@@ -25,12 +25,33 @@ struct Pos {
   bool valid() const { return line != 0; }
 };
 
+/// The immutable bytes of one input.  A file is mapped read-only; anything else is owned.  Nothing
+/// ever writes to it: the lexer's tokens are segments (start, end) of it, and text that is not a
+/// slice of it (an unescaped string) is a separate, appended entry.
+class Source {
+public:
+  Source(const Source &) = delete;
+  Source &operator=(const Source &) = delete;
+  ~Source();
+  static std::shared_ptr<const Source> fromString(std::string text);
+  /// Maps a regular, non-empty file; null when that is not possible (the caller reads it).
+  static std::shared_ptr<const Source> mapFile(const std::string &path);
+  std::string_view view() const { return {data_, size_}; }
+
+private:
+  Source() = default;
+  const char *data_ = nullptr;
+  size_t size_ = 0;
+  std::string owned_;
+  void *map_ = nullptr;
+};
+
 /// Origin of source text: a file path, or "«string»"/"«stdin»".
 struct Origin {
   std::string name;   // what errors print
   std::string path;   // absolute file path if a file, else empty
   std::string baseDir;
-  std::shared_ptr<std::string> text;
+  std::shared_ptr<const Source> text;
 };
 
 struct ParseError : std::runtime_error {

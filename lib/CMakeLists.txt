@@ -16,7 +16,7 @@ add_library(NixStore STATIC Store/Hash.cpp Store/StorePaths.cpp Store/LocalStore
 target_link_libraries(NixStore PUBLIC LLVMSupport)
 llvm_update_compile_flags(NixStore)
 
-add_library(NixFrontend STATIC Frontend/Parser.cpp Frontend/Printer.cpp Frontend/MLIRGen.cpp)
+add_library(NixFrontend STATIC Frontend/Parser.cpp Frontend/Printer.cpp Frontend/MLIRGen.cpp Frontend/Source.cpp)
 add_dependencies(NixFrontend MLIRNixOpsIncGen)
 target_link_libraries(NixFrontend PUBLIC MLIRNix MLIRIR)
 llvm_update_compile_flags(NixFrontend)

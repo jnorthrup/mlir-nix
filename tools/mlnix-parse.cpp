@@ -10,22 +10,33 @@
 #include <vector>
 
 int main(int argc, char **argv) {
-  bool quiet = argc == 3 && std::string(argv[1]) == "-n"; // time the parse alone: no AST printing
-  if (argc != 2 && !quiet) {
-    std::cerr << "usage: mlnix-parse [-n] FILE-LIST\n";
+  // -n: time the parse alone, no AST printing.  -m: map the files instead of reading them.
+  bool quiet = false, map = false;
+  int a = 1;
+  for (; a < argc && argv[a][0] == '-'; a++) {
+    if (std::string(argv[a]) == "-n") quiet = true;
+    else if (std::string(argv[a]) == "-m") map = true;
+    else a = argc;
+  }
+  if (a != argc - 1) {
+    std::cerr << "usage: mlnix-parse [-n] [-m] FILE-LIST\n";
     return 2;
   }
-  std::ifstream list(argv[quiet ? 2 : 1]);
+  std::ifstream list(argv[a]);
   // Read everything first: the time reported is the parser's, not the file system's.
-  std::vector<std::pair<std::string, std::string>> corpus;
+  std::vector<std::pair<std::string, std::shared_ptr<const nixfe::Source>>> corpus;
   std::string path;
   size_t bytes = 0;
   while (std::getline(list, path)) {
-    std::ifstream f(path, std::ios::binary);
-    std::stringstream ss;
-    ss << f.rdbuf();
-    corpus.emplace_back(path, ss.str());
-    bytes += corpus.back().second.size();
+    std::shared_ptr<const nixfe::Source> src = map ? nixfe::Source::mapFile(path) : nullptr;
+    if (!src) {
+      std::ifstream f(path, std::ios::binary);
+      std::stringstream ss;
+      ss << f.rdbuf();
+      src = nixfe::Source::fromString(ss.str());
+    }
+    bytes += src->view().size();
+    corpus.emplace_back(path, std::move(src));
   }
   size_t files = 0, errors = 0;
   auto t0 = std::chrono::steady_clock::now();
@@ -33,7 +44,7 @@ int main(int argc, char **argv) {
     auto origin = std::make_shared<nixfe::Origin>();
     origin->name = origin->path = name;
     origin->baseDir = ".";
-    origin->text = std::make_shared<std::string>(text);
+    origin->text = text;
     nixfe::ExprArena arena;
     nixfe::ParseOptions opts;
     opts.pipeOperators = true;

@@ -123,6 +123,7 @@ void EvalState::copyContext(const Value &v, NixStringContext &ctx) {
 EvalState::EvalState(EvalSettings st, std::shared_ptr<nixstore::Store> store)
     : settings(std::move(st)), store(std::move(store)) {
   statsEnabled = getenv("MLNIX_STATS") != nullptr;
+  settings.mapSources = !getenv("MLNIX_NOMMAP"); // ablation switch: read and copy every file, as before
   inPlaceEnabled = !getenv("MLNIX_NOINPLACE"); // ablation switch: every operand gets a thunk, as before
   // The evaluator is single-threaded.  With threading enabled every attribute
   // and location is uniqued through sharded, locked, thread-cached tables --
@@ -1404,7 +1405,7 @@ nixfe::Expr *EvalState::parseSource(const std::string &text, const std::string &
   origin->name = name;
   origin->path = path;
   origin->baseDir = baseDir;
-  origin->text = std::make_shared<std::string>(text);
+  origin->text = nixfe::Source::fromString(text);
   origins.push_back(origin);
   if (originOut) *originOut = origin;
   return nixfe::parse(*arena, origin, parseOptions());
@@ -1415,7 +1416,7 @@ nixfe::Expr *EvalState::parseString(nixfe::ExprArena &arena, const std::string &
   auto origin = std::make_shared<nixfe::Origin>();
   origin->name = originName;
   origin->baseDir = baseDir;
-  origin->text = std::make_shared<std::string>(text);
+  origin->text = nixfe::Source::fromString(text);
   origins.push_back(origin);
   nixfe::ParseOptions po = parseOptions();
   return nixfe::parse(arena, origin, po);
@@ -1586,14 +1587,14 @@ Value *EvalState::evalFile(const std::string &pathIn) {
   if (resolved.size() > 5 && resolved.substr(resolved.size() - 5) == ".mlir") {
     result = evalMLIRFile(resolved, "");
   } else {
-    std::string text = readSource(resolved);
     auto *arena = new nixfe::ExprArena();
     arenas.push_back(arena);
     auto origin = std::make_shared<nixfe::Origin>();
     origin->name = logical;
     origin->path = logical;
     origin->baseDir = nixstore::dirOf(logical);
-    origin->text = std::make_shared<std::string>(text);
+    origin->text = settings.mapSources ? nixfe::Source::mapFile(resolved) : nullptr;
+    if (!origin->text) origin->text = nixfe::Source::fromString(readSource(resolved));
     origins.push_back(origin);
     nixfe::ParseOptions po = parseOptions();
     nixfe::Expr *e = nixfe::parse(*arena, origin, po);
@@ -1611,7 +1612,7 @@ Value *EvalState::evalString(const std::string &text, const std::string &baseDir
   auto origin = std::make_shared<nixfe::Origin>();
   origin->name = originName;
   origin->baseDir = baseDir;
-  origin->text = std::make_shared<std::string>(text);
+  origin->text = nixfe::Source::fromString(text);
   origins.push_back(origin);
   nixfe::ParseOptions po = parseOptions();
   nixfe::Expr *e = nixfe::parse(*arena, origin, po);
@@ -1705,17 +1706,17 @@ static std::string chomp(std::string s) {
   return s;
 }
 
-static void appendCodeLines(std::string &out, const std::string &text, unsigned line, unsigned col,
+static void appendCodeLines(std::string &out, std::string_view text, unsigned line, unsigned col,
                             unsigned indent = 7) {
   std::vector<std::string> lines;
   size_t start = 0;
   while (true) {
     size_t nl = text.find('\n', start);
-    if (nl == std::string::npos) {
-      lines.push_back(text.substr(start));
+    if (nl == std::string_view::npos) {
+      lines.push_back(std::string(text.substr(start)));
       break;
     }
-    lines.push_back(text.substr(start, nl - start));
+    lines.push_back(std::string(text.substr(start, nl - start)));
     start = nl + 1;
   }
   auto fmtLine = [&](unsigned n) {
@@ -1734,7 +1735,7 @@ static void appendCodeLines(std::string &out, const std::string &text, unsigned 
 static std::string sourceFor(EvalState *state, const std::string &file) {
   if (state)
     for (auto &o : state->origins)
-      if (o->name == file && o->text) return *o->text;
+      if (o->name == file && o->text) return std::string(o->text->view());
   if (!file.empty() && file[0] == '/' && nixstore::pathExists(file)) {
     try {
       return nixstore::readFile(file);
@@ -1782,7 +1783,7 @@ std::string formatParseError(const nixfe::ParseError &e, const char *kind) {
   if (e.pos.valid() && e.origin) {
     res += "\n" + std::string(indent, ' ') + "at " + e.origin->name + ":" + std::to_string(e.pos.line) + ":" +
            std::to_string(e.pos.col) + ":";
-    if (e.origin->text) appendCodeLines(res, *e.origin->text, e.pos.line, e.pos.col, indent);
+    if (e.origin->text) appendCodeLines(res, e.origin->text->view(), e.pos.line, e.pos.col, indent);
   }
   return res;
 }

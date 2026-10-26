@@ -216,6 +216,8 @@ struct EvalSettings {
   /// `nix-dce` cost more than they save on real workloads (measured), so only
   /// devirtualization is on by default.
   std::string pipeline = "nix-prims";
+  /// Imported files are mapped read-only (nixfe::Source::mapFile) instead of read and copied.
+  bool mapSources = true;
   unsigned maxCallDepth = 10000;
   bool dumpMLIR = false;
   nixfe::Lint lintAbsolutePaths = nixfe::Lint::Ignore, lintShortPaths = nixfe::Lint::Ignore,

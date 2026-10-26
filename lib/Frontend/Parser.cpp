@@ -112,7 +112,7 @@ bool isUriChar(char c) {
 class Lexer {
 public:
   Lexer(std::shared_ptr<Origin> o, const ParseOptions &opts)
-      : origin(std::move(o)), src(*origin->text), opts(opts), derived{"$", "''", "'", "~/"} {
+      : origin(std::move(o)), src(origin->text->view()), opts(opts), derived{"$", "''", "'", "~/"} {
     if (src.size() >= UINT32_MAX) throw ParseError("input too large (segments are 32-bit)", Pos{1, 1}, origin);
   }
 

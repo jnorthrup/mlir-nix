@@ -1058,7 +1058,7 @@ void registerBuiltins(EvalState &state) {
       origin->name = real;
       origin->path = real;
       origin->baseDir = nixstore::dirOf(real);
-      origin->text = std::make_shared<std::string>(text);
+      origin->text = nixfe::Source::fromString(text);
       st.origins.push_back(origin);
       nixfe::ParseOptions po = st.parseOptions();
       nixfe::Expr *e = nixfe::parse(*arena, origin, po);

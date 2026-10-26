@@ -390,7 +390,7 @@ int runEvalCommandIn(Options &o, bool build, EvalState &st, std::shared_ptr<nixs
     origin->name = name;
     origin->path = path;
     origin->baseDir = baseDir;
-    origin->text = std::make_shared<std::string>(text);
+    origin->text = nixfe::Source::fromString(text);
     st.origins.push_back(origin);
     nixfe::ParseOptions po = st.parseOptions();
     nixfe::Expr *e = nixfe::parse(*arena, origin, po);
