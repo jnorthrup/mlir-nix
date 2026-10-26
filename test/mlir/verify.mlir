@@ -16,3 +16,14 @@ nix.expr @too_many {
   %0 = nixlist.length(%a, %a)
   nix.return %0
 }
+
+// -----
+
+// A computed path component needs an operand (generic form, since the custom
+// syntax cannot express the mismatch).
+nix.expr @path_mismatch {
+  %s = nix.attrs [](  )
+  // expected-error @+1 {{has 1 computed path component(s) but 0 operand(s)}}
+  %0 = "nix.select"(%s) {path = [unit], operandSegmentSizes = array<i32: 1, 0, 0>} : (!nix.value) -> !nix.value
+  nix.return %0
+}

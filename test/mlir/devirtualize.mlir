@@ -7,8 +7,7 @@
 // CHECK-LABEL: nix.expr @spellings
 nix.expr @spellings {
   %b = nix.builtin "builtins"
-  %k = nix.str "add"
-  %sel = nix.select %b [%k]
+  %sel = nix.select %b ["add"]
   %add = nix.builtin "__add"
   %one = nix.int 1
   %two = nix.int 2
@@ -53,10 +52,9 @@ nix.expr @oversaturated {
 // are not the primop and must not be rewritten.
 // CHECK-LABEL: nix.expr @not_builtins
 nix.expr @not_builtins {
-  %user = nix.attrs ["add"](%f) 
+  %user = nix.attrs ["add"](%f)
   %f = nix.builtin "map"
-  %k = nix.str "add"
-  %sel = nix.select %user [%k]
+  %sel = nix.select %user ["add"]
   %one = nix.int 1
   %two = nix.int 2
   %r = nix.apply %sel(%one, %two)
@@ -64,3 +62,17 @@ nix.expr @not_builtins {
 }
 // CHECK-NOT: nixnum.add
 // CHECK: nix.apply
+
+// A computed component or a default keeps the select a select.
+// CHECK-LABEL: nix.expr @dynamic_key
+nix.expr @dynamic_key {
+  %b = nix.builtin "builtins"
+  %k = nix.str "add"
+  %sel = nix.select %b [%k]
+  %one = nix.int 1
+  %two = nix.int 2
+  %r = nix.apply %sel(%one, %two)
+  nix.return %r
+}
+// CHECK-NOT: nixnum.add
+// CHECK: nix.select

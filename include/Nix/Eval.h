@@ -385,6 +385,8 @@ public:
   /// Constant folding hook of the continent dialects: run primop `key` on
   /// scalar constants; null when it throws or yields a non-scalar.
   mlir::Attribute foldPrimOp(llvm::StringRef key, llvm::ArrayRef<mlir::Attribute> args);
+  std::string_view pathComponent(mlir::Attribute comp, mlir::OperandRange dyn, unsigned &nextDyn, Frame *env,
+                                 PosPtr pos);
   Value *lookup(Frame *f, mlir::Value v);
   void evalOp(mlir::Operation *op, Frame *env, Value &out);
   RegionInfo *regionInfo(mlir::Region *r);

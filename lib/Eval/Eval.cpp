@@ -765,6 +765,14 @@ void EvalState::evalConcatStrings(nd::ConcatStringsOp op, Frame *env, Value &out
   }
 }
 
+/// One component of a select/has_attr path: a literal (attribute) or the
+/// next computed key (operand), forced to a string.
+std::string_view EvalState::pathComponent(mlir::Attribute comp, mlir::OperandRange dyn, unsigned &nextDyn,
+                                          Frame *env, PosPtr pos) {
+  if (auto lit = mlir::dyn_cast<mlir::StringAttr>(comp)) return lit.getValue();
+  return forceStringNoCtx(*lookup(env, dyn[nextDyn++]), pos, "while evaluating an attribute name");
+}
+
 void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
   PosPtr pos = op->getLoc().getAsOpaquePointer();
   auto copyFrom = [&](Value *v) {
@@ -781,18 +789,11 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
       .Case<nd::SelectOp>([&](nd::SelectOp sel) {
         Value *cur = lookup(env, sel.getBase());
         mlir::Value def = sel.getDefaultValue();
-        auto keys = sel.getKeys();
-        std::string pathStr;
-        for (size_t i = 0; i < keys.size(); i++) {
-          Value *kv = lookup(env, keys[i]);
-          auto name = forceStringNoCtx(*kv, pos, "while evaluating an attribute name");
-          if (!pathStr.empty()) pathStr += ".";
-          pathStr += name;
-          try {
-            forceValue(*cur, pos);
-          } catch (EvalError &e) {
-            throw;
-          }
+        mlir::OperandRange dyn = sel.getDynKeys();
+        unsigned nextDyn = 0;
+        for (mlir::Attribute comp : sel.getPath()) {
+          std::string_view name = pathComponent(comp, dyn, nextDyn, env, pos);
+          forceValue(*cur, pos);
           if (def) {
             if (cur->type != VType::Attrs) return copyFrom(lookup(env, def));
           } else if (cur->type != VType::Attrs) {
@@ -801,9 +802,7 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
           const Attr *a = cur->attrs->get(symbols.create(name));
           if (!a) {
             if (def) return copyFrom(lookup(env, def));
-            // Suggest similar names, like upstream.
-            std::string msg = "attribute '" + std::string(name) + "' missing";
-            throw EvalError(msg, pos);
+            throw EvalError("attribute '" + std::string(name) + "' missing", pos);
           }
           cur = a->value;
         }
@@ -811,9 +810,11 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
       })
       .Case<nd::HasAttrOp>([&](nd::HasAttrOp h) {
         Value *cur = lookup(env, h.getBase());
-        for (mlir::Value k : h.getKeys()) {
+        mlir::OperandRange dyn = h.getDynKeys();
+        unsigned nextDyn = 0;
+        for (mlir::Attribute comp : h.getPath()) {
           forceValue(*cur, pos);
-          auto name = forceStringNoCtx(*lookup(env, k), pos, "while evaluating an attribute name");
+          std::string_view name = pathComponent(comp, dyn, nextDyn, env, pos);
           if (cur->type != VType::Attrs) return mkBool(out, false);
           const Attr *a = cur->attrs->get(symbols.create(name));
           if (!a) return mkBool(out, false);

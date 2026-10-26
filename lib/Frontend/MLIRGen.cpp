@@ -58,8 +58,7 @@ public:
       b.setInsertionPointToEnd(lb);
       Scope s;
       for (auto &n : opts.scopeNames) {
-        Value key = nd::StringOp::create(b, loc(Pos{}), valTy(), b.getStringAttr(n));
-        s.vars[n] = nd::SelectOp::create(b, loc(Pos{}), valTy(), arg, ValueRange{key}, Value());
+        s.vars[n] = selectLiteral(Pos{}, arg, n);
       }
       Value body = gen(e, &s);
       nd::ReturnOp::create(b, loc(e->pos), body);
@@ -184,13 +183,29 @@ private:
     return nd::WithVarOp::create(b, loc(p), valTy(), b.getStringAttr(name), withs);
   }
 
-  SmallVector<Value> genKeys(const AttrPath &path, Scope *s, Pos p) {
-    SmallVector<Value> keys;
+  /// A select/has_attr path: literal components become string attributes,
+  /// computed ones (`${e}`) unit attributes plus an operand (see nix.select).
+  struct GenPath {
+    SmallVector<Attribute> comps;
+    SmallVector<Value> dyn;
+  };
+  GenPath genPath(const AttrPath &path, Scope *s) {
+    GenPath r;
     for (auto &a : path) {
-      if (a.symbol) keys.push_back(str(*a.symbol, p));
-      else keys.push_back(gen(a.expr, s));
+      if (a.symbol) {
+        r.comps.push_back(b.getStringAttr(*a.symbol));
+      } else {
+        r.comps.push_back(b.getUnitAttr());
+        r.dyn.push_back(gen(a.expr, s));
+      }
     }
-    return keys;
+    return r;
+  }
+
+  /// `base.key` with a literal key and no default.
+  Value selectLiteral(Pos p, Value base, StringRef key, Value def = Value()) {
+    return nd::SelectOp::create(b, loc(p), valTy(), base, ValueRange{}, def,
+                                b.getArrayAttr({b.getStringAttr(key)}));
   }
 
   /// Generate the bindings of an attrs node into `names/values`, resolving
@@ -209,9 +224,7 @@ private:
       case ExprAttrs::DefKind::InheritedFrom: {
         auto *sel = static_cast<const ExprSelect *>(def.e);
         auto *from = static_cast<const ExprInheritFrom *>(sel->e);
-        Value key = str(name, def.pos);
-        v = nd::SelectOp::create(b, loc(def.pos), valTy(), fromVals[from->displ],
-                                 ValueRange{key}, Value());
+        v = selectLiteral(def.pos, fromVals[from->displ], name);
         break;
       }
       }
@@ -260,8 +273,7 @@ private:
         idx = 0;
         for (auto &[name, def] : a->attrs) {
           if (idx != ovIdx)
-            values[idx] = nd::SelectOp::create(b, loc(def.pos), valTy(), ov, ValueRange{str(name, def.pos)},
-                                               values[idx]);
+            values[idx] = selectLiteral(def.pos, ov, name, values[idx]);
           idx++;
         }
       }
@@ -392,15 +404,16 @@ private:
     case ExprKind::Select: {
       auto *sel = static_cast<const ExprSelect *>(e);
       Value base = gen(sel->e, s);
-      auto keys = genKeys(sel->path, s, sel->pos);
+      GenPath path = genPath(sel->path, s);
       Value def = sel->def ? gen(sel->def, s) : Value();
-      return nd::SelectOp::create(b, loc(sel->pos), valTy(), base, keys, def);
+      return nd::SelectOp::create(b, loc(sel->pos), valTy(), base, path.dyn, def,
+                                  b.getArrayAttr(path.comps));
     }
     case ExprKind::HasAttr: {
       auto *h = static_cast<const ExprHasAttr *>(e);
       Value base = gen(h->e, s);
-      auto keys = genKeys(h->path, s, h->pos);
-      return nd::HasAttrOp::create(b, loc(h->pos), valTy(), base, keys);
+      GenPath path = genPath(h->path, s);
+      return nd::HasAttrOp::create(b, loc(h->pos), valTy(), base, path.dyn, b.getArrayAttr(path.comps));
     }
     case ExprKind::Attrs:
       return genAttrs(static_cast<const ExprAttrs *>(e), s);

@@ -24,6 +24,64 @@ using namespace mlir::nix;
 #define GET_TYPEDEF_CLASSES
 #include "NixDialect/NixTypes.cpp.inc"
 
+namespace mlir::nix {
+/// `[ "a", %k, "b" ]`: literal components are string attributes, computed ones
+/// are operands (recorded as unit attributes in `path`).
+static ParseResult parseAttrPath(OpAsmParser &p, ArrayAttr &path,
+                                 SmallVectorImpl<OpAsmParser::UnresolvedOperand> &dyn) {
+  Builder b(p.getContext());
+  SmallVector<Attribute> comps;
+  if (p.parseLSquare())
+    return failure();
+  do {
+    std::string lit;
+    OpAsmParser::UnresolvedOperand operand;
+    if (succeeded(p.parseOptionalString(&lit))) {
+      comps.push_back(b.getStringAttr(lit));
+    } else {
+      OptionalParseResult r = p.parseOptionalOperand(operand);
+      if (!r.has_value())
+        return p.emitError(p.getCurrentLocation(), "expected a string or an operand");
+      if (failed(*r))
+        return failure();
+      dyn.push_back(operand);
+      comps.push_back(b.getUnitAttr());
+    }
+  } while (succeeded(p.parseOptionalComma()));
+  if (p.parseRSquare())
+    return failure();
+  path = b.getArrayAttr(comps);
+  return success();
+}
+
+static void printAttrPath(OpAsmPrinter &p, Operation *, ArrayAttr path, OperandRange dyn) {
+  p << "[";
+  unsigned next = 0;
+  llvm::interleaveComma(path, p, [&](Attribute a) {
+    if (isa<StringAttr>(a))
+      p.printAttribute(a);
+    else
+      p.printOperand(dyn[next++]);
+  });
+  p << "]";
+}
+
+static LogicalResult verifyAttrPath(Operation *op, ArrayAttr path, unsigned numDyn) {
+  if (path.empty())
+    return op->emitOpError("path must have at least one component");
+  unsigned units = 0;
+  for (Attribute a : path) {
+    if (isa<UnitAttr>(a))
+      ++units;
+    else if (!isa<StringAttr>(a))
+      return op->emitOpError("path components must be strings or units");
+  }
+  if (units != numDyn)
+    return op->emitOpError("has ") << units << " computed path component(s) but " << numDyn << " operand(s)";
+  return success();
+}
+} // namespace mlir::nix
+
 #define GET_OP_CLASSES
 #include "NixDialect/NixOps.cpp.inc"
 
@@ -79,6 +137,9 @@ LogicalResult LambdaOp::verify() {
   }
   return success();
 }
+
+LogicalResult SelectOp::verify() { return verifyAttrPath(*this, getPath(), getDynKeys().size()); }
+LogicalResult HasAttrOp::verify() { return verifyAttrPath(*this, getPath(), getDynKeys().size()); }
 
 LogicalResult AttrsOp::verify() {
   if (getNames().size() != getValues().size())
@@ -180,10 +241,10 @@ struct DevirtualizePrimCall : OpRewritePattern<ApplyOp> {
         info = &it->second;
     } else if (auto sel = callee.getDefiningOp<SelectOp>()) {
       // builtins.<name>
-      if (sel.getDefaultValue() || sel.getKeys().size() != 1)
+      if (sel.getDefaultValue() || sel.getPath().size() != 1)
         return failure();
       auto base = sel.getBase().getDefiningOp<BuiltinOp>();
-      auto key = sel.getKeys()[0].getDefiningOp<StringOp>();
+      auto key = dyn_cast<StringAttr>(sel.getPath()[0]);
       if (!base || base.getName() != "builtins" || !key)
         return failure();
       llvm::SmallString<48> internal("__");

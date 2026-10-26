@@ -181,17 +181,29 @@ def Nix_AttrsOp : Nix_Op<"attrs", [Pure, AttrSizedOperandSegments]> {
 
 def Nix_SelectOp : Nix_Op<"select", [Pure, AttrSizedOperandSegments]> {
   let summary = "attribute path selection `e.a.b or d`";
-  let arguments = (ins NixVal:$base, Variadic<NixVal>:$keys,
-                       Optional<NixVal>:$default_value);
+  let description = [{
+    `path` has one element per path component: a string attribute for a literal
+    component (`a`), a unit attribute for a computed one (`${e}`) which takes the
+    next operand of `dyn_keys`.  This is the static/dynamic mix used by
+    `memref.subview`: literal names are attributes (uniqued, free), not ops.
+
+        %v = nix.select %set ["pkgs", %k, "version"] or %default
+  }];
+  let arguments = (ins NixVal:$base, Variadic<NixVal>:$dyn_keys,
+                       Optional<NixVal>:$default_value, ArrayAttr:$path);
   let results = (outs NixVal:$result);
-  let assemblyFormat = "$base `[` $keys `]` (`or` $default_value^)? attr-dict";
+  let assemblyFormat =
+      "$base custom<AttrPath>($path, $dyn_keys) (`or` $default_value^)? attr-dict";
+  let hasVerifier = 1;
 }
 
 def Nix_HasAttrOp : Nix_Op<"has_attr", [Pure]> {
   let summary = "attribute path test `e ? a.b`";
-  let arguments = (ins NixVal:$base, Variadic<NixVal>:$keys);
+  let description = [{ `path`/`dyn_keys` as in `nix.select`. }];
+  let arguments = (ins NixVal:$base, Variadic<NixVal>:$dyn_keys, ArrayAttr:$path);
   let results = (outs NixVal:$result);
-  let assemblyFormat = "$base `[` $keys `]` attr-dict";
+  let assemblyFormat = "$base custom<AttrPath>($path, $dyn_keys) attr-dict";
+  let hasVerifier = 1;
 }
 
 def Nix_ApplyOp : Nix_Op<"apply", [Pure]> {
