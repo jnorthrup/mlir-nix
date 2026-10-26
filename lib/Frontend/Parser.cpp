@@ -483,28 +483,38 @@ private:
       return false;
     }
 
-    // Candidates: (length, rule index).  Earlier rule wins ties.
+    // Characters that start no rule but the default one: the token is the character.
+    switch (c) {
+    case '(': case ')': case '[': case ']': case ';': case ',': case '@': case '?': case ':': case '*':
+      p = i + 1;
+      t.t = T_CHAR;
+      t.ch = c;
+      return true;
+    default:
+      break;
+    }
+
+    // Candidates: (length, rule index).  Earlier rule wins ties.  Every matcher returns 0
+    // unless the current character can start it, so only those run.
     struct Cand { size_t len; int rule; };
     Cand best{0, 1000};
     auto consider = [&](size_t len, int rule) {
       if (len > best.len || (len == best.len && len > 0 && rule < best.rule))
         best = {len, rule};
     };
-    static const char *kw[] = {"if", "then", "else", "assert", "with", "let", "in", "rec", "inherit", "or"};
-    static const Tok kwTok[] = {T_IF, T_THEN, T_ELSE, T_ASSERT, T_WITH, T_LET, T_IN, T_REC, T_INHERIT, T_OR_KW};
-    for (int k = 0; k < 10; k++) {
-      size_t n = strlen(kw[k]);
-      if (src.compare(i, n, kw[k]) == 0) consider(n, k);
-    }
-    static const char *ops[] = {"...", "==", "!=", "<=", ">=", "&&", "||", "->", "//", "++", "<|", "|>"};
-    static const Tok opTok[] = {T_ELLIPSIS, T_EQ, T_NEQ, T_LEQ, T_GEQ, T_AND, T_OR, T_IMPL, T_UPDATE, T_CONCAT, T_PIPE_FROM, T_PIPE_INTO};
-    for (int k = 0; k < 12; k++) {
-      size_t n = strlen(ops[k]);
-      if (src.compare(i, n, ops[k]) == 0) consider(n, 10 + k);
-    }
-    consider(mId(i), 30);
-    consider(mInt(i), 31);
-    consider(mFloat(i), 32);
+    static constexpr std::string_view kw[] = {"if", "then", "else", "assert", "with", "let", "in", "rec", "inherit", "or"};
+    static constexpr Tok kwTok[] = {T_IF, T_THEN, T_ELSE, T_ASSERT, T_WITH, T_LET, T_IN, T_REC, T_INHERIT, T_OR_KW};
+    static constexpr std::string_view ops[] = {"...", "==", "!=", "<=", ">=", "&&", "||", "->", "//", "++", "<|", "|>"};
+    static constexpr Tok opTok[] = {T_ELLIPSIS, T_EQ, T_NEQ, T_LEQ, T_GEQ, T_AND, T_OR, T_IMPL, T_UPDATE, T_CONCAT, T_PIPE_FROM, T_PIPE_INTO};
+    const bool idStart = isIdStart(c), digit = isDigit(c), pathStart = isPathChar(c) || c == '/';
+    if (idStart)
+      for (int k = 0; k < 10; k++)
+        if (kw[k][0] == c && src.compare(i, kw[k].size(), kw[k]) == 0) consider(kw[k].size(), k);
+    for (int k = 0; k < 12; k++)
+      if (ops[k][0] == c && src.compare(i, ops[k].size(), ops[k]) == 0) consider(ops[k].size(), 10 + k);
+    if (idStart) consider(mId(i), 30);
+    if (digit) consider(mInt(i), 31);
+    if (digit || c == '.') consider(mFloat(i), 32);
     if (c == '$' && at(i + 1) == '{') consider(2, 33);
     if (c == '}') consider(1, 34);
     if (c == '{') consider(1, 35);
@@ -514,20 +524,22 @@ private:
       while (at(j) == ' ') j++;
       consider(at(j) == '\n' ? j + 1 - i : 2, 37);
     }
-    {
+    if (pathStart) {
       size_t l = mPathSeg(i);
       if (l && at(i + l) == '$' && at(i + l + 1) == '{') consider(l + 2, 38);
-      if (c == '~' && at(i + 1) == '/' && at(i + 2) == '$' && at(i + 3) == '{') consider(4, 38);
+      consider(mPath(i), 39);
     }
-    consider(mPath(i), 39);
-    consider(mHPath(i), 40);
-    consider(mSPath(i), 41);
-    consider(mUri(i), 42);
-    consider(mLongComment(i), 43); // doc comments and long comments
+    if (c == '~') {
+      if (at(i + 1) == '/' && at(i + 2) == '$' && at(i + 3) == '{') consider(4, 38);
+      consider(mHPath(i), 40);
+    }
+    if (c == '<') consider(mSPath(i), 41);
+    if (isAlpha(c)) consider(mUri(i), 42);
+    if (c == '/') consider(mLongComment(i), 43); // doc comments and long comments
     if (best.len == 0) consider(1, 99);
 
     size_t len = best.len;
-    std::string text = src.substr(i, len);
+    auto text = [&] { return src.substr(i, len); }; // only the rules that carry text copy it
     int r = best.rule;
     p = i + len;
     if (r < 10) { t.t = kwTok[r]; return true; }
@@ -538,21 +550,25 @@ private:
       return true;
     }
     switch (r) {
-    case 30: t.t = T_ID; t.s = text; return true;
+    case 30: t.t = T_ID; t.s = text(); return true;
     case 31: {
       errno = 0;
       char *end;
-      unsigned long long v = strtoull(text.c_str(), &end, 10);
+      std::string txt = text();
+      unsigned long long v = strtoull(txt.c_str(), &end, 10);
       if (errno || v > (unsigned long long)INT64_MAX)
-        error("invalid integer '" + text + "'", i);
+        error("invalid integer '" + txt + "'", i);
       t.t = T_INT;
       t.i = (int64_t)v;
       return true;
     }
     case 32:
       errno = 0;
-      t.f = strtod(text.c_str(), nullptr);
-      if (errno) error("invalid float '" + text + "'", i);
+      {
+        std::string txt = text();
+        t.f = strtod(txt.c_str(), nullptr);
+        if (errno) error("invalid float '" + txt + "'", i);
+      }
       t.t = T_FLOAT;
       return true;
     case 33: push(S_DEFAULT); t.t = T_DOLLAR_CURLY; return true;
@@ -572,12 +588,12 @@ private:
     }
     case 39:
     case 40:
-      push(text.back() == '/' ? S_INPATH_SLASH : S_INPATH);
+      t.s = text();
+      push(t.s.back() == '/' ? S_INPATH_SLASH : S_INPATH);
       t.t = r == 39 ? T_PATH : T_HPATH;
-      t.s = text;
       return true;
-    case 41: t.t = T_SPATH; t.s = text; return true;
-    case 42: t.t = T_URI; t.s = text; return true;
+    case 41: t.t = T_SPATH; t.s = text(); return true;
+    case 42: t.t = T_URI; t.s = text(); return true;
     case 43: return false;
     default:
       t.t = T_CHAR;

@@ -12,3 +12,8 @@ llvm_update_compile_flags(mlnix)
 add_executable(mlnix-query mlnix-query.cpp)
 target_link_libraries(mlnix-query PRIVATE MLIRNix MLIRQueryLib MLIRQueryMatcher MLIRIR MLIRParser MLIRSupport)
 llvm_update_compile_flags(mlnix-query)
+
+# Parse a list of files in one process (scripts/parse-corpus.py compares two builds with it).
+add_executable(mlnix-parse mlnix-parse.cpp)
+target_link_libraries(mlnix-parse PRIVATE NixFrontend)
+llvm_update_compile_flags(mlnix-parse)
