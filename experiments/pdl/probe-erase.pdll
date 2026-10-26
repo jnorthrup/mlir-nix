@@ -1,0 +1,12 @@
+// Erase the callee op inside the rewrite (pdl.erase).
+#include "NixPrims.td"
+Pattern EraseCallee {
+  let ty : Type;
+  let fn = op<nix.builtin> {name = attr<"\"__add\"">};
+  let call = op<nix.apply>(fn.0, a0 : Value, a1 : Value) -> (ty);
+  rewrite call with {
+    let new = op<nixnum.add>((a0, a1)) -> (ty);
+    replace call with new;
+    erase fn;
+  };
+}

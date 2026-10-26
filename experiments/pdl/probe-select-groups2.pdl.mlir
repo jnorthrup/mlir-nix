@@ -1,0 +1,22 @@
+module {
+  pdl.pattern @SelWithDefaultRange : benefit(0) {
+    %0 = operand loc(#loc2)
+    %1 = operands loc(#loc3)
+    %2 = operands loc(#loc4)
+    %3 = attribute = ["add"] loc(#loc5)
+    %4 = types loc(#loc6)
+    %5 = operation "nix.select"(%0, %1, %2 : !pdl.value, !pdl.range<value>, !pdl.range<value>)  {"path" = %3} -> (%4 : !pdl.range<type>) loc(#loc6)
+    rewrite %5 {
+      replace %5 with(%0 : !pdl.value) loc(#loc8)
+    } loc(#loc7)
+  } loc(#loc1)
+} loc(#loc)
+#loc = loc("probe-select-groups2.pdll":2:1)
+#loc1 = loc("probe-select-groups2.pdll":4:1)
+#loc2 = loc("probe-select-groups2.pdll":5:7)
+#loc3 = loc("probe-select-groups2.pdll":6:31)
+#loc4 = loc("probe-select-groups2.pdll":6:48)
+#loc5 = loc("probe-select-groups2.pdll":6:72)
+#loc6 = loc("probe-select-groups2.pdll":6:13)
+#loc7 = loc("probe-select-groups2.pdll":7:3)
+#loc8 = loc("probe-select-groups2.pdll":7:22)

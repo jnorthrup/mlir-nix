@@ -1,6 +1,7 @@
 //===- NixDialect.cpp - Nix dialect implementation ------------------------===//
 
 #include "NixDialect/NixDialect.h"
+#include "NixDialect/NixDevirtPDL.h"
 
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
@@ -343,9 +344,26 @@ void eliminateDeadBindings(Operation *root) {
 
 void mlir::nix::devirtualizePrims(Operation *root) {
   MLIRContext *ctx = root->getContext();
-  RewritePatternSet patterns(ctx);
-  patterns.add<DevirtualizePrimCall>(ctx);
-  walkAndApplyPatterns(root, FrozenRewritePatternSet(std::move(patterns)));
+  // MLNIX_DEVIRT_TIME: count what is walked (outside the timed region).
+  DevirtStats *stats = devirtConfig().time ? &devirtStats() : nullptr;
+  DevirtClock::time_point t0, t1;
+  if (stats) {
+    ++stats->calls;
+    root->walk([&](Operation *op) {
+      ++stats->ops;
+      stats->applies += isa<ApplyOp>(op);
+    });
+    t0 = DevirtClock::now();
+  }
+  if (devirtConfig().mode != DevirtMode::Cpp) {
+    devirtualizePrimsPDL(root);
+  } else {
+    RewritePatternSet patterns(ctx);
+    patterns.add<DevirtualizePrimCall>(ctx);
+    walkAndApplyPatterns(root, FrozenRewritePatternSet(std::move(patterns)));
+  }
+  if (stats)
+    t1 = DevirtClock::now();
   // The callee computations of rewritten calls are now unreferenced; erase
   // them, and whatever only they kept alive.
   llvm::SmallVector<Operation *> work;
@@ -363,6 +381,10 @@ void mlir::nix::devirtualizePrims(Operation *root) {
     for (Operation *d : producers)
       if (isa<BuiltinOp, SelectOp, StringOp>(d) && d->use_empty())
         work.push_back(d);
+  }
+  if (stats) {
+    stats->walkMs += devirtMs(t0, t1);
+    stats->cleanupMs += devirtMs(t1, DevirtClock::now());
   }
 }
 

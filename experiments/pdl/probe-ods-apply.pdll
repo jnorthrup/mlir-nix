@@ -1,0 +1,9 @@
+// With nix.apply described to PDLL (ODS), "exactly two arguments" cannot be said.
+#include "NixOps.td"
+#include "NixPrims.td"
+Pattern OdsApply2 {
+  let ty : Type;
+  let fn = op<nix.builtin> {name = attr<"\"__add\"">};
+  let call = op<nix.apply>(fn, a0 : Value, a1 : Value) -> (ty);
+  rewrite call with { let new = op<nixnum.add>((a0, a1)) -> (ty); replace call with new; };
+}

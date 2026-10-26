@@ -180,6 +180,12 @@ void EvalState::printStats() {
   llvm::errs() << "== top ops\n";
   for (size_t i = 0; i < o.size() && i < 14; i++)
     llvm::errs() << "  " << llvm::format("%-22s", o[i].first.c_str()) << llvm::format("%9zu", o[i].second) << "\n";
+  // MLNIX_STATS=full: the complete histogram, by name (to diff two pipelines).
+  if (const char *m = getenv("MLNIX_STATS"); m && std::string(m) == "full") {
+    std::sort(o.begin(), o.end());
+    llvm::errs() << "== all ops\n";
+    for (auto &[n, c] : o) llvm::errs() << n << " " << c << "\n";
+  }
 }
 
 EvalState::~EvalState() {

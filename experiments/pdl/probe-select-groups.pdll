@@ -1,0 +1,8 @@
+// All three operand groups given: matches a select WITH a default value.
+#include "NixOps.td"
+#include "NixPrims.td"
+Pattern SelWithDefault {
+  let b : Value;
+  let sel = op<nix.select>(b, ks : ValueRange, d : Value) {path = attr<"[\"add\"]">};
+  rewrite sel with { replace sel with d; };
+}

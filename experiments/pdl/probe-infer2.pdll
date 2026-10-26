@@ -1,0 +1,13 @@
+// Oversaturated form with the result type of the CREATED continent op left to inference
+// (only the final apply, which replaces the root, has a type).
+#include "NixPrims.td"
+Pattern InferredInnerResultType {
+  let ty : Type;
+  let fn = op<nix.builtin> {name = attr<"\"__length\"">};
+  let call = op<nix.apply>(fn.0, a0 : Value, extra : Value, rest : ValueRange) -> (ty);
+  rewrite call with {
+    let new = op<nixlist.length>(a0);
+    let app = op<nix.apply>(new.0, extra, rest) -> (ty);
+    replace call with app;
+  };
+}

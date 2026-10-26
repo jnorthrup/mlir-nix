@@ -1,0 +1,7 @@
+// Result type of the created op left to inference (no `-> (ty)`).
+#include "NixPrims.td"
+Pattern InferredResultType {
+  let fn = op<nix.builtin> {name = attr<"\"__length\"">};
+  let call = op<nix.apply>(fn.0, a0 : Value);
+  rewrite call with { let new = op<nixlist.length>(a0); replace call with new; };
+}

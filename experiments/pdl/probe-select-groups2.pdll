@@ -1,0 +1,8 @@
+// Same, with the optional group as a ValueRange.
+#include "NixOps.td"
+#include "NixPrims.td"
+Pattern SelWithDefaultRange {
+  let b : Value;
+  let sel = op<nix.select>(b, ks : ValueRange, d : ValueRange) {path = attr<"[\"add\"]">};
+  rewrite sel with { replace sel with b; };
+}

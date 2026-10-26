@@ -43,6 +43,11 @@ def Nix_Dialect : Dialect {
         ::llvm::StringRef key, ::llvm::ArrayRef<::mlir::Attribute> args)>;
     PrimFolder primFolder;
 
+    /// Compiled PDL devirtualization patterns (MLNIX_DEVIRT=pdl), built on
+    /// first use; type-erased (a FrozenRewritePatternSet) to keep PDL out of
+    /// this header.
+    std::shared_ptr<void> devirtPDL;
+
     /// Primops declared by the continent dialects, by base-environment key.
     struct PrimInfo {
       ::mlir::OperationName name;

@@ -1,0 +1,8 @@
+// nix.select has AttrSizedOperandSegments (base, dyn_keys, default_value).
+#include "NixOps.td"
+#include "NixPrims.td"
+Pattern SelBaseOnly {
+  let b : Value;
+  let sel = op<nix.select>(b);
+  rewrite sel with { replace sel with b; };
+}

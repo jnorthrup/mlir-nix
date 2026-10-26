@@ -1,0 +1,200 @@
+// Spike: PDLL for three primops, every spelling x {exact, oversaturated}.
+//   __length  nixlist.length   arity 1
+//   __add     nixnum.add       arity 2
+//   toString  nixstr.to_string arity 1  (global alias, no "__" prefix)
+//
+// Spellings of the callee:
+//   direct  %f = nix.builtin "<key>"
+//   select  %b = nix.builtin "builtins"; %f = nix.select %b ["<name>"]
+// where the select name is looked up as __<name> first, then <name>.
+//
+// Only the continent ops are described to PDLL (NixPrims.td).  The core ops
+// nix.apply/builtin/select stay unregistered for PDLL on purpose: with their
+// ODS description PDLL cannot say "exactly N arguments" (see experiments/PDL.md).
+//
+// compile: mlir-pdll -x=mlir -I include/NixDialect -I $LLVM/include spike3.pdll
+#include "NixPrims.td"
+
+// ---- __length -> nixlist.length (arity 1)
+
+Pattern LengthDirectExact {
+  let ty : Type;
+  let fn = op<nix.builtin> {name = attr<"\"__length\"">};
+  let call = op<nix.apply>(fn.0, a0 : Value) -> (ty);
+  rewrite call with {
+    let new = op<nixlist.length>(a0) -> (ty);
+    replace call with new;
+  };
+}
+
+Pattern LengthSelLengthExact {
+  let ty : Type;
+  let b = op<nix.builtin> {name = attr<"\"builtins\"">};
+  let fn = op<nix.select>(b.0) {path = attr<"[\"length\"]">};
+  let call = op<nix.apply>(fn.0, a0 : Value) -> (ty);
+  rewrite call with {
+    let new = op<nixlist.length>(a0) -> (ty);
+    replace call with new;
+  };
+}
+
+Pattern LengthSelDunderLengthExact {
+  let ty : Type;
+  let b = op<nix.builtin> {name = attr<"\"builtins\"">};
+  let fn = op<nix.select>(b.0) {path = attr<"[\"__length\"]">};
+  let call = op<nix.apply>(fn.0, a0 : Value) -> (ty);
+  rewrite call with {
+    let new = op<nixlist.length>(a0) -> (ty);
+    replace call with new;
+  };
+}
+
+Pattern LengthDirectOver {
+  let ty : Type;
+  let fn = op<nix.builtin> {name = attr<"\"__length\"">};
+  let call = op<nix.apply>(fn.0, a0 : Value, extra : Value, rest : ValueRange) -> (ty);
+  rewrite call with {
+    let new = op<nixlist.length>(a0) -> (ty);
+    let app = op<nix.apply>(new.0, extra, rest) -> (ty);
+    replace call with app;
+  };
+}
+
+Pattern LengthSelLengthOver {
+  let ty : Type;
+  let b = op<nix.builtin> {name = attr<"\"builtins\"">};
+  let fn = op<nix.select>(b.0) {path = attr<"[\"length\"]">};
+  let call = op<nix.apply>(fn.0, a0 : Value, extra : Value, rest : ValueRange) -> (ty);
+  rewrite call with {
+    let new = op<nixlist.length>(a0) -> (ty);
+    let app = op<nix.apply>(new.0, extra, rest) -> (ty);
+    replace call with app;
+  };
+}
+
+Pattern LengthSelDunderLengthOver {
+  let ty : Type;
+  let b = op<nix.builtin> {name = attr<"\"builtins\"">};
+  let fn = op<nix.select>(b.0) {path = attr<"[\"__length\"]">};
+  let call = op<nix.apply>(fn.0, a0 : Value, extra : Value, rest : ValueRange) -> (ty);
+  rewrite call with {
+    let new = op<nixlist.length>(a0) -> (ty);
+    let app = op<nix.apply>(new.0, extra, rest) -> (ty);
+    replace call with app;
+  };
+}
+
+// ---- __add -> nixnum.add (arity 2)
+
+Pattern AddDirectExact {
+  let ty : Type;
+  let fn = op<nix.builtin> {name = attr<"\"__add\"">};
+  let call = op<nix.apply>(fn.0, a0 : Value, a1 : Value) -> (ty);
+  rewrite call with {
+    let new = op<nixnum.add>((a0, a1)) -> (ty);
+    replace call with new;
+  };
+}
+
+Pattern AddSelAddExact {
+  let ty : Type;
+  let b = op<nix.builtin> {name = attr<"\"builtins\"">};
+  let fn = op<nix.select>(b.0) {path = attr<"[\"add\"]">};
+  let call = op<nix.apply>(fn.0, a0 : Value, a1 : Value) -> (ty);
+  rewrite call with {
+    let new = op<nixnum.add>((a0, a1)) -> (ty);
+    replace call with new;
+  };
+}
+
+Pattern AddSelDunderAddExact {
+  let ty : Type;
+  let b = op<nix.builtin> {name = attr<"\"builtins\"">};
+  let fn = op<nix.select>(b.0) {path = attr<"[\"__add\"]">};
+  let call = op<nix.apply>(fn.0, a0 : Value, a1 : Value) -> (ty);
+  rewrite call with {
+    let new = op<nixnum.add>((a0, a1)) -> (ty);
+    replace call with new;
+  };
+}
+
+Pattern AddDirectOver {
+  let ty : Type;
+  let fn = op<nix.builtin> {name = attr<"\"__add\"">};
+  let call = op<nix.apply>(fn.0, a0 : Value, a1 : Value, extra : Value, rest : ValueRange) -> (ty);
+  rewrite call with {
+    let new = op<nixnum.add>((a0, a1)) -> (ty);
+    let app = op<nix.apply>(new.0, extra, rest) -> (ty);
+    replace call with app;
+  };
+}
+
+Pattern AddSelAddOver {
+  let ty : Type;
+  let b = op<nix.builtin> {name = attr<"\"builtins\"">};
+  let fn = op<nix.select>(b.0) {path = attr<"[\"add\"]">};
+  let call = op<nix.apply>(fn.0, a0 : Value, a1 : Value, extra : Value, rest : ValueRange) -> (ty);
+  rewrite call with {
+    let new = op<nixnum.add>((a0, a1)) -> (ty);
+    let app = op<nix.apply>(new.0, extra, rest) -> (ty);
+    replace call with app;
+  };
+}
+
+Pattern AddSelDunderAddOver {
+  let ty : Type;
+  let b = op<nix.builtin> {name = attr<"\"builtins\"">};
+  let fn = op<nix.select>(b.0) {path = attr<"[\"__add\"]">};
+  let call = op<nix.apply>(fn.0, a0 : Value, a1 : Value, extra : Value, rest : ValueRange) -> (ty);
+  rewrite call with {
+    let new = op<nixnum.add>((a0, a1)) -> (ty);
+    let app = op<nix.apply>(new.0, extra, rest) -> (ty);
+    replace call with app;
+  };
+}
+
+// ---- toString -> nixstr.to_string (arity 1)
+
+Pattern ToStringDirectExact {
+  let ty : Type;
+  let fn = op<nix.builtin> {name = attr<"\"toString\"">};
+  let call = op<nix.apply>(fn.0, a0 : Value) -> (ty);
+  rewrite call with {
+    let new = op<nixstr.to_string>(a0) -> (ty);
+    replace call with new;
+  };
+}
+
+Pattern ToStringSelToStringExact {
+  let ty : Type;
+  let b = op<nix.builtin> {name = attr<"\"builtins\"">};
+  let fn = op<nix.select>(b.0) {path = attr<"[\"toString\"]">};
+  let call = op<nix.apply>(fn.0, a0 : Value) -> (ty);
+  rewrite call with {
+    let new = op<nixstr.to_string>(a0) -> (ty);
+    replace call with new;
+  };
+}
+
+Pattern ToStringDirectOver {
+  let ty : Type;
+  let fn = op<nix.builtin> {name = attr<"\"toString\"">};
+  let call = op<nix.apply>(fn.0, a0 : Value, extra : Value, rest : ValueRange) -> (ty);
+  rewrite call with {
+    let new = op<nixstr.to_string>(a0) -> (ty);
+    let app = op<nix.apply>(new.0, extra, rest) -> (ty);
+    replace call with app;
+  };
+}
+
+Pattern ToStringSelToStringOver {
+  let ty : Type;
+  let b = op<nix.builtin> {name = attr<"\"builtins\"">};
+  let fn = op<nix.select>(b.0) {path = attr<"[\"toString\"]">};
+  let call = op<nix.apply>(fn.0, a0 : Value, extra : Value, rest : ValueRange) -> (ty);
+  rewrite call with {
+    let new = op<nixstr.to_string>(a0) -> (ty);
+    let app = op<nix.apply>(new.0, extra, rest) -> (ty);
+    replace call with app;
+  };
+}
