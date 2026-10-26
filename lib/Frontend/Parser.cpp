@@ -11,6 +11,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "Composite/Pack.h"
 #include "Nix/AST.h"
 
 #include <algorithm>
@@ -38,8 +39,9 @@ enum Tok {
 struct Token {
   Tok t;
   char ch = 0;
-  std::string s;          // payload (ID, STR, PATH...)
   bool hasIndent = false; // IND_STR from the main rule
+  bool derived = false;   // the text is not a slice of the input: span.first() indexes the lexer's pool
+  join::TwInt span;       // [start, end) of the lexeme in the input: a segment, never a copy
   int64_t i = 0;
   double f = 0;
   Pos pos;
@@ -110,7 +112,15 @@ bool isUriChar(char c) {
 class Lexer {
 public:
   Lexer(std::shared_ptr<Origin> o, const ParseOptions &opts)
-      : origin(std::move(o)), src(*origin->text), opts(opts) {}
+      : origin(std::move(o)), src(*origin->text), opts(opts), derived{"$", "''", "'", "~/"} {
+    if (src.size() >= UINT32_MAX) throw ParseError("input too large (segments are 32-bit)", Pos{1, 1}, origin);
+  }
+
+  /// The text of a token: a slice of the input, or an entry of the pool of derived texts.
+  std::string_view text(const Token &t) const {
+    if (t.derived) return derived[t.span.first()];
+    return src.substr(t.span.first(), t.span.second() - t.span.first());
+  }
 
   /// Produce the next token (T_EOF at end, repeatedly).
   Token nextToken() {
@@ -141,8 +151,25 @@ public:
 private:
   enum State { S_INITIAL, S_DEFAULT, S_STRING, S_IND_STRING, S_INPATH, S_INPATH_SLASH };
   std::shared_ptr<Origin> origin;
-  const std::string &src;
+  std::string_view src; // the input, immutable: tokens are segments of it
   const ParseOptions &opts;
+  /// Texts that are not slices of the input (unescaped strings, `''$`, ...), appended and never
+  /// mutated; the first four are fixed.  Deque: entries do not move.
+  std::deque<std::string> derived;
+  enum Fixed : uint32_t { F_DOLLAR, F_TWO_QUOTES, F_QUOTE, F_HOME };
+  void setSlice(Token &t, size_t from, size_t to) { t.span = join::TwInt(uint32_t(from), uint32_t(to)); }
+  void setFixed(Token &t, Fixed f) { t.derived = true; t.span = join::TwInt(uint32_t(f), 0); }
+  void setDerived(Token &t, std::string s) {
+    derived.push_back(std::move(s));
+    t.derived = true;
+    t.span = join::TwInt(uint32_t(derived.size() - 1), 0);
+  }
+  /// A string piece: the slice itself unless it has escapes to resolve.
+  void setUnescaped(Token &t, size_t from, size_t to) {
+    std::string_view seg = src.substr(from, to - from);
+    if (seg.find_first_of("\\\r") == std::string_view::npos) setSlice(t, from, to);
+    else setDerived(t, unescapeStr(seg));
+  }
   std::vector<State> stack;
   size_t p = 0;
   uint32_t line = 1;
@@ -298,8 +325,8 @@ private:
     return t;
   }
 
-  void checkNul(const std::string &s, size_t off) {
-    if (s.find('\0') != std::string::npos)
+  void checkNul(std::string_view s, size_t off) {
+    if (s.find('\0') != std::string_view::npos)
       error("input string contains NUL byte", off);
   }
 
@@ -385,8 +412,8 @@ private:
       return true;
     }
     t.t = T_STR;
-    t.s = unescapeStr(std::string_view(src).substr(i, j - i));
-    checkNul(t.s, i);
+    setUnescaped(t, i, j);
+    checkNul(text(t), i);
     p = j;
     return true;
   }
@@ -406,18 +433,18 @@ private:
     }
     if (j > i) {
       t.t = T_IND_STR;
-      t.s = src.substr(i, j - i);
+      setSlice(t, i, j);
       t.hasIndent = true;
-      checkNul(t.s, i);
+      checkNul(text(t), i);
       p = j;
       return true;
     }
     if (at(i) == '\'' && at(i + 1) == '\'') {
-      if (at(i + 2) == '$') { t.t = T_IND_STR; t.s = "$"; p += 3; return true; }
-      if (at(i + 2) == '\'') { t.t = T_IND_STR; t.s = "''"; p += 3; return true; }
+      if (at(i + 2) == '$') { t.t = T_IND_STR; setFixed(t, F_DOLLAR); p += 3; return true; }
+      if (at(i + 2) == '\'') { t.t = T_IND_STR; setFixed(t, F_TWO_QUOTES); p += 3; return true; }
       if (at(i + 2) == '\\' && !eof(i + 3)) {
         t.t = T_IND_STR;
-        t.s = unescapeStr(std::string_view(src).substr(i + 2, 2));
+        setDerived(t, unescapeStr(src.substr(i + 2, 2)));
         // `''\` followed by CR LF: unescape handles "\\\r" as '\r' literal;
         // upstream matches exactly one char after the backslash.
         p += 4;
@@ -434,8 +461,8 @@ private:
       t.t = T_DOLLAR_CURLY;
       return true;
     }
-    if (at(i) == '$') { t.t = T_IND_STR; t.s = "$"; p++; return true; }
-    if (at(i) == '\'') { t.t = T_IND_STR; t.s = "'"; p++; return true; }
+    if (at(i) == '$') { t.t = T_IND_STR; setFixed(t, F_DOLLAR); p++; return true; }
+    if (at(i) == '\'') { t.t = T_IND_STR; setFixed(t, F_QUOTE); p++; return true; }
     // unreachable
     error("lexer error in indented string", i);
   }
@@ -459,7 +486,7 @@ private:
       pop();
       push(src[i + l - 1] == '/' ? S_INPATH_SLASH : S_INPATH);
       t.t = T_STR;
-      t.s = src.substr(i, l);
+      setSlice(t, i, i + l);
       p += l;
       return true;
     }
@@ -539,7 +566,7 @@ private:
     if (best.len == 0) consider(1, 99);
 
     size_t len = best.len;
-    auto text = [&] { return src.substr(i, len); }; // only the rules that carry text copy it
+    auto number = [&] { return std::string(src.substr(i, len)); }; // strtoull/strtod need a NUL
     int r = best.rule;
     p = i + len;
     if (r < 10) { t.t = kwTok[r]; return true; }
@@ -550,11 +577,11 @@ private:
       return true;
     }
     switch (r) {
-    case 30: t.t = T_ID; t.s = text(); return true;
+    case 30: t.t = T_ID; setSlice(t, i, i + len); return true;
     case 31: {
       errno = 0;
       char *end;
-      std::string txt = text();
+      std::string txt = number();
       unsigned long long v = strtoull(txt.c_str(), &end, 10);
       if (errno || v > (unsigned long long)INT64_MAX)
         error("invalid integer '" + txt + "'", i);
@@ -565,7 +592,7 @@ private:
     case 32:
       errno = 0;
       {
-        std::string txt = text();
+        std::string txt = number();
         t.f = strtod(txt.c_str(), nullptr);
         if (errno) error("invalid float '" + txt + "'", i);
       }
@@ -581,19 +608,19 @@ private:
     case 37: push(S_IND_STRING); t.t = T_IND_STRING_OPEN; return true;
     case 38: {
       // PATH_START: re-lex as PATH_SEG / HPATH_START, then INPATH_SLASH.
-      if (c == '~') { t.t = T_HPATH; t.s = "~/"; p = i + 2; }
-      else { size_t l = mPathSeg(i); t.t = T_PATH; t.s = src.substr(i, l); p = i + l; }
+      if (c == '~') { t.t = T_HPATH; setFixed(t, F_HOME); p = i + 2; }
+      else { size_t l = mPathSeg(i); t.t = T_PATH; setSlice(t, i, i + l); p = i + l; }
       push(S_INPATH_SLASH);
       return true;
     }
     case 39:
     case 40:
-      t.s = text();
-      push(t.s.back() == '/' ? S_INPATH_SLASH : S_INPATH);
+      setSlice(t, i, i + len);
+      push(src[i + len - 1] == '/' ? S_INPATH_SLASH : S_INPATH);
       t.t = r == 39 ? T_PATH : T_HPATH;
       return true;
-    case 41: t.t = T_SPATH; t.s = text(); return true;
-    case 42: t.t = T_URI; t.s = text(); return true;
+    case 41: t.t = T_SPATH; setSlice(t, i, i + len); return true;
+    case 42: t.t = T_URI; setSlice(t, i, i + len); return true;
     case 43: return false;
     default:
       t.t = T_CHAR;
@@ -636,6 +663,7 @@ private:
       if (toks.back().t == T_EOF) sawEof = true;
     }
   }
+  std::string str(const Token &t) { return std::string(lx.text(t)); }
   const Token &cur() { fill(0); return toks[0]; }
   const Token &peek(size_t n = 1) { fill(n); return toks[n]; }
   bool isChar(const Token &t, char c) { return t.t == T_CHAR && t.ch == c; }
@@ -691,7 +719,7 @@ private:
     const Token &t = cur();
     Pos pos = t.pos;
     if (t.t == T_ID && isChar(peek(), ':')) {
-      std::string arg = take().s;
+      std::string arg = str(take());
       take();
       auto *lam = arena.add<ExprLambda>(pos, nullptr);
       lam->arg = arg;
@@ -699,7 +727,7 @@ private:
       return lam;
     }
     if (t.t == T_ID && isChar(peek(), '@') && isChar(peek(2), '{')) {
-      std::string arg = take().s;
+      std::string arg = str(take());
       take();
       auto *lam = arena.add<ExprLambda>(pos, nullptr);
       lam->arg = arg;
@@ -715,7 +743,7 @@ private:
       if (atChar('@')) {
         take();
         if (cur().t != T_ID) unexpected("identifier");
-        lam->arg = take().s;
+        lam->arg = str(take());
       }
       validateFormals(lam, pos);
       expectChar(':');
@@ -763,7 +791,7 @@ private:
       if (cur().t != T_ID) unexpected();
       Formal f;
       f.pos = cur().pos;
-      f.name = take().s;
+      f.name = str(take());
       if (atChar('?')) {
         take();
         f.def = parseExpr();
@@ -977,7 +1005,7 @@ private:
     AttrPath path;
     while (true) {
       const std::string expecting = "identifier or 'or' or '${' or '\"'";
-      if (cur().t == T_ID) path.emplace_back(take().s);
+      if (cur().t == T_ID) path.emplace_back(str(take()));
       else if (cur().t == T_OR_KW) { take(); path.emplace_back(std::string("or")); }
       else if (atChar('"') || cur().t == T_DOLLAR_CURLY) path.push_back(parseStringAttr());
       else unexpected(expecting);
@@ -1014,8 +1042,8 @@ private:
     while (true) {
       if (cur().t == T_STR) {
         Token t = take();
-        parts.emplace_back(t.pos, arena.add<ExprString>(t.s));
-        single = t.s;
+        parts.emplace_back(t.pos, arena.add<ExprString>(str(t)));
+        single = str(t);
         haveSingle = true;
       } else if (cur().t == T_DOLLAR_CURLY) {
         Pos p = take().pos;
@@ -1041,7 +1069,7 @@ private:
     Pos pos = t.pos;
     switch (t.t) {
     case T_ID: {
-      std::string n = take().s;
+      std::string n = str(take());
       if (n == "__curPos") return arena.add<ExprCurPos>(pos);
       return arena.add<ExprVar>(pos, n);
     }
@@ -1076,7 +1104,7 @@ private:
       while (true) {
         if (cur().t == T_STR) {
           Token s = take();
-          parts.emplace_back(s.pos, arena.add<ExprString>(s.s));
+          parts.emplace_back(s.pos, arena.add<ExprString>(str(s)));
         } else if (cur().t == T_DOLLAR_CURLY) {
           Pos p = take().pos;
           Expr *e = parseExpr();
@@ -1091,7 +1119,7 @@ private:
       return arena.add<ExprConcatStrings>(pos, false, std::move(parts));
     }
     case T_SPATH: {
-      std::string s = take().s;
+      std::string s = str(take());
       std::string path = s.substr(1, s.size() - 2);
       return arena.add<ExprCall>(pos, var("__findFile"),
                                  std::vector<Expr *>{var("__nixPath"), arena.add<ExprString>(path)});
@@ -1099,8 +1127,8 @@ private:
     case T_URI: {
       diagnose(opts.lintUrls, "lint-url-literals",
                std::string("URL literals are ") + (opts.lintUrls == Lint::Fatal ? "disallowed" : "discouraged") +
-                   ". Consider using a string literal \"" + t.s + "\" instead", pos);
-      auto *e = arena.add<ExprString>(take().s);
+                   ". Consider using a string literal \"" + str(t) + "\" instead", pos);
+      auto *e = arena.add<ExprString>(str(take()));
       e->pos = pos;
       return e;
     }
@@ -1168,7 +1196,7 @@ private:
   }
 
   Expr *makePath(const Token &t) {
-    std::string lit = t.s;
+    std::string lit = str(t);
     if (t.t == T_HPATH)
       diagnose(opts.lintAbsolutePaths, "lint-absolute-path-literals",
                "home path literals are not portable. Consider replacing path literal '" + lit +
@@ -1206,7 +1234,7 @@ private:
         }
         continue;
       }
-      for (char c : str->s) {
+      for (char c : lx.text(*str)) {
         if (atStartOfLine) {
           if (c == ' ') curIndent++;
           else if (c == '\n') curIndent = 0;
@@ -1233,7 +1261,7 @@ private:
       }
       const Token &t = std::get<Token>(it->second);
       std::string s2;
-      for (char c : t.s) {
+      for (char c : lx.text(t)) {
         if (atStartOfLine) {
           if (c == ' ') {
             if (curDropped++ >= minIndent) s2 += c;
@@ -1281,7 +1309,7 @@ private:
         while (!atChar(';')) {
           Pos apos = cur().pos;
           std::string name;
-          if (cur().t == T_ID) name = take().s;
+          if (cur().t == T_ID) name = str(take());
           else if (cur().t == T_OR_KW) { take(); name = "or"; }
           else if (atChar('"') || cur().t == T_DOLLAR_CURLY) {
             AttrName an = parseStringAttr();

@@ -7,6 +7,7 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <vector>
 
 int main(int argc, char **argv) {
   bool quiet = argc == 3 && std::string(argv[1]) == "-n"; // time the parse alone: no AST printing
@@ -15,23 +16,29 @@ int main(int argc, char **argv) {
     return 2;
   }
   std::ifstream list(argv[quiet ? 2 : 1]);
+  // Read everything first: the time reported is the parser's, not the file system's.
+  std::vector<std::pair<std::string, std::string>> corpus;
   std::string path;
-  size_t files = 0, errors = 0, bytes = 0;
-  auto t0 = std::chrono::steady_clock::now();
+  size_t bytes = 0;
   while (std::getline(list, path)) {
     std::ifstream f(path, std::ios::binary);
     std::stringstream ss;
     ss << f.rdbuf();
+    corpus.emplace_back(path, ss.str());
+    bytes += corpus.back().second.size();
+  }
+  size_t files = 0, errors = 0;
+  auto t0 = std::chrono::steady_clock::now();
+  for (auto &[name, text] : corpus) {
     auto origin = std::make_shared<nixfe::Origin>();
-    origin->name = origin->path = path;
+    origin->name = origin->path = name;
     origin->baseDir = ".";
-    origin->text = std::make_shared<std::string>(ss.str());
-    bytes += origin->text->size();
+    origin->text = std::make_shared<std::string>(text);
     nixfe::ExprArena arena;
     nixfe::ParseOptions opts;
     opts.pipeOperators = true;
     opts.home = "/home";
-    if (!quiet) std::cout << "=== " << path << "\n";
+    if (!quiet) std::cout << "=== " << name << "\n";
     try {
       nixfe::Expr *e = nixfe::parse(arena, origin, opts);
       if (!quiet) {
