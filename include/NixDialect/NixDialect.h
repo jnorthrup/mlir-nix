@@ -59,7 +59,10 @@ void registerNixDialects(DialectRegistry &registry);
 void loadNixDialects(MLIRContext &ctx);
 
 /// Which stages of the nix pipeline to run (all are cheap walks except `fold`,
-/// which drives the greedy rewriter).
+/// which drives the greedy rewriter).  This is the *direct-call* interface;
+/// the evaluator no longer uses it: it runs a PassManager built from a textual
+/// pipeline or a Transform-dialect script (Nix/Pipeline.h).  It stays as the
+/// baseline for per-call overhead measurements.
 struct SimplifyOptions {
   /// Rewrite saturated calls of known primops into continent-dialect ops.
   bool devirtualize = true;
@@ -69,11 +72,17 @@ struct SimplifyOptions {
   bool dce = false;
 };
 
+/// Registers the passes `nix-prims`, `nix-fold`, `nix-dce` and the pipeline
+/// alias `nix-simplify` (= nix-prims,nix-fold,nix-dce).  Idempotent.
 void registerNixPasses();
-std::unique_ptr<Pass> createNixSimplifyPass();
 std::unique_ptr<Pass> createNixPrimsPass();
+std::unique_ptr<Pass> createNixFoldPass();
+std::unique_ptr<Pass> createNixDcePass();
+/// The `nix-simplify` alias: prims, fold, dce.
+void buildNixSimplifyPipeline(OpPassManager &pm);
 
-/// Run the selected stages below `root` (an ExprOp or a ModuleOp).
+/// Run the selected stages below `root` (an ExprOp or a ModuleOp) by direct
+/// calls, without a pass manager.
 void simplifyExpr(Operation *root, SimplifyOptions options = {});
 /// `nix.apply (builtin|builtins.X) args` -> continent op (single walk).
 void devirtualizePrims(Operation *root);

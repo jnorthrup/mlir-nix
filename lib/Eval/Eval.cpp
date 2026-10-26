@@ -7,6 +7,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/Parser/Parser.h"
 #include "mlir/Pass/PassManager.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/SourceMgr.h"
 
@@ -131,6 +132,12 @@ EvalState::EvalState(EvalSettings st, std::shared_ptr<nixstore::Store> store)
   };
   ctx.allowUnregisteredDialects(false);
   module = ModuleOp::create(UnknownLoc::get(&ctx));
+  scratch = ModuleOp::create(UnknownLoc::get(&ctx));
+  if (settings.optimize) {
+    std::string error;
+    pipeline = nixpipe::makeFromEnvironment(ctx, settings.pipeline, error);
+    if (!pipeline) throw EvalError(error);
+  }
 #define SYM(field, str) s.field = symbols.create(str)
   SYM(outPath, "outPath"); SYM(drvPath, "drvPath"); SYM(type, "type"); SYM(name, "name");
   SYM(value, "value"); SYM(functor, "__functor"); SYM(toString, "__toString"); SYM(file, "file");
@@ -172,7 +179,8 @@ void EvalState::printStats() {
   std::vector<std::pair<std::string, size_t>> d;
   for (auto &e : perDialect) d.push_back({e.getKey().str(), e.getValue()});
   std::sort(d.begin(), d.end(), [](auto &a, auto &b) { return a.second > b.second; });
-  llvm::errs() << "== mlnix ops lowered: " << total << " in " << d.size() << " dialects\n";
+  llvm::errs() << "== mlnix ops lowered: " << total << " in " << d.size() << " dialects, " << exprCounter
+               << " expressions (= optimization pipeline runs)\n";
   for (auto &[n, c] : d) llvm::errs() << "  " << llvm::format("%-9s", n.c_str()) << llvm::format("%9zu", c) << "\n";
   std::vector<std::pair<std::string, size_t>> o;
   for (auto &e : opStats) o.push_back({e.getKey().str(), e.getValue()});
@@ -1361,24 +1369,24 @@ nd::ExprOp EvalState::lowerToMLIR(nixfe::Expr *e, std::shared_ptr<nixfe::Origin>
     go.scopeNames = *scopeNames;
   }
   std::string sym = "expr" + std::to_string(exprCounter++);
-  nd::ExprOp op = nixfe::genExpr(*module, e, std::move(origin), sym, go);
-  // The expression is IsolatedFromAbove and not yet referenced by any frame,
-  // so it can be rewritten freely before evaluation starts.
-  if (settings.optimize) {
-    nd::SimplifyOptions so;
-    so.devirtualize = so.fold = so.dce = false;
-    std::string passes = settings.passes;
-    if (const char *e = getenv("MLNIX_PASSES")) passes = e; // experiments / benchmarks
-    for (llvm::StringRef rest = passes; !rest.empty();) {
-      auto [p, tail] = rest.split(',');
-      rest = tail;
-      if (p == "devirt") so.devirtualize = true;
-      else if (p == "fold") so.fold = true;
-      else if (p == "dce") so.dce = true;
-      else if (p == "all") so.devirtualize = so.fold = so.dce = true;
-    }
-    nd::simplifyExpr(op, so);
-  }
+  // The expression is lowered into the scratch module, so the pipeline (which
+  // works on a module) sees this expression and nothing else, and no frame
+  // refers to it yet: it can be rewritten freely.  If lowering or the pipeline
+  // throws, nothing stays behind in the scratch module.
+  mlir::Block *scratchBody = scratch->getBody();
+  llvm::scope_exit cleanScratch([&] {
+    for (mlir::Operation &o : *scratchBody) o.dropAllReferences(); // graph regions: cycles
+    scratchBody->clear();
+  });
+  nixfe::genExpr(*scratch, e, std::move(origin), sym, go);
+  if (pipeline && mlir::failed(pipeline->run(*scratch)))
+    throw EvalError("the optimization pipeline failed on '" + sym + "'");
+  // A pipeline may replace the expression (e.g. transform.alternatives works
+  // on a clone), so take whatever it left behind rather than a saved pointer.
+  if (!llvm::hasSingleElement(*scratchBody) || !llvm::isa<nd::ExprOp>(scratchBody->front()))
+    throw EvalError("the optimization pipeline did not leave exactly one expression for '" + sym + "'");
+  auto op = llvm::cast<nd::ExprOp>(scratchBody->front());
+  op->moveBefore(module->getBody(), module->getBody()->end());
   if (statsEnabled)
     op->walk([&](mlir::Operation *o) { ++opStats[o->getName().getStringRef()]; });
   return op;

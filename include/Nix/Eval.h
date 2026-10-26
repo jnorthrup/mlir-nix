@@ -14,6 +14,7 @@
 #define NIX_EVAL_H
 
 #include "Nix/AST.h"
+#include "Nix/Pipeline.h"
 #include "Nix/Store.h"
 #include "NixDialect/NixDialect.h"
 
@@ -199,10 +200,13 @@ struct EvalSettings {
   bool showTrace = false;
   bool pipeOperators = false;
   bool optimize = true;
-  /// Comma-separated stages of the nix pipeline: devirt, fold, dce (or none).
-  /// See mlir::nix::SimplifyOptions.  `fold` and `dce` cost more than they
-  /// save on real workloads (measured), so only `devirt` is on by default.
-  std::string passes = "devirt";
+  /// The optimization pipeline run on every freshly lowered file, as a textual
+  /// MLIR pass pipeline (see Nix/Pipeline.h).  `nix-fold` and `nix-dce` cost
+  /// more than they save on real workloads (measured), so only `nix-prims` is
+  /// on by default.  The environment overrides it: MLNIX_PIPELINE=TEXT,
+  /// MLNIX_TRANSFORM=embedded|FILE (a Transform-dialect script instead) and,
+  /// deprecated, MLNIX_PASSES=devirt,fold,dce|all.
+  std::string pipeline = std::string(nixpipe::defaultPipelineText);
   unsigned maxCallDepth = 10000;
   bool dumpMLIR = false;
   nixfe::Lint lintAbsolutePaths = nixfe::Lint::Ignore, lintShortPaths = nixfe::Lint::Ignore,
@@ -222,7 +226,13 @@ public:
   std::shared_ptr<nixstore::Store> store;
   SymbolTable symbols;
   mlir::MLIRContext ctx;
+  /// Everything lowered so far (one nix.expr per file / string).
   mlir::OwningOpRef<mlir::ModuleOp> module;
+  /// A file is lowered into `scratch` -- a module that holds only that
+  /// expression -- optimized there by `pipeline`, and then moved into `module`.
+  /// The pipeline sees a module with one expression, never the whole program.
+  mlir::OwningOpRef<mlir::ModuleOp> scratch;
+  std::unique_ptr<nixpipe::Pipeline> pipeline;
   llvm::BumpPtrAllocator alloc;
 
   // Frequently used symbols.
