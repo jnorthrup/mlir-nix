@@ -5,7 +5,7 @@
 
 int main(int argc, char **argv) {
   mlir::DialectRegistry registry;
-  registry.insert<mlir::nix::NixDialect>();
+  mlir::nix::registerNixDialects(registry);
   mlir::registerTransformsPasses();
   mlir::nix::registerNixPasses();
   return mlir::asMainReturnCode(

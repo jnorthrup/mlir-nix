@@ -8,7 +8,9 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "mlir/Transforms/WalkPatternRewriteDriver.h"
 #include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -17,6 +19,7 @@ using namespace mlir;
 using namespace mlir::nix;
 
 #include "NixDialect/NixDialect.cpp.inc"
+#include "NixDialect/NixInterfaces.cpp.inc"
 
 #define GET_TYPEDEF_CLASSES
 #include "NixDialect/NixTypes.cpp.inc"
@@ -37,6 +40,10 @@ void NixDialect::initialize() {
 
 Operation *NixDialect::materializeConstant(OpBuilder &b, Attribute value,
                                            Type type, Location loc) {
+  if (auto bl = dyn_cast<BoolAttr>(value)) // before IntegerAttr: i1 integers
+    return BoolOp::create(b, loc, type, bl);
+  if (isa<UnitAttr>(value))
+    return NullOp::create(b, loc, type);
   if (auto i = dyn_cast<IntegerAttr>(value))
     return IntOp::create(b, loc, type, i);
   if (auto f = dyn_cast<FloatAttr>(value))
@@ -93,6 +100,33 @@ LogicalResult AttrsOp::verify() {
 OpFoldResult IntOp::fold(FoldAdaptor) { return getValueAttr(); }
 OpFoldResult FloatOp::fold(FoldAdaptor) { return getValueAttr(); }
 OpFoldResult StringOp::fold(FoldAdaptor) { return getValueAttr(); }
+OpFoldResult BoolOp::fold(FoldAdaptor) { return getValueAttr(); }
+OpFoldResult NullOp::fold(FoldAdaptor) { return UnitAttr::get(getContext()); }
+
+//===----------------------------------------------------------------------===//
+// Primops (the continent dialects): verification and generic folding
+//===----------------------------------------------------------------------===//
+
+LogicalResult mlir::nix::verifyPrimArity(Operation *op, unsigned arity) {
+  if (op->getNumOperands() != arity)
+    return op->emitOpError("expects ") << arity << " operand(s) but has " << op->getNumOperands();
+  return success();
+}
+
+/// Every foldable primop is folded by the same code: hand the scalar constant
+/// operands to the evaluator's own implementation of the primop.  If the
+/// call throws, nothing is folded and the error stays a runtime error.
+OpFoldResult mlir::nix::foldPrim(Operation *op, StringRef key, ArrayRef<Attribute> args) {
+  auto *core = op->getContext()->getLoadedDialect<NixDialect>();
+  if (!core || !core->primFolder)
+    return {};
+  for (Attribute a : args)
+    if (!a)
+      return {};
+  if (Attribute r = core->primFolder(key, args))
+    return r;
+  return {};
+}
 
 OpFoldResult ConcatStringsOp::fold(FoldAdaptor adaptor) {
   auto ops = adaptor.getParts();
@@ -127,30 +161,48 @@ OpFoldResult ConcatStringsOp::fold(FoldAdaptor adaptor) {
 
 namespace {
 
-/// apply(builtin "__sub"|"__mul"|"__div", int, int) -> int
-struct FoldBuiltinArith : OpRewritePattern<ApplyOp> {
+/// `nix.apply (builtin "__add"|builtins.add|...) a b` -> `nixnum.add(a, b)`:
+/// the call of a known primop becomes an op of its continent dialect, whose
+/// arity, effects and foldability are declared in NixPrims.td.  Calls with too
+/// few arguments stay partial applications; extra arguments are applied to the
+/// result.
+struct DevirtualizePrimCall : OpRewritePattern<ApplyOp> {
   using OpRewritePattern::OpRewritePattern;
   LogicalResult matchAndRewrite(ApplyOp op, PatternRewriter &rw) const override {
-    auto b = op.getCallee().getDefiningOp<BuiltinOp>();
-    if (!b || op.getArgs().size() != 2)
+    if (op.getArgs().empty())
       return failure();
-    auto l = op.getArgs()[0].getDefiningOp<IntOp>();
-    auto r = op.getArgs()[1].getDefiningOp<IntOp>();
-    if (!l || !r)
-      return failure();
-    int64_t x = l.getValue(), y = r.getValue(), z;
-    StringRef n = b.getName();
-    if (n == "__sub") {
-      if (__builtin_sub_overflow(x, y, &z)) return failure();
-    } else if (n == "__mul") {
-      if (__builtin_mul_overflow(x, y, &z)) return failure();
-    } else if (n == "__div") {
-      if (y == 0 || (x == INT64_MIN && y == -1)) return failure();
-      z = x / y;
-    } else {
-      return failure();
+    auto *core = getContext()->getLoadedDialect<NixDialect>();
+    const NixDialect::PrimInfo *info = nullptr;
+    Value callee = op.getCallee();
+    if (auto b = callee.getDefiningOp<BuiltinOp>()) {
+      auto it = core->prims.find(b.getName());
+      if (it != core->prims.end())
+        info = &it->second;
+    } else if (auto sel = callee.getDefiningOp<SelectOp>()) {
+      // builtins.<name>
+      if (sel.getDefaultValue() || sel.getKeys().size() != 1)
+        return failure();
+      auto base = sel.getBase().getDefiningOp<BuiltinOp>();
+      auto key = sel.getKeys()[0].getDefiningOp<StringOp>();
+      if (!base || base.getName() != "builtins" || !key)
+        return failure();
+      llvm::SmallString<48> internal("__");
+      internal += key.getValue();
+      auto it = core->prims.find(internal);
+      if (it == core->prims.end())
+        it = core->prims.find(key.getValue());
+      if (it != core->prims.end())
+        info = &it->second;
     }
-    rw.replaceOp(op, IntOp::create(rw, op.getLoc(), op.getType(), rw.getI64IntegerAttr(z)));
+    if (!info || op.getArgs().size() < info->arity)
+      return failure();
+    OperationState st(op.getLoc(), info->name);
+    st.addOperands(op.getArgs().take_front(info->arity));
+    st.addTypes(op.getType());
+    Value res = rw.create(st)->getResult(0);
+    if (op.getArgs().size() > info->arity)
+      res = ApplyOp::create(rw, op.getLoc(), op.getType(), res, op.getArgs().drop_front(info->arity));
+    rw.replaceOp(op, res);
     return success();
   }
 };
@@ -172,6 +224,11 @@ struct ForwardUnobservableIdentity : OpRewritePattern<ApplyOp> {
     return success();
   }
 };
+
+/// Core dialect or one of the continent dialects (nixnum, nixstr, ...).
+bool isNixFamily(Operation *op) {
+  return op->getDialect() && op->getDialect()->getNamespace().starts_with("nix");
+}
 
 /// Graph regions can hold dead *cycles* (unused recursive bindings) that the
 /// generic dead-code elimination never removes. Mark from each terminator.
@@ -201,8 +258,7 @@ void eliminateDeadBindings(Operation *root) {
   }
   llvm::SmallVector<Operation *> dead;
   root->walk([&](Operation *op) {
-    if (op->getDialect() && isa<NixDialect>(op->getDialect()) &&
-        !isa<ExprOp>(op) && !live.contains(op))
+    if (isNixFamily(op) && !isa<ExprOp>(op) && !live.contains(op))
       dead.push_back(op);
   });
   // Drop all uses first (cycles), then erase outermost-first is unsafe; erase
@@ -224,18 +280,48 @@ void eliminateDeadBindings(Operation *root) {
 
 } // namespace
 
-void mlir::nix::simplifyExpr(Operation *root) {
+void mlir::nix::devirtualizePrims(Operation *root) {
   MLIRContext *ctx = root->getContext();
   RewritePatternSet patterns(ctx);
-  patterns.add<FoldBuiltinArith, ForwardUnobservableIdentity>(ctx);
-  for (RegisteredOperationName op : ctx->getRegisteredOperations())
-    if (op.getDialect().getNamespace() == "nix")
-      op.getCanonicalizationPatterns(patterns, ctx);
-  GreedyRewriteConfig cfg;
-  cfg.setRegionSimplificationLevel(GreedySimplifyRegionLevel::Disabled);
-  cfg.enableConstantCSE(false);
-  (void)applyPatternsGreedily(root, std::move(patterns), cfg);
-  eliminateDeadBindings(root);
+  patterns.add<DevirtualizePrimCall>(ctx);
+  walkAndApplyPatterns(root, FrozenRewritePatternSet(std::move(patterns)));
+  // The callee computations of rewritten calls are now unreferenced; erase
+  // them, and whatever only they kept alive.
+  llvm::SmallVector<Operation *> work;
+  root->walk([&](Operation *op) {
+    if (isa<BuiltinOp, SelectOp, StringOp>(op) && op->use_empty())
+      work.push_back(op);
+  });
+  while (!work.empty()) {
+    Operation *op = work.pop_back_val();
+    llvm::SmallVector<Operation *, 4> producers;
+    for (Value v : op->getOperands())
+      if (Operation *d = v.getDefiningOp())
+        producers.push_back(d);
+    op->erase();
+    for (Operation *d : producers)
+      if (isa<BuiltinOp, SelectOp, StringOp>(d) && d->use_empty())
+        work.push_back(d);
+  }
+}
+
+void mlir::nix::simplifyExpr(Operation *root, SimplifyOptions options) {
+  MLIRContext *ctx = root->getContext();
+  if (options.devirtualize)
+    devirtualizePrims(root);
+  if (options.fold) {
+    RewritePatternSet patterns(ctx);
+    patterns.add<ForwardUnobservableIdentity>(ctx);
+    for (RegisteredOperationName op : ctx->getRegisteredOperations())
+      if (op.getDialect().getNamespace().starts_with("nix"))
+        op.getCanonicalizationPatterns(patterns, ctx);
+    GreedyRewriteConfig cfg;
+    cfg.setRegionSimplificationLevel(GreedySimplifyRegionLevel::Disabled);
+    cfg.enableConstantCSE(false);
+    (void)applyPatternsGreedily(root, std::move(patterns), cfg);
+  }
+  if (options.dce)
+    eliminateDeadBindings(root);
 }
 
 namespace {
@@ -245,14 +331,42 @@ struct NixSimplifyPass
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(NixSimplifyPass)
   StringRef getArgument() const override { return "nix-simplify"; }
   StringRef getDescription() const override {
-    return "Fold constants/builtin arithmetic and remove dead (cyclic) bindings";
+    return "Devirtualize primops, fold constants, remove dead (cyclic) bindings";
   }
-  void runOnOperation() override { simplifyExpr(getOperation()); }
+  // The continent dialects register their primops when they are loaded, so a
+  // pass that devirtualizes must make sure they all are.
+  void getDependentDialects(DialectRegistry &registry) const override {
+    registerNixDialects(registry);
+  }
+  void runOnOperation() override {
+    SimplifyOptions o;
+    o.fold = o.dce = true;
+    simplifyExpr(getOperation(), o);
+  }
+};
+
+struct NixPrimsPass : public PassWrapper<NixPrimsPass, OperationPass<ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(NixPrimsPass)
+  StringRef getArgument() const override { return "nix-prims"; }
+  StringRef getDescription() const override {
+    return "Rewrite calls of known primops into continent-dialect ops";
+  }
+  void getDependentDialects(DialectRegistry &registry) const override {
+    registerNixDialects(registry);
+  }
+  void runOnOperation() override { devirtualizePrims(getOperation()); }
 };
 } // namespace
+
+std::unique_ptr<Pass> mlir::nix::createNixPrimsPass() {
+  return std::make_unique<NixPrimsPass>();
+}
 
 std::unique_ptr<Pass> mlir::nix::createNixSimplifyPass() {
   return std::make_unique<NixSimplifyPass>();
 }
 
-void mlir::nix::registerNixPasses() { PassRegistration<NixSimplifyPass>(); }
+void mlir::nix::registerNixPasses() {
+  PassRegistration<NixSimplifyPass>();
+  PassRegistration<NixPrimsPass>();
+}

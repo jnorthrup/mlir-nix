@@ -149,6 +149,22 @@ private:
     return v;
   }
 
+  /// A reference to a base-environment entry.  The literals `true`, `false`
+  /// and `null` become real constants (ConstantLike, so they fold and can be
+  /// operands of folded primops); everything else stays a `nix.builtin`.
+  Value baseRef(StringRef name) {
+    if (name != "true" && name != "false" && name != "null") return builtin(name);
+    auto it = builtinCache.find(name);
+    if (it != builtinCache.end()) return it->second;
+    OpBuilder::InsertionGuard g(b);
+    b.setInsertionPointToStart(topBlock);
+    Location l = UnknownLoc::get(ctx);
+    Value v = name == "null" ? nd::NullOp::create(b, l, valTy()).getResult()
+                             : nd::BoolOp::create(b, l, valTy(), b.getBoolAttr(name == "true")).getResult();
+    builtinCache[name] = v;
+    return v;
+  }
+
   Value str(StringRef s, Pos p = {}) {
     return nd::StringOp::create(b, loc(p), valTy(), b.getStringAttr(s));
   }
@@ -163,7 +179,7 @@ private:
       auto it = c->vars.find(name);
       if (it != c->vars.end()) return it->second;
     }
-    if (opts.isBaseName && opts.isBaseName(name)) return builtin(name);
+    if (opts.isBaseName && opts.isBaseName(name)) return baseRef(name);
     if (withs.empty()) error("undefined variable '" + name + "'", p);
     return nd::WithVarOp::create(b, loc(p), valTy(), b.getStringAttr(name), withs);
   }

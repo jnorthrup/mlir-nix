@@ -199,6 +199,10 @@ struct EvalSettings {
   bool showTrace = false;
   bool pipeOperators = false;
   bool optimize = true;
+  /// Comma-separated stages of the nix pipeline: devirt, fold, dce (or none).
+  /// See mlir::nix::SimplifyOptions.  `fold` and `dce` cost more than they
+  /// save on real workloads (measured), so only `devirt` is on by default.
+  std::string passes = "devirt";
   unsigned maxCallDepth = 10000;
   bool dumpMLIR = false;
   nixfe::Lint lintAbsolutePaths = nixfe::Lint::Ignore, lintShortPaths = nixfe::Lint::Ignore,
@@ -370,6 +374,17 @@ public:
   void createBaseEnv();
 
   // Interpreter internals (public for builtins).
+  /// Call a primop on already-collected arguments, adding the
+  /// "while calling the 'X' builtin" trace like upstream.
+  void callPrimOp(const PrimOp &op, Value **args, Value &out, PosPtr pos);
+  const PrimOp *primOpByKey(llvm::StringRef key);
+  /// MLNIX_STATS=1: op histogram of every module lowered, printed at exit.
+  llvm::StringMap<size_t> opStats;
+  bool statsEnabled = false;
+  void printStats();
+  /// Constant folding hook of the continent dialects: run primop `key` on
+  /// scalar constants; null when it throws or yields a non-scalar.
+  mlir::Attribute foldPrimOp(llvm::StringRef key, llvm::ArrayRef<mlir::Attribute> args);
   Value *lookup(Frame *f, mlir::Value v);
   void evalOp(mlir::Operation *op, Frame *env, Value &out);
   RegionInfo *regionInfo(mlir::Region *r);
@@ -407,6 +422,10 @@ void parseTOML(EvalState &state, std::string_view toml, Value &v);
 
 /// Run `fn` on a thread with a large stack (deep recursion in the evaluator).
 int runWithLargeStack(std::function<int()> fn);
+
+/// Attach the evaluator's external `NixEvalOpInterface` models to the ops of
+/// the Nix dialect family in `ctx` (EvalModels.cpp).
+void registerEvalModels(mlir::MLIRContext &ctx);
 
 } // namespace nixev
 

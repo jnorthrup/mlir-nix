@@ -800,6 +800,22 @@ int realMain(int argc, char **argv) {
     for (int i = 2; i < argc; i++) nargs.push_back(argv[i]);
     return cmdInstantiate(nargs.size(), nargs.data(), 1, false);
   }
+  if (cmd == "primops") {
+    // Dump the live primop registry ("<base-env key> <arity>"); the continent
+    // dialects (include/NixDialect/NixPrims.td) must stay in sync with it.
+    Options o;
+    o.readOnly = true;
+    finishOptions(o);
+    o.store.readOnly = true;
+    auto store = std::make_shared<nixstore::Store>(o.store);
+    EvalState st(o.eval, store);
+    std::vector<std::pair<std::string, unsigned>> v;
+    for (auto &e : st.baseEnv)
+      if (e.getValue()->type == VType::PrimOp) v.push_back({e.getKey().str(), e.getValue()->primOp->arity});
+    std::sort(v.begin(), v.end());
+    for (auto &[k, a] : v) std::cout << k << " " << a << "\n";
+    return 0;
+  }
   if (cmd == "store") return cmdStore(argc, argv, 2);
   if (cmd == "hash") return cmdHash(argc, argv, 2);
   if (cmd == "derivation") {

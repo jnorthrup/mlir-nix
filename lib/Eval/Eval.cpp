@@ -1,6 +1,7 @@
 //===- Eval.cpp - Lazy evaluator over the nix dialect ---------------------===//
 
 #include "Nix/Eval.h"
+#include "llvm/Support/Format.h"
 #include "Nix/MLIRGen.h"
 
 #include "mlir/IR/Builders.h"
@@ -117,7 +118,13 @@ void EvalState::copyContext(const Value &v, NixStringContext &ctx) {
 
 EvalState::EvalState(EvalSettings st, std::shared_ptr<nixstore::Store> store)
     : settings(std::move(st)), store(std::move(store)) {
-  ctx.getOrLoadDialect<nd::NixDialect>();
+  statsEnabled = getenv("MLNIX_STATS") != nullptr;
+  nd::loadNixDialects(ctx);
+  registerEvalModels(ctx);
+  ctx.getLoadedDialect<nd::NixDialect>()->primFolder = [this](llvm::StringRef key,
+                                                              llvm::ArrayRef<mlir::Attribute> args) {
+    return foldPrimOp(key, args);
+  };
   ctx.allowUnregisteredDialects(false);
   module = ModuleOp::create(UnknownLoc::get(&ctx));
 #define SYM(field, str) s.field = symbols.create(str)
@@ -150,7 +157,29 @@ EvalState::EvalState(EvalSettings st, std::shared_ptr<nixstore::Store> store)
   createBaseEnv();
 }
 
+void EvalState::printStats() {
+  // Per dialect: how many ops of real programs live in it.
+  llvm::StringMap<size_t> perDialect;
+  size_t total = 0;
+  for (auto &e : opStats) {
+    perDialect[e.getKey().split('.').first] += e.getValue();
+    total += e.getValue();
+  }
+  std::vector<std::pair<std::string, size_t>> d;
+  for (auto &e : perDialect) d.push_back({e.getKey().str(), e.getValue()});
+  std::sort(d.begin(), d.end(), [](auto &a, auto &b) { return a.second > b.second; });
+  llvm::errs() << "== mlnix ops lowered: " << total << " in " << d.size() << " dialects\n";
+  for (auto &[n, c] : d) llvm::errs() << "  " << llvm::format("%-9s", n.c_str()) << llvm::format("%9zu", c) << "\n";
+  std::vector<std::pair<std::string, size_t>> o;
+  for (auto &e : opStats) o.push_back({e.getKey().str(), e.getValue()});
+  std::sort(o.begin(), o.end(), [](auto &a, auto &b) { return a.second > b.second; });
+  llvm::errs() << "== top ops\n";
+  for (size_t i = 0; i < o.size() && i < 14; i++)
+    llvm::errs() << "  " << llvm::format("%-22s", o[i].first.c_str()) << llvm::format("%9zu", o[i].second) << "\n";
+}
+
 EvalState::~EvalState() {
+  if (statsEnabled) printStats();
   for (auto *a : arenas) delete a;
 }
 
@@ -296,13 +325,15 @@ Value *EvalState::lookup(Frame *f, mlir::Value v) {
   if (slot) return slot;
   Operation *op = v.getDefiningOp();
   if (!op) throw EvalError("internal error: unbound block argument");
-  if (isa<nd::IntOp, nd::FloatOp, nd::StringOp, nd::PathOp>(op)) {
+  if (isa<nd::IntOp, nd::FloatOp, nd::StringOp, nd::PathOp, nd::BoolOp, nd::NullOp>(op)) {
     auto c = constCache.find(op);
     if (c != constCache.end()) return slot = c->second;
     Value *cv = allocValue();
     if (auto i = dyn_cast<nd::IntOp>(op)) mkInt(*cv, i.getValue());
     else if (auto fl = dyn_cast<nd::FloatOp>(op)) mkFloat(*cv, fl.getValue().convertToDouble());
     else if (auto s = dyn_cast<nd::StringOp>(op)) mkString(*cv, s.getValue());
+    else if (auto bl = dyn_cast<nd::BoolOp>(op)) mkBool(*cv, bl.getValue());
+    else if (isa<nd::NullOp>(op)) mkNull(*cv);
     else mkPath(*cv, cast<nd::PathOp>(op).getValue());
     constCache[op] = cv;
     return slot = cv;
@@ -494,6 +525,55 @@ void EvalState::callLambda(Value &fun, Value *arg, Value &out, PosPtr pos) {
   out = *r;
 }
 
+void EvalState::callPrimOp(const PrimOp &op, Value **args, Value &out, PosPtr pos) {
+  try {
+    op.fn(*this, args, out, pos);
+  } catch (EvalError &e) {
+    if (op.name != "throw" && op.name != "abort" && op.name != "addErrorContext")
+      e.addTrace(pos, "while calling the '" + op.name + "' builtin");
+    throw;
+  }
+}
+
+const PrimOp *EvalState::primOpByKey(llvm::StringRef key) {
+  Value *v = baseEnvValue(key);
+  return v && v->type == VType::PrimOp ? v->primOp : nullptr;
+}
+
+mlir::Attribute EvalState::foldPrimOp(llvm::StringRef key, llvm::ArrayRef<mlir::Attribute> args) {
+  const PrimOp *op = primOpByKey(key);
+  if (!op || op->arity != args.size()) return {};
+  llvm::SmallVector<Value *, 4> vals;
+  for (mlir::Attribute a : args) {
+    Value *v = allocValue();
+    if (auto b = mlir::dyn_cast<mlir::BoolAttr>(a)) mkBool(*v, b.getValue());
+    else if (auto i = mlir::dyn_cast<mlir::IntegerAttr>(a)) mkInt(*v, i.getInt());
+    else if (auto f = mlir::dyn_cast<mlir::FloatAttr>(a)) mkFloat(*v, f.getValueAsDouble());
+    else if (auto s = mlir::dyn_cast<mlir::StringAttr>(a)) mkString(*v, s.getValue());
+    else if (mlir::isa<mlir::UnitAttr>(a)) mkNull(*v);
+    else return {};
+    vals.push_back(v);
+  }
+  Value out;
+  try {
+    op->fn(*this, vals.data(), out, nullptr);
+    forceValue(out, nullptr);
+  } catch (std::exception &) {
+    return {}; // stays a run-time error, with its original position and trace
+  }
+  mlir::Builder b(&ctx);
+  switch (out.type) {
+  case VType::Int: return b.getI64IntegerAttr(out.integer);
+  case VType::Float: return b.getF64FloatAttr(out.fpoint);
+  case VType::Bool: return b.getBoolAttr(out.boolean);
+  case VType::Null: return b.getUnitAttr();
+  case VType::String:
+    if (out.str.ctx && out.str.ctx->n) return {}; // keep contexts out of constants
+    return b.getStringAttr(out.sv());
+  default: return {};
+  }
+}
+
 void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out, PosPtr pos) {
   Value *cur = &fun;
   size_t i = 0;
@@ -539,13 +619,7 @@ void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out,
       for (size_t k = 0; k < need; k++) all.push_back(args[i + k]);
       i += need;
       res = (i == nargs) ? &out : allocValue();
-      try {
-        op->fn(*this, all.data(), *res, pos);
-      } catch (EvalError &e) {
-        if (op->name != "throw" && op->name != "abort" && op->name != "addErrorContext")
-          e.addTrace(pos, "while calling the '" + op->name + "' builtin");
-        throw;
-      }
+      callPrimOp(*op, all.data(), *res, pos);
     } else if (cur->type == VType::Attrs && cur->attrs->get(s.functor)) {
       const Attr *f = cur->attrs->get(s.functor);
       Value *self = cur;
@@ -849,11 +923,16 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
         copyFrom(lookup(env, f.getDefaultValue()));
       })
       .Case<nd::IntOp>([&](nd::IntOp i) { mkInt(out, i.getValue()); })
+      .Case<nd::BoolOp>([&](nd::BoolOp b) { mkBool(out, b.getValue()); })
+      .Case<nd::NullOp>([&](nd::NullOp) { mkNull(out); })
       .Case<nd::FloatOp>([&](nd::FloatOp fl) { mkFloat(out, fl.getValue().convertToDouble()); })
       .Case<nd::StringOp>([&](nd::StringOp s) { mkString(out, s.getValue()); })
       .Case<nd::PathOp>([&](nd::PathOp p) { mkPath(out, p.getValue()); })
       .Case<nd::BuiltinOp>([&](nd::BuiltinOp b) { copyFrom(baseEnvValue(b.getName())); })
       .Default([&](Operation *o) {
+        // Everything else (all primop ops of the continent dialects) runs
+        // through the externally attached NixEvalOpInterface model.
+        if (auto e = dyn_cast<nd::NixEvalOpInterface>(o)) return e.eval(*this, env, out);
         throw EvalError("internal error: cannot evaluate operation '" + o->getName().getStringRef().str() + "'", pos);
       });
 }
@@ -1282,7 +1361,23 @@ nd::ExprOp EvalState::lowerToMLIR(nixfe::Expr *e, std::shared_ptr<nixfe::Origin>
   nd::ExprOp op = nixfe::genExpr(*module, e, std::move(origin), sym, go);
   // The expression is IsolatedFromAbove and not yet referenced by any frame,
   // so it can be rewritten freely before evaluation starts.
-  if (settings.optimize) nd::simplifyExpr(op);
+  if (settings.optimize) {
+    nd::SimplifyOptions so;
+    so.devirtualize = so.fold = so.dce = false;
+    std::string passes = settings.passes;
+    if (const char *e = getenv("MLNIX_PASSES")) passes = e; // experiments / benchmarks
+    for (llvm::StringRef rest = passes; !rest.empty();) {
+      auto [p, tail] = rest.split(',');
+      rest = tail;
+      if (p == "devirt") so.devirtualize = true;
+      else if (p == "fold") so.fold = true;
+      else if (p == "dce") so.dce = true;
+      else if (p == "all") so.devirtualize = so.fold = so.dce = true;
+    }
+    nd::simplifyExpr(op, so);
+  }
+  if (statsEnabled)
+    op->walk([&](mlir::Operation *o) { ++opStats[o->getName().getStringRef()]; });
   return op;
 }
 

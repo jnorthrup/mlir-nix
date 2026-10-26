@@ -18,36 +18,12 @@
 #ifndef NIX_OPS_TD
 #define NIX_OPS_TD
 
-include "mlir/IR/OpBase.td"
-include "mlir/IR/AttrTypeBase.td"
 include "mlir/IR/RegionKindInterface.td"
 include "mlir/IR/SymbolInterfaces.td"
-include "mlir/Interfaces/SideEffectInterfaces.td"
-
-def Nix_Dialect : Dialect {
-  let name = "nix";
-  let cppNamespace = "::mlir::nix";
-  let summary = "The Nix expression language";
-  let description = [{
-    A lazy, purely functional dialect modelling the Nix expression language.
-    Values are untyped (`!nix.value`) lazy thunks; regions are graph regions.
-  }];
-  let useDefaultTypePrinterParser = 1;
-  let hasConstantMaterializer = 1;
-}
-
-class Nix_Type<string name, string typeMnemonic> : TypeDef<Nix_Dialect, name> {
-  let mnemonic = typeMnemonic;
-}
-
-def Nix_ValueType : Nix_Type<"Value", "value"> {
-  let summary = "a lazy Nix value";
-}
+include "NixBase.td"
 
 class Nix_Op<string mnemonic, list<Trait> traits = []>
     : Op<Nix_Dialect, mnemonic, traits>;
-
-defvar NixVal = Nix_ValueType;
 
 //===----------------------------------------------------------------------===//
 // Structure
@@ -130,6 +106,21 @@ def Nix_StringOp : Nix_Op<"str", [ConstantLike, Pure]> {
   let arguments = (ins StrAttr:$value);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$value attr-dict";
+  let hasFolder = 1;
+}
+
+def Nix_BoolOp : Nix_Op<"bool", [ConstantLike, Pure]> {
+  let summary = "the literals `true` and `false`";
+  let arguments = (ins BoolAttr:$value);
+  let results = (outs NixVal:$result);
+  let assemblyFormat = "$value attr-dict";
+  let hasFolder = 1;
+}
+
+def Nix_NullOp : Nix_Op<"null", [ConstantLike, Pure]> {
+  let summary = "the literal `null`";
+  let results = (outs NixVal:$result);
+  let assemblyFormat = "attr-dict";
   let hasFolder = 1;
 }
 
