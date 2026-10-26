@@ -1,0 +1,88 @@
+diff --git a/include/Nix/Eval.h b/include/Nix/Eval.h
+index e6959bc..68f6d6e 100644
+--- a/include/Nix/Eval.h
++++ b/include/Nix/Eval.h
+@@ -59,6 +59,7 @@ struct Value;
+ struct Frame;
+ struct RegionInfo;
+ class EvalState;
++extern uint64_t gArenaBytes[8], gArenaCount[8]; // EXPERIMENT: 0 value 1 frame 2 bindings 3 list 4 string 5 ctx
+ 
+ /// Opaque position: an mlir::Location's opaque pointer (or null).
+ using PosPtr = const void *;
+@@ -252,7 +253,7 @@ public:
+   Bindings *builtinsAttrs = nullptr;
+ 
+   // -- Allocation --------------------------------------------------------
+-  Value *allocValue() { return new (alloc.Allocate<Value>()) Value(); }
++  Value *allocValue() { gArenaBytes[0] += sizeof(Value); gArenaCount[0]++; return new (alloc.Allocate<Value>()) Value(); }
+   Bindings *allocBindings(size_t n);
+   Value **allocList(size_t n);
+   const char *copyString(std::string_view s);
+diff --git a/lib/Eval/Eval.cpp b/lib/Eval/Eval.cpp
+index 7937cac..1259d55 100644
+--- a/lib/Eval/Eval.cpp
++++ b/lib/Eval/Eval.cpp
+@@ -1,6 +1,7 @@
+ //===- Eval.cpp - Lazy evaluator over the nix dialect ---------------------===//
+ 
+ #include "Nix/Eval.h"
++#include <sys/resource.h>
+ #include "mlir/Pass/PassManager.h"
+ #include "mlir/Pass/PassRegistry.h"
+ #include "mlir/Transforms/Passes.h"
+@@ -51,7 +52,9 @@ std::vector<const Attr *> Bindings::lexicographicOrder(const SymbolTable &st) co
+   return v;
+ }
+ 
++uint64_t gArenaBytes[8], gArenaCount[8];
+ Bindings *EvalState::allocBindings(size_t n) {
++  gArenaBytes[2] += sizeof(Bindings) + n * sizeof(Attr); gArenaCount[2]++;
+   void *mem = alloc.Allocate(sizeof(Bindings) + n * sizeof(Attr), alignof(Bindings));
+   auto *b = new (mem) Bindings();
+   b->size_ = 0;
+@@ -72,10 +75,12 @@ Bindings *EvalState::BindingsBuilder::finish() {
+ 
+ Value **EvalState::allocList(size_t n) {
+   if (!n) return nullptr;
++  gArenaBytes[3] += n * sizeof(Value *); gArenaCount[3]++;
+   return static_cast<Value **>(alloc.Allocate(n * sizeof(Value *), alignof(Value *)));
+ }
+ 
+ const char *EvalState::copyString(std::string_view s) {
++  gArenaBytes[4] += s.size() + 1; gArenaCount[4]++;
+   char *p = static_cast<char *>(alloc.Allocate(s.size() + 1, 1));
+   memcpy(p, s.data(), s.size());
+   p[s.size()] = 0;
+@@ -84,6 +89,7 @@ const char *EvalState::copyString(std::string_view s) {
+ 
+ const StringContext *EvalState::makeContext(const NixStringContext &c) {
+   if (c.empty()) return nullptr;
++  gArenaBytes[5] += sizeof(StringContext) + c.size() * sizeof(const char *); gArenaCount[5]++;
+   void *mem = alloc.Allocate(sizeof(StringContext) + c.size() * sizeof(const char *), alignof(StringContext));
+   auto *ctx = new (mem) StringContext();
+   ctx->n = c.size();
+@@ -202,6 +208,15 @@ void EvalState::printStats() {
+ }
+ 
+ EvalState::~EvalState() {
++  if (getenv("MLNIX_ARENASTATS")) {
++    const char *nm[] = {"values", "frames", "bindings", "lists", "strings", "str-contexts"};
++    uint64_t tot = 0;
++    for (int i = 0; i < 6; i++) tot += gArenaBytes[i];
++    fprintf(stderr, "== arena by kind: requested %.0f MB, arena total (slabs) %.0f MB\n", tot / 1e6, alloc.getTotalMemory() / 1e6);
++    for (int i = 0; i < 6; i++) fprintf(stderr, "  %-13s %12llu allocs %9.1f MB  %5.1f%%  avg %6.1f B\n", nm[i], (unsigned long long)gArenaCount[i], gArenaBytes[i] / 1e6, 100.0 * gArenaBytes[i] / tot, double(gArenaBytes[i]) / (gArenaCount[i] ? gArenaCount[i] : 1));
++    struct rusage ru; getrusage(RUSAGE_SELF, &ru);
++    fprintf(stderr, "  peak RSS %.0f MB  => everything that is not the arena (MLIR IR, attrs, std containers, code): %.0f MB\n", ru.ru_maxrss / 1e6, ru.ru_maxrss / 1e6 - alloc.getTotalMemory() / 1e6);
++  }
+   if (statsEnabled) printStats();
+   for (auto *a : arenas) delete a;
+ }
+@@ -330,6 +345,7 @@ RegionInfo *EvalState::regionInfo(Region *r) {
+ 
+ Frame *EvalState::newFrame(RegionInfo *ri, Frame *up) {
+   size_t sz = sizeof(Frame) + ri->numSlots * sizeof(Value *);
++  gArenaBytes[1] += sz; gArenaCount[1]++;
+   auto *f = static_cast<Frame *>(alloc.Allocate(sz, alignof(Frame)));
+   f->up = up;
+   f->info = ri;

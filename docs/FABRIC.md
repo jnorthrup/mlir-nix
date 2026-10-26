@@ -136,10 +136,12 @@ Fresh profile of the NixOS toplevel run (2 s main-thread sample, 1449 busy sampl
     Bindings::get                                    was 5.9%, now about 1% (see COLLECTIONS.md)
 
 1. Memory volume. The arena never frees, so 2.4 GB is touched fresh and the kernel
-   charges about 10% of the run for it. `//` alone copies 264 MB (toplevel) / 514 MB
-   (nixpkgs-73, a fifth of RSS); 374 calls with a 256+ entry left operand are 56% of that.
-   A persistent or layered attribute set is the one place a tree structure could pay
-   (`docs/COLLECTIONS.md`, section 6). Not built.
+   charges about 10% of the run for it. Arena by kind (NixOS): Values 842 MB (26.3M at
+   32 B), frames 465 MB, attrsets 404 MB; MLIR IR is another 686 MB. `//` alone is 65-81%
+   of attrset memory (264 MB / 514 MB copied; 374 / 773 calls with a 256+ entry left
+   operand are 56% / 67% of that). A persistent or layered attribute set is the one place
+   a tree structure could pay, and a 24-byte `Value` saves ~200 MB
+   (`docs/COLLECTIONS.md`, section 6). Neither is built.
 2. A lowering to a runtime dialect with *resolved addressing*: operand
    (depth, slot) and Symbol ids as attributes, so `lookup` (8.6%) and the `TypeSwitch`
    chain in `evalOp` disappear. Progressive lowering `nix + continents -> nixrt`.

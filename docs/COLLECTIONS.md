@@ -162,21 +162,38 @@ C7. My first estimate was wrong: "lookups are 5.9% of the profile, so the ceilin
 
 ## 6. Where a tree could still pay: `//`
 
-`//` copies both operands into a fresh sorted array, and the arena never frees:
+What the 2.4 GB is made of (`experiments/attrs/arena-stats.patch`, `MLNIX_ARENASTATS=1`):
+
+                          NixOS toplevel                 nixpkgs-73
+    peak RSS              2462 MB                        2364 MB
+    arena                 1776 MB (72%)                  1767 MB (75%)
+      Values (32 B)       26.3M   842 MB                 20.2M   646 MB
+      frames (avg 86-110 B) 5.4M  465 MB                 3.8M    413 MB
+      attrsets            1.65M   404 MB                 1.01M   638 MB
+      lists + strings     50 MB                          61 MB
+    not the arena         686 MB (MLIR IR, attributes)   597 MB
+
+`//` copies both operands into a fresh sorted array and the arena never frees, so:
 
                                   NixOS toplevel     nixpkgs-73
-    `//` calls                    369,945            316,797 (134k trivial)
-    entries copied                11.0M (264 MB)     21.4M (514 MB, a fifth of RSS)
+    `//` calls                    369,945            316,797 (133,717 trivial)
+    entries copied                11.0M (264 MB)     21.4M (514 MB)
+    share of all attrset memory   65%                81%
+    share of peak RSS             11%                22%
     calls with left >= 256        374                773
     entries copied by those       6.1M (56%)         14.4M (67%)
 
 The kernel charges 10% of the NixOS run (0.36 s of 3.46 s, 151,567 page reclaims) for
-touching a 2.4 GB footprint. A persistent or layered attribute set (`big // small`
-shares `big`, lookup checks the small layer first, iteration flattens once) would turn
-those copies into O(small) work. That is where a tree-like structure is the right tool;
-the estimate is 1-3% (page-fault share of the copied bytes plus the merge loops) and a
-smaller footprint, at the cost of touching every direct reader of `Bindings` (about 40
+touching that footprint. A persistent or layered attribute set (`big // small` shares
+`big`, lookup checks the small layer first, iteration flattens once) would turn those
+copies into O(small) work. That is where a tree-like structure is the right tool; the
+estimate is 1.5% (NixOS) to 3% (nixpkgs-73): the page-fault share of the copied bytes
+plus the merge loops. It means touching every direct reader of `Bindings` (about 40
 sites: 14 `attrs[i]` accesses, 14 range-for loops, 14 `size()/empty()` uses). Not built.
+
+A smaller, separate item: `Value` is 32 bytes because the string variant is three words
+(chars, length, context). Moving the length and context into the string allocation makes
+it 24 bytes and saves about 200 MB (8% of RSS).
 
 ## 7. Reproduce
 
@@ -184,5 +201,6 @@ sites: 14 `attrs[i]` accesses, 14 range-for loops, 14 `size()/empty()` uses). No
     git apply experiments/attrs/trace.patch      # counters + MLNIX_ATTRTRACE=file + MLNIX_ATTRSTATS=1
     MLNIX_ATTRSTATS=1 MLNIX_ATTRTRACE=/tmp/t.trace build/bin/mlnix instantiate --readonly-mode --eval --strict test/nixos-toplevel.nix --arg nixpkgs ./.cache/nixpkgs
     c++ -std=c++20 -O2 -isysroot $(xcrun --show-sdk-path) -o /tmp/replay experiments/attrs/replay.cpp && /tmp/replay /tmp/t.trace
+    git apply experiments/attrs/arena-stats.patch    # MLNIX_ARENASTATS=1: arena bytes by kind
 
 The patch is against the tree before the experiment (`git checkout` the two files after).
