@@ -53,38 +53,67 @@ arity, effects and foldability. Everything else follows:
 
 ## Measured
 
-    pipeline                  nixos-toplevel   nixpkgs-73
-    nix-simplify (v0.1.0)          4.59 s        4.91 s     greedy driver on every file
-    --no-opt                       4.52 s        3.76 s
-    devirt   (default)             4.25 s        3.63 s     walk-based
-    devirt,dce                     4.39 s        3.71 s
-    devirt,fold                    4.60 s        3.94 s
-    devirt,fold,dce                4.81 s        3.98 s
+`scripts/bench.py`, min of 3 runs, NixOS toplevel / 73 nixpkgs attrs. Every row
+has the identical result hash (same `.drv` paths), 466/466 on the lang suite,
+53/53 against Nix 2.35.4.
 
-Result hashes are identical in every row. `fold` and `dce` cost more than they
-save on these workloads, so only `devirt` is on by default (`MLNIX_PASSES`
-selects stages). The lesson is as much about drivers as about dialects: the
-greedy rewriter is a fixpoint machine; use it only where a fixpoint is needed.
+    change                                          toplevel    nixpkgs-73   peak RSS
+    v0.1.0 (nix-simplify = greedy driver per file)    4.59 s      4.91 s     2554 MB
+    --no-opt                                          4.52 s      3.76 s     2549 MB
+    + devirtualization to continent dialects          4.25 s      3.63 s     2509 MB
+    + static select/has_attr paths as attributes      4.12 s      3.53 s     2453 MB
+    + ctx.disableMultithreading()                     3.82 s      3.38 s     2344 MB
+    + literals without locations, filename attr once  3.59 s      3.13 s     2349 MB
+    + Symbols keyed by StringAttr; CommonCrypto SHA   3.48 s      2.97 s     2378 MB
+
+Optional stages (`MLNIX_PASSES`), measured on top of `devirt`:
+
+    devirt,dce +0.14 s    devirt,fold +0.35 s    devirt,fold,dce +0.56 s
+
+`fold` and `dce` cost more than they save here, so only `devirt` is on by
+default. The greedy rewriter is a fixpoint machine; use it only where a
+fixpoint is needed. Devirtualization is one `walkAndApplyPatterns` walk.
+
+### The MLIR tax, and what it was made of
+
+The first profile of the evaluator thread (busy samples only) put **26%** in
+MLIR attribute/location uniquing. Three causes, each a one-spot fix:
+
+1. Multithreading enabled: every uniquer access is sharded, locked and
+   thread-cached. The evaluator is single-threaded. (-7%)
+2. A `FileLineColLoc` per op, built from the file *name* so the path was
+   re-hashed each time; literals, lists and returns cannot fail and now carry no
+   location, and the few consumers that report an operand's position (`with`
+   scopes, computed attribute names, interpolation parts) get it back
+   explicitly. (-6%)
+3. 48% of all `nix.str` ops existed only to name an attribute in a select path:
+   structural constants as ops instead of attributes. (-16% of all ops)
+
+After 1-2 the uniquing share was 13.6%. The remaining profile (self time, busy):
+evalOp/force/call 17.5%, `memcmp`/`strlen` 15% (mostly symbol re-interning, fixed
+after this profile), uniquing 13.6%, lexer/parser 10.8%, `lookup` 10.6%,
+malloc 6%, SHA-256 4.7% (fixed after this profile).
 
 `MLNIX_STATS=1` prints the op histogram of everything an evaluation lowers. For
-the NixOS toplevel (1.3M ops): `nix.str` 33%, `nix.formal` 16%, `nix.select`
-11%, `nix.apply` 9.5%, `nix.attrs` 9.6%, `nix.with_var` 4.5%. Continent ops are
-0.6% (primop calls are rare in nixpkgs; most applications are of user lambdas).
+the NixOS toplevel, now 1.10M ops (was 1.30M): `nix.str` 20%, `nix.formal` 19%,
+`nix.select` 13%, `nix.apply` 11%, `nix.attrs` 11%, `nix.with_var` 5%.
+Continent ops are 0.6% (most applications in nixpkgs are of user lambdas).
 
 ## What this does not buy
 
-Arithmetic and `if` are a rounding error in this workload (`nix.int` 0.4%,
+Arithmetic and `if` are a rounding error in this workload (`nix.int` 0.5%,
 `nix.if` < 0.3%). `arith` and `scf` would be ornamental here, and the rungs
-below are ordered by the histogram, not by which dialects are fashionable.
+below are ordered by the profile, not by which dialects are fashionable.
 
 ## Next rungs (by measured weight)
 
-1. Static attribute paths as attributes: `nix.select`/`nix.has_attr` keys that
-   are literals become a mixed static/dynamic attribute (the `static_offsets`
-   idiom of `memref.subview`) instead of one `nix.str` op each. Target: remove
-   most of the 33%.
-2. Core ops behind `NixEvalOpInterface` models; delete the `TypeSwitch` in
-   `evalOp`.
-3. Resolve operand slots at lowering instead of hashing per lookup.
-4. Only then: closure conversion to `func` + the stock inliner, strictness
+1. A lowering to a runtime dialect with *resolved addressing*: operand
+   (depth, slot) and Symbol ids as attributes, so `lookup` (10.6%, a hash probe
+   per operand) and the `TypeSwitch` chain in `evalOp` disappear. Progressive
+   lowering `nix + continents -> nixrt`.
+2. Core ops behind `NixEvalOpInterface` models; delete the `TypeSwitch`.
+3. Lexer (7.8% self): a table-driven scanner instead of per-character calls.
+4. Lowered-IR cache as MLIR bytecode, keyed by file hash (skips lex, parse and
+   lowering on warm runs; the uniquing cost moves to the reader, so measure).
+5. Only then: closure conversion to `func` + the stock inliner, strictness
    analysis (needs a lattice type instead of the single `!nix.value`).

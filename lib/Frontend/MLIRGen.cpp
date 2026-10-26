@@ -61,13 +61,13 @@ public:
         s.vars[n] = selectLiteral(Pos{}, arg, n);
       }
       Value body = gen(e, &s);
-      nd::ReturnOp::create(b, loc(e->pos), body);
+      nd::ReturnOp::create(b, noLoc(), body);
       result = lam.getResult();
     } else {
       result = gen(e, nullptr);
     }
     b.setInsertionPointToEnd(blk);
-    nd::ReturnOp::create(b, loc(e->pos), result);
+    nd::ReturnOp::create(b, noLoc(), result);
     return exprOp;
   }
 
@@ -83,9 +83,27 @@ private:
 
   Type valTy() { return nd::ValueType::get(ctx); }
 
+  StringAttr fileAttr;
   Location loc(Pos p) {
     if (!p.valid()) return UnknownLoc::get(ctx);
-    return FileLineColLoc::get(ctx, origin->name, p.line, p.col);
+    // The file name is uniqued once per file, not hashed again per op.
+    if (!fileAttr) fileAttr = b.getStringAttr(origin->name);
+    return FileLineColLoc::get(fileAttr, p.line, p.col);
+  }
+
+  /// Ops that cannot fail (literals, lists, returns) get no location: creating
+  /// and uniquing a FileLineColLoc for every one of them was a measurable share
+  /// of the run time.
+  Location noLoc() { return UnknownLoc::get(ctx); }
+
+  /// A few consumers report errors at the position of an *operand* (a `with`
+  /// scope, a computed attribute name, a part of an interpolation).  Give a
+  /// literal operand its position back.
+  Value positioned(Value v, Pos p) {
+    if (Operation *d = v.getDefiningOp())
+      if (isa<UnknownLoc>(d->getLoc()) && isa<nd::StringOp, nd::IntOp, nd::FloatOp, nd::PathOp, nd::ListOp>(d))
+        d->setLoc(loc(p));
+    return v;
   }
 
   [[noreturn]] void error(const std::string &msg, Pos p) {
@@ -165,7 +183,7 @@ private:
   }
 
   Value str(StringRef s, Pos p = {}) {
-    return nd::StringOp::create(b, loc(p), valTy(), b.getStringAttr(s));
+    return nd::StringOp::create(b, noLoc(), valTy(), b.getStringAttr(s));
   }
 
   Value lookupVar(const std::string &name, Pos p, Scope *s) {
@@ -240,7 +258,7 @@ private:
     if (!a->recursive) {
       genBindings(a, s, s, s, names, values, positions);
       for (auto &d : a->dynamicAttrs) {
-        dynNames.push_back(gen(d.nameExpr, s));
+        dynNames.push_back(positioned(gen(d.nameExpr, s), d.nameExpr->pos));
         dynValues.push_back(gen(d.valueExpr, s));
       }
     } else {
@@ -254,7 +272,7 @@ private:
       }
       genBindings(a, &ns, s, &ns, names, values, positions);
       for (auto &d : a->dynamicAttrs) {
-        dynNames.push_back(gen(d.nameExpr, &ns));
+        dynNames.push_back(positioned(gen(d.nameExpr, &ns), d.nameExpr->pos));
         dynValues.push_back(gen(d.valueExpr, &ns));
       }
       SmallVector<Value> phv;
@@ -367,22 +385,22 @@ private:
       }
     }
     Value body = gen(l->body, &ns);
-    nd::ReturnOp::create(b, loc(l->body->pos), body);
+    nd::ReturnOp::create(b, noLoc(), body);
     return lam.getResult();
   }
 
   Value gen(const Expr *e, Scope *s) {
     switch (e->kind) {
     case ExprKind::Int:
-      return nd::IntOp::create(b, loc(e->pos), valTy(),
+      return nd::IntOp::create(b, noLoc(), valTy(),
                                b.getI64IntegerAttr(static_cast<const ExprInt *>(e)->v));
     case ExprKind::Float:
-      return nd::FloatOp::create(b, loc(e->pos), valTy(),
+      return nd::FloatOp::create(b, noLoc(), valTy(),
                                  b.getF64FloatAttr(static_cast<const ExprFloat *>(e)->v));
     case ExprKind::String:
       return str(static_cast<const ExprString *>(e)->v, e->pos);
     case ExprKind::Path:
-      return nd::PathOp::create(b, loc(e->pos), valTy(),
+      return nd::PathOp::create(b, noLoc(), valTy(),
                                 b.getStringAttr(static_cast<const ExprPath *>(e)->v));
     case ExprKind::Var: {
       auto *v = static_cast<const ExprVar *>(e);
@@ -393,9 +411,9 @@ private:
       SmallVector<Attribute> names{b.getStringAttr("column"), b.getStringAttr("file"),
                                    b.getStringAttr("line")};
       SmallVector<Value> vals{
-          nd::IntOp::create(b, loc(e->pos), valTy(), b.getI64IntegerAttr(e->pos.col)),
+          nd::IntOp::create(b, noLoc(), valTy(), b.getI64IntegerAttr(e->pos.col)),
           str(origin->path, e->pos),
-          nd::IntOp::create(b, loc(e->pos), valTy(), b.getI64IntegerAttr(e->pos.line))};
+          nd::IntOp::create(b, noLoc(), valTy(), b.getI64IntegerAttr(e->pos.line))};
       return nd::AttrsOp::create(b, loc(e->pos), valTy(), b.getArrayAttr(names), vals,
                                  ValueRange{}, ValueRange{}, ArrayAttr());
     }
@@ -420,7 +438,7 @@ private:
     case ExprKind::List: {
       SmallVector<Value> elems;
       for (auto *x : static_cast<const ExprList *>(e)->elems) elems.push_back(gen(x, s));
-      return nd::ListOp::create(b, loc(e->pos), valTy(), elems);
+      return nd::ListOp::create(b, noLoc(), valTy(), elems);
     }
     case ExprKind::Lambda:
       return genLambda(static_cast<const ExprLambda *>(e), s);
@@ -437,7 +455,7 @@ private:
     }
     case ExprKind::With: {
       auto *w = static_cast<const ExprWith *>(e);
-      Value a = gen(w->attrs, s);
+      Value a = positioned(gen(w->attrs, s), w->attrs->pos);
       Scope ns;
       ns.parent = s;
       ns.isWith = true;
@@ -477,7 +495,7 @@ private:
     case ExprKind::ConcatStrings: {
       auto *c = static_cast<const ExprConcatStrings *>(e);
       SmallVector<Value> parts;
-      for (auto &[p, x] : c->es) parts.push_back(gen(x, s));
+      for (auto &[p, x] : c->es) parts.push_back(positioned(gen(x, s), x->pos));
       return nd::ConcatStringsOp::create(b, loc(c->pos), valTy(), parts, c->forceString);
     }
     }

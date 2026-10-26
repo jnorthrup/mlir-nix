@@ -119,6 +119,10 @@ void EvalState::copyContext(const Value &v, NixStringContext &ctx) {
 EvalState::EvalState(EvalSettings st, std::shared_ptr<nixstore::Store> store)
     : settings(std::move(st)), store(std::move(store)) {
   statsEnabled = getenv("MLNIX_STATS") != nullptr;
+  // The evaluator is single-threaded.  With threading enabled every attribute
+  // and location is uniqued through sharded, locked, thread-cached tables --
+  // a quarter of the run time (measured) for no benefit.
+  ctx.disableMultithreading();
   nd::loadNixDialects(ctx);
   registerEvalModels(ctx);
   ctx.getLoadedDialect<nd::NixDialect>()->primFolder = [this](llvm::StringRef key,
@@ -690,7 +694,7 @@ void EvalState::evalAttrs(nd::AttrsOp op, Frame *env, Value &out) {
   for (size_t i = 0; i < names.size(); i++) {
     PosPtr p = positions && i < positions->size()
                    ? cast<LocationAttr>((*positions)[i]).getAsOpaquePointer() : nullptr;
-    bb.insert(symbols.create(cast<StringAttr>(names[i]).getValue()), lookup(env, values[i]), p);
+    bb.insert(symbolOf(cast<StringAttr>(names[i])), lookup(env, values[i]), p);
   }
   if (dynNames.empty()) {
     mkAttrs(out, bb.finish());
@@ -699,7 +703,7 @@ void EvalState::evalAttrs(nd::AttrsOp op, Frame *env, Value &out) {
   // Dynamic attributes are inserted one by one with duplicate checks.
   std::map<Symbol, PosPtr> seen;
   for (size_t i = 0; i < names.size(); i++)
-    seen[symbols.create(cast<StringAttr>(names[i]).getValue())] = nullptr;
+    seen[symbolOf(cast<StringAttr>(names[i]))] = nullptr;
   auto dynValues = op.getDynValues();
   for (size_t j = 0; j < dynNames.size(); j++) {
     Value *nv = lookup(env, dynNames[j]);
@@ -765,12 +769,10 @@ void EvalState::evalConcatStrings(nd::ConcatStringsOp op, Frame *env, Value &out
   }
 }
 
-/// One component of a select/has_attr path: a literal (attribute) or the
-/// next computed key (operand), forced to a string.
-std::string_view EvalState::pathComponent(mlir::Attribute comp, mlir::OperandRange dyn, unsigned &nextDyn,
-                                          Frame *env, PosPtr pos) {
-  if (auto lit = mlir::dyn_cast<mlir::StringAttr>(comp)) return lit.getValue();
-  return forceStringNoCtx(*lookup(env, dyn[nextDyn++]), pos, "while evaluating an attribute name");
+Symbol EvalState::pathSymbol(mlir::Attribute comp, mlir::OperandRange dyn, unsigned &nextDyn, Frame *env,
+                             PosPtr pos) {
+  if (auto lit = mlir::dyn_cast<mlir::StringAttr>(comp)) return symbolOf(lit);
+  return symbols.create(forceStringNoCtx(*lookup(env, dyn[nextDyn++]), pos, "while evaluating an attribute name"));
 }
 
 void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
@@ -792,17 +794,17 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
         mlir::OperandRange dyn = sel.getDynKeys();
         unsigned nextDyn = 0;
         for (mlir::Attribute comp : sel.getPath()) {
-          std::string_view name = pathComponent(comp, dyn, nextDyn, env, pos);
+          Symbol sym = pathSymbol(comp, dyn, nextDyn, env, pos);
           forceValue(*cur, pos);
           if (def) {
             if (cur->type != VType::Attrs) return copyFrom(lookup(env, def));
           } else if (cur->type != VType::Attrs) {
             throwTypeError("a set", *cur, pos, "while selecting an attribute");
           }
-          const Attr *a = cur->attrs->get(symbols.create(name));
+          const Attr *a = cur->attrs->get(sym);
           if (!a) {
             if (def) return copyFrom(lookup(env, def));
-            throw EvalError("attribute '" + std::string(name) + "' missing", pos);
+            throw EvalError("attribute '" + std::string(symbols[sym].str()) + "' missing", pos);
           }
           cur = a->value;
         }
@@ -814,9 +816,9 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
         unsigned nextDyn = 0;
         for (mlir::Attribute comp : h.getPath()) {
           forceValue(*cur, pos);
-          std::string_view name = pathComponent(comp, dyn, nextDyn, env, pos);
+          Symbol sym = pathSymbol(comp, dyn, nextDyn, env, pos);
           if (cur->type != VType::Attrs) return mkBool(out, false);
-          const Attr *a = cur->attrs->get(symbols.create(name));
+          const Attr *a = cur->attrs->get(sym);
           if (!a) return mkBool(out, false);
           cur = a->value;
         }
@@ -908,7 +910,7 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
       })
       .Case<nd::ConcatStringsOp>([&](nd::ConcatStringsOp c) { evalConcatStrings(c, env, out); })
       .Case<nd::WithVarOp>([&](nd::WithVarOp w) {
-        Symbol sym = symbols.create(w.getName());
+        Symbol sym = symbolOf(w.getNameAttr());
         for (mlir::Value sc : w.getScopes()) {
           Value *sv = lookup(env, sc);
           forceAttrs(*sv, sc.getLoc().getAsOpaquePointer(), "while evaluating the first subexpression of a with expression");
@@ -919,7 +921,7 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
       .Case<nd::FormalOp>([&](nd::FormalOp f) {
         Value *arg = lookup(env, f.getArg());
         forceAttrs(*arg, pos);
-        if (const Attr *a = arg->attrs->get(symbols.create(f.getName()))) return copyFrom(a->value);
+        if (const Attr *a = arg->attrs->get(symbolOf(f.getNameAttr()))) return copyFrom(a->value);
         if (!f.getDefaultValue()) throw EvalError("missing formal argument '" + f.getName().str() + "'", pos);
         copyFrom(lookup(env, f.getDefaultValue()));
       })

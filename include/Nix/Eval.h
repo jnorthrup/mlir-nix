@@ -385,8 +385,18 @@ public:
   /// Constant folding hook of the continent dialects: run primop `key` on
   /// scalar constants; null when it throws or yields a non-scalar.
   mlir::Attribute foldPrimOp(llvm::StringRef key, llvm::ArrayRef<mlir::Attribute> args);
-  std::string_view pathComponent(mlir::Attribute comp, mlir::OperandRange dyn, unsigned &nextDyn, Frame *env,
-                                 PosPtr pos);
+  /// The evaluator Symbol of a name that MLIR has already interned as a
+  /// StringAttr.  Keyed by the attribute's address, so no string is hashed or
+  /// compared (the uniquer did that once, at lowering).
+  Symbol symbolOf(mlir::StringAttr a) {
+    auto [it, inserted] = attrSymbols.try_emplace(a.getAsOpaquePointer(), Symbol());
+    if (inserted) it->second = symbols.create(a.getValue());
+    return it->second;
+  }
+  llvm::DenseMap<const void *, Symbol> attrSymbols;
+  /// Symbol of one select/has_attr path component: literal (attribute) or the
+  /// next computed key (operand), forced to a string.
+  Symbol pathSymbol(mlir::Attribute comp, mlir::OperandRange dyn, unsigned &nextDyn, Frame *env, PosPtr pos);
   Value *lookup(Frame *f, mlir::Value v);
   void evalOp(mlir::Operation *op, Frame *env, Value &out);
   RegionInfo *regionInfo(mlir::Region *r);

@@ -6,6 +6,11 @@
 #include "llvm/Support/MD5.h"
 #include "llvm/Support/SHA1.h"
 #include "llvm/Support/SHA256.h"
+#ifdef __APPLE__
+// Hardware-accelerated SHA-256 (ARMv8 crypto extensions) instead of LLVM's portable C.
+#include <CommonCrypto/CommonDigest.h>
+#define NIX_CC_SHA256 1
+#endif
 
 #include <cstring>
 #include <fcntl.h>
@@ -133,7 +138,14 @@ HashSink::HashSink(HashAlgo a) : algo(a) {
   switch (a) {
   case HashAlgo::MD5: impl = new llvm::MD5(); break;
   case HashAlgo::SHA1: impl = new llvm::SHA1(); break;
-  case HashAlgo::SHA256: impl = new llvm::SHA256(); break;
+  case HashAlgo::SHA256:
+#ifdef NIX_CC_SHA256
+    impl = new CC_SHA256_CTX;
+    CC_SHA256_Init(static_cast<CC_SHA256_CTX *>(impl));
+#else
+    impl = new llvm::SHA256();
+#endif
+    break;
   case HashAlgo::SHA512: impl = new SHA512Ctx(); break;
   }
 }
@@ -142,7 +154,13 @@ HashSink::~HashSink() {
   switch (algo) {
   case HashAlgo::MD5: delete static_cast<llvm::MD5 *>(impl); break;
   case HashAlgo::SHA1: delete static_cast<llvm::SHA1 *>(impl); break;
-  case HashAlgo::SHA256: delete static_cast<llvm::SHA256 *>(impl); break;
+  case HashAlgo::SHA256:
+#ifdef NIX_CC_SHA256
+    delete static_cast<CC_SHA256_CTX *>(impl);
+#else
+    delete static_cast<llvm::SHA256 *>(impl);
+#endif
+    break;
   case HashAlgo::SHA512: delete static_cast<SHA512Ctx *>(impl); break;
   }
 }
@@ -153,7 +171,15 @@ void HashSink::update(std::string_view data) {
   switch (algo) {
   case HashAlgo::MD5: static_cast<llvm::MD5 *>(impl)->update(a); break;
   case HashAlgo::SHA1: static_cast<llvm::SHA1 *>(impl)->update(a); break;
-  case HashAlgo::SHA256: static_cast<llvm::SHA256 *>(impl)->update(a); break;
+  case HashAlgo::SHA256:
+#ifdef NIX_CC_SHA256
+    for (size_t off = 0; off < data.size(); off += 1u << 30)
+      CC_SHA256_Update(static_cast<CC_SHA256_CTX *>(impl), data.data() + off,
+                       (CC_LONG)std::min<size_t>(1u << 30, data.size() - off));
+#else
+    static_cast<llvm::SHA256 *>(impl)->update(a);
+#endif
+    break;
   case HashAlgo::SHA512: static_cast<SHA512Ctx *>(impl)->update(a.data(), a.size()); break;
   }
 }
@@ -174,8 +200,12 @@ Hash HashSink::finish() {
     break;
   }
   case HashAlgo::SHA256: {
+#ifdef NIX_CC_SHA256
+    CC_SHA256_Final(h.bytes, static_cast<CC_SHA256_CTX *>(impl));
+#else
     auto r = static_cast<llvm::SHA256 *>(impl)->final();
     memcpy(h.bytes, r.data(), 32);
+#endif
     break;
   }
   case HashAlgo::SHA512:
