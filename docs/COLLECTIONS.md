@@ -195,6 +195,36 @@ A smaller, separate item: `Value` is 32 bytes because the string variant is thre
 (chars, length, context). Moving the length and context into the string allocation makes
 it 24 bytes and saves about 200 MB (8% of RSS).
 
+## 6b. Built: `//` as a Series view
+
+Section 6 estimated that a layered `//` would pay and left it unbuilt. `Series` and `MetaSeries`
+(../TrikeShed/PRELOAD.md: size plus an index function, lazily materialized) are smaller than the
+vector they would otherwise become, so it was built, as the one place the numbers said it would
+matter.
+
+`a // b` with `b` at most an eighth of `a` and `a` at least 32 entries is a `Bindings::Layer`:
+`top` (a flat sorted set) shadows `base` (a flat sorted set). Nothing of `a` is copied. A layer
+`//` more attributes merges them into its top, so layers stay two deep; when the top is no longer
+small the result is one flat set again. Lookup consults the top then the base. Anything that
+iterates or asks for a size calls `flat()`, which builds the union once.
+
+                                toplevel      nixpkgs-73
+    layered `//` calls           15,744        31,114
+    entries not copied        5,257,320    11,754,817    (24 bytes each: 126 MB, 282 MB)
+    flat merges                 255,938       151,966    (base under 32, or top not small)
+    layers flattened later          688         1,671    (4.4%, 5.4% of the layers)
+    peak footprint         1876 -> 1807 MB   1878 -> 1723 MB    (-3.7%, -8.3%)
+    time, 11 interleaved        -1.2%         -1.3%             identical result hashes
+
+Almost no layer is ever iterated, which is what a view is for. The thresholds (32, 8) are the best
+of nine settings tried on both workloads; layering smaller sets or larger overlays did not help.
+12 differential cases (`scripts/difftest.py`: shadowing, nesting, size, equality, `with`, function
+arguments, layered right-hand sides) match Nix 2.35.4, and two mutations (the base shadows the top;
+a merge keeps the wrong side) each fail some of them.
+
+Smaller than the section-6 guess of 1.5-3% time and "most of the 404 MB": two thirds of the `//`
+calls have a base too small to layer, and what they copy is small.
+
 ## 7. Reproduce
 
     c++ -std=c++20 -O2 -isysroot $(xcrun --show-sdk-path) -o /tmp/test_krapivin experiments/attrs/test_krapivin.cpp && /tmp/test_krapivin

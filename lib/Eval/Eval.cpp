@@ -34,22 +34,92 @@ namespace nixev {
 //===----------------------------------------------------------------------===//
 
 const Attr *Bindings::get(Symbol s) const {
-  size_t lo = 0, hi = size_;
+  const Bindings *b = this;
+  if (b->layered()) {
+    const Layer &L = b->layer();
+    if (L.flat) b = L.flat;
+    else {
+      if (const Attr *a = L.top->get(s)) return a; // top shadows base
+      b = L.base;
+    }
+  }
+  size_t lo = 0, hi = b->size_;
   while (lo < hi) {
     size_t mid = (lo + hi) / 2;
-    if (attrs[mid].name < s) lo = mid + 1;
+    if (b->attrs[mid].name < s) lo = mid + 1;
     else hi = mid;
   }
-  if (lo < size_ && attrs[lo].name == s) return &attrs[lo];
+  if (lo < b->size_ && b->attrs[lo].name == s) return &b->attrs[lo];
   return nullptr;
+}
+
+/// The union of two flat sorted sets, `y` winning on equal names, as a new flat set of exactly its size.
+static Bindings *mergeBindings(llvm::BumpPtrAllocator &alloc, const Bindings *x, const Bindings *y) {
+  size_t i = 0, j = 0, n = 0;
+  while (i < x->size_ && j < y->size_) {
+    Symbol a = x->attrs[i].name, b = y->attrs[j].name;
+    if (a == b) { i++; j++; }
+    else if (a < b) i++;
+    else j++;
+    n++;
+  }
+  n += (x->size_ - i) + (y->size_ - j);
+  void *mem = alloc.Allocate(sizeof(Bindings) + n * sizeof(Attr), alignof(Bindings));
+  auto *r = new (mem) Bindings();
+  i = j = 0;
+  size_t k = 0;
+  while (i < x->size_ && j < y->size_) {
+    const Attr &a = x->attrs[i], &b = y->attrs[j];
+    if (a.name == b.name) { r->attrs[k++] = b; i++; j++; }
+    else if (a.name < b.name) { r->attrs[k++] = a; i++; }
+    else { r->attrs[k++] = b; j++; }
+  }
+  while (i < x->size_) r->attrs[k++] = x->attrs[i++];
+  while (j < y->size_) r->attrs[k++] = y->attrs[j++];
+  r->size_ = uint32_t(k);
+  return r;
+}
+
+Bindings *Bindings::flat() const {
+  if (!layered()) return const_cast<Bindings *>(this);
+  Layer &L = layer();
+  if (!L.flat) { L.flat = mergeBindings(*L.alloc, L.base, L.top); flattened++; }
+  return L.flat;
 }
 
 std::vector<const Attr *> Bindings::lexicographicOrder(const SymbolTable &st) const {
   std::vector<const Attr *> v;
-  v.reserve(size_);
+  v.reserve(size());
   for (auto &a : *this) v.push_back(&a);
   std::sort(v.begin(), v.end(), [&](const Attr *a, const Attr *b) { return st[a->name] < st[b->name]; });
   return v;
+}
+
+/// `a // b`.  A small `b` next to a big `a` becomes a layer over `a` (nothing of `a` is copied);
+/// otherwise the two are merged into one flat set.  Layers stay two deep: a layer `//` more
+/// attributes merges them into its top, and is flattened once the top is no longer small.
+Bindings *EvalState::updateAttrs(Bindings *a, Bindings *b) {
+  constexpr size_t kMinBase = 32, kRatio = 8; // layer when |top| * kRatio <= |base| and |base| >= kMinBase
+  b = b->flat();
+  if (a->layered() && a->layer().flat) a = a->layer().flat;
+  Bindings *base = a, *top = b;
+  if (a->layered()) {
+    Bindings::Layer &L = a->layer();
+    base = L.base;
+    top = mergeBindings(alloc, L.top, b);
+  }
+  if (statsEnabled) {
+    if (base->size_ >= kMinBase && top->size_ * kRatio <= base->size_) { nUpdLayered++; nUpdBase += base->size_; nUpdTop += top->size_; }
+    else { nUpdMerged++; nUpdTop += base->size_ + top->size_; }
+  }
+  if (base->size_ >= kMinBase && top->size_ * kRatio <= base->size_) {
+    void *mem = alloc.Allocate(sizeof(Bindings) + sizeof(Bindings::Layer), alignof(Bindings));
+    auto *r = new (mem) Bindings();
+    r->size_ = Bindings::kLayered;
+    r->layer() = {top, base, nullptr, &alloc};
+    return r;
+  }
+  return mergeBindings(alloc, base, top);
 }
 
 Bindings *EvalState::allocBindings(size_t n) {
@@ -193,6 +263,7 @@ void EvalState::printStats() {
     for (auto &[n, c] : sorted(m)) llvm::errs() << "  " << llvm::format("%-9s", n.c_str()) << llvm::format("%9zu", c) << "\n";
   };
   llvm::errs() << "== mlnix ops lowered: " << total << "\n";
+  llvm::errs() << "== `//`: " << nUpdLayered << " layered (" << nUpdBase << " entries not copied, " << nUpdTop << " top entries incl. merges), " << nUpdMerged << " flat merges, " << Bindings::flattened << " layers flattened later\n";
   llvm::errs() << "== operands evaluated in place: " << nInPlace << ", thunks created by lookup(): " << nThunks << "\n";
   section("scopes", perScope);
   section("continents", perContinent);
@@ -952,18 +1023,7 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
         forceAttrs(*r, pos, "in the right operand of the update (//) operator");
         if (l->attrs->empty()) { out = *r; return; }
         if (r->attrs->empty()) { out = *l; return; }
-        Bindings *b = allocBindings(l->attrs->size() + r->attrs->size());
-        size_t i = 0, j = 0, n = 0;
-        while (i < l->attrs->size() && j < r->attrs->size()) {
-          const Attr &x = l->attrs->attrs[i], &y = r->attrs->attrs[j];
-          if (x.name == y.name) { b->attrs[n++] = y; i++; j++; }
-          else if (x.name < y.name) { b->attrs[n++] = x; i++; }
-          else { b->attrs[n++] = y; j++; }
-        }
-        while (i < l->attrs->size()) b->attrs[n++] = l->attrs->attrs[i++];
-        while (j < r->attrs->size()) b->attrs[n++] = r->attrs->attrs[j++];
-        b->size_ = n;
-        mkAttrs(out, b);
+        mkAttrs(out, updateAttrs(l->attrs, r->attrs));
       })
       .Case<nd::ConcatListsOp>([&](nd::ConcatListsOp c) {
         Value tl, tr;
@@ -1164,7 +1224,7 @@ bool EvalState::eqValues(Value &v1, Value &v2, PosPtr pos) {
     }
     if (v1.attrs->size() != v2.attrs->size()) return false;
     for (size_t k = 0; k < v1.attrs->size(); k++) {
-      const Attr &a = v1.attrs->attrs[k], &b = v2.attrs->attrs[k];
+      const Attr &a = v1.attrs->begin()[k], &b = v2.attrs->begin()[k];
       if (a.name != b.name) return false;
       if (a.value == b.value) continue;
       if (!eqValues(*a.value, *b.value, pos)) return false;

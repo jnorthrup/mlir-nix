@@ -75,6 +75,19 @@ CASES = [
     'builtins.intersectAttrs { } { b = 2; }',
     'builtins.intersectAttrs { b = 2; } { }',
     'let big = builtins.listToAttrs (map (n: { name = "k${toString n}"; value = n; }) (builtins.genList (x: x) 300)); in [ (builtins.intersectAttrs { k7 = null; k250 = null; nope = null; } big) (builtins.attrNames (builtins.intersectAttrs big { k0 = 1; k299 = 2; k300 = 3; })) ]',
+    # --- `//`: a small right side over a big left one is a layer (a view), not a copy ----------
+    'let big = builtins.listToAttrs (map (n: { name = "k${toString n}"; value = n; }) (builtins.genList (x: x) 300)); o = big // { k7 = "top"; z = 1; }; in [ o.k7 o.k8 o.z (o ? k299) (o ? zz) o.k299 (builtins.getAttr "k9" o) ]',
+    'let big = builtins.listToAttrs (map (n: { name = "k${toString n}"; value = n; }) (builtins.genList (x: x) 300)); o = big // { zz = 1; k5 = 0; }; in [ (builtins.length (builtins.attrNames o)) (builtins.head (builtins.attrNames o)) (builtins.elemAt (builtins.attrNames o) 300) o.k5 ]',
+    'let big = builtins.listToAttrs (map (n: { name = "k${toString n}"; value = n; }) (builtins.genList (x: x) 300)); o = ((big // { a = 1; }) // { b = 2; k7 = 70; }) // { c = 3; a = 10; }; in [ o.a o.b o.c o.k7 o.k8 (builtins.length (builtins.attrNames o)) ]',
+    'let big = builtins.listToAttrs (map (n: { name = "k${toString n}"; value = n; }) (builtins.genList (x: x) 300)); in [ ((big // { k7 = 7; }) == big) ((big // { k7 = 8; }) == big) ((big // { extra = 1; }) == big) ]',
+    'let big = builtins.listToAttrs (map (n: { name = "k${toString n}"; value = n; }) (builtins.genList (x: x) 300)); o = big // { k1 = 1000; }; in [ (builtins.foldl\' (a: b: a + b) 0 (builtins.attrValues o)) (builtins.length (builtins.attrValues o)) ]',
+    'let big = builtins.listToAttrs (map (n: { name = "k${toString n}"; value = n; }) (builtins.genList (x: x) 300)); o = big // { k1 = 1000; }; in [ (builtins.length (builtins.attrNames (builtins.removeAttrs o [ "k1" "k2" "nope" ]))) (builtins.attrNames (builtins.intersectAttrs { k1 = 0; zz = 0; } o)) ((builtins.mapAttrs (n: v: v + 1) o).k1) ]',
+    'let big = builtins.listToAttrs (map (n: { name = "k${toString n}"; value = n; }) (builtins.genList (x: x) 300)); in { x = 1; k7 = "left"; } // (big // { y = 2; k7 = "mid"; }) // { w = 3; }',
+    'let big = builtins.listToAttrs (map (n: { name = "k${toString n}"; value = n; }) (builtins.genList (x: x) 300)); in builtins.length (builtins.attrNames (big // (builtins.listToAttrs (map (n: { name = "j${toString n}"; value = n; }) (builtins.genList (x: x) 100)))))',
+    'let big = builtins.listToAttrs (map (n: { name = "k${toString n}"; value = n; }) (builtins.genList (x: x) 300)); in with (big // { w = 5; k3 = "over"; }); [ w k3 k4 ]',
+    'let big = builtins.listToAttrs (map (n: { name = "k${toString n}"; value = n; }) (builtins.genList (x: x) 300)); in ({ k1, k2, ... }: [ k1 k2 ]) (big // { k1 = 100; })',
+    'let big = builtins.listToAttrs (map (n: { name = "k${toString n}"; value = n; }) (builtins.genList (x: x) 300)); in (big // { a = 1; }) // (big // { b = 2; })',
+    'let big = builtins.listToAttrs (map (n: { name = "k${toString n}"; value = n; }) (builtins.genList (x: x) 300)); o = big // { n = null; }; in [ (builtins.attrNames o == builtins.attrNames (o // { })) (builtins.toJSON { inherit (o) k1 n; }) (builtins.hashString "md5" (builtins.toJSON o)) ]',
 ]
 
 def run_local(mlnix, expr):

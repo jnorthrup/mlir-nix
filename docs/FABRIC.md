@@ -75,6 +75,14 @@ has the identical result hash (same `.drv` paths), 466/466 on the lang suite,
     + literals without locations, filename attr once  3.59 s      3.13 s     2349 MB
     + Symbols keyed by StringAttr; CommonCrypto SHA   3.48 s      2.97 s     2378 MB
     + intersectAttrs walks the smaller set            3.38 s      2.80 s     2359 MB
+    + operands evaluated in place (NixModes)          3.41 s      2.82 s     1993 MB
+    + lexer: first-character dispatch                 3.02 s      2.50 s     1983 MB
+    + tape lexer (tokens are segments)                2.92 s      2.43 s     2026 MB
+    + `//` as a layered view over a big set           2.92 s      2.40 s     1945 MB
+
+Timings are min-of-3 `bench.py` runs on the machine of the day and move a few percent between
+sessions; each row's own interleaved A/B is in the commit message. Peak RSS counts mapped
+file pages since `nixfe::Source`; peak *footprint* is the number to compare for memory.
 
 The last row is an algorithm fix, not an MLIR change: one builtin made 90-96% of all
 attrset lookups (`docs/COLLECTIONS.md`).

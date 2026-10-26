@@ -70,15 +70,31 @@ struct Attr {
 };
 
 struct Bindings {
+  /// `size_` of a layered set (below).
+  static constexpr uint32_t kLayered = 0xFFFFFFFFu;
   uint32_t size_ = 0;
   PosPtr pos = nullptr;
   Attr attrs[0];
-  size_t size() const { return size_; }
-  bool empty() const { return size_ == 0; }
-  Attr *begin() { return attrs; }
-  Attr *end() { return attrs + size_; }
-  const Attr *begin() const { return attrs; }
-  const Attr *end() const { return attrs + size_; }
+
+  /// `base // top` as a view instead of a copy: `top` shadows `base`, both flat sorted sets.  Built
+  /// by `//` when `top` is small next to `base` (O(|top|) instead of O(|base| + |top|)); looked up
+  /// without copying; flattened once, on the first iteration or size query.
+  struct Layer {
+    Bindings *top, *base, *flat;
+    llvm::BumpPtrAllocator *alloc; // where flat() allocates
+  };
+  static inline uint64_t flattened = 0; // MLNIX_STATS
+  bool layered() const { return size_ == kLayered; }
+  Layer &layer() const { return *reinterpret_cast<Layer *>(const_cast<Attr *>(attrs)); }
+  /// The set as one sorted array: itself, or the union of its layers, built once.
+  Bindings *flat() const;
+
+  size_t size() const { return layered() ? flat()->size_ : size_; }
+  bool empty() const { return !layered() && size_ == 0; }
+  Attr *begin() { return flat()->attrs; }
+  Attr *end() { Bindings *f = flat(); return f->attrs + f->size_; }
+  const Attr *begin() const { return flat()->attrs; }
+  const Attr *end() const { Bindings *f = flat(); return f->attrs + f->size_; }
   const Attr *get(Symbol s) const;
   /// Attributes sorted by name (string order).
   std::vector<const Attr *> lexicographicOrder(const SymbolTable &st) const;
@@ -264,6 +280,8 @@ public:
   // -- Allocation --------------------------------------------------------
   Value *allocValue() { return new (alloc.Allocate<Value>()) Value(); }
   Bindings *allocBindings(size_t n);
+  /// `a // b` (see Bindings::Layer).
+  Bindings *updateAttrs(Bindings *a, Bindings *b);
   Value **allocList(size_t n);
   const char *copyString(std::string_view s);
   const StringContext *makeContext(const NixStringContext &c);
@@ -445,6 +463,7 @@ public:
 
 private:
   llvm::DenseMap<void *, Slot> slotMap;
+  uint64_t nUpdLayered = 0, nUpdMerged = 0, nUpdBase = 0, nUpdTop = 0; // MLNIX_STATS: `//` as a layer / a flat merge, entries not copied / copied
   uint64_t nInPlace = 0, nThunks = 0; // MLNIX_STATS: operands evaluated in place / thunks created by lookup()
   llvm::DenseMap<mlir::Region *, RegionInfo *> regionInfos;
   llvm::DenseMap<mlir::Operation *, Value *> constCache;
