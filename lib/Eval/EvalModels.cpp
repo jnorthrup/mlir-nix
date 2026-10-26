@@ -37,6 +37,9 @@ const PrimOp *EvalState::primFor(Operation *op) {
   if (it != primForOp.end()) return it->second;
   const auto *info = ctx.getLoadedDialect<nd::NixDialect>()->primOf(op);
   const PrimOp *p = primOpByKey(info->key);
+  if (!p)
+    throw EvalError("primop '" + info->key.str() + "' is declared in the IRDL but has no implementation",
+                    op->getLoc().getAsOpaquePointer());
   primForOp[k] = p;
   return p;
 }

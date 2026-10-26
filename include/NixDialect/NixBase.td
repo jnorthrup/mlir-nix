@@ -57,13 +57,15 @@ def Nix_Dialect : Dialect {
     };
     ::llvm::StringMap<PrimInfo> prims;
     ::llvm::DenseMap<const void *, const PrimInfo *> primsByOp;
-    void registerPrim(::llvm::StringRef key, unsigned arity, ::mlir::OperationName name,
+    /// Returns false (and registers nothing) when `key` is already declared.
+    bool registerPrim(::llvm::StringRef key, unsigned arity, ::mlir::OperationName name,
                       PrimFx fx = PrimFx::Pure, bool foldable = false) {
       auto [it, inserted] = prims.try_emplace(key, PrimInfo{name, arity, fx, foldable, {}});
       if (inserted) {
         it->second.key = it->first();
         primsByOp[name.getAsOpaquePointer()] = &it->second;
       }
+      return inserted;
     }
     /// The declaration of the primop `op` stands for (null for other ops).
     const PrimInfo *primOf(::mlir::Operation *op) const {

@@ -30,6 +30,7 @@
 #include "mlir/Parser/Parser.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
 
 using namespace mlir;
@@ -164,8 +165,22 @@ LogicalResult mlir::nix::loadPrimDialects(MLIRContext *ctx, NixDialect &core) {
   if (!core.prims.empty()) // already defined (the extension can be applied twice)
     return success();
   ctx->getOrLoadDialect<irdl::IRDLDialect>();
-  OwningOpRef<ModuleOp> module =
-      parseSourceString<ModuleOp>(kPrimsIRDL, ParserConfig(ctx), "NixPrims.irdl.mlir");
+
+  // The declaration is data, so it can be swapped without rebuilding:
+  // MLNIX_PRIMS_IRDL=other.irdl.mlir (used by the mutation tests in test/mlir).
+  StringRef source = kPrimsIRDL, name = "NixPrims.irdl.mlir";
+  std::unique_ptr<llvm::MemoryBuffer> override;
+  if (const char *path = getenv("MLNIX_PRIMS_IRDL")) {
+    auto buf = llvm::MemoryBuffer::getFile(path);
+    if (!buf) {
+      emitError(UnknownLoc::get(ctx)) << "cannot read MLNIX_PRIMS_IRDL=" << path << ": " << buf.getError().message();
+      return failure();
+    }
+    override = std::move(*buf);
+    source = override->getBuffer();
+    name = path;
+  }
+  OwningOpRef<ModuleOp> module = parseSourceString<ModuleOp>(source, ParserConfig(ctx), name);
   if (!module)
     return failure();
   if (failed(irdl::loadDialects(*module)))
@@ -191,7 +206,8 @@ LogicalResult mlir::nix::loadPrimDialects(MLIRContext *ctx, NixDialect &core) {
         arity = operands.getOperands().size();
       bool foldable = opOp->hasAttr("nix.fold");
 
-      core.registerPrim(key.getValue(), arity, name, *fx, foldable);
+      if (!core.registerPrim(key.getValue(), arity, name, *fx, foldable))
+        return opOp.emitError("duplicate nix.key '") << key.getValue() << "'";
 
       DynamicOpDefinition *def = NameAccess::definition(name);
       def->setParseFn(parsePrim);

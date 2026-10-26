@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the FileCheck tests in test/mlir (a minimal lit: `// RUN:` lines).
 
-Each RUN line is executed with `%s` replaced by the test file and with
+Each RUN line is executed with `%s` replaced by the test file (`%S`: its directory) and with
 build/bin (mlnix, mlnix-opt) and the LLVM bin dir (FileCheck, not) on PATH.
 
 usage: run-mlir-tests.py [-v] [FILTER]
@@ -27,7 +27,7 @@ def main():
         runs = re.findall(r"^// RUN: (.*)$", text, re.M)
         ok = True
         for cmd in runs:
-            cmd = cmd.replace("%s", f)
+            cmd = cmd.replace("%S", os.path.dirname(f)).replace("%s", f)
             p = subprocess.run(["bash", "-c", "set -o pipefail; " + cmd], env=env, cwd=ROOT,
                                capture_output=True, text=True)
             if p.returncode != 0:
