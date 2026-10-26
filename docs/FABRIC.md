@@ -8,40 +8,40 @@ is aspirational unless it says so.
 
 ## What exists
 
-Twelve dialects, all present in the IR of real programs:
+The core dialect `nix` (ODS: lambda, apply, attrs, list, select, if, with, ...) and
+24 *primop dialects* in 6 macro scopes, all 105 base-environment primops as ops:
 
-    nix        language core: lambda, apply, attrs, list, select, if, with, ...
-    nixnum     10 ops   arithmetic, bit ops, rounding, ordering
-    nixty      11 ops   type predicates, typeOf, functionArgs
-    nixstr     11 ops   substring, replaceStrings, toString, match, versions, ...
-    nixctx      6 ops   string context
-    nixlist    17 ops   length, elemAt, map, filter, foldl', sort, ...
-    nixattr    11 ops   attrNames, getAttr, mapAttrs, ...
-    nixpath     9 ops   readFile, pathExists, dirOf, baseNameOf, getEnv, ...
-    nixstore    9 ops   toFile, path, derivationStrict, fetchers
-    nixhash     3 ops   hashString, hashFile, convertHash
-    nixfmt      6 ops   toJSON, fromJSON, toXML, fromTOML, flake refs
-    nixctl     12 ops   seq, throw, trace, tryEval, import, ...
+    scope  dialects
+    val    nixnum nixbit nixty nixrefl
+    coll   nixlist nixlistfn nixattr nixattrfn
+    text   nixstr nixver nixre nixctx
+    io     nixpath nixfs nixstore nixhash
+    meta   nixjson nixtoml nixxml nixflake
+    ctl    nixctl nixerr nixtrace nixload
 
-The 105 continent ops are declared once, in `include/NixDialect/NixPrims.td`:
-arity, effects and foldability. Everything else follows:
+They are **not TableGen**. They are declared once, as data, in
+`include/NixDialect/NixPrims.irdl.mlir` (IRDL), and defined at load time by the
+generic loader `lib/Dialect/NixPrimDialects.cpp`, which names no op. How, what failed
+and what it cost: `docs/COMBINATORS.md`. What follows from the declaration:
 
-- **Verification**: ODS verifier checks arity. `mlnix primops` (the runtime
-  registry) is compared with the declarations by `scripts/check-prims.py`.
-- **Effects**: `Pure`, `MemRead<NixFS|NixEnv>`, `MemWrite<NixTrace|NixStore>`.
-  The stock `-cse` pass is therefore sound on Nix IR: pure primops merge, ops
-  that may run user code or trace do not (`test/mlir/effects.mlir`).
-- **Folding**: one generic folder serves every `foldable` primop by calling the
-  evaluator's own implementation; a call that would throw is left alone, so
-  errors keep their position and trace.
-- **Evaluation**: `NixEvalOpInterface` is attached from outside as an external
-  model (`lib/Eval/EvalModels.cpp`). The dialects know nothing about the
-  evaluator; a JIT or symbolic executor can attach its own model the same way.
+- **Verification**: the stock IRDL verifier checks arity. `mlnix primops` (the runtime
+  registry) is compared with the declaration by `scripts/check-prims.py`.
+- **Effects**: `nix.fx` per op becomes a `MemoryEffectOpInterface` model
+  (`Pure`, `MemRead<NixFS|NixEnv>`, `MemWrite<NixTrace|NixStore>`). The stock `-cse`
+  pass is therefore sound on Nix IR: pure primops merge, ops that may run user code
+  or trace do not (`test/mlir/effects.mlir`, `declaration.mlir`).
+- **Folding**: one generic pattern serves every `nix.fold` primop by calling the
+  evaluator's own implementation; a call that would throw is left alone, so errors keep
+  their position and trace.
+- **Evaluation**: `NixEvalOpInterface` is attached from outside as one fallback model
+  (`lib/Eval/EvalModels.cpp`). The dialects know nothing about the evaluator; a JIT or
+  symbolic executor can attach its own model the same way.
 - **Devirtualization** (`nix-prims`): `builtins.length x`, `__add a b`, `map f l`
-  become `nixlist.length(x)`, `nixnum.add(a, b)`, `nixlist.map(f, l)`. A single
-  walk (`walkAndApplyPatterns`), not the greedy fixpoint driver.
-- **Constants**: `true`, `false`, `null` are `nix.bool` / `nix.null`
-  (ConstantLike), so they fold and feed folded primops.
+  become `nixlist.length(x)`, `nixnum.add(a, b)`, `nixlistfn.map(f, l)`. A single walk
+  (`walkAndApplyPatterns`), not the greedy fixpoint driver.
+- **Constants**: `true`, `false`, `null` are `nix.bool` / `nix.null` (ConstantLike), so
+  they fold and feed folded primops.
+- **Replaceable**: `MLNIX_PRIMS_IRDL=file` swaps the declaration without a rebuild.
 
 ## Tests (each layer can fail)
 
@@ -49,6 +49,8 @@ arity, effects and foldability. Everything else follows:
     python3 scripts/difftest.py         53 expressions identical to Nix 2.35.4
     python3 scripts/run-mlir-tests.py   FileCheck tests of the dialects/passes
     python3 scripts/check-prims.py      declarations == runtime registry
+    python3 scripts/ab.py A B           interleaved A/B (two envs or two binaries)
+    python3 scripts/startup-bench.py    process start-up cost of two binaries
     python3 scripts/bench.py            wall-clock, peak RSS, result hash
 
 ## Measured
@@ -97,7 +99,7 @@ malloc 6%, SHA-256 4.7% (fixed after this profile).
 `MLNIX_STATS=1` prints the op histogram of everything an evaluation lowers. For
 the NixOS toplevel, now 1.10M ops (was 1.30M): `nix.str` 20%, `nix.formal` 19%,
 `nix.select` 13%, `nix.apply` 11%, `nix.attrs` 11%, `nix.with_var` 5%.
-Continent ops are 0.6% (most applications in nixpkgs are of user lambdas).
+Continent ops are 0.68% (most applications in nixpkgs are of user lambdas).
 
 ## What this does not buy
 
