@@ -112,4 +112,19 @@ def NixEnvRes   : Resource<"::mlir::nix::NixEnvResource">;
 // Writes to the Nix store.
 def NixStoreRes : Resource<"::mlir::nix::NixStoreResource">;
 
+//===----------------------------------------------------------------------===//
+// Declarations that keep generic passes (CSE, DCE, LICM) sound
+//===----------------------------------------------------------------------===//
+
+// A call may run user code, which can trace, throw and allocate: two equal calls
+// are not interchangeable.
+defvar NixFxUser = [MemoryEffects<[MemWrite<NixTraceRes>]>];
+
+// A result that is a freshly allocated value whose *identity* is observable:
+// lists, attribute sets and functions print as «repeated» when the same one
+// occurs twice, and lists of distinct functions compare unequal.  Such an op is
+// pure but two identical ones must not be merged, so it declares an
+// allocation of its result (like memref.alloc); an unused one is still dead.
+def NixFreshVal : Res<NixVal, "a fresh value with observable identity", [MemAlloc]>;
+
 #endif // NIX_BASE_TD

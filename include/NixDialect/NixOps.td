@@ -47,7 +47,7 @@ def Nix_ReturnOp : Nix_Op<"return", [Terminator, Pure,
   let assemblyFormat = "$value attr-dict";
 }
 
-def Nix_LambdaOp : Nix_Op<"lambda", [Pure, SingleBlock,
+def Nix_LambdaOp : Nix_Op<"lambda", [SingleBlock,
     DeclareOpInterfaceMethods<RegionKindInterface>]> {
   let summary = "function abstraction";
   let description = [{
@@ -63,7 +63,7 @@ def Nix_LambdaOp : Nix_Op<"lambda", [Pure, SingleBlock,
                        OptionalAttr<StrAttr>:$arg_name,
                        OptionalAttr<StrAttr>:$name,
                        OptionalAttr<ArrayAttr>:$formal_locs);
-  let results = (outs NixVal:$result);
+  let results = (outs NixFreshVal:$result);
   let regions = (region SizedRegion<1>:$body);
   let assemblyFormat = "attr-dict-with-keyword $body";
   let hasVerifier = 1;
@@ -152,13 +152,13 @@ def Nix_WithVarOp : Nix_Op<"with_var", [Pure]> {
 // Data constructors
 //===----------------------------------------------------------------------===//
 
-def Nix_ListOp : Nix_Op<"list", [Pure]> {
+def Nix_ListOp : Nix_Op<"list"> {
   let arguments = (ins Variadic<NixVal>:$elements);
-  let results = (outs NixVal:$result);
+  let results = (outs NixFreshVal:$result);
   let assemblyFormat = "`[` $elements `]` attr-dict";
 }
 
-def Nix_AttrsOp : Nix_Op<"attrs", [Pure, AttrSizedOperandSegments]> {
+def Nix_AttrsOp : Nix_Op<"attrs", [AttrSizedOperandSegments]> {
   let summary = "attribute set construction";
   let description = [{
     `names[i]` is bound to `values[i]`.  Dynamic attributes (`${e} = v;`) pair
@@ -168,7 +168,7 @@ def Nix_AttrsOp : Nix_Op<"attrs", [Pure, AttrSizedOperandSegments]> {
   let arguments = (ins StrArrayAttr:$names, Variadic<NixVal>:$values,
                        Variadic<NixVal>:$dyn_names, Variadic<NixVal>:$dyn_values,
                        OptionalAttr<ArrayAttr>:$positions);
-  let results = (outs NixVal:$result);
+  let results = (outs NixFreshVal:$result);
   let assemblyFormat = [{
     $names `(` $values `)` (`dynamic` `(` $dyn_names^ `)` `=` `(` $dyn_values `)`)? attr-dict
   }];
@@ -206,7 +206,7 @@ def Nix_HasAttrOp : Nix_Op<"has_attr", [Pure]> {
   let hasVerifier = 1;
 }
 
-def Nix_ApplyOp : Nix_Op<"apply", [Pure]> {
+def Nix_ApplyOp : Nix_Op<"apply", NixFxUser> {
   let summary = "(curried) function application";
   let arguments = (ins NixVal:$callee, Variadic<NixVal>:$args);
   let results = (outs NixVal:$result);
@@ -230,7 +230,7 @@ def Nix_AssertOp : Nix_Op<"assert", [Pure]> {
 // __lessThan exactly as upstream Nix does, so they remain overridable).
 //===----------------------------------------------------------------------===//
 
-class Nix_BinOp<string mnemonic> : Nix_Op<mnemonic, [Pure]> {
+class Nix_BinOp<string mnemonic, list<Trait> traits = [Pure]> : Nix_Op<mnemonic, traits> {
   let arguments = (ins NixVal:$lhs, NixVal:$rhs);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$lhs `,` $rhs attr-dict";
@@ -241,8 +241,12 @@ def Nix_NeqOp     : Nix_BinOp<"neq">;
 def Nix_AndOp     : Nix_BinOp<"and">;
 def Nix_OrOp      : Nix_BinOp<"or">;
 def Nix_ImplOp    : Nix_BinOp<"impl">;
-def Nix_UpdateOp  : Nix_BinOp<"update">;
-def Nix_ConcatListsOp : Nix_BinOp<"concat_lists">;
+// `a // b` and `a ++ b` allocate a new attribute set / list.
+class Nix_FreshBinOp<string mnemonic> : Nix_BinOp<mnemonic, []> {
+  let results = (outs NixFreshVal:$result);
+}
+def Nix_UpdateOp  : Nix_FreshBinOp<"update">;
+def Nix_ConcatListsOp : Nix_FreshBinOp<"concat_lists">;
 
 def Nix_NotOp : Nix_Op<"not", [Pure]> {
   let arguments = (ins NixVal:$operand);
