@@ -187,6 +187,9 @@ LogicalResult mlir::nix::loadPrimDialects(MLIRContext *ctx, NixDialect &core) {
     return failure();
 
   for (auto dialectOp : module->getOps<irdl::DialectOp>()) {
+    auto scope = dialectOp->getAttrOfType<StringAttr>("nix.scope");
+    auto continent = dialectOp->getAttrOfType<StringAttr>("nix.continent");
+    core.continents[dialectOp.getSymName()] = {scope ? scope.getValue().str() : "", continent ? continent.getValue().str() : ""};
     for (auto opOp : dialectOp.getOps<irdl::OperationOp>()) {
       std::string full = (dialectOp.getSymName() + "." + opOp.getSymName()).str();
       OperationName name(full, ctx);

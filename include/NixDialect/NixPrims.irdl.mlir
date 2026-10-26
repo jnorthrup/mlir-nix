@@ -11,7 +11,15 @@
 //             | env (reads the environment) | store (writes the store) | import
 //   nix.fold  the primop may be evaluated at compile time on scalar constants
 //
-// Stock tools read it too:  mlir-opt --irdl-file=NixPrims.irdl.mlir
+// Dialect attributes: nix.scope (6 macro scopes) and nix.continent (the 11 areas the
+// 24 dialects were split from) group the dialects; MLNIX_STATS=1 reports the ops of
+// real programs per scope, continent and dialect.
+//
+// Stock tools: stock mlir-opt has no `nix` dialect, so `irdl.base "!nix.value"` does not
+// resolve there.  With that constraint relaxed to `irdl.any` the file loads in
+// `mlir-opt --irdl-file=` and `mlir-translate --irdl-to-cpp` emits a static C++ dialect
+// from it (33k lines; compiles).  The declaration can also be replaced at run time:
+// MLNIX_PRIMS_IRDL=other.irdl.mlir (test/mlir/declaration.mlir does this).
 
 // ---- scope val ------------------------------------------------------------
 irdl.dialect @nixnum attributes {nix.summary = "Arithmetic and ordering", nix.scope = "val", nix.continent = "nixnum"} {

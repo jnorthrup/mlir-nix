@@ -67,6 +67,12 @@ def Nix_Dialect : Dialect {
       }
       return inserted;
     }
+    /// Grouping of the continent dialects (`nix.scope` / `nix.continent` in the IRDL).
+    struct DialectInfo {
+      std::string scope, continent;
+    };
+    ::llvm::StringMap<DialectInfo> continents;
+
     /// The declaration of the primop `op` stands for (null for other ops).
     const PrimInfo *primOf(::mlir::Operation *op) const {
       return primsByOp.lookup(op->getName().getAsOpaquePointer());

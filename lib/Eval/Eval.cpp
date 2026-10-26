@@ -162,18 +162,33 @@ EvalState::EvalState(EvalSettings st, std::shared_ptr<nixstore::Store> store)
 }
 
 void EvalState::printStats() {
-  // Per dialect: how many ops of real programs live in it.
-  llvm::StringMap<size_t> perDialect;
+  // How many ops of real programs live where: per tier of the dialect hierarchy
+  // (scope > continent > dialect), read from the IRDL declaration.
+  auto *core = ctx.getLoadedDialect<nd::NixDialect>();
+  llvm::StringMap<size_t> perDialect, perScope, perContinent;
   size_t total = 0;
   for (auto &e : opStats) {
-    perDialect[e.getKey().split('.').first] += e.getValue();
+    llvm::StringRef dialect = e.getKey().split('.').first;
+    perDialect[dialect] += e.getValue();
+    auto it = core->continents.find(dialect);
+    perScope[it == core->continents.end() ? "core" : llvm::StringRef(it->second.scope)] += e.getValue();
+    perContinent[it == core->continents.end() ? "core" : llvm::StringRef(it->second.continent)] += e.getValue();
     total += e.getValue();
   }
-  std::vector<std::pair<std::string, size_t>> d;
-  for (auto &e : perDialect) d.push_back({e.getKey().str(), e.getValue()});
-  std::sort(d.begin(), d.end(), [](auto &a, auto &b) { return a.second > b.second; });
-  llvm::errs() << "== mlnix ops lowered: " << total << " in " << d.size() << " dialects\n";
-  for (auto &[n, c] : d) llvm::errs() << "  " << llvm::format("%-9s", n.c_str()) << llvm::format("%9zu", c) << "\n";
+  auto sorted = [](llvm::StringMap<size_t> &m) {
+    std::vector<std::pair<std::string, size_t>> v;
+    for (auto &e : m) v.push_back({e.getKey().str(), e.getValue()});
+    std::sort(v.begin(), v.end(), [](auto &a, auto &b) { return a.second > b.second; });
+    return v;
+  };
+  auto section = [&](const char *title, llvm::StringMap<size_t> &m) {
+    llvm::errs() << "== " << title << " (" << m.size() << ")\n";
+    for (auto &[n, c] : sorted(m)) llvm::errs() << "  " << llvm::format("%-9s", n.c_str()) << llvm::format("%9zu", c) << "\n";
+  };
+  llvm::errs() << "== mlnix ops lowered: " << total << "\n";
+  section("scopes", perScope);
+  section("continents", perContinent);
+  section("dialects", perDialect);
   std::vector<std::pair<std::string, size_t>> o;
   for (auto &e : opStats) o.push_back({e.getKey().str(), e.getValue()});
   std::sort(o.begin(), o.end(), [](auto &a, auto &b) { return a.second > b.second; });
