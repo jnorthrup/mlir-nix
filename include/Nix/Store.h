@@ -257,6 +257,11 @@ private:
   void builtinFetchurl(const Derivation &drv, const std::map<std::string, std::string> &outputs);
 };
 
+/// (.attrs.json, .attrs.sh) contents for a structured-attrs derivation.
+std::pair<std::string, std::string> structuredAttrsFiles(const std::string &json,
+                                                         const std::map<std::string, std::string> &outputs,
+                                                         const std::map<std::string, std::string> &rewrites);
+
 /// Helpers.
 std::string readFile(const std::string &path);
 void writeFile(const std::string &path, std::string_view data, mode_t mode = 0644);

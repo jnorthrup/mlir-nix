@@ -4,7 +4,7 @@ add_mlir_dialect_library(MLIRNix
   DEPENDS MLIRNixOpsIncGen
   LINK_LIBS PUBLIC MLIRIR MLIRPass MLIRTransforms MLIRTransformUtils MLIRSideEffectInterfaces)
 
-add_library(NixStore STATIC Store/Hash.cpp Store/StorePaths.cpp Store/LocalStore.cpp)
+add_library(NixStore STATIC Store/Hash.cpp Store/StorePaths.cpp Store/LocalStore.cpp Store/StructuredAttrs.cpp)
 target_link_libraries(NixStore PUBLIC LLVMSupport)
 llvm_update_compile_flags(NixStore)
 

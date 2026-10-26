@@ -495,14 +495,6 @@ std::map<std::string, std::string> Store::realise(const std::string &drvPath,
   return outputs;
 }
 
-static std::string shellEscape(const std::string &s) {
-  std::string r = "'";
-  for (char c : s) {
-    if (c == '\'') r += "'\\''";
-    else r += c;
-  }
-  return r + "'";
-}
 
 void Store::runBuilder(const std::string &drvPath, const Derivation &drv,
                        const std::map<std::string, std::string> &outputs) {
@@ -534,25 +526,24 @@ void Store::runBuilder(const std::string &drvPath, const Derivation &drv,
         if (const char *val = getenv(v.c_str())) env[v] = val;
     }
   }
-  for (auto &[k, v] : drv.env) env[k] = v;
+  // Output placeholders (builtins.placeholder) are rewritten to the real
+  // output paths in the environment, arguments and structured attributes.
+  std::map<std::string, std::string> rewrites;
+  for (auto &[n, p] : outputs) rewrites[hashPlaceholder(n)] = p;
+  auto rewrite = [&](std::string s) {
+    for (auto &[from, to] : rewrites) {
+      size_t pos = 0;
+      while ((pos = s.find(from, pos)) != std::string::npos) {
+        s.replace(pos, from.size(), to);
+        pos += to.size();
+      }
+    }
+    return s;
+  };
+  for (auto &[k, v] : drv.env) env[k] = rewrite(v);
   if (drv.structuredAttrs) {
-    // Inject output paths, as upstream does.
-    std::string json = *drv.structuredAttrs;
-    std::string outs = "{";
-    bool first = true;
-    for (auto &[n, p] : outputs) {
-      outs += (first ? "" : ",") + jsonEscape(n) + ":" + jsonEscape(p);
-      first = false;
-    }
-    outs += "}";
-    if (json.size() >= 2 && json.back() == '}') {
-      json.pop_back();
-      json += std::string(json.size() > 1 ? "," : "") + "\"outputs\":" + outs + "}";
-    }
+    auto [json, sh] = structuredAttrsFiles(*drv.structuredAttrs, outputs, rewrites);
     writeFile(top + "/.attrs.json", json);
-    std::string sh = "declare -A outputs=(";
-    for (auto &[n, p] : outputs) sh += "['" + n + "']=" + shellEscape(p) + " ";
-    sh += ")\n";
     writeFile(top + "/.attrs.sh", sh);
     env["NIX_ATTRS_JSON_FILE"] = top + "/.attrs.json";
     env["NIX_ATTRS_SH_FILE"] = top + "/.attrs.sh";
@@ -566,7 +557,9 @@ void Store::runBuilder(const std::string &drvPath, const Derivation &drv,
   std::vector<char *> argv;
   std::string builderBase = baseNameOf(drv.builder);
   argv.push_back(const_cast<char *>(builderBase.c_str()));
-  for (auto &a : drv.args) argv.push_back(const_cast<char *>(a.c_str()));
+  std::vector<std::string> args;
+  for (auto &a : drv.args) args.push_back(rewrite(a));
+  for (auto &a : args) argv.push_back(const_cast<char *>(a.c_str()));
   argv.push_back(nullptr);
 
   pid_t pid = fork();
