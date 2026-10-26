@@ -1,9 +1,10 @@
-// The arity of a primop is part of its declaration; the verifier enforces it.
+// The arity of a primop is part of its IRDL declaration (irdl.operands); the stock
+// IRDL verifier enforces it, so the wording is IRDL's.
 // RUN: mlnix-opt %s --split-input-file --verify-diagnostics
 
 nix.expr @too_few {
   %a = nix.int 1
-  // expected-error @+1 {{expects 2 operand(s) but has 1}}
+  // expected-error @+1 {{expects exactly 2 operands, but got 1}}
   %0 = nixnum.add(%a)
   nix.return %0
 }
@@ -12,7 +13,7 @@ nix.expr @too_few {
 
 nix.expr @too_many {
   %a = nix.int 1
-  // expected-error @+1 {{expects 1 operand(s) but has 2}}
+  // expected-error @+1 {{expects exactly 1 operands, but got 2}}
   %0 = nixlist.length(%a, %a)
   nix.return %0
 }

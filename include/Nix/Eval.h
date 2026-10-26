@@ -378,6 +378,9 @@ public:
   /// "while calling the 'X' builtin" trace like upstream.
   void callPrimOp(const PrimOp &op, Value **args, Value &out, PosPtr pos);
   const PrimOp *primOpByKey(llvm::StringRef key);
+  /// The primop an IRDL-defined continent op stands for (cached per op name).
+  const PrimOp *primFor(mlir::Operation *op);
+  llvm::DenseMap<const void *, const PrimOp *> primForOp;
   /// MLNIX_STATS=1: op histogram of every module lowered, printed at exit.
   llvm::StringMap<size_t> opStats;
   bool statsEnabled = false;

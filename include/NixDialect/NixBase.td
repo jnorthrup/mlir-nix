@@ -5,15 +5,14 @@
 //   nix        the language core: lambdas, application, attribute sets, lists,
 //              `if`, `with`, string interpolation, ...  (NixOps.td)
 //   nix<area>  one dialect per "continent" of the runtime: every primop of the
-//              base environment is an op of the continent it belongs to
-//              (NixPrims.td): nixnum nixty nixstr nixctx nixlist nixattr
-//              nixpath nixstore nixhash nixfmt nixctl.
+//              base environment is an op of the continent it belongs to:
+//              nixnum nixty nixstr nixctx nixlist nixattr nixpath nixstore
+//              nixhash nixfmt nixctl.  They are *not* defined in TableGen: they
+//              are declared in IRDL (NixPrims.irdl.mlir) and defined at load time.
 //
-// Everything here is shared: the dialect/type/value definitions, the two
-// interfaces through which the evaluator and the passes talk to ops without
-// knowing their classes, and the effect resources used to *declare* what a
-// primop may do (so CSE/DCE/folding follow from declarations, not from
-// conditionals in C++).
+// Everything here is the core: the dialect/type/value definitions and the
+// interface through which the evaluator talks to ops without knowing their
+// classes.
 //
 //===----------------------------------------------------------------------===//
 
@@ -43,14 +42,32 @@ def Nix_Dialect : Dialect {
         ::llvm::StringRef key, ::llvm::ArrayRef<::mlir::Attribute> args)>;
     PrimFolder primFolder;
 
-    /// Primops declared by the continent dialects, by base-environment key.
+    /// How a primop may interact with the world (`nix.fx` of each op in
+    /// NixPrims.irdl.mlir; drives the memory-effect interface).
+    enum class PrimFx : uint8_t { Pure, User, FS, Env, Store, Import };
+
+    /// Primops declared by the continent dialects (NixPrims.irdl.mlir), by
+    /// base-environment key.
     struct PrimInfo {
       ::mlir::OperationName name;
       unsigned arity;
+      PrimFx fx = PrimFx::Pure;
+      bool foldable = false;
+      ::llvm::StringRef key; // owned by the map entry
     };
     ::llvm::StringMap<PrimInfo> prims;
-    void registerPrim(::llvm::StringRef key, unsigned arity, ::mlir::OperationName name) {
-      prims.try_emplace(key, PrimInfo{name, arity});
+    ::llvm::DenseMap<const void *, const PrimInfo *> primsByOp;
+    void registerPrim(::llvm::StringRef key, unsigned arity, ::mlir::OperationName name,
+                      PrimFx fx = PrimFx::Pure, bool foldable = false) {
+      auto [it, inserted] = prims.try_emplace(key, PrimInfo{name, arity, fx, foldable, {}});
+      if (inserted) {
+        it->second.key = it->first();
+        primsByOp[name.getAsOpaquePointer()] = &it->second;
+      }
+    }
+    /// The declaration of the primop `op` stands for (null for other ops).
+    const PrimInfo *primOf(::mlir::Operation *op) const {
+      return primsByOp.lookup(op->getName().getAsOpaquePointer());
     }
   }];
 }
@@ -85,31 +102,5 @@ def NixEvalOpInterface : OpInterface<"NixEvalOpInterface"> {
            "::nixev::Value &":$out)>
   ];
 }
-
-def NixPrimOpInterface : OpInterface<"NixPrimOpInterface"> {
-  let cppNamespace = "::mlir::nix";
-  let description = [{
-    An op that stands for one primop of the base environment.
-  }];
-  let methods = [
-    InterfaceMethod<"Key of the primop in the base environment (e.g. `__add`).",
-                    "::llvm::StringRef", "getPrimKey">,
-    InterfaceMethod<"Number of arguments the primop takes.",
-                    "unsigned", "getPrimArity">
-  ];
-}
-
-//===----------------------------------------------------------------------===//
-// Effect resources
-//===----------------------------------------------------------------------===//
-
-// May run user code (which can trace/throw) or emit diagnostics.
-def NixTraceRes : Resource<"::mlir::nix::NixTraceResource">;
-// Reads the file system.
-def NixFSRes    : Resource<"::mlir::nix::NixFSResource">;
-// Reads the process environment.
-def NixEnvRes   : Resource<"::mlir::nix::NixEnvResource">;
-// Writes to the Nix store.
-def NixStoreRes : Resource<"::mlir::nix::NixStoreResource">;
 
 #endif // NIX_BASE_TD

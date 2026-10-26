@@ -1,15 +1,15 @@
-//===- EvalModels.cpp - Evaluation semantics as external interface models --===//
+//===- EvalModels.cpp - Evaluation semantics as an external interface model ===//
 //
 // The dialects define *what* an op is (operands, effects, folds); how the lazy
 // evaluator *runs* it is attached from outside as a NixEvalOpInterface model.
-// A primop op of any continent is evaluated by one template, which replaces
-// both the `builtin` + `select` + `apply` chain of the generic encoding and
-// the chain of dyn_casts the interpreter would need to tell 105 ops apart.
+// The 105 primop ops of the 11 continent dialects (defined at run time from
+// IRDL, so they have no C++ classes) are all evaluated by this one model, which
+// finds the primop through the core dialect's table.
 //
 //===----------------------------------------------------------------------===//
 
 #include "Nix/Eval.h"
-#include "NixDialect/NixPrims.h"
+#include "NixDialect/NixDialect.h"
 
 using namespace mlir;
 namespace nd = mlir::nix;
@@ -17,75 +17,36 @@ namespace nd = mlir::nix;
 namespace nixev {
 namespace {
 
-template <class OpT>
-struct PrimEvalModel : public nd::NixEvalOpInterface::ExternalModel<PrimEvalModel<OpT>, OpT> {
+struct PrimEvalModel : public nd::NixEvalOpInterface::FallbackModel<PrimEvalModel> {
   void eval(Operation *op, EvalState &st, Frame *env, Value &out) const {
-    // One cached lookup per op class and evaluator (statics are zero-initialised,
-    // so there is no guard on the fast path).
-    static EvalState *cachedFor;
-    static const PrimOp *prim;
-    if (cachedFor != &st) {
-      prim = st.primOpByKey(OpT::primKey);
-      cachedFor = &st;
-    }
-    Value *args[OpT::primArity > 0 ? OpT::primArity : 1];
-    for (unsigned i = 0; i < OpT::primArity; i++) args[i] = st.lookup(env, op->getOperand(i));
+    const PrimOp *prim = st.primFor(op);
+    constexpr unsigned kMaxArity = 8;
+    Value *args[kMaxArity];
+    unsigned n = op->getNumOperands();
+    assert(n <= kMaxArity && "primop arity above the evaluator's limit");
+    for (unsigned i = 0; i < n; i++) args[i] = st.lookup(env, op->getOperand(i));
     st.callPrimOp(*prim, args, out, op->getLoc().getAsOpaquePointer());
   }
 };
 
-template <class... Ops>
-void attachPrimModels(MLIRContext &ctx) {
-  (Ops::template attachInterface<PrimEvalModel<Ops>>(ctx), ...);
-}
-
 } // namespace
 
+const PrimOp *EvalState::primFor(Operation *op) {
+  const void *k = op->getName().getAsOpaquePointer();
+  auto it = primForOp.find(k);
+  if (it != primForOp.end()) return it->second;
+  const auto *info = ctx.getLoadedDialect<nd::NixDialect>()->primOf(op);
+  const PrimOp *p = primOpByKey(info->key);
+  primForOp[k] = p;
+  return p;
+}
+
 void registerEvalModels(MLIRContext &ctx) {
-  attachPrimModels<
-#define GET_OP_LIST
-#include "NixDialect/NixnumOps.cpp.inc"
-      >(ctx);
-  attachPrimModels<
-#define GET_OP_LIST
-#include "NixDialect/NixtyOps.cpp.inc"
-      >(ctx);
-  attachPrimModels<
-#define GET_OP_LIST
-#include "NixDialect/NixstrOps.cpp.inc"
-      >(ctx);
-  attachPrimModels<
-#define GET_OP_LIST
-#include "NixDialect/NixctxOps.cpp.inc"
-      >(ctx);
-  attachPrimModels<
-#define GET_OP_LIST
-#include "NixDialect/NixlistOps.cpp.inc"
-      >(ctx);
-  attachPrimModels<
-#define GET_OP_LIST
-#include "NixDialect/NixattrOps.cpp.inc"
-      >(ctx);
-  attachPrimModels<
-#define GET_OP_LIST
-#include "NixDialect/NixpathOps.cpp.inc"
-      >(ctx);
-  attachPrimModels<
-#define GET_OP_LIST
-#include "NixDialect/NixstoreOps.cpp.inc"
-      >(ctx);
-  attachPrimModels<
-#define GET_OP_LIST
-#include "NixDialect/NixhashOps.cpp.inc"
-      >(ctx);
-  attachPrimModels<
-#define GET_OP_LIST
-#include "NixDialect/NixfmtOps.cpp.inc"
-      >(ctx);
-  attachPrimModels<
-#define GET_OP_LIST
-#include "NixDialect/NixctlOps.cpp.inc"
-      >(ctx);
+  auto *core = ctx.getLoadedDialect<nd::NixDialect>();
+  for (auto &entry : core->prims) {
+    OperationName name = entry.second.name;
+    if (!name.hasInterface<nd::NixEvalOpInterface>()) name.attachInterface<PrimEvalModel>();
+  }
 }
 
 } // namespace nixev

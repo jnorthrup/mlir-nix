@@ -12,21 +12,11 @@ mlir_tablegen(NixDialect.cpp.inc -gen-dialect-defs -dialect=nix)
 mlir_tablegen(NixTypes.h.inc -gen-typedef-decls -typedefs-dialect=nix)
 mlir_tablegen(NixTypes.cpp.inc -gen-typedef-defs -typedefs-dialect=nix)
 
-# One dialect per continent of primops (NixPrims.td).  `-dialect` selects the
-# dialect definition; the ops of a dialect are selected by matching the regex
-# against their full op name (`nixnum.add`).
-set(NIX_CONTINENTS nixnum nixty nixstr nixctx nixlist nixattr nixpath nixstore
-                   nixhash nixfmt nixctl)
-set(LLVM_TARGET_DEFINITIONS NixPrims.td)
-foreach(c ${NIX_CONTINENTS})
-  string(SUBSTRING ${c} 0 1 _first)
-  string(TOUPPER ${_first} _first)
-  string(SUBSTRING ${c} 1 -1 _rest)
-  set(D "${_first}${_rest}")
-  mlir_tablegen(${D}Ops.h.inc -gen-op-decls "-op-include-regex=^${c}[.]")
-  mlir_tablegen(${D}Ops.cpp.inc -gen-op-defs "-op-include-regex=^${c}[.]")
-  mlir_tablegen(${D}Dialect.h.inc -gen-dialect-decls -dialect=${c})
-  mlir_tablegen(${D}Dialect.cpp.inc -gen-dialect-defs -dialect=${c})
-endforeach()
-
 add_public_tablegen_target(MLIRNixOpsIncGen)
+
+# The continents' IRDL declaration, embedded in the binary as a raw string
+# literal (NixPrimsIRDL.inc); editing the .irdl.mlir re-runs configure.
+set(NIX_PRIMS_IRDL_FILE ${CMAKE_CURRENT_SOURCE_DIR}/NixPrims.irdl.mlir)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${NIX_PRIMS_IRDL_FILE})
+file(READ ${NIX_PRIMS_IRDL_FILE} NIX_PRIMS_IRDL_TEXT)
+file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/NixPrimsIRDL.inc "R\"IRDL(${NIX_PRIMS_IRDL_TEXT})IRDL\"")

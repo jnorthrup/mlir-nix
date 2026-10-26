@@ -1,20 +1,9 @@
 add_mlir_dialect_library(MLIRNix
   Dialect/NixDialect.cpp
-  Dialect/NixPrims.cpp
-  Dialect/Prims/NixNum.cpp
-  Dialect/Prims/NixTy.cpp
-  Dialect/Prims/NixStr.cpp
-  Dialect/Prims/NixCtx.cpp
-  Dialect/Prims/NixList.cpp
-  Dialect/Prims/NixAttr.cpp
-  Dialect/Prims/NixPath.cpp
-  Dialect/Prims/NixStore.cpp
-  Dialect/Prims/NixHash.cpp
-  Dialect/Prims/NixFmt.cpp
-  Dialect/Prims/NixCtl.cpp
+  Dialect/NixPrimDialects.cpp
   PARTIAL_SOURCES_INTENDED
   DEPENDS MLIRNixOpsIncGen
-  LINK_LIBS PUBLIC MLIRIR MLIRPass MLIRTransforms MLIRTransformUtils MLIRRewrite MLIRSideEffectInterfaces)
+  LINK_LIBS PUBLIC MLIRIR MLIRPass MLIRTransforms MLIRTransformUtils MLIRRewrite MLIRSideEffectInterfaces MLIRIRDL MLIRParser)
 
 add_library(NixStore STATIC Store/Hash.cpp Store/StorePaths.cpp Store/LocalStore.cpp Store/StructuredAttrs.cpp)
 target_link_libraries(NixStore PUBLIC LLVMSupport)

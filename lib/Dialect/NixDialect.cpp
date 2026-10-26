@@ -164,31 +164,6 @@ OpFoldResult StringOp::fold(FoldAdaptor) { return getValueAttr(); }
 OpFoldResult BoolOp::fold(FoldAdaptor) { return getValueAttr(); }
 OpFoldResult NullOp::fold(FoldAdaptor) { return UnitAttr::get(getContext()); }
 
-//===----------------------------------------------------------------------===//
-// Primops (the continent dialects): verification and generic folding
-//===----------------------------------------------------------------------===//
-
-LogicalResult mlir::nix::verifyPrimArity(Operation *op, unsigned arity) {
-  if (op->getNumOperands() != arity)
-    return op->emitOpError("expects ") << arity << " operand(s) but has " << op->getNumOperands();
-  return success();
-}
-
-/// Every foldable primop is folded by the same code: hand the scalar constant
-/// operands to the evaluator's own implementation of the primop.  If the
-/// call throws, nothing is folded and the error stays a runtime error.
-OpFoldResult mlir::nix::foldPrim(Operation *op, StringRef key, ArrayRef<Attribute> args) {
-  auto *core = op->getContext()->getLoadedDialect<NixDialect>();
-  if (!core || !core->primFolder)
-    return {};
-  for (Attribute a : args)
-    if (!a)
-      return {};
-  if (Attribute r = core->primFolder(key, args))
-    return r;
-  return {};
-}
-
 OpFoldResult ConcatStringsOp::fold(FoldAdaptor adaptor) {
   auto ops = adaptor.getParts();
   if (ops.empty())
@@ -224,7 +199,7 @@ namespace {
 
 /// `nix.apply (builtin "__add"|builtins.add|...) a b` -> `nixnum.add(a, b)`:
 /// the call of a known primop becomes an op of its continent dialect, whose
-/// arity, effects and foldability are declared in NixPrims.td.  Calls with too
+/// arity, effects and foldability are declared in NixPrims.irdl.mlir.  Calls with too
 /// few arguments stay partial applications; extra arguments are applied to the
 /// result.
 struct DevirtualizePrimCall : OpRewritePattern<ApplyOp> {
