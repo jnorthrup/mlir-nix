@@ -9,11 +9,12 @@
 #include <sstream>
 
 int main(int argc, char **argv) {
-  if (argc != 2) {
-    std::cerr << "usage: mlnix-parse FILE-LIST\n";
+  bool quiet = argc == 3 && std::string(argv[1]) == "-n"; // time the parse alone: no AST printing
+  if (argc != 2 && !quiet) {
+    std::cerr << "usage: mlnix-parse [-n] FILE-LIST\n";
     return 2;
   }
-  std::ifstream list(argv[1]);
+  std::ifstream list(argv[quiet ? 2 : 1]);
   std::string path;
   size_t files = 0, errors = 0, bytes = 0;
   auto t0 = std::chrono::steady_clock::now();
@@ -30,16 +31,19 @@ int main(int argc, char **argv) {
     nixfe::ParseOptions opts;
     opts.pipeOperators = true;
     opts.home = "/home";
-    std::cout << "=== " << path << "\n";
+    if (!quiet) std::cout << "=== " << path << "\n";
     try {
-      nixfe::showExpr(std::cout, nixfe::parse(arena, origin, opts));
-      std::cout << "\n";
+      nixfe::Expr *e = nixfe::parse(arena, origin, opts);
+      if (!quiet) {
+        nixfe::showExpr(std::cout, e);
+        std::cout << "\n";
+      }
     } catch (const nixfe::ParseError &e) {
       errors++;
-      std::cout << "ERROR " << e.what() << " @" << e.pos.line << ":" << e.pos.col << "\n";
+      if (!quiet) std::cout << "ERROR " << e.what() << " @" << e.pos.line << ":" << e.pos.col << "\n";
     }
     files++;
   }
   double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-  std::cerr << files << " files, " << bytes << " bytes, " << errors << " parse errors, " << s << " s (parse + print)\n";
+  std::cerr << files << " files, " << bytes << " bytes, " << errors << " parse errors, " << s << " s (" << (quiet ? "parse only" : "parse + print") << ")\n";
 }

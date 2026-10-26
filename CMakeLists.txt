@@ -32,6 +32,7 @@ string(REPLACE "-fno-exceptions" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
 string(REPLACE "-fno-rtti" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fexceptions -frtti -Wno-unused-parameter")
 
+add_subdirectory(include/Composite)
 add_subdirectory(include/NixDialect)
 add_subdirectory(lib)
 add_subdirectory(tools)
