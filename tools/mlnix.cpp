@@ -673,6 +673,7 @@ int cmdHash(int argc, char **argv, int start) {
   nixstore::HashFormat fmt = nixstore::HashFormat::Base16;
   bool flat = false, sri = false;
   std::vector<std::string> args;
+  bool algoGiven = false;
   for (int i = start; i < argc; i++) {
     std::string a = argv[i];
     if (a == "--type") {
@@ -680,6 +681,7 @@ int cmdHash(int argc, char **argv, int start) {
       auto t = nixstore::parseHashAlgo(argv[i]);
       if (!t) usage(std::string("unknown hash algorithm '") + argv[i] + "'");
       algo = *t;
+      algoGiven = true;
     } else if (a == "--flat") flat = true;
     else if (a == "--base32" || a == "--nix32") fmt = nixstore::HashFormat::Nix32;
     else if (a == "--base16") fmt = nixstore::HashFormat::Base16;
@@ -694,6 +696,8 @@ int cmdHash(int argc, char **argv, int start) {
   try {
     for (auto &a : args) {
       if (mode.rfind("--to-", 0) == 0) {
+        if (!algoGiven && a.find(':') == std::string::npos && a.find('-') == std::string::npos)
+          throw nixstore::Error("hash '" + a + "' does not include a type, nor is the type otherwise known from context");
         auto h = nixstore::parseHash(a, algo);
         nixstore::HashFormat f = mode == "--to-base16" ? nixstore::HashFormat::Base16
                                  : mode == "--to-base64" ? nixstore::HashFormat::Base64
