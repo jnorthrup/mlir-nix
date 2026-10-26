@@ -201,6 +201,8 @@ struct EvalSettings {
   bool optimize = true;
   unsigned maxCallDepth = 10000;
   bool dumpMLIR = false;
+  nixfe::Lint lintAbsolutePaths = nixfe::Lint::Ignore, lintShortPaths = nixfe::Lint::Ignore,
+              lintUrls = nixfe::Lint::Ignore;
 };
 
 //===----------------------------------------------------------------------===//
@@ -342,6 +344,10 @@ public:
   Value *evalString(const std::string &text, const std::string &baseDir,
                     const std::string &originName = "«string»");
   /// Parse only.
+  nixfe::ParseOptions parseOptions();
+  /// Parse a source text with a fresh origin (kept alive by the state).
+  nixfe::Expr *parseSource(const std::string &text, const std::string &name, const std::string &path,
+                           const std::string &baseDir, std::shared_ptr<nixfe::Origin> *originOut = nullptr);
   nixfe::Expr *parseString(nixfe::ExprArena &arena, const std::string &text, const std::string &baseDir,
                            const std::string &originName);
   mlir::nix::ExprOp lowerToMLIR(nixfe::Expr *e, std::shared_ptr<nixfe::Origin> origin,
@@ -391,7 +397,7 @@ private:
 
 /// Render an error the way Nix does ("error: ..." with source excerpt).
 std::string formatError(EvalState *state, const EvalError &e);
-std::string formatParseError(const nixfe::ParseError &e);
+std::string formatParseError(const nixfe::ParseError &e, const char *kind = "error");
 
 /// Register all builtins (Builtins.cpp).
 void registerBuiltins(EvalState &state);

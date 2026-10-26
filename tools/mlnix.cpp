@@ -148,6 +148,14 @@ bool parseCommon(Options &o, const std::string &arg, int &i, int argc, char **ar
       o.eval.pipeOperators = true;
     else if (n == "system") o.eval.currentSystem = v;
     else if (n == "pure-eval") o.eval.pureEval = v == "true";
+  } else if (arg == "--lint-absolute-path-literals" || arg == "--lint-short-path-literals" || arg == "--lint-url-literals") {
+    std::string v = next();
+    nixfe::Lint l = v == "warn" ? nixfe::Lint::Warn : v == "fatal" ? nixfe::Lint::Fatal : nixfe::Lint::Ignore;
+    if (v != "warn" && v != "fatal" && v != "ignore")
+      usage("option '" + arg.substr(2) + "' has invalid value '" + v + "' (expected 'ignore', 'warn', or 'fatal')");
+    if (arg == "--lint-absolute-path-literals") o.eval.lintAbsolutePaths = l;
+    else if (arg == "--lint-short-path-literals") o.eval.lintShortPaths = l;
+    else o.eval.lintUrls = l;
   } else if (arg == "--system") {
     o.eval.currentSystem = next();
   } else if (arg == "--store-dir") {
@@ -384,12 +392,10 @@ int runEvalCommandIn(Options &o, bool build, EvalState &st, std::shared_ptr<nixs
     origin->baseDir = baseDir;
     origin->text = std::make_shared<std::string>(text);
     st.origins.push_back(origin);
-    nixfe::ParseOptions po;
-    po.pipeOperators = st.settings.pipeOperators;
-    const char *home = getenv("HOME");
-    po.home = home ? home : "/homeless-shelter";
+    nixfe::ParseOptions po = st.parseOptions();
     nixfe::Expr *e = nixfe::parse(*arena, origin, po);
     if (o.parseOnly) {
+      st.lowerToMLIR(e, origin); // static checks (undefined variables), like bindVars
       nixfe::showExpr(std::cout, e);
       std::cout << "\n";
       return nullptr;

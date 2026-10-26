@@ -100,7 +100,8 @@ private:
 
   /// Replace the placeholders of a binding group by their final values.
   SmallVector<Value> finalizeGroup(ArrayRef<Value> phs, ArrayRef<Value> values,
-                                   ArrayRef<Pos> poses) {
+                                   ArrayRef<Pos> poses,
+                                   ArrayRef<SmallVectorImpl<Value> *> remap = {}) {
     SmallVector<Value> finals;
     for (size_t i = 0; i < values.size(); i++) {
       Value v = values[i];
@@ -108,12 +109,34 @@ private:
         v = nd::ApplyOp::create(b, loc(poses[i]), valTy(), v, ValueRange{});
       finals.push_back(v);
     }
+    // Other value lists that may hold placeholders must be remapped before the
+    // placeholders are erased.
+    for (auto *vec : remap)
+      for (Value &v : *vec)
+        for (size_t i = 0; i < phs.size(); i++)
+          if (v == phs[i]) v = finals[i];
     for (size_t i = 0; i < phs.size(); i++) {
       Value ph = phs[i];
       ph.replaceAllUsesWith(finals[i]);
       ph.getDefiningOp()->erase();
     }
     return finals;
+  }
+
+  /// Upstream evaluates `let`/`with` into a fresh value (copying the body's
+  /// value) whereas variable references share the bound value.  Mirror that
+  /// so that value identity (observable via `==` on functions and via
+  /// «repeated» when printing) matches.
+  static bool isShared(const Expr *e) {
+    switch (e->kind) {
+    case ExprKind::Var: return true;
+    case ExprKind::Let: return isShared(static_cast<const ExprLet *>(e)->body);
+    case ExprKind::With: return isShared(static_cast<const ExprWith *>(e)->body);
+    default: return false;
+    }
+  }
+  Value identity(Value v, Pos p) {
+    return nd::ApplyOp::create(b, loc(p), valTy(), v, ValueRange{});
   }
 
   Value builtin(StringRef name) {
@@ -207,12 +230,32 @@ private:
       }
       SmallVector<Value> phv;
       SmallVector<Pos> poses;
+      int ovIdx = -1, idx = 0;
       for (auto &[name, def] : a->attrs) {
         phv.push_back(phs[name]);
         poses.push_back(def.pos);
+        if (name == "__overrides") ovIdx = idx;
+        idx++;
       }
-      auto finals = finalizeGroup(phv, values, poses);
+      // Legacy `__overrides`: attributes of the overrides set replace both the
+      // recursive bindings and the resulting attributes.
+      if (ovIdx >= 0) {
+        Value ov = values[ovIdx];
+        idx = 0;
+        for (auto &[name, def] : a->attrs) {
+          if (idx != ovIdx)
+            values[idx] = nd::SelectOp::create(b, loc(def.pos), valTy(), ov, ValueRange{str(name, def.pos)},
+                                               values[idx]);
+          idx++;
+        }
+      }
+      auto finals = finalizeGroup(phv, values, poses, {&dynNames, &dynValues});
       values.assign(finals.begin(), finals.end());
+      if (ovIdx >= 0) {
+        Value attrs = nd::AttrsOp::create(b, loc(a->pos), valTy(), b.getArrayAttr(names), values, dynNames,
+                                          dynValues, b.getArrayAttr(positions));
+        return nd::UpdateOp::create(b, loc(a->pos), valTy(), attrs, values[ovIdx]);
+      }
     }
     return nd::AttrsOp::create(b, loc(a->pos), valTy(), b.getArrayAttr(names), values,
                                dynNames, dynValues, b.getArrayAttr(positions));
@@ -276,13 +319,18 @@ private:
       }
       SmallVector<Value> defs;
       for (auto &f : l->formals) defs.push_back(f.def ? gen(f.def, &ns) : Value());
+      // Create all formal ops before replacing any placeholder: defaults may
+      // refer to other formals' placeholders.
+      SmallVector<Value> fvs;
       for (size_t i = 0; i < l->formals.size(); i++) {
         auto &f = l->formals[i];
-        Value fv = nd::FormalOp::create(b, loc(f.pos), valTy(), arg,
-                                        b.getStringAttr(f.name), defs[i]);
-        phs[i].replaceAllUsesWith(fv);
+        fvs.push_back(nd::FormalOp::create(b, loc(f.pos), valTy(), arg,
+                                           b.getStringAttr(f.name), defs[i]));
+      }
+      for (size_t i = 0; i < l->formals.size(); i++) {
+        phs[i].replaceAllUsesWith(fvs[i]);
         phs[i].getDefiningOp()->erase();
-        ns.vars[f.name] = fv;
+        ns.vars[l->formals[i].name] = fvs[i];
       }
     }
     Value body = gen(l->body, &ns);
@@ -349,8 +397,10 @@ private:
       for (auto *a : c->args) args.push_back(gen(a, s));
       return nd::ApplyOp::create(b, loc(c->pos), valTy(), f, args);
     }
-    case ExprKind::Let:
-      return genLet(static_cast<const ExprLet *>(e), s);
+    case ExprKind::Let: {
+      Value v = genLet(static_cast<const ExprLet *>(e), s);
+      return isShared(e) ? identity(v, e->pos) : v;
+    }
     case ExprKind::With: {
       auto *w = static_cast<const ExprWith *>(e);
       Value a = gen(w->attrs, s);
@@ -358,7 +408,8 @@ private:
       ns.parent = s;
       ns.isWith = true;
       ns.withValue = a;
-      return gen(w->body, &ns);
+      Value v = gen(w->body, &ns);
+      return isShared(e) ? identity(v, e->pos) : v;
     }
     case ExprKind::If: {
       auto *i = static_cast<const ExprIf *>(e);

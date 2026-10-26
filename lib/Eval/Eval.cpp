@@ -367,6 +367,8 @@ void EvalState::forceValue(Value &v, PosPtr pos) {
 void EvalState::forceValueDeep(Value &v) {
   std::set<const void *> seen;
   std::function<void(Value &)> rec = [&](Value &v) {
+    if (callDepth >= settings.maxCallDepth) throw StackOverflowError("stack overflow; max-call-depth exceeded");
+    DepthGuard g(callDepth);
     forceValue(v);
     if (!seen.insert(&v).second) return;
     if (v.type == VType::Attrs) {
@@ -1231,6 +1233,32 @@ std::string EvalState::printValueForTrace(Value &v) {
 // Parsing, lowering, files
 //===----------------------------------------------------------------------===//
 
+nixfe::ParseOptions EvalState::parseOptions() {
+  nixfe::ParseOptions po;
+  po.pipeOperators = settings.pipeOperators;
+  const char *home = getenv("HOME");
+  po.home = home ? home : "/homeless-shelter";
+  po.lintAbsolutePaths = settings.lintAbsolutePaths;
+  po.lintShortPaths = settings.lintShortPaths;
+  po.lintUrls = settings.lintUrls;
+  po.onWarning = [](const nixfe::ParseError &e) { std::cerr << formatParseError(e, "warning") << std::endl; };
+  return po;
+}
+
+nixfe::Expr *EvalState::parseSource(const std::string &text, const std::string &name, const std::string &path,
+                                    const std::string &baseDir, std::shared_ptr<nixfe::Origin> *originOut) {
+  auto *arena = new nixfe::ExprArena();
+  arenas.push_back(arena);
+  auto origin = std::make_shared<nixfe::Origin>();
+  origin->name = name;
+  origin->path = path;
+  origin->baseDir = baseDir;
+  origin->text = std::make_shared<std::string>(text);
+  origins.push_back(origin);
+  if (originOut) *originOut = origin;
+  return nixfe::parse(*arena, origin, parseOptions());
+}
+
 nixfe::Expr *EvalState::parseString(nixfe::ExprArena &arena, const std::string &text, const std::string &baseDir,
                                     const std::string &originName) {
   auto origin = std::make_shared<nixfe::Origin>();
@@ -1238,10 +1266,7 @@ nixfe::Expr *EvalState::parseString(nixfe::ExprArena &arena, const std::string &
   origin->baseDir = baseDir;
   origin->text = std::make_shared<std::string>(text);
   origins.push_back(origin);
-  nixfe::ParseOptions po;
-  po.pipeOperators = settings.pipeOperators;
-  const char *home = getenv("HOME");
-  po.home = home ? home : "/homeless-shelter";
+  nixfe::ParseOptions po = parseOptions();
   return nixfe::parse(arena, origin, po);
 }
 
@@ -1270,7 +1295,82 @@ Value *EvalState::evalExprOp(nd::ExprOp op) {
   return lookup(f, ri->result);
 }
 
+static const char *corepkgsFetchurl = R"NIX({
+  system ? "", # obsolete
+  url,
+  hash ? "", # an SRI hash
+
+  # Legacy hash specification
+  md5 ? "",
+  sha1 ? "",
+  sha256 ? "",
+  sha512 ? "",
+  outputHash ?
+    if hash != "" then
+      hash
+    else if sha512 != "" then
+      sha512
+    else if sha1 != "" then
+      sha1
+    else if md5 != "" then
+      md5
+    else
+      sha256,
+  outputHashAlgo ?
+    if hash != "" then
+      ""
+    else if sha512 != "" then
+      "sha512"
+    else if sha1 != "" then
+      "sha1"
+    else if md5 != "" then
+      "md5"
+    else
+      "sha256",
+
+  executable ? false,
+  unpack ? false,
+  name ? baseNameOf (toString url),
+  impure ? false,
+}:
+
+derivation (
+  {
+    builder = "builtin:fetchurl";
+
+    # New-style output content requirements.
+    outputHashMode = if unpack || executable then "recursive" else "flat";
+
+    inherit
+      name
+      url
+      executable
+      unpack
+      ;
+
+    system = "builtin";
+
+    # No need to double the amount of network traffic
+    preferLocalBuild = true;
+
+    # This attribute does nothing; it's here to avoid changing evaluation results.
+    impureEnvVars = [
+      "http_proxy"
+      "https_proxy"
+      "ftp_proxy"
+      "all_proxy"
+      "no_proxy"
+    ];
+
+    # To make "nix-prefetch-url" work.
+    urls = [ url ];
+  }
+  // (if impure then { __impure = true; } else { inherit outputHashAlgo outputHash; })
+)
+)NIX";
+
 static std::string readSource(const std::string &path) {
+  if (path == "/__corepkgs__/fetchurl.nix") return corepkgsFetchurl;
   try {
     return nixstore::readFile(path);
   } catch (nixstore::Error &e) {
@@ -1279,6 +1379,7 @@ static std::string readSource(const std::string &path) {
 }
 
 std::string EvalState::resolveExprPath(std::string path) {
+  if (path.rfind("/__corepkgs__/", 0) == 0) return path;
   // Follow symlinks (to the final target), then use default.nix for dirs.
   for (int i = 0; i < 1024; i++) {
     struct stat st;
@@ -1322,10 +1423,7 @@ Value *EvalState::evalFile(const std::string &pathIn) {
     origin->baseDir = nixstore::dirOf(logical);
     origin->text = std::make_shared<std::string>(text);
     origins.push_back(origin);
-    nixfe::ParseOptions po;
-    po.pipeOperators = settings.pipeOperators;
-    const char *home = getenv("HOME");
-    po.home = home ? home : "/homeless-shelter";
+    nixfe::ParseOptions po = parseOptions();
     nixfe::Expr *e = nixfe::parse(*arena, origin, po);
     nd::ExprOp op = lowerToMLIR(e, origin);
     result = evalExprOp(op);
@@ -1343,10 +1441,7 @@ Value *EvalState::evalString(const std::string &text, const std::string &baseDir
   origin->baseDir = baseDir;
   origin->text = std::make_shared<std::string>(text);
   origins.push_back(origin);
-  nixfe::ParseOptions po;
-  po.pipeOperators = settings.pipeOperators;
-  const char *home = getenv("HOME");
-  po.home = home ? home : "/homeless-shelter";
+  nixfe::ParseOptions po = parseOptions();
   nixfe::Expr *e = nixfe::parse(*arena, origin, po);
   nd::ExprOp op = lowerToMLIR(e, origin);
   return evalExprOp(op);
@@ -1372,16 +1467,10 @@ Value *EvalState::evalMLIRFile(const std::string &path, const std::string &sym) 
 }
 
 std::string EvalState::realisePath(const std::string &path, PosPtr pos) {
+  // Store paths are realised through string context (realiseContext); here we
+  // only map logical store paths to their physical location.
   const std::string &sd = store->storeDir();
-  if (nixstore::isInStore(sd, path)) {
-    std::string sp = nixstore::toStorePath(sd, path);
-    if (!store->isValidPath(sp)) {
-      // Import from derivation: find a derivation that produces it.
-      NixStringContext c{sp};
-      realiseContext(c, pos);
-    }
-    return store->toReal(path);
-  }
+  if (path == sd || path == sd + "/" || nixstore::isInStore(sd, path)) return store->toReal(path);
   return path;
 }
 
@@ -1423,19 +1512,16 @@ std::string EvalState::findFile(Value &searchPath, std::string_view name, PosPtr
     } else {
       rest = "/" + std::string(name);
     }
-    if (p.find("://") != std::string::npos) {
-      // URL entries (tarballs): fetch lazily.
-      std::string out;
-      int rc = nixstore::runProgram("sh", {"-c", "true"}, &out);
-      (void)rc;
-      continue;
-    }
+    if (p.find("://") != std::string::npos) continue; // URL entries are not fetched implicitly
     std::string full = nixfe::canonPath(p + rest);
     if (nixstore::pathExists(realisePath(full, pos))) return full;
   }
-  throw EvalError("file '" + std::string(name) +
-                      "' was not found in the Nix search path (add it using $NIX_PATH or -I)",
-                  pos);
+  if (name.substr(0, 4) == "nix/") return "/__corepkgs__" + std::string(name.substr(3));
+  if (settings.pureEval)
+    throw ThrownError("cannot look up '<" + std::string(name) + ">' in pure evaluation mode (use '--impure' to override)", pos);
+  throw ThrownError("file '" + std::string(name) +
+                        "' was not found in the Nix search path (add it using $NIX_PATH or -I)",
+                    pos);
 }
 
 //===----------------------------------------------------------------------===//
@@ -1447,7 +1533,8 @@ static std::string chomp(std::string s) {
   return s;
 }
 
-static void appendCodeLines(std::string &out, const std::string &text, unsigned line, unsigned col) {
+static void appendCodeLines(std::string &out, const std::string &text, unsigned line, unsigned col,
+                            unsigned indent = 7) {
   std::vector<std::string> lines;
   size_t start = 0;
   while (true) {
@@ -1462,12 +1549,12 @@ static void appendCodeLines(std::string &out, const std::string &text, unsigned 
   auto fmtLine = [&](unsigned n) {
     char buf[16];
     snprintf(buf, sizeof buf, "%5u", n);
-    return chomp(std::string("        ") + buf + "| " + lines[n - 1]);
+    return chomp(std::string(indent + 1, ' ') + buf + "| " + lines[n - 1]);
   };
   if (line >= 2 && line - 1 <= lines.size()) out += "\n" + fmtLine(line - 1);
   if (line >= 1 && line <= lines.size()) {
     out += "\n" + fmtLine(line);
-    if (col > 0) out += "\n" + std::string(7, ' ') + "      |" + std::string(col, ' ') + "^";
+    if (col > 0) out += "\n" + std::string(indent, ' ') + "      |" + std::string(col, ' ') + "^";
   }
   if (line + 1 <= lines.size()) out += "\n" + fmtLine(line + 1);
 }
@@ -1517,11 +1604,13 @@ std::string formatError(EvalState *state, const EvalError &e) {
   return res;
 }
 
-std::string formatParseError(const nixfe::ParseError &e) {
-  std::string res = "error: " + std::string(e.what());
+std::string formatParseError(const nixfe::ParseError &e, const char *kind) {
+  unsigned indent = strlen(kind) + 2;
+  std::string res = std::string(kind) + ": " + std::string(e.what());
   if (e.pos.valid() && e.origin) {
-    res += "\n       at " + e.origin->name + ":" + std::to_string(e.pos.line) + ":" + std::to_string(e.pos.col) + ":";
-    if (e.origin->text) appendCodeLines(res, *e.origin->text, e.pos.line, e.pos.col);
+    res += "\n" + std::string(indent, ' ') + "at " + e.origin->name + ":" + std::to_string(e.pos.line) + ":" +
+           std::to_string(e.pos.col) + ":";
+    if (e.origin->text) appendCodeLines(res, *e.origin->text, e.pos.line, e.pos.col, indent);
   }
   return res;
 }

@@ -39,6 +39,11 @@ Store::Store(StoreSettings s) : settings(std::move(s)) {
   }
   if (!settings.cores) settings.cores = std::max(1u, std::thread::hardware_concurrency());
   log = [](const std::string &m) { std::cerr << m << "\n"; };
+  try {
+    createDirs(toReal(settings.storeDir));
+  } catch (Error &) {
+    // Not creatable (e.g. /nix/store on a read-only root): fine for evaluation.
+  }
 }
 
 std::string Store::toReal(const std::string &logical) const {

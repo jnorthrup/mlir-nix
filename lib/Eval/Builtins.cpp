@@ -369,7 +369,12 @@ void registerBuiltins(EvalState &state) {
     int64_t len = st.forceInt(*args[1], pos, "while evaluating the second argument (the substring length) passed to builtins.substring");
     if (len == 0) {
       st.forceValue(*args[2], pos);
-      if (args[2]->type == VType::String) { st.mkString(v, ""); return; }
+      if (args[2]->type == VType::String) {
+        NixStringContext c;
+        st.copyContext(*args[2], c);
+        st.mkString(v, "", c);
+        return;
+      }
     }
     NixStringContext ctx;
     auto s = st.coerceToString(*args[2], ctx, false, true, pos, "while evaluating the third argument (the string) passed to builtins.substring");
@@ -1046,10 +1051,7 @@ void registerBuiltins(EvalState &state) {
       origin->baseDir = nixstore::dirOf(real);
       origin->text = std::make_shared<std::string>(text);
       st.origins.push_back(origin);
-      nixfe::ParseOptions po;
-      po.pipeOperators = st.settings.pipeOperators;
-      const char *home = getenv("HOME");
-      po.home = home ? home : "/homeless-shelter";
+      nixfe::ParseOptions po = st.parseOptions();
       nixfe::Expr *e = nixfe::parse(*arena, origin, po);
       auto op = st.lowerToMLIR(e, origin, &names);
       fn = st.evalExprOp(op);

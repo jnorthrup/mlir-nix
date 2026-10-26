@@ -43,7 +43,9 @@ def main():
     mlnix = os.path.abspath(args.mlnix)
     pwd = TESTDIR
     env = dict(os.environ)
-    env.update({"TEST_VAR": "foo", "NIX_REMOTE": "dummy://", "NIX_STORE_DIR": "/nix/store"})
+    env.update({"TEST_VAR": "foo", "NIX_REMOTE": "dummy://", "NIX_STORE_DIR": "/nix/store",
+                # Physical location of the (chroot) store; HOME is faked below.
+                "MLNIX_STORE_ROOT": os.path.join(tmp, "root"), "MLNIX_STATE_DIR": os.path.join(tmp, "state")})
     env.pop("NIX_PATH", None)
     instantiate = [mlnix, "instantiate"]
 
@@ -76,7 +78,7 @@ def main():
         out = out.replace(pwd, "/pwd")
         exp = read(os.path.join(TESTDIR, "lang", name + ".exp"))
         sem = rc == 0 and out == exp
-        detail = err if rc != 0 else "".join(difflib.unified_diff((exp or "").splitlines(1), out.splitlines(1), "expected", "got"))
+        detail = err if rc != 0 else "".join(difflib.unified_diff((exp or "").splitlines(True), out.splitlines(True), "expected", "got"))
         record("parse-okay", name, sem, sem, detail)
 
     for name in names("eval-fail-"):
@@ -101,7 +103,7 @@ def main():
             rc, out, err = run(instantiate + ["--eval", "--xml", "--no-location", "--strict", "lang/" + name + ".nix"], env=e2)
             exp = read(base + ".exp.xml")
             sem = rc == 0 and out == exp
-            detail = err if rc != 0 else "".join(difflib.unified_diff((exp or "").splitlines(1), out.splitlines(1), "expected", "got"))
+            detail = err if rc != 0 else "".join(difflib.unified_diff((exp or "").splitlines(True), out.splitlines(True), "expected", "got"))
             record("eval-okay", name, sem, sem, detail)
             continue
         if os.path.exists(base + ".exp-disabled"):
@@ -120,7 +122,7 @@ def main():
         exp = read(base + ".exp")
         experr = read(base + ".err.exp") or ""
         sem = rc == 0 and out == exp
-        detail = err if rc != 0 else "".join(difflib.unified_diff((exp or "").splitlines(1), (out or "").splitlines(1), "expected", "got"))
+        detail = err if rc != 0 else "".join(difflib.unified_diff((exp or "").splitlines(True), (out or "").splitlines(True), "expected", "got"))
         record("eval-okay", name, sem, sem and err == experr, detail)
 
     shutil.rmtree(tmp, ignore_errors=True)

@@ -7,6 +7,9 @@
 #include <cmath>
 #include <cstring>
 #include <map>
+#include <set>
+#include <unistd.h>
+#include <climits>
 #include <sstream>
 
 using namespace mlir;
@@ -21,14 +24,50 @@ static std::string str(std::string_view s) { return std::string(s); }
 // JSON output
 //===----------------------------------------------------------------------===//
 
+static void checkUTF8(std::string_view s) {
+  size_t i = 0;
+  while (i < s.size()) {
+    unsigned char c = s[i];
+    size_t n = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 0;
+    bool ok = n != 0 && i + n <= s.size();
+    for (size_t k = 1; ok && k < n; k++) ok = ((unsigned char)s[i + k] >> 6) == 2;
+    if (!ok) {
+      size_t bad = i;
+      if (n > 1)
+        for (size_t k = 1; k < n && i + k < s.size(); k++)
+          if (((unsigned char)s[i + k] >> 6) != 2) { bad = i + k; break; }
+      char buf[160];
+      snprintf(buf, sizeof buf, "JSON serialization error: [json.exception.type_error.316] invalid UTF-8 byte at index %zu: 0x%02X",
+               bad, (unsigned char)s[bad]);
+      throw EvalError(buf);
+    }
+    i += n;
+  }
+}
+
+namespace {
+struct CallDepth {
+  unsigned &d;
+  CallDepth(EvalState &st, PosPtr pos) : d(st.callDepth) {
+    if (++d > st.settings.maxCallDepth) {
+      --d;
+      throw StackOverflowError("stack overflow; max-call-depth exceeded", pos);
+    }
+  }
+  ~CallDepth() { --d; }
+};
+} // namespace
+
 void EvalState::printValueAsJSON(std::ostream &out, Value &v, bool strict, NixStringContext &ctx, bool copyToStore,
                                  PosPtr pos) {
+  CallDepth guard(*this, pos);
   if (strict) forceValue(v, pos);
   switch (v.type) {
   case VType::Int: out << v.integer; break;
   case VType::Bool: out << (v.boolean ? "true" : "false"); break;
   case VType::String:
     copyContext(v, ctx);
+    checkUTF8(v.sv());
     out << nixstore::jsonEscape(v.sv());
     break;
   case VType::Path:
@@ -119,6 +158,24 @@ struct JSONParser {
     return v;
   }
   std::string string() {
+    std::string r = stringRaw();
+    if (r.find('\0') != std::string::npos) {
+      std::string shown;
+      for (char c : r) {
+        if (c == '\0') shown += "\u2400";
+        else shown += c;
+      }
+      // U+2400 SYMBOL FOR NULL, as UTF-8.
+      std::string out2;
+      for (size_t i = 0; i < shown.size(); i++) {
+        if (shown.compare(i, 6, "\u2400") == 0) { out2 += "\xe2\x90\x80"; i += 5; }
+        else out2 += shown[i];
+      }
+      throw EvalError("input string '" + out2 + "' cannot be represented as Nix string because it contains null bytes");
+    }
+    return r;
+  }
+  std::string stringRaw() {
     p++; // "
     std::string out;
     while (true) {
@@ -371,7 +428,8 @@ void toXML(EvalState &st, XMLWriter &doc, Value &v, bool strict, bool location, 
       if (lam.getEllipsis()) pa["ellipsis"] = "1";
       doc.open("attrspat", pa);
       std::vector<std::string> names;
-      for (Attribute f : *lam.getFormals()) names.push_back(cast<StringAttr>(f).getValue().str());
+      ArrayAttr formals = *lam.getFormals();
+      for (Attribute f : formals) names.push_back(cast<StringAttr>(f).getValue().str());
       std::sort(names.begin(), names.end());
       for (auto &n : names) doc.empty("attr", {{"name", n}});
       doc.close();
@@ -854,8 +912,219 @@ void parseTOML(EvalState &state, std::string_view toml, Value &v) {
 
 bool tomlTimestamps = false;
 
+//===----------------------------------------------------------------------===//
+// Flake references (parseFlakeRef / flakeRefToString)
+//===----------------------------------------------------------------------===//
+
+static std::string percentDecode(std::string_view s) {
+  std::string r;
+  for (size_t i = 0; i < s.size(); i++) {
+    if (s[i] == '%' && i + 2 < s.size() && isxdigit((unsigned char)s[i + 1]) && isxdigit((unsigned char)s[i + 2])) {
+      r += char(std::stoi(std::string(s.substr(i + 1, 2)), nullptr, 16));
+      i += 2;
+    } else r += s[i];
+  }
+  return r;
+}
+
+static std::string percentEncode(std::string_view s, const char *keep = "-._~/:@!$'()*+,;=") {
+  std::string r;
+  for (unsigned char c : s) {
+    if (isalnum(c) || strchr(keep, c)) r += char(c);
+    else {
+      char buf[4];
+      snprintf(buf, sizeof buf, "%%%02X", c);
+      r += buf;
+    }
+  }
+  return r;
+}
+
+static std::map<std::string, std::string> parseQuery(std::string_view q) {
+  std::map<std::string, std::string> m;
+  size_t i = 0;
+  while (i < q.size()) {
+    size_t amp = q.find('&', i);
+    if (amp == std::string_view::npos) amp = q.size();
+    auto kv = q.substr(i, amp - i);
+    auto eq = kv.find('=');
+    if (eq != std::string_view::npos) m[percentDecode(kv.substr(0, eq))] = percentDecode(kv.substr(eq + 1));
+    else if (!kv.empty()) m[percentDecode(kv)] = "";
+    i = amp + 1;
+  }
+  return m;
+}
+
+static bool isHexRev(std::string_view s) {
+  if (s.size() != 40) return false;
+  for (char c : s)
+    if (!isxdigit((unsigned char)c)) return false;
+  return true;
+}
+
+static void putFlakeAttr(EvalState &st, EvalState::BindingsBuilder &bb, const std::string &k, const std::string &v) {
+  static const std::set<std::string> ints = {"revCount", "lastModified"};
+  static const std::set<std::string> bools = {"submodules", "shallow", "allRefs", "exportIgnore", "lfs", "verifyCommit"};
+  Value &x = bb.alloc(k);
+  if (ints.count(k)) st.mkInt(x, atoll(v.c_str()));
+  else if (bools.count(k)) st.mkBool(x, v == "1" || v == "true");
+  else st.mkString(x, v);
+}
+
+static void parseFlakeRef(EvalState &st, std::string_view ref, Value &v, PosPtr pos) {
+  std::string s(ref);
+  std::string query;
+  if (auto q = s.find('?'); q != std::string::npos) {
+    query = s.substr(q + 1);
+    s = s.substr(0, q);
+  }
+  if (auto h = s.find('#'); h != std::string::npos) s = s.substr(0, h);
+  auto params = parseQuery(query);
+  EvalState::BindingsBuilder bb(st);
+  auto colon = s.find(':');
+  std::string scheme = colon == std::string::npos ? "" : s.substr(0, colon);
+  if (scheme == "github" || scheme == "gitlab" || scheme == "sourcehut") {
+    std::string rest = s.substr(colon + 1);
+    std::vector<std::string> parts;
+    size_t i = 0;
+    while (true) {
+      size_t sl = rest.find('/', i);
+      parts.push_back(percentDecode(rest.substr(i, sl == std::string::npos ? std::string::npos : sl - i)));
+      if (sl == std::string::npos) break;
+      i = sl + 1;
+    }
+    if (parts.size() < 2 || parts.size() > 3)
+      throw EvalError("'" + std::string(ref) + "' is not a valid URL", pos);
+    st.mkString(bb.alloc("type"), scheme);
+    st.mkString(bb.alloc("owner"), parts[0]);
+    st.mkString(bb.alloc("repo"), parts[1]);
+    if (parts.size() == 3) {
+      if (isHexRev(parts[2])) params["rev"] = parts[2];
+      else params["ref"] = parts[2];
+    }
+    for (auto &[k, val] : params) putFlakeAttr(st, bb, k, val);
+  } else if (scheme == "path" || (scheme.empty() && (s[0] == '/' || s[0] == '.'))) {
+    st.mkString(bb.alloc("type"), "path");
+    std::string p = scheme.empty() ? s : s.substr(colon + 1);
+    if (!p.empty() && p[0] != '/') {
+      char buf[PATH_MAX];
+      p = nixfe::canonPath(std::string(getcwd(buf, sizeof buf) ? buf : "/") + "/" + p);
+    }
+    st.mkString(bb.alloc("path"), percentDecode(p));
+    for (auto &[k, val] : params) putFlakeAttr(st, bb, k, val);
+  } else if (scheme.rfind("git+", 0) == 0 || scheme.rfind("hg+", 0) == 0 || scheme.rfind("tarball+", 0) == 0 ||
+             scheme.rfind("file+", 0) == 0) {
+    auto plus = scheme.find('+');
+    std::string type = scheme.substr(0, plus);
+    st.mkString(bb.alloc("type"), type == "hg" ? "mercurial" : type);
+    std::string url = s.substr(plus + 1);
+    std::map<std::string, std::string> keep;
+    for (auto &[k, val] : params) {
+      static const std::set<std::string> attrs = {"ref", "rev", "dir", "narHash", "revCount", "lastModified",
+                                                  "submodules", "shallow", "allRefs", "exportIgnore", "lfs"};
+      if (attrs.count(k)) putFlakeAttr(st, bb, k, val);
+      else keep[k] = val;
+    }
+    if (!keep.empty()) {
+      url += "?";
+      bool first = true;
+      for (auto &[k, val] : keep) { url += (first ? "" : "&") + k + "=" + val; first = false; }
+    }
+    st.mkString(bb.alloc("url"), url);
+  } else if (scheme == "http" || scheme == "https" || scheme == "file") {
+    static const char *exts[] = {".zip", ".tar", ".tgz", ".tar.gz", ".tar.xz", ".tar.bz2", ".tar.zst"};
+    bool tarball = false;
+    for (auto *e : exts)
+      if (s.size() >= strlen(e) && s.substr(s.size() - strlen(e)) == e) tarball = true;
+    st.mkString(bb.alloc("type"), tarball ? "tarball" : "file");
+    std::string url = s;
+    if (!query.empty()) url += "?" + query;
+    st.mkString(bb.alloc("url"), url);
+  } else {
+    // Indirect: [flake:]id[/ref-or-rev]
+    std::string rest = scheme == "flake" ? s.substr(colon + 1) : s;
+    auto sl = rest.find('/');
+    st.mkString(bb.alloc("type"), "indirect");
+    st.mkString(bb.alloc("id"), rest.substr(0, sl));
+    if (sl != std::string::npos) {
+      std::string r = rest.substr(sl + 1);
+      if (isHexRev(r)) params["rev"] = r;
+      else params["ref"] = r;
+    }
+    for (auto &[k, val] : params) putFlakeAttr(st, bb, k, val);
+  }
+  st.mkAttrs(v, bb.finish());
+}
+
+static void flakeRefToString(EvalState &st, Value &arg, Value &v, PosPtr pos) {
+  st.forceAttrs(arg, pos, "while evaluating the argument passed to builtins.flakeRefToString");
+  std::map<std::string, std::string> m;
+  for (auto &a : *arg.attrs) {
+    st.forceValue(*a.value, pos);
+    std::string k = st.symbols[a.name].str();
+    switch (a.value->type) {
+    case VType::String: m[k] = std::string(a.value->sv()); break;
+    case VType::Int:
+      if (a.value->integer < 0)
+        throw EvalError("negative value given for flake ref attr " + k + ": " + std::to_string(a.value->integer), pos);
+      m[k] = std::to_string(a.value->integer);
+      break;
+    case VType::Bool: m[k] = a.value->boolean ? "1" : "0"; break;
+    default:
+      throw EvalError("flake reference attribute sets may only contain integers, Booleans, and strings, but attribute '" +
+                          k + "' is " + EvalState::showType(*a.value),
+                      pos);
+    }
+  }
+  auto take = [&](const std::string &k) {
+    auto it = m.find(k);
+    if (it == m.end()) return std::string();
+    std::string r = it->second;
+    m.erase(it);
+    return r;
+  };
+  std::string type = take("type");
+  if (type.empty()) throw EvalError("attribute 'type' is missing in call to 'fetchTree'", pos);
+  std::string res;
+  if (type == "github" || type == "gitlab" || type == "sourcehut") {
+    std::string owner = take("owner"), repo = take("repo"), rev = take("rev"), ref = take("ref");
+    res = type + ":" + percentEncode(owner) + "/" + percentEncode(repo);
+    if (!rev.empty()) res += "/" + rev;
+    else if (!ref.empty()) res += "/" + percentEncode(ref);
+  } else if (type == "path") {
+    res = "path:" + percentEncode(take("path"));
+  } else if (type == "git" || type == "mercurial" || type == "tarball" || type == "file") {
+    std::string url = take("url");
+    std::string prefix = type == "mercurial" ? "hg" : type;
+    res = prefix + "+" + url;
+  } else if (type == "indirect") {
+    res = "flake:" + take("id");
+    std::string rev = take("rev"), ref = take("ref");
+    if (!ref.empty()) res += "/" + ref;
+    if (!rev.empty()) res += "/" + rev;
+  } else {
+    throw EvalError("unsupported flake reference type '" + type + "'", pos);
+  }
+  if (!m.empty()) {
+    res += "?";
+    bool first = true;
+    for (auto &[k, val] : m) {
+      res += (first ? "" : "&") + percentEncode(k, "-._~") + "=" + percentEncode(val, "-._~/:");
+      first = false;
+    }
+  }
+  st.mkString(v, res);
+}
+
 void registerFormatBuiltins(EvalState &state) {
   auto &S = state;
+  S.addPrimOp("__parseFlakeRef", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
+    auto s = st.forceStringNoCtx(*args[0], pos, "while evaluating the argument passed to builtins.parseFlakeRef");
+    parseFlakeRef(st, s, v, pos);
+  });
+  S.addPrimOp("__flakeRefToString", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
+    flakeRefToString(st, *args[0], v, pos);
+  });
   S.addPrimOp("__toJSON", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
     std::ostringstream os;
     NixStringContext ctx;

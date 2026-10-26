@@ -976,6 +976,8 @@ private:
       take();
       Expr *e = parseExpr();
       expectChar('}');
+      // `${"string"}` is treated as a static attribute name (NixOS/nix#14642).
+      if (e->kind == ExprKind::String) return AttrName(static_cast<ExprString *>(e)->v);
       return AttrName(e);
     }
     Pos pos = cur().pos;
@@ -1079,6 +1081,9 @@ private:
                                  std::vector<Expr *>{var("__nixPath"), arena.add<ExprString>(path)});
     }
     case T_URI: {
+      diagnose(opts.lintUrls, "lint-url-literals",
+               std::string("URL literals are ") + (opts.lintUrls == Lint::Fatal ? "disallowed" : "discouraged") +
+                   ". Consider using a string literal \"" + t.s + "\" instead", pos);
       auto *e = arena.add<ExprString>(take().s);
       e->pos = pos;
       return e;
@@ -1138,8 +1143,27 @@ private:
     }
   }
 
+  void diagnose(Lint setting, const char *name, std::string msg, Pos p) {
+    if (setting == Lint::Ignore) return;
+    msg += std::string(" (") + name + ")";
+    ParseError e(msg, p, origin);
+    if (setting == Lint::Fatal) throw e;
+    if (opts.onWarning) opts.onWarning(e);
+  }
+
   Expr *makePath(const Token &t) {
     std::string lit = t.s;
+    if (t.t == T_HPATH)
+      diagnose(opts.lintAbsolutePaths, "lint-absolute-path-literals",
+               "home path literals are not portable. Consider replacing path literal '" + lit +
+                   "' by a string, relative path, or parameter", t.pos);
+    else if (lit[0] == '/')
+      diagnose(opts.lintAbsolutePaths, "lint-absolute-path-literals",
+               "absolute path literals are not portable. Consider replacing path literal '" + lit +
+                   "' by a string, relative path, or parameter", t.pos);
+    else if (lit[0] != '.')
+      diagnose(opts.lintShortPaths, "lint-short-path-literals",
+               "relative path literal '" + lit + "' should be prefixed with '.' for clarity: './" + lit + "'", t.pos);
     if (t.t == T_HPATH) {
       std::string path = opts.home + lit.substr(1);
       return arena.add<ExprPath>(path);

@@ -526,7 +526,11 @@ void registerStoreBuiltins(EvalState &state) {
   S.addPrimOp("__pathExists", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceValue(*args[0], pos);
     NixStringContext ctx;
-    bool mustBeDir = args[0]->type == VType::String && !args[0]->sv().empty() && args[0]->sv().back() == '/';
+    bool mustBeDir = false;
+    if (args[0]->type == VType::String) {
+      auto sv = args[0]->sv();
+      mustBeDir = (sv.size() >= 1 && sv.back() == '/') || (sv.size() >= 2 && sv.substr(sv.size() - 2) == "/.");
+    }
     std::string p = st.coerceToPath(*args[0], ctx, pos, "while realising the context of a path");
     try {
       st.realiseContext(ctx, pos);

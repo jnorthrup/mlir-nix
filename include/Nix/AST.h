@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -186,8 +187,13 @@ struct ExprArena {
   }
 };
 
+enum class Lint { Ignore, Warn, Fatal };
+
 struct ParseOptions {
   bool pipeOperators = false;
+  Lint lintAbsolutePaths = Lint::Ignore, lintShortPaths = Lint::Ignore, lintUrls = Lint::Ignore;
+  /// Receives lint warnings (formatted by the caller).
+  std::function<void(const ParseError &)> onWarning;
   std::string home;                     // for ~/ paths
   std::vector<std::string> *warnings = nullptr;
 };
