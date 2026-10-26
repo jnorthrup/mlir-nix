@@ -58,27 +58,16 @@ void loadNixDialects(MLIRContext &ctx);
 
 /// Define the continent dialects at run time from NixPrims.irdl.mlir (IRDL),
 /// attach their effects and assembly, and fill the core dialect's primop
-/// table.  Called by the dialect extension that `registerNixDialects` installs
-/// when `MLNIX_CONTINENTS=irdl`.
+/// table.  Called by the dialect extension that `registerNixDialects` installs.
 LogicalResult loadPrimDialects(MLIRContext *ctx, NixDialect &core);
 
-/// Which stages of the nix pipeline to run (all are cheap walks except `fold`,
-/// which drives the greedy rewriter).
-struct SimplifyOptions {
-  /// Rewrite saturated calls of known primops into continent-dialect ops.
-  bool devirtualize = true;
-  /// Constant-fold (generic: every foldable primop) with the greedy driver.
-  bool fold = false;
-  /// Remove unreferenced bindings, including dead recursive cycles.
-  bool dce = false;
-};
-
+/// Registers the passes `nix-prims` (devirtualize primop calls into continent ops),
+/// `nix-fold` (canonicalize + constant-fold with the declared primops) and `nix-dce`
+/// (drop unreferenced bindings, including dead recursive cycles), and the pipeline
+/// `nix-simplify` = all three.  They run on any op: the evaluator hands them a
+/// `nix.expr`, mlnix-opt a module.
 void registerNixPasses();
-std::unique_ptr<Pass> createNixSimplifyPass();
-std::unique_ptr<Pass> createNixPrimsPass();
 
-/// Run the selected stages below `root` (an ExprOp or a ModuleOp).
-void simplifyExpr(Operation *root, SimplifyOptions options = {});
 /// `nix.apply (builtin|builtins.X) args` -> continent op (single walk).
 void devirtualizePrims(Operation *root);
 } // namespace mlir::nix

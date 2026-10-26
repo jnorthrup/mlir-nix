@@ -24,6 +24,8 @@
 #include "llvm/ADT/StringMap.h"
 #include "llvm/Support/Allocator.h"
 
+namespace mlir { class PassManager; }
+
 #include <functional>
 #include <map>
 #include <memory>
@@ -199,10 +201,13 @@ struct EvalSettings {
   bool showTrace = false;
   bool pipeOperators = false;
   bool optimize = true;
-  /// Comma-separated stages of the nix pipeline: devirt, fold, dce (or none).
-  /// See mlir::nix::SimplifyOptions.  `fold` and `dce` cost more than they
-  /// save on real workloads (measured), so only `devirt` is on by default.
-  std::string passes = "devirt";
+  /// MLIR pass pipeline (text, a comma-separated list: no `op(...)` wrapper, which
+  /// would nest it under child ops) run on every lowered expression; any
+  /// registered pass can be named (nix-prims, nix-fold, nix-dce, nix-simplify,
+  /// cse, canonicalize, sccp, ...).  MLNIX_PIPELINE overrides it.  `nix-fold` and
+  /// `nix-dce` cost more than they save on real workloads (measured), so only
+  /// devirtualization is on by default.
+  std::string pipeline = "nix-prims";
   unsigned maxCallDepth = 10000;
   bool dumpMLIR = false;
   nixfe::Lint lintAbsolutePaths = nixfe::Lint::Ignore, lintShortPaths = nixfe::Lint::Ignore,
@@ -223,6 +228,8 @@ public:
   SymbolTable symbols;
   mlir::MLIRContext ctx;
   mlir::OwningOpRef<mlir::ModuleOp> module;
+  /// The optimization pipeline (text: settings.pipeline / MLNIX_PIPELINE), built on first use.
+  std::unique_ptr<mlir::PassManager> optimizer;
   llvm::BumpPtrAllocator alloc;
 
   // Frequently used symbols.

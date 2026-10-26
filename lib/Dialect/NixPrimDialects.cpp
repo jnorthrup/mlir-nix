@@ -52,24 +52,27 @@ struct PrimEffects : public MemoryEffectOpInterface::FallbackModel<PrimEffects> 
     const NixDialect::PrimInfo *info = core->primOf(op);
     switch (info ? info->fx : NixDialect::PrimFx::User) {
     case NixDialect::PrimFx::Pure:
-      return;
+      break;
     case NixDialect::PrimFx::User:
       effects.emplace_back(MemoryEffects::Write::get(), NixTraceResource::get());
-      return;
+      break;
     case NixDialect::PrimFx::FS:
       effects.emplace_back(MemoryEffects::Read::get(), NixFSResource::get());
-      return;
+      break;
     case NixDialect::PrimFx::Env:
       effects.emplace_back(MemoryEffects::Read::get(), NixEnvResource::get());
-      return;
+      break;
     case NixDialect::PrimFx::Store:
       effects.emplace_back(MemoryEffects::Write::get(), NixStoreResource::get());
-      return;
+      break;
     case NixDialect::PrimFx::Import:
       effects.emplace_back(MemoryEffects::Read::get(), NixFSResource::get());
       effects.emplace_back(MemoryEffects::Write::get(), NixTraceResource::get());
-      return;
+      break;
     }
+    // A fresh value has observable identity: allocate it, so equal calls are kept.
+    if (info && info->fresh)
+      effects.emplace_back(MemoryEffects::Allocate::get(), op->getResult(0), SideEffects::DefaultResource::get());
   }
 };
 
@@ -208,8 +211,9 @@ LogicalResult mlir::nix::loadPrimDialects(MLIRContext *ctx, NixDialect &core) {
       for (auto operands : opOp.getOps<irdl::OperandsOp>())
         arity = operands.getOperands().size();
       bool foldable = opOp->hasAttr("nix.fold");
+      bool fresh = opOp->hasAttr("nix.fresh");
 
-      if (!core.registerPrim(key.getValue(), arity, name, *fx, foldable))
+      if (!core.registerPrim(key.getValue(), arity, name, *fx, foldable, fresh))
         return opOp.emitError("duplicate nix.key '") << key.getValue() << "'";
 
       DynamicOpDefinition *def = NameAccess::definition(name);

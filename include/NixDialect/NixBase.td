@@ -53,14 +53,17 @@ def Nix_Dialect : Dialect {
       unsigned arity;
       PrimFx fx = PrimFx::Pure;
       bool foldable = false;
+      /// The result is a freshly allocated list/attribute set whose identity is
+      /// observable (`nix.fresh`): equal calls must not be merged.
+      bool fresh = false;
       ::llvm::StringRef key; // owned by the map entry
     };
     ::llvm::StringMap<PrimInfo> prims;
     ::llvm::DenseMap<const void *, const PrimInfo *> primsByOp;
     /// Returns false (and registers nothing) when `key` is already declared.
     bool registerPrim(::llvm::StringRef key, unsigned arity, ::mlir::OperationName name,
-                      PrimFx fx = PrimFx::Pure, bool foldable = false) {
-      auto [it, inserted] = prims.try_emplace(key, PrimInfo{name, arity, fx, foldable, {}});
+                      PrimFx fx = PrimFx::Pure, bool foldable = false, bool fresh = false) {
+      auto [it, inserted] = prims.try_emplace(key, PrimInfo{name, arity, fx, foldable, fresh, {}});
       if (inserted) {
         it->second.key = it->first();
         primsByOp[name.getAsOpaquePointer()] = &it->second;
@@ -110,5 +113,23 @@ def NixEvalOpInterface : OpInterface<"NixEvalOpInterface"> {
            "::nixev::Value &":$out)>
   ];
 }
+
+//===----------------------------------------------------------------------===//
+// Declarations that keep the generic passes (CSE, DCE, LICM) sound
+//===----------------------------------------------------------------------===//
+
+// May run user code (which can trace, throw and allocate) or emit diagnostics.
+def NixTraceRes : Resource<"::mlir::nix::NixTraceResource">;
+
+// A call may run user code: two equal calls are not interchangeable.
+defvar NixFxUser = [MemoryEffects<[MemWrite<NixTraceRes>]>];
+
+// A result that is a freshly allocated value whose *identity* is observable:
+// lists, attribute sets and functions are compared and shown by identity in
+// places (`(x: x) == (x: x)` is false; `let f = x: x; in [f f]` shows
+// <REPEAT>), so two identical constructions must not be merged.  The op is
+// otherwise pure, so it declares an allocation of its result (like
+// memref.alloc): CSE keeps both, an unused one is still dead.
+def NixFreshVal : Res<NixVal, "a fresh value with observable identity", [MemAlloc]>;
 
 #endif // NIX_BASE_TD

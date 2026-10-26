@@ -41,6 +41,13 @@ and what it cost: `docs/COMBINATORS.md`. What follows from the declaration:
   (`walkAndApplyPatterns`), not the greedy fixpoint driver.
 - **Constants**: `true`, `false`, `null` are `nix.bool` / `nix.null` (ConstantLike), so
   they fold and feed folded primops.
+- **Identity**: `nix.fresh` (primops) and `NixFreshVal` (core lists, attrs, lambdas,
+  `//`, `++`) declare an allocation, so stock `cse` cannot merge values whose identity
+  is observable (`test/mlir/identity.mlir`; 466/466 with `cse` in the pipeline).
+- **Pipeline**: the optimizer is MLIR pass-pipeline text, not an options struct:
+  `MLNIX_PIPELINE='nix-prims,cse'` (default `nix-prims`). Passes: `nix-prims`,
+  `nix-fold`, `nix-dce`, pipeline `nix-simplify`, plus any stock pass by name. Write a
+  bare list: `any(...)` / `builtin.module(...)` wrappers silently nest and do nothing.
 - **Replaceable**: `MLNIX_PRIMS_IRDL=file` swaps the declaration without a rebuild.
 
 ## Tests (each layer can fail)
@@ -68,13 +75,17 @@ has the identical result hash (same `.drv` paths), 466/466 on the lang suite,
     + literals without locations, filename attr once  3.59 s      3.13 s     2349 MB
     + Symbols keyed by StringAttr; CommonCrypto SHA   3.48 s      2.97 s     2378 MB
 
-Optional stages (`MLNIX_PASSES`), measured on top of `devirt`:
+Optional pipeline stages, interleaved A/B against the default `nix-prims` (same
+binary, identical result hashes), NixOS toplevel / 73 attrs:
 
-    devirt,dce +0.14 s    devirt,fold +0.35 s    devirt,fold,dce +0.56 s
+    nix-prims,cse            +7.1%  / +5.4%
+    nix-prims,canonicalize  +19.6%  / +16.6%
+    nix-simplify (fold+dce)  +9.8%  / +10.4%
 
-`fold` and `dce` cost more than they save here, so only `devirt` is on by
-default. The greedy rewriter is a fixpoint machine; use it only where a
-fixpoint is needed. Devirtualization is one `walkAndApplyPatterns` walk.
+None pays: each file is lowered and evaluated once, so a pass has no second run to
+amortize against (`docs/COMBINATORS.md`, F17). Only devirtualization is on by default.
+Devirtualization is one `walkAndApplyPatterns` walk; the greedy rewriter is a fixpoint
+machine, use it only where a fixpoint is needed.
 
 ### The MLIR tax, and what it was made of
 

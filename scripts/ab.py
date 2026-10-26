@@ -2,8 +2,8 @@
 """Interleaved A/B benchmark of two environment settings of the same mlnix binary.
 
 usage: ab.py [--runs N] [--workload NAME]... A_ENV B_ENV
-  A_ENV / B_ENV are comma-separated KEY=VAL lists ("-" for none), e.g.
-     ab.py MLNIX_CONTINENTS=static MLNIX_CONTINENTS=irdl
+  A_ENV / B_ENV are ';'-separated KEY=VAL lists ("-" for none), e.g.
+     ab.py MLNIX_PIPELINE=nix-prims "MLNIX_PIPELINE=nix-prims,cse"
 
 Runs alternate A,B,A,B,... so load from other processes hits both equally; reports
 the median of wall and CPU (user+sys) time, min wall, peak RSS and the result hash
@@ -16,7 +16,7 @@ from bench import WORKLOADS, ROOT  # noqa: E402
 
 
 def parse_env(s):
-    return {} if s == "-" else dict(kv.split("=", 1) for kv in s.split(","))
+    return {} if s == "-" else dict(kv.split("=", 1) for kv in s.split(";"))
 
 
 def run(binary, args, extra):

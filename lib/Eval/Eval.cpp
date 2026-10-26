@@ -1,6 +1,10 @@
 //===- Eval.cpp - Lazy evaluator over the nix dialect ---------------------===//
 
 #include "Nix/Eval.h"
+#include "mlir/Pass/PassManager.h"
+#include "mlir/Pass/PassRegistry.h"
+#include "mlir/Transforms/Passes.h"
+#include <mutex>
 #include "llvm/Support/Format.h"
 #include "Nix/MLIRGen.h"
 
@@ -1367,6 +1371,25 @@ nixfe::Expr *EvalState::parseString(nixfe::ExprArena &arena, const std::string &
   return nixfe::parse(arena, origin, po);
 }
 
+/// The optimization pipeline is data: MLIR pass-pipeline text (EvalSettings::pipeline,
+/// overridden by MLNIX_PIPELINE), so any registered pass can be composed by name.
+static std::unique_ptr<mlir::PassManager> makeOptimizer(mlir::MLIRContext &ctx, const EvalSettings &settings) {
+  static std::once_flag once;
+  std::call_once(once, [] {
+    mlir::registerTransformsPasses();
+    nd::registerNixPasses();
+  });
+  std::string text = settings.pipeline;
+  if (const char *e = getenv("MLNIX_PIPELINE")) text = e;
+  auto pm = std::make_unique<mlir::PassManager>(&ctx); // anchored on any op
+  pm->enableVerifier(false);
+  std::string err;
+  llvm::raw_string_ostream os(err);
+  if (mlir::failed(mlir::parsePassPipeline(text, *pm, os)))
+    throw EvalError("invalid pass pipeline '" + text + "': " + err);
+  return pm;
+}
+
 nd::ExprOp EvalState::lowerToMLIR(nixfe::Expr *e, std::shared_ptr<nixfe::Origin> origin,
                                   const std::vector<std::string> *scopeNames) {
   nixfe::GenOptions go;
@@ -1380,19 +1403,8 @@ nd::ExprOp EvalState::lowerToMLIR(nixfe::Expr *e, std::shared_ptr<nixfe::Origin>
   // The expression is IsolatedFromAbove and not yet referenced by any frame,
   // so it can be rewritten freely before evaluation starts.
   if (settings.optimize) {
-    nd::SimplifyOptions so;
-    so.devirtualize = so.fold = so.dce = false;
-    std::string passes = settings.passes;
-    if (const char *e = getenv("MLNIX_PASSES")) passes = e; // experiments / benchmarks
-    for (llvm::StringRef rest = passes; !rest.empty();) {
-      auto [p, tail] = rest.split(',');
-      rest = tail;
-      if (p == "devirt") so.devirtualize = true;
-      else if (p == "fold") so.fold = true;
-      else if (p == "dce") so.dce = true;
-      else if (p == "all") so.devirtualize = so.fold = so.dce = true;
-    }
-    nd::simplifyExpr(op, so);
+    if (!optimizer) optimizer = makeOptimizer(ctx, settings);
+    if (mlir::failed(optimizer->run(op))) throw EvalError("the optimization pipeline failed");
   }
   if (statsEnabled)
     op->walk([&](mlir::Operation *o) { ++opStats[o->getName().getStringRef()]; });

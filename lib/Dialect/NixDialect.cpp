@@ -6,6 +6,7 @@
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
+#include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Transforms/WalkPatternRewriteDriver.h"
@@ -14,6 +15,7 @@
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include <mutex>
 
 using namespace mlir;
 using namespace mlir::nix;
@@ -341,68 +343,69 @@ void mlir::nix::devirtualizePrims(Operation *root) {
   }
 }
 
-void mlir::nix::simplifyExpr(Operation *root, SimplifyOptions options) {
-  MLIRContext *ctx = root->getContext();
-  if (options.devirtualize)
-    devirtualizePrims(root);
-  if (options.fold) {
-    RewritePatternSet patterns(ctx);
-    patterns.add<ForwardUnobservableIdentity>(ctx);
-    for (RegisteredOperationName op : ctx->getRegisteredOperations())
-      if (op.getDialect().getNamespace().starts_with("nix"))
-        op.getCanonicalizationPatterns(patterns, ctx);
-    GreedyRewriteConfig cfg;
-    cfg.setRegionSimplificationLevel(GreedySimplifyRegionLevel::Disabled);
-    cfg.enableConstantCSE(false);
-    (void)applyPatternsGreedily(root, std::move(patterns), cfg);
-  }
-  if (options.dce)
-    eliminateDeadBindings(root);
-}
-
 namespace {
 
-struct NixSimplifyPass
-    : public PassWrapper<NixSimplifyPass, OperationPass<ModuleOp>> {
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(NixSimplifyPass)
-  StringRef getArgument() const override { return "nix-simplify"; }
-  StringRef getDescription() const override {
-    return "Devirtualize primops, fold constants, remove dead (cyclic) bindings";
-  }
-  // The continent dialects register their primops when they are loaded, so a
-  // pass that devirtualizes must make sure they all are.
-  void getDependentDialects(DialectRegistry &registry) const override {
-    registerNixDialects(registry);
-  }
-  void runOnOperation() override {
-    SimplifyOptions o;
-    o.fold = o.dce = true;
-    simplifyExpr(getOperation(), o);
-  }
-};
+// The passes run on any op, so the same ones serve the evaluator (a `nix.expr`)
+// and mlnix-opt (a module).  The continent dialects are defined when the core
+// dialect loads, so a pass that creates or matches their ops makes sure it is.
 
-struct NixPrimsPass : public PassWrapper<NixPrimsPass, OperationPass<ModuleOp>> {
+struct NixPrimsPass : public PassWrapper<NixPrimsPass, OperationPass<>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(NixPrimsPass)
   StringRef getArgument() const override { return "nix-prims"; }
   StringRef getDescription() const override {
     return "Rewrite calls of known primops into continent-dialect ops";
   }
-  void getDependentDialects(DialectRegistry &registry) const override {
-    registerNixDialects(registry);
-  }
+  void getDependentDialects(DialectRegistry &registry) const override { registerNixDialects(registry); }
   void runOnOperation() override { devirtualizePrims(getOperation()); }
+};
+
+struct NixFoldPass : public PassWrapper<NixFoldPass, OperationPass<>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(NixFoldPass)
+  StringRef getArgument() const override { return "nix-fold"; }
+  StringRef getDescription() const override {
+    return "Canonicalize and constant-fold Nix IR (every foldable primop, generically)";
+  }
+  void getDependentDialects(DialectRegistry &registry) const override { registerNixDialects(registry); }
+  LogicalResult initialize(MLIRContext *ctx) override {
+    RewritePatternSet patterns(ctx);
+    patterns.add<ForwardUnobservableIdentity>(ctx);
+    for (RegisteredOperationName op : ctx->getRegisteredOperations())
+      if (op.getDialect().getNamespace().starts_with("nix"))
+        op.getCanonicalizationPatterns(patterns, ctx);
+    frozen = FrozenRewritePatternSet(std::move(patterns));
+    return success();
+  }
+  void runOnOperation() override {
+    GreedyRewriteConfig cfg;
+    cfg.setRegionSimplificationLevel(GreedySimplifyRegionLevel::Disabled);
+    cfg.enableConstantCSE(false);
+    (void)applyPatternsGreedily(getOperation(), frozen, cfg);
+  }
+  FrozenRewritePatternSet frozen;
+};
+
+struct NixDcePass : public PassWrapper<NixDcePass, OperationPass<>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(NixDcePass)
+  StringRef getArgument() const override { return "nix-dce"; }
+  StringRef getDescription() const override {
+    return "Remove unreferenced bindings, including dead recursive cycles";
+  }
+  void runOnOperation() override { eliminateDeadBindings(getOperation()); }
 };
 } // namespace
 
-std::unique_ptr<Pass> mlir::nix::createNixPrimsPass() {
-  return std::make_unique<NixPrimsPass>();
-}
-
-std::unique_ptr<Pass> mlir::nix::createNixSimplifyPass() {
-  return std::make_unique<NixSimplifyPass>();
-}
-
 void mlir::nix::registerNixPasses() {
-  PassRegistration<NixSimplifyPass>();
-  PassRegistration<NixPrimsPass>();
+  static std::once_flag once;
+  std::call_once(once, [] {
+    PassRegistration<NixPrimsPass>();
+    PassRegistration<NixFoldPass>();
+    PassRegistration<NixDcePass>();
+    PassPipelineRegistration<>("nix-simplify",
+                               "Devirtualize primops, fold constants, remove dead (cyclic) bindings",
+                               [](OpPassManager &pm) {
+                                 pm.addPass(std::make_unique<NixPrimsPass>());
+                                 pm.addPass(std::make_unique<NixFoldPass>());
+                                 pm.addPass(std::make_unique<NixDcePass>());
+                               });
+  });
 }

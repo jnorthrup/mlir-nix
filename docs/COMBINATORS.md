@@ -6,11 +6,13 @@ declared as dialects, rewrites and pipelines *as data*?
 
 Short answer: MLIR ships several declarative layers (IRDL for dialects, PDL for
 rewrites, the Transform dialect and textual pipelines for strategies, a matcher
-language for queries). IRDL now carries the declaration of all 105 primops: it
-works, it costs nothing measurable at run time, and it failed in thirteen specific
-ways, listed in section 4 with the evidence. PDL and pipeline-as-data were tried in
-side branches (section 7). What is still handwritten C++ is mostly algorithms
-(parser, evaluator, primop library, store), not structure.
+language for queries). IRDL now carries the declaration of all 105 primops, and
+the optimization pipeline is MLIR pass-pipeline text instead of a hand-rolled
+options struct. Both work and cost nothing measurable at run time. PDL as a
+replacement for the devirtualizer was tried and lost on every count. Seventeen
+specific failures are listed in section 4 with the evidence, including one real
+soundness bug in my own core dialect. What is still handwritten C++ is mostly
+algorithms (parser, evaluator, primop library, store), not structure.
 
 How each claim is marked: **tested** (a command was run, output seen),
 **header** (read from the installed LLVM 23.1.1 headers or `--help`),
@@ -22,9 +24,9 @@ How each claim is marked: **tested** (a command was run, output seen),
 |---|---|---|---|
 | ODS constraint combinators (`AnyTypeOf`, `And`, `Or`, `Variadic`, `Optional`, `CPred`, ...) | op and type constraints, in TableGen | mlir-tblgen | core dialect (`NixOps.td`) |
 | **IRDL** (`irdl.is`, `any_of`, `all_of`, `base`, `parametric`, `any`, `c_pred`, `operation`, `operands`, `results`, `attributes`, `region`) | a *dialect definition written as IR*; loadable at run time | `mlir-opt --irdl-file`, `irdl::loadDialects`, `tblgen-to-irdl`, `mlir-translate --irdl-to-cpp` | **all 105 primops (24 dialects)** |
-| PDL / PDLL (`pdl.pattern`, `pdl.operation`, `pdl.replace`) | rewrite rules as IR, compiled to a matcher bytecode | `mlir-pdll -x=mlir\|cpp`, `PDLPatternModule` | experiment B (see section 7) |
-| Transform dialect (`sequence`, `alternatives`, `foreach_match`, `include`, `apply_registered_pass`, `apply_patterns`, `apply_cse`; extensions: PDL, IRDL `irdl.collect_matching`, SMT `smt.constrain_params`, Tune `tune.knob` / `tune.alternatives`) | strategies: try/else, sequencing, match-then-act tables | `mlir-transform-opt`, `-transform-interpreter` | experiment C (section 7) |
-| textual pass pipelines (`builtin.module(a,b,c)`) | passes | `parsePassPipeline`, `--pass-pipeline` | experiment C |
+| PDL / PDLL (`pdl.pattern`, `pdl.operation`, `pdl.replace`) | rewrite rules as IR, compiled to a matcher bytecode | `mlir-pdll -x=mlir\|cpp`, `PDLPatternModule` | tried for the devirtualizer, **rejected** (section 7, F16) |
+| Transform dialect (`sequence`, `alternatives`, `foreach_match`, `include`, `apply_registered_pass`, `apply_patterns`, `apply_cse`; extensions: PDL, IRDL `irdl.collect_matching`, SMT `smt.constrain_params`, Tune `tune.knob` / `tune.alternatives`) | strategies: try/else, sequencing, match-then-act tables | `mlir-transform-opt`, `-transform-interpreter` | not used: a flat pass list is all the pipeline needs (section 7) |
+| textual pass pipelines (`a,b,c`) | passes | `parsePassPipeline`, `--pass-pipeline` | **`MLNIX_PIPELINE`**, the evaluator's whole optimizer |
 | C++ matcher combinators (`m_Op`, `m_Constant`, `m_Zero`, `matchPattern`) | value/op matchers | `mlir/IR/Matchers.h` | `FoldPrim` pattern |
 | `mlir-query` matcher language (`anyOf`, `allOf`, `hasOpName`, `hasOpAttrName`, `getDefinitions`, `getAllDefinitions`, `getDefinitionsByPredicate`, `getUsersByPredicate`) | read-only IR queries | `mlir-query`, `MLIRQueryLib` | `mlnix-query` |
 | `DialectExtension`, external interface models, `OperationName::attachInterface` | dialects with each other and with behaviour, after the fact | core MLIR | `ContinentsExtension`, evaluator model, effects model |
@@ -64,6 +66,7 @@ macro scopes. Per op, structure is IRDL (`irdl.operands(a0: %v, a1: %v)`,
 | `irdl.operands` | the stock IRDL verifier rejects wrong arity (**tested**: `test/mlir/verify.mlir`) |
 | `nix.fx` | a `MemoryEffectOpInterface` fallback model attached with `OperationName::attachInterface`; stock `-cse`/DCE obey it (**tested**) |
 | `nix.fold` | one `RewritePattern` per op, via the canonicalization hook |
+| `nix.fresh` | a `MemAlloc` effect on the result: pure, but equal calls are not merged (F14) |
 | all ops | one parser/printer pair: `nixnum.add(%a, %b)` |
 | `nix.key`, arity | the core dialect's primop table (devirtualizer, evaluator) |
 | `nix.scope`, `nix.continent` | `MLNIX_STATS=1` op counts per scope / continent / dialect |
@@ -76,6 +79,12 @@ arity 2 -> 1 makes the verifier reject; bad effect class, duplicate key, missing
 are loader errors). Both directions were checked to fail against the wrong
 expectation.
 
+The pipeline is data too. The three stages are registered passes (`nix-prims`,
+`nix-fold`, `nix-dce`) and one pipeline (`nix-simplify`); the evaluator builds one
+`PassManager` from text (`EvalSettings::pipeline`, default `nix-prims`, override
+`MLNIX_PIPELINE='nix-prims,cse'`). The `SimplifyOptions` struct and the `MLNIX_PASSES`
+parser are gone, and any registered pass can be named.
+
 Restructuring is a data edit: the split from 11 to 24 dialects changed the IRDL file
 and four FileCheck op names, and no C++.
 
@@ -87,18 +96,28 @@ hashes identical on both workloads.
 
 | | master | this branch |
 |---|---|---|
-| NixOS toplevel, median wall of 5 | 3.631 s | 3.631 s (0.0%) |
-| 73 nixpkgs attrs, median wall of 5 | 3.335 s | 3.273 s (-1.9%) |
-| process start-up, median CPU of 80 | 7.95 ms | 9.07 ms (**+1.12 ms**) |
+| NixOS toplevel, median wall of 5 | 3.565 s | 3.484 s (-2.3%) |
+| 73 nixpkgs attrs, median wall of 5 | 3.098 s | 3.116 s (+0.6%, noise) |
+| process start-up, median CPU of 60 | 7.72 ms | 9.01 ms (**+1.29 ms**) |
 | full rebuild CPU (single measurement each) | 76.3 s user | 40.8 s user |
-| C++/TD/CMake lines (library + tools) | | +432 / -841 (net -409) |
+| C++/TD/CMake lines (library + tools) | | +555 / -924 (net **-369**) |
 | translation units in the dialect library | 13 | 2 |
-| declaration data | 251-line TD + 12 TUs | 625 lines IRDL |
+| declaration data | 251-line TD + 12 TUs | 628 lines IRDL |
 
-Correctness gates, unchanged: upstream lang suite 466/466 semantic in all three
-pipeline modes (default 208 / all passes 207 / `--no-opt` 207 byte-exact stderr, same
-as before), 53/53 expressions identical to Nix 2.35.4, 8/8 FileCheck files,
-registry-vs-declaration check 105/105 (it fails when an arity in the data is changed).
+The pipeline-as-text and identity-soundness step alone was +140 / -100 (net +40
+lines): it removed the options mini-language and fixed F14, it did not shrink
+the code.
+
+Every gate, timed on this machine: FileCheck 0.7 s, declaration check 0.0 s, lang
+suite 6-7 s per pipeline mode (three modes), difftest 2.8 s; **26 s for all of
+them**. A full rebuild is about 7 s wall.
+
+Correctness gates, unchanged: upstream lang suite 466/466 semantic in all pipeline
+modes (default `nix-prims` 208 / `nix-simplify` 207 / `--no-opt` 207 byte-exact
+stderr, same as before), 466/466 also with stock `cse` and `cse,canonicalize` in the
+pipeline (it was 463 before F14 was fixed), 53/53 expressions identical to Nix
+2.35.4, 9/9 FileCheck files, registry-vs-declaration check 105/105 (it fails when an
+arity in the data is changed).
 
 Continent ops are 0.68% of the ops of a NixOS toplevel evaluation (7.4k of 1.10M), so
 "no run-time cost" means "no cost on a workload where they are rare". A workload
@@ -171,6 +190,51 @@ classes; IRDL ops have none. PDL, which matches by name, is the compatible route
 **F13. eqsat is not available, and has little to chew on here. (tested for availability)** Absent from the
 installed MLIR. Continent ops, the only place with algebra worth saturating, are 0.68% of the IR.
 
+**F14. My core dialect declared unsound `Pure`. (tested)** `nix.lambda`, `nix.list`,
+`nix.attrs`, `//`, `++` and 20 primops that return fresh lists or attribute sets were
+`Pure`, so stock `cse` merged identical ones. In Nix `(x: x) == (x: x)` is false, so
+merging broke three upstream tests with `MLNIX_PIPELINE='nix-prims,cse'`:
+`eval-okay-equal-function-attrset-distinct-similar`,
+`eval-okay-equal-function-list-distinct-similar`, `eval-okay-sort` (463/466). My earlier
+claim "stock `-cse` is sound on Nix IR" held only for the primops I had tested. Fix:
+results with observable identity declare `MemAlloc` (core: `NixFreshVal` in the TD;
+primops: `nix.fresh`), and `apply` declares a user-code effect. 466/466 afterwards, and
+`test/mlir/identity.mlir` fails when `nix.fresh` is removed from the data. A helper agent
+found the bug; I reproduced the failure and the fix myself. The default pipeline never
+ran `cse`, so shipped behaviour was unaffected.
+
+**F15. A textual pipeline can silently do nothing. (tested)** On an any-anchored
+`PassManager`, `parsePassPipeline("any(nix-prims)")` nests the passes under child ops:
+they ran on the lambdas inside the expression, not on the expression, with no error.
+Devirtualization silently stopped (the default exact-match count fell 208 -> 207) and
+`any(nix-simplify)` ran once per nested lambda (lang suite 6 s -> 20 s). The bare list
+`nix-prims` is right; `builtin.module(...)` and `nix.expr(...)` wrappers are silent
+no-ops here too. It was caught only because a count moved by one.
+
+**F16. PDL as the devirtualizer loses on every count. (tested)** Branch
+`exp/pdl-devirt`: a generator that builds ~300 `pdl.pattern`s from the primop table at
+start-up. Output identical, but **+627 net C++ lines** to replace a ~45-line pattern,
+**+1.0 to +3.4% run time** on the two workloads (interleaved), and **+23.8 ms start-up**
+per process (8.9 -> 32.7 ms CPU) to build and lower the patterns. From the helper's
+transcript, not re-run: PDLL rejected `op<nixnum.add>(a0, a1)` with "invalid number of
+operand groups for `nixnum.add`; expected 1, but got 2" while the op had one variadic
+operand group, and ops not described to PDLL are treated as unregistered. A PDLL file
+generated from the IRDL data and loaded at run time would pay the same start-up and
+matching costs; not built.
+
+**F17. Stock passes compose for free and cost run time. (tested)** Two workloads,
+interleaved, same binary, identical result hashes:
+
+| pipeline vs `nix-prims` | NixOS toplevel | 73 nixpkgs attrs |
+|---|---|---|
+| `nix-prims,cse` | +7.1% | +5.4% |
+| `nix-prims,canonicalize` | +19.6% | +16.6% |
+| `nix-simplify` (fold + dce) | +9.8% | +10.4% |
+
+The evaluator lowers each file once and evaluates it once, mostly lazily, so a pass
+has no second run to amortize against. They would only pay if the optimized IR were
+reused (a bytecode cache keyed by file hash), which is not built.
+
 ## 5. What is still handwritten C++
 
 | | lines | structural declaration? |
@@ -178,30 +242,38 @@ installed MLIR. Continent ops, the only place with algebra worth saturating, are
 | Nix lexer + parser | 1423 | no: an algorithm |
 | AST printer (`--parse` output) | 253 | no |
 | AST -> MLIR lowering (scopes, `rec`, `with`) | 514 | no, but it is the natural next dialect conversion |
-| evaluator core (`evalOp` type switch, force, call) | 2185 | partly: the type switch is "conditionals theater" and could be interface models |
+| evaluator core (`evalOp` type switch, force, call) | 2219 | partly: the type switch is "conditionals theater" and could be interface models |
 | primop implementations | 2909 | no: the library the declarations point at |
 | store, hashing, derivations, builder | 2448 | no |
-| core dialect (ops, folders, passes) | 863 | yes, but see F11 |
-| continents: generic loader | 248 | no code per op |
-| continents: declaration | 625 | data |
+| core dialect (ops, folders, passes) | 886 | yes, but see F11 |
+| continents: generic loader | 252 | no code per op |
+| continents: declaration | 628 | data |
 
 The structural declarations that were C++ or TableGen (251-line TD, 12 translation units, a CMake
-loop, 105 generated classes) are now data plus 248 generic lines. The rest is not structure, and no
+loop, 105 generated classes) are now data plus 252 generic lines. The rest is not structure, and no
 MLIR mechanism I found removes the need to write a parser or the 105 primop bodies.
 
 ## 6. Next, by what the data says
 
+0. A cache of lowered *and optimized* IR (MLIR bytecode keyed by file hash). Without it no
+   pass can pay (F17); with it `cse`/`nix-fold` become one-time costs.
 1. Core ops behind `NixEvalOpInterface` models, deleting the `evalOp` type switch (needs a
-   measurement; the lookup is not free).
+   measurement; the lookup is not free, and this moves lines rather than removing them).
 2. AST -> `nix` as a dialect conversion (the Toy-tutorial shape): the parser emits an AST dialect,
    `MLIRGen` becomes patterns plus a `ConversionTarget`.
 3. Resolved-addressing runtime dialect (see `FABRIC.md`), where `lookup` (10.6%) lives.
 
-## 7. Side experiments
+## 7. The two side experiments
 
-Two further mechanisms were tried on separate branches, against master, by
-independent workers; their results are appended here once verified:
+Two helper agents ran these on separate branches with an open-ended budget; I stopped
+them after 32 minutes. That was my mistake in setting them up: the experiments are small
+and every gate here runs in 26 seconds. The branches are kept.
 
-* `exp/pdl-devirt`: the devirtualization rewrite as PDL/PDLL patterns.
-* `exp/pipeline-as-data`: the optimization pipeline as a textual pass pipeline and as
-  a Transform-dialect script.
+* `exp/pdl-devirt` (`638f015`): PDL devirtualizer. Measured by me, see F16. Not merged.
+* `exp/pipeline-as-data` (`5db8d05`): textual pipeline, a Transform-dialect driver
+  (`MLNIX_TRANSFORM`) and a micro-benchmark tool, +622 net lines. I did not use its code:
+  the text pipeline is about 40 lines here, and a flat pass list needs no Transform
+  script. Its second commit found F14, which I reproduced and ported.
+* **Not done**, so no result: the Transform dialect's `alternatives`, `foreach_match` and
+  `tune.knob`, `transform.irdl.collect_matching`, and `mlir-transform-opt` on Nix IR.
+  Nothing in this document claims anything about them beyond their existence.
