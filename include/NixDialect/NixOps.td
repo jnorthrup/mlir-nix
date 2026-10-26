@@ -40,7 +40,7 @@ def Nix_ExprOp : Nix_Op<"expr", [
   let assemblyFormat = "$sym_name attr-dict-with-keyword $body";
 }
 
-def Nix_ReturnOp : Nix_Op<"return", [Terminator, Pure,
+def Nix_ReturnOp : Nix_Op<"return", [Terminator, Pure, NixModes<[], [0]>,
     ParentOneOf<["ExprOp", "LambdaOp"]>]> {
   let summary = "result of the enclosing expression / lambda body";
   let arguments = (ins NixVal:$value);
@@ -179,7 +179,7 @@ def Nix_AttrsOp : Nix_Op<"attrs", [AttrSizedOperandSegments]> {
 // Elimination forms
 //===----------------------------------------------------------------------===//
 
-def Nix_SelectOp : Nix_Op<"select", [Pure, AttrSizedOperandSegments]> {
+def Nix_SelectOp : Nix_Op<"select", [Pure, AttrSizedOperandSegments, NixModes<[0], []>]> {
   let summary = "attribute path selection `e.a.b or d`";
   let description = [{
     `path` has one element per path component: a string attribute for a literal
@@ -197,7 +197,7 @@ def Nix_SelectOp : Nix_Op<"select", [Pure, AttrSizedOperandSegments]> {
   let hasVerifier = 1;
 }
 
-def Nix_HasAttrOp : Nix_Op<"has_attr", [Pure]> {
+def Nix_HasAttrOp : Nix_Op<"has_attr", [Pure, NixModes<[0], []>]> {
   let summary = "attribute path test `e ? a.b`";
   let description = [{ `path`/`dyn_keys` as in `nix.select`. }];
   let arguments = (ins NixVal:$base, Variadic<NixVal>:$dyn_keys, ArrayAttr:$path);
@@ -213,13 +213,13 @@ def Nix_ApplyOp : Nix_Op<"apply", NixFxUser> {
   let assemblyFormat = "$callee `(` $args `)` attr-dict";
 }
 
-def Nix_IfOp : Nix_Op<"if", [Pure]> {
+def Nix_IfOp : Nix_Op<"if", [Pure, NixModes<[0], [1, 2]>]> {
   let arguments = (ins NixVal:$cond, NixVal:$then_value, NixVal:$else_value);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$cond `then` $then_value `else` $else_value attr-dict";
 }
 
-def Nix_AssertOp : Nix_Op<"assert", [Pure]> {
+def Nix_AssertOp : Nix_Op<"assert", [Pure, NixModes<[0], [1]>]> {
   let arguments = (ins NixVal:$cond, NixVal:$body, OptionalAttr<StrAttr>:$text);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$cond `in` $body attr-dict";
@@ -236,19 +236,19 @@ class Nix_BinOp<string mnemonic, list<Trait> traits = [Pure]> : Nix_Op<mnemonic,
   let assemblyFormat = "$lhs `,` $rhs attr-dict";
 }
 
-def Nix_EqOp      : Nix_BinOp<"eq">;
-def Nix_NeqOp     : Nix_BinOp<"neq">;
-def Nix_AndOp     : Nix_BinOp<"and">;
-def Nix_OrOp      : Nix_BinOp<"or">;
-def Nix_ImplOp    : Nix_BinOp<"impl">;
+def Nix_EqOp      : Nix_BinOp<"eq", [Pure, NixModes<[0, 1], []>]>;
+def Nix_NeqOp     : Nix_BinOp<"neq", [Pure, NixModes<[0, 1], []>]>;
+def Nix_AndOp     : Nix_BinOp<"and", [Pure, NixModes<[0, 1], []>]>;
+def Nix_OrOp      : Nix_BinOp<"or", [Pure, NixModes<[0, 1], []>]>;
+def Nix_ImplOp    : Nix_BinOp<"impl", [Pure, NixModes<[0, 1], []>]>;
 // `a // b` and `a ++ b` allocate a new attribute set / list.
-class Nix_FreshBinOp<string mnemonic> : Nix_BinOp<mnemonic, []> {
+class Nix_FreshBinOp<string mnemonic> : Nix_BinOp<mnemonic, [NixModes<[0, 1], []>]> {
   let results = (outs NixFreshVal:$result);
 }
 def Nix_UpdateOp  : Nix_FreshBinOp<"update">;
 def Nix_ConcatListsOp : Nix_FreshBinOp<"concat_lists">;
 
-def Nix_NotOp : Nix_Op<"not", [Pure]> {
+def Nix_NotOp : Nix_Op<"not", [Pure, NixModes<[0], []>]> {
   let arguments = (ins NixVal:$operand);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$operand attr-dict";

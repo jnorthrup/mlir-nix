@@ -87,6 +87,15 @@ static LogicalResult verifyAttrPath(Operation *op, ArrayAttr path, unsigned numD
 #define GET_OP_CLASSES
 #include "NixDialect/NixOps.cpp.inc"
 
+namespace {
+// Collects the operand modalities declared with the NixModes trait; names no op.
+template <typename OpT> void collectModes(NixDialect &d, MLIRContext *ctx) {
+  if constexpr (OpT::template hasTrait<NixModes>())
+    d.operandModes[OperationName(OpT::getOperationName(), ctx).getAsOpaquePointer()] = {OpT::kStrictMask, OpT::kTailMask};
+}
+template <typename... Ops> void collectAllModes(NixDialect &d, MLIRContext *ctx) { (collectModes<Ops>(d, ctx), ...); }
+} // namespace
+
 void NixDialect::initialize() {
   addTypes<
 #define GET_TYPEDEF_LIST
@@ -96,6 +105,20 @@ void NixDialect::initialize() {
 #define GET_OP_LIST
 #include "NixDialect/NixOps.cpp.inc"
       >();
+  collectAllModes<
+#define GET_OP_LIST
+#include "NixDialect/NixOps.cpp.inc"
+      >(*this, getContext());
+}
+
+bool NixDialect::evaluatesInPlace(Value v) const {
+  if (!v.hasOneUse()) return false;
+  OpOperand &use = *v.use_begin();
+  Operation *user = use.getOwner(), *def = v.getDefiningOp();
+  if (!def || user == def || user->getBlock() != def->getBlock()) return false;
+  unsigned i = use.getOperandNumber();
+  OperandModes m = modesOf(user->getName());
+  return i < 32 && (((m.strict | m.tail) >> i) & 1);
 }
 
 Operation *NixDialect::materializeConstant(OpBuilder &b, Attribute value,
@@ -384,6 +407,25 @@ struct NixFoldPass : public PassWrapper<NixFoldPass, OperationPass<>> {
   FrozenRewritePatternSet frozen;
 };
 
+// Marks the values the evaluator evaluates in place: single use, in the same region, by a
+// strict or tail operand (the NixModes traits).  The evaluator makes the same decision
+// per value with NixDialect::evaluatesInPlace; this pass makes it visible and testable.
+struct NixInlineValuesPass : public PassWrapper<NixInlineValuesPass, OperationPass<>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(NixInlineValuesPass)
+  StringRef getArgument() const override { return "nix-inline-values"; }
+  StringRef getDescription() const override {
+    return "Mark values the evaluator evaluates in place (nix.inline): single use by a strict or tail operand";
+  }
+  void getDependentDialects(DialectRegistry &registry) const override { registerNixDialects(registry); }
+  void runOnOperation() override {
+    auto *core = getContext().getLoadedDialect<NixDialect>();
+    UnitAttr unit = UnitAttr::get(&getContext());
+    getOperation()->walk([&](Operation *op) {
+      if (op->getNumResults() == 1 && core->evaluatesInPlace(op->getResult(0))) op->setAttr("nix.inline", unit);
+    });
+  }
+};
+
 struct NixDcePass : public PassWrapper<NixDcePass, OperationPass<>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(NixDcePass)
   StringRef getArgument() const override { return "nix-dce"; }
@@ -400,6 +442,7 @@ void mlir::nix::registerNixPasses() {
     PassRegistration<NixPrimsPass>();
     PassRegistration<NixFoldPass>();
     PassRegistration<NixDcePass>();
+    PassRegistration<NixInlineValuesPass>();
     PassPipelineRegistration<>("nix-simplify",
                                "Devirtualize primops, fold constants, remove dead (cyclic) bindings",
                                [](OpPassManager &pm) {

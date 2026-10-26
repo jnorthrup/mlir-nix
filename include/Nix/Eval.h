@@ -156,6 +156,14 @@ struct Frame {
   Value *slots[0];
 };
 
+/// Where an SSA value lives: its region, its frame slot, and whether its single
+/// strict/tail consumer evaluates it in place (NixDialect::evaluatesInPlace).
+struct Slot {
+  RegionInfo *ri;
+  unsigned idx;
+  bool inPlace;
+};
+
 //===----------------------------------------------------------------------===//
 // Errors
 //===----------------------------------------------------------------------===//
@@ -391,6 +399,17 @@ public:
   /// MLNIX_STATS=1: op histogram of every module lowered, printed at exit.
   llvm::StringMap<size_t> opStats;
   bool statsEnabled = false;
+  bool inPlaceEnabled = true;
+
+  /// The operand `v` of the op being evaluated in frame `f`, for a consumer that forces it
+  /// right away and does not keep the Value (a `strict` operand, see NixModes).  When the
+  /// value is evaluated in place the result is `tmp`, already in WHNF; otherwise it is the
+  /// frame's (possibly still unevaluated) thunk, exactly like lookup().
+  Value &operand(Frame *f, mlir::Value v, Value &tmp);
+  /// Evaluates `v` to WHNF into `out` (a `tail` operand: the op's result is its value).
+  void evalTail(Frame *f, mlir::Value v, Value &out, PosPtr pos);
+
+  void evalDefinition(mlir::Operation *def, Frame *f, Value &dest);
   void printStats();
   /// Constant folding hook of the continent dialects: run primop `key` on
   /// scalar constants; null when it throws or yields a non-scalar.
@@ -423,7 +442,8 @@ public:
   std::function<void(const std::string &)> printTrace;
 
 private:
-  llvm::DenseMap<void *, std::pair<RegionInfo *, unsigned>> slotMap;
+  llvm::DenseMap<void *, Slot> slotMap;
+  uint64_t nInPlace = 0, nThunks = 0; // MLNIX_STATS: operands evaluated in place / thunks created by lookup()
   llvm::DenseMap<mlir::Region *, RegionInfo *> regionInfos;
   llvm::DenseMap<mlir::Operation *, Value *> constCache;
   void indexRegion(mlir::Region &r);

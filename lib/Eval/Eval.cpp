@@ -123,6 +123,7 @@ void EvalState::copyContext(const Value &v, NixStringContext &ctx) {
 EvalState::EvalState(EvalSettings st, std::shared_ptr<nixstore::Store> store)
     : settings(std::move(st)), store(std::move(store)) {
   statsEnabled = getenv("MLNIX_STATS") != nullptr;
+  inPlaceEnabled = !getenv("MLNIX_NOINPLACE"); // ablation switch: every operand gets a thunk, as before
   // The evaluator is single-threaded.  With threading enabled every attribute
   // and location is uniqued through sharded, locked, thread-cached tables --
   // a quarter of the run time (measured) for no benefit.
@@ -190,6 +191,7 @@ void EvalState::printStats() {
     for (auto &[n, c] : sorted(m)) llvm::errs() << "  " << llvm::format("%-9s", n.c_str()) << llvm::format("%9zu", c) << "\n";
   };
   llvm::errs() << "== mlnix ops lowered: " << total << "\n";
+  llvm::errs() << "== operands evaluated in place: " << nInPlace << ", thunks created by lookup(): " << nThunks << "\n";
   section("scopes", perScope);
   section("continents", perContinent);
   section("dialects", perDialect);
@@ -307,13 +309,14 @@ void EvalState::indexRegion(Region &r) {
   auto *ri = new RegionInfo{&r, 0, {}};
   Block &blk = r.front();
   unsigned slot = 0;
-  for (BlockArgument a : blk.getArguments()) slotMap[a.getAsOpaquePointer()] = {ri, slot++};
+  auto *core = ctx.getLoadedDialect<nd::NixDialect>();
+  for (BlockArgument a : blk.getArguments()) slotMap[a.getAsOpaquePointer()] = {ri, slot++, false};
   for (Operation &op : blk) {
     if (auto ret = dyn_cast<nd::ReturnOp>(op)) {
       ri->result = ret.getValue();
       continue;
     }
-    for (mlir::Value res : op.getResults()) slotMap[res.getAsOpaquePointer()] = {ri, slot++};
+    for (mlir::Value res : op.getResults()) slotMap[res.getAsOpaquePointer()] = {ri, slot++, inPlaceEnabled && core->evaluatesInPlace(res)};
     for (Region &nested : op.getRegions())
       if (!nested.empty()) indexRegion(nested);
   }
@@ -340,8 +343,8 @@ Frame *EvalState::newFrame(RegionInfo *ri, Frame *up) {
 Value *EvalState::lookup(Frame *f, mlir::Value v) {
   auto it = slotMap.find(v.getAsOpaquePointer());
   if (it == slotMap.end()) throw EvalError("internal error: unindexed SSA value");
-  RegionInfo *ri = it->second.first;
-  unsigned idx = it->second.second;
+  RegionInfo *ri = it->second.ri;
+  unsigned idx = it->second.idx;
   while (f && f->info != ri) f = f->up;
   if (!f) throw EvalError("internal error: SSA value used outside its scope");
   Value *&slot = f->slots[idx];
@@ -367,6 +370,7 @@ Value *EvalState::lookup(Frame *f, mlir::Value v) {
     return slot = bv;
   }
   Value *nv = allocValue();
+  if (statsEnabled) nThunks++;
   if (isa<nd::LambdaOp>(op)) {
     nv->type = VType::Lambda;
   } else {
@@ -375,6 +379,40 @@ Value *EvalState::lookup(Frame *f, mlir::Value v) {
   nv->thunk.op = op;
   nv->thunk.env = f;
   return slot = nv;
+}
+
+/// Evaluates the defining op of an in-place value straight into `dest`.  Lambdas are
+/// closures, built where lookup() would build them.
+void EvalState::evalDefinition(mlir::Operation *def, Frame *f, Value &dest) {
+  if (isa<nd::LambdaOp>(def)) {
+    dest.type = VType::Lambda;
+    dest.thunk.op = def;
+    dest.thunk.env = f;
+  } else {
+    evalOp(def, f, dest);
+  }
+}
+
+Value &EvalState::operand(Frame *f, mlir::Value v, Value &tmp) {
+  auto it = slotMap.find(v.getAsOpaquePointer());
+  if (it != slotMap.end() && it->second.inPlace && f && f->info == it->second.ri) {
+    if (statsEnabled) nInPlace++;
+    evalDefinition(v.getDefiningOp(), f, tmp);
+    return tmp;
+  }
+  return *lookup(f, v);
+}
+
+void EvalState::evalTail(Frame *f, mlir::Value v, Value &out, PosPtr pos) {
+  auto it = slotMap.find(v.getAsOpaquePointer());
+  if (it != slotMap.end() && it->second.inPlace && f && f->info == it->second.ri) {
+    if (statsEnabled) nInPlace++;
+    evalDefinition(v.getDefiningOp(), f, out);
+    return;
+  }
+  Value *p = lookup(f, v);
+  forceValue(*p, pos);
+  out = *p;
 }
 
 //===----------------------------------------------------------------------===//
@@ -543,9 +581,7 @@ void EvalState::callLambda(Value &fun, Value *arg, Value &out, PosPtr pos) {
   if (callDepth >= settings.maxCallDepth)
     throw StackOverflowError("stack overflow; max-call-depth exceeded", pos);
   DepthGuard g(callDepth);
-  Value *r = lookup(f, ri->result);
-  forceValue(*r, pos);
-  out = *r;
+  evalTail(f, ri->result, out, pos);
 }
 
 void EvalState::callPrimOp(const PrimOp &op, Value **args, Value &out, PosPtr pos) {
@@ -808,9 +844,10 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
       })
       .Case<nd::AttrsOp>([&](nd::AttrsOp a) { evalAttrs(a, env, out); })
       .Case<nd::SelectOp>([&](nd::SelectOp sel) {
-        Value *cur = lookup(env, sel.getBase());
-        mlir::Value def = sel.getDefaultValue();
         mlir::OperandRange dyn = sel.getDynKeys();
+        Value tb;
+        Value *cur = dyn.empty() ? &operand(env, sel.getBase(), tb) : lookup(env, sel.getBase());
+        mlir::Value def = sel.getDefaultValue();
         unsigned nextDyn = 0;
         for (mlir::Attribute comp : sel.getPath()) {
           Symbol sym = pathSymbol(comp, dyn, nextDyn, env, pos);
@@ -830,8 +867,9 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
         copyFrom(cur);
       })
       .Case<nd::HasAttrOp>([&](nd::HasAttrOp h) {
-        Value *cur = lookup(env, h.getBase());
         mlir::OperandRange dyn = h.getDynKeys();
+        Value tb;
+        Value *cur = dyn.empty() ? &operand(env, h.getBase(), tb) : lookup(env, h.getBase());
         unsigned nextDyn = 0;
         for (mlir::Attribute comp : h.getPath()) {
           forceValue(*cur, pos);
@@ -851,54 +889,64 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
         callFunction(*f, args.size(), args.data(), out, pos);
       })
       .Case<nd::IfOp>([&](nd::IfOp i) {
-        bool c = forceBool(*lookup(env, i.getCond()), pos, "while evaluating a branch condition");
-        copyFrom(lookup(env, c ? i.getThenValue() : i.getElseValue()));
+        Value tc;
+        bool c = forceBool(operand(env, i.getCond(), tc), pos, "while evaluating a branch condition");
+        evalTail(env, c ? i.getThenValue() : i.getElseValue(), out, pos);
       })
       .Case<nd::AssertOp>([&](nd::AssertOp a) {
-        bool c = forceBool(*lookup(env, a.getCond()), pos, "in the condition of the assert statement");
+        Value tc;
+        bool c = forceBool(operand(env, a.getCond(), tc), pos, "in the condition of the assert statement");
         if (!c) {
           std::string txt = a.getText() ? a.getText()->str() : "?";
           throw AssertionError("assertion '" + txt + "' failed", pos);
         }
-        copyFrom(lookup(env, a.getBody()));
+        evalTail(env, a.getBody(), out, pos);
       })
       .Case<nd::NotOp>([&](nd::NotOp n) {
-        mkBool(out, !forceBool(*lookup(env, n.getOperand()), pos, "in the argument of the not operator"));
+        Value t;
+        mkBool(out, !forceBool(operand(env, n.getOperand(), t), pos, "in the argument of the not operator"));
       })
       .Case<nd::AndOp>([&](nd::AndOp a) {
-        if (!forceBool(*lookup(env, a.getLhs()), pos, "in the left operand of the AND (&&) operator"))
+        Value t1, t2;
+        if (!forceBool(operand(env, a.getLhs(), t1), pos, "in the left operand of the AND (&&) operator"))
           return mkBool(out, false);
-        mkBool(out, forceBool(*lookup(env, a.getRhs()), pos, "in the right operand of the AND (&&) operator"));
+        mkBool(out, forceBool(operand(env, a.getRhs(), t2), pos, "in the right operand of the AND (&&) operator"));
       })
       .Case<nd::OrOp>([&](nd::OrOp o) {
-        if (forceBool(*lookup(env, o.getLhs()), pos, "in the left operand of the OR (||) operator"))
+        Value t1, t2;
+        if (forceBool(operand(env, o.getLhs(), t1), pos, "in the left operand of the OR (||) operator"))
           return mkBool(out, true);
-        mkBool(out, forceBool(*lookup(env, o.getRhs()), pos, "in the right operand of the OR (||) operator"));
+        mkBool(out, forceBool(operand(env, o.getRhs(), t2), pos, "in the right operand of the OR (||) operator"));
       })
       .Case<nd::ImplOp>([&](nd::ImplOp o) {
-        if (!forceBool(*lookup(env, o.getLhs()), pos, "in the left operand of the IMPL (->) operator"))
+        Value t1, t2;
+        if (!forceBool(operand(env, o.getLhs(), t1), pos, "in the left operand of the IMPL (->) operator"))
           return mkBool(out, true);
-        mkBool(out, forceBool(*lookup(env, o.getRhs()), pos, "in the right operand of the IMPL (->) operator"));
+        mkBool(out, forceBool(operand(env, o.getRhs(), t2), pos, "in the right operand of the IMPL (->) operator"));
       })
       .Case<nd::EqOp>([&](nd::EqOp e) {
-        Value a = *lookup(env, e.getLhs()), b;
-        Value *pa = lookup(env, e.getLhs()), *pb = lookup(env, e.getRhs());
-        forceValue(*pa, pos);
-        forceValue(*pb, pos);
-        a = *pa;
-        b = *pb;
+        Value ta, tb;
+        Value &ra = operand(env, e.getLhs(), ta);
+        forceValue(ra, pos);
+        Value &rb = operand(env, e.getRhs(), tb);
+        forceValue(rb, pos);
+        Value a = ra, b = rb;
         mkBool(out, eqValues(a, b, pos));
       })
       .Case<nd::NeqOp>([&](nd::NeqOp e) {
-        Value *pa = lookup(env, e.getLhs()), *pb = lookup(env, e.getRhs());
-        forceValue(*pa, pos);
-        forceValue(*pb, pos);
-        Value a = *pa, b = *pb;
+        Value ta, tb;
+        Value &ra = operand(env, e.getLhs(), ta);
+        forceValue(ra, pos);
+        Value &rb = operand(env, e.getRhs(), tb);
+        forceValue(rb, pos);
+        Value a = ra, b = rb;
         mkBool(out, !eqValues(a, b, pos));
       })
       .Case<nd::UpdateOp>([&](nd::UpdateOp u) {
-        Value *l = lookup(env, u.getLhs()), *r = lookup(env, u.getRhs());
+        Value tl, tr;
+        Value *l = &operand(env, u.getLhs(), tl);
         forceAttrs(*l, pos, "in the left operand of the update (//) operator");
+        Value *r = &operand(env, u.getRhs(), tr);
         forceAttrs(*r, pos, "in the right operand of the update (//) operator");
         if (l->attrs->empty()) { out = *r; return; }
         if (r->attrs->empty()) { out = *l; return; }
@@ -916,8 +964,10 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
         mkAttrs(out, b);
       })
       .Case<nd::ConcatListsOp>([&](nd::ConcatListsOp c) {
-        Value *l = lookup(env, c.getLhs()), *r = lookup(env, c.getRhs());
+        Value tl, tr;
+        Value *l = &operand(env, c.getLhs(), tl);
         forceList(*l, pos, "in the left operand of the list concatenation operator");
+        Value *r = &operand(env, c.getRhs(), tr);
         forceList(*r, pos, "in the right operand of the list concatenation operator");
         if (l->list.size == 0) { out = *r; return; }
         if (r->list.size == 0) { out = *l; return; }

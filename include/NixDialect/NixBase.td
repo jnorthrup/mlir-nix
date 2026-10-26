@@ -42,6 +42,21 @@ def Nix_Dialect : Dialect {
         ::llvm::StringRef key, ::llvm::ArrayRef<::mlir::Attribute> args)>;
     PrimFolder primFolder;
 
+    /// Operand modalities, collected from the `NixModes` traits of the ops: bit i of
+    /// `strict` says operand i is forced before the op returns and never retained;
+    /// bit i of `tail` says the op's result is that operand's value.
+    struct OperandModes { unsigned strict = 0, tail = 0; };
+    ::llvm::DenseMap<const void *, OperandModes> operandModes; // by OperationName
+    OperandModes modesOf(::mlir::OperationName n) const {
+      auto it = operandModes.find(n.getAsOpaquePointer());
+      return it == operandModes.end() ? OperandModes{} : it->second;
+    }
+    /// True when the value has exactly one use, that use is a strict or tail operand,
+    /// and the consumer is in the same region as the definition.  The consumer then
+    /// runs at most once per frame, right when it needs the value, so the evaluator
+    /// can evaluate the definition in place instead of allocating a thunk for it.
+    bool evaluatesInPlace(::mlir::Value v) const;
+
     /// How a primop may interact with the world (`nix.fx` of each op in
     /// NixPrims.irdl.mlir; drives the memory-effect interface).
     enum class PrimFx : uint8_t { Pure, User, FS, Env, Store, Import };
@@ -131,5 +146,20 @@ defvar NixFxUser = [MemoryEffects<[MemWrite<NixTraceRes>]>];
 // otherwise pure, so it declares an allocation of its result (like
 // memref.alloc): CSE keeps both, an unused one is still dead.
 def NixFreshVal : Res<NixVal, "a fresh value with observable identity", [MemAlloc]>;
+
+//===----------------------------------------------------------------------===//
+// Operand modalities: which operands the evaluator may evaluate in place
+//===----------------------------------------------------------------------===//
+
+// Every operand is lazy unless listed.  `strict`: if the op's evaluation uses the
+// operand it forces it before returning, and does not keep the operand's Value (it
+// copies out what it needs).  `tail`: the op's result is the operand's value, so it can
+// be evaluated straight into the result.  Lists are operand indices.
+class NixModes<list<int> strict, list<int> tail>
+    : NativeOpTrait<"NixModes", [],
+        "static constexpr unsigned kStrictMask = " # !foldl(0, strict, acc, i, !or(acc, !shl(1, i))) # "u;\n"
+        "static constexpr unsigned kTailMask = " # !foldl(0, tail, acc, i, !or(acc, !shl(1, i))) # "u;"> {
+  let cppNamespace = "::mlir::nix";
+}
 
 #endif // NIX_BASE_TD

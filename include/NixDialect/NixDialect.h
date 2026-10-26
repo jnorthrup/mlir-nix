@@ -42,6 +42,13 @@ struct NixStoreResource : public SideEffects::Resource::Base<NixStoreResource> {
 
 } // namespace mlir::nix
 
+namespace mlir::nix {
+/// Marker trait of the `NixModes` ODS class (NixBase.td): the op class carries
+/// `kStrictMask` / `kTailMask`, which the dialect collects into `operandModes`.
+template <typename ConcreteType>
+class NixModes : public OpTrait::TraitBase<ConcreteType, NixModes> {};
+} // namespace mlir::nix
+
 #include "NixDialect/NixInterfaces.h.inc"
 #include "NixDialect/NixDialect.h.inc"
 
