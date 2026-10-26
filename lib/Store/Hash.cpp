@@ -1,5 +1,6 @@
 //===- Hash.cpp - Hashes and encodings (bit-compatible with Nix) ----------===//
 
+#include "Nix/Prefetch.h"
 #include "Nix/Store.h"
 
 #include "llvm/ADT/ArrayRef.h"
@@ -223,6 +224,7 @@ Hash hashString(HashAlgo a, std::string_view s) {
 
 Hash hashFile(HashAlgo a, const std::string &path) {
   HashSink sink(a);
+  nixprefetch::note('F', path.c_str());
   int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
   if (fd < 0) throw Error("opening file '" + path + "': " + strerror(errno));
   char buf[65536];

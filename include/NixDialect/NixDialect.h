@@ -13,6 +13,7 @@
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/Config/llvm-config.h"
 #include "llvm/ADT/StringMap.h"
 #include <functional>
 #include <memory>
@@ -25,19 +26,26 @@ struct Frame;
 class EvalState;
 } // namespace nixev
 
+// SideEffects::Resource::getName() became const in LLVM 23 (the distro packages are 22).
+#if LLVM_VERSION_MAJOR >= 23
+#define NIX_RESOURCE_NAME_CONST const
+#else
+#define NIX_RESOURCE_NAME_CONST
+#endif
+
 namespace mlir::nix {
 // Effect resources for primops (see NixPrims.irdl.mlir, `nix.fx`).
 struct NixTraceResource : public SideEffects::Resource::Base<NixTraceResource> {
-  StringRef getName() const final { return "NixTrace"; }
+  StringRef getName() NIX_RESOURCE_NAME_CONST final { return "NixTrace"; }
 };
 struct NixFSResource : public SideEffects::Resource::Base<NixFSResource> {
-  StringRef getName() const final { return "NixFS"; }
+  StringRef getName() NIX_RESOURCE_NAME_CONST final { return "NixFS"; }
 };
 struct NixEnvResource : public SideEffects::Resource::Base<NixEnvResource> {
-  StringRef getName() const final { return "NixEnv"; }
+  StringRef getName() NIX_RESOURCE_NAME_CONST final { return "NixEnv"; }
 };
 struct NixStoreResource : public SideEffects::Resource::Base<NixStoreResource> {
-  StringRef getName() const final { return "NixStore"; }
+  StringRef getName() NIX_RESOURCE_NAME_CONST final { return "NixStore"; }
 };
 
 } // namespace mlir::nix

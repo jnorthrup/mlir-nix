@@ -23,7 +23,9 @@ include(HandleLLVMOptions)
 include_directories(${LLVM_INCLUDE_DIRS} ${MLIR_INCLUDE_DIRS})
 include_directories(${PROJECT_SOURCE_DIR}/include ${PROJECT_BINARY_DIR}/include)
 link_directories(${LLVM_BUILD_LIBRARY_DIR})
-add_definitions(${LLVM_DEFINITIONS})
+# LLVM_DEFINITIONS is one string of -D flags; add_definitions needs them as a list.
+separate_arguments(LLVM_DEFINITIONS_LIST NATIVE_COMMAND "${LLVM_DEFINITIONS}")
+add_definitions(${LLVM_DEFINITIONS_LIST})
 
 # The evaluator relies on C++ exceptions for Nix errors (throw/assert/tryEval).
 set(LLVM_REQUIRES_EH ON)

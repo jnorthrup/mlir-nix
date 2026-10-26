@@ -7,6 +7,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "Nix/Prefetch.h"
 #include "Nix/Eval.h"
 #include "Nix/MLIRGen.h"
 
@@ -828,6 +829,7 @@ int realMain(int argc, char **argv) {
 } // namespace
 
 int main(int argc, char **argv) {
+  nixprefetch::init(argc, argv); // MLNIX_PREFETCH=record:FILE | replay:FILE | auto
   std::ios::sync_with_stdio(true);
   int rc = 1;
   try {

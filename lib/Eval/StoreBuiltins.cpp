@@ -1,5 +1,6 @@
 //===- StoreBuiltins.cpp - Builtins that touch the store / file system ----===//
 
+#include "Nix/Prefetch.h"
 #include "Nix/Eval.h"
 
 #include <algorithm>
@@ -250,6 +251,18 @@ static std::string fileTypeOf(const std::string &path) {
   if (S_ISDIR(st.st_mode)) return "directory";
   if (S_ISLNK(st.st_mode)) return "symlink";
   return "unknown";
+}
+
+/// The type of a directory entry: the file system already told `readdir` (d_type), so no stat;
+/// DT_UNKNOWN (some file systems) falls back to lstat, as upstream does.
+static std::string dirEntryType(const std::string &dir, const dirent &e) {
+  switch (e.d_type) {
+  case DT_REG: return "regular";
+  case DT_DIR: return "directory";
+  case DT_LNK: return "symlink";
+  case DT_UNKNOWN: return fileTypeOf(dir + "/" + e.d_name);
+  default: return "unknown";
+  }
 }
 
 /// Shared implementation of builtins.path and builtins.filterSource.
@@ -540,6 +553,7 @@ void registerStoreBuiltins(EvalState &state) {
     }
     std::string real = st.realisePath(nixfe::canonPath(p), pos);
     struct stat sb;
+    nixprefetch::note('S', real.c_str());
     bool ok = mustBeDir ? (stat(real.c_str(), &sb) == 0 && S_ISDIR(sb.st_mode)) : (stat(real.c_str(), &sb) == 0 || nixstore::pathExists(real));
     st.mkBool(v, ok);
   });
@@ -569,6 +583,7 @@ void registerStoreBuiltins(EvalState &state) {
     std::string p = st.coerceToPath(*args[0], ctx, pos, "while evaluating the first argument passed to builtins.readDir");
     st.realiseContext(ctx, pos);
     std::string real = st.realisePath(p, pos);
+    nixprefetch::note('D', real.c_str());
     DIR *d = opendir(real.c_str());
     if (!d) throw EvalError("cannot read directory '" + p + "': " + strerror(errno), pos);
     EvalState::BindingsBuilder bb(st);
@@ -576,7 +591,7 @@ void registerStoreBuiltins(EvalState &state) {
       std::string n = e->d_name;
       if (n == "." || n == "..") continue;
       Value &t = bb.alloc(n);
-      st.mkString(t, fileTypeOf(real + "/" + n));
+      st.mkString(t, dirEntryType(real, *e));
     }
     closedir(d);
     st.mkAttrs(v, bb.finish());

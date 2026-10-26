@@ -1,5 +1,6 @@
 //===- StorePaths.cpp - NAR, store paths, ATerm derivations, utilities ----===//
 
+#include "Nix/Prefetch.h"
 #include "Nix/Store.h"
 
 #include <algorithm>
@@ -23,6 +24,7 @@ namespace nixstore {
 //===----------------------------------------------------------------------===//
 
 std::string readFile(const std::string &path) {
+  nixprefetch::note('F', path.c_str());
   int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
   if (fd < 0) throw Error("opening file '" + path + "': " + strerror(errno));
   std::string s;
@@ -58,6 +60,7 @@ void writeFile(const std::string &path, std::string_view data, mode_t mode) {
 
 bool pathExists(const std::string &path) {
   struct stat st;
+  nixprefetch::note('L', path.c_str());
   return lstat(path.c_str(), &st) == 0;
 }
 
@@ -253,6 +256,7 @@ struct NarWriter {
   }
   void dump(const std::string &path) {
     struct stat st;
+    nixprefetch::note('L', path.c_str());
     if (lstat(path.c_str(), &st) != 0)
       throw Error("getting attributes of path '" + path + "': " + strerror(errno));
     str("(");
@@ -265,6 +269,7 @@ struct NarWriter {
       }
       str("contents");
       u64(st.st_size);
+      nixprefetch::note('F', path.c_str());
       int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
       if (fd < 0) throw Error("opening file '" + path + "': " + strerror(errno));
       char buf[65536];
@@ -281,6 +286,7 @@ struct NarWriter {
       str("type");
       str("directory");
       std::vector<std::string> names;
+      nixprefetch::note('D', path.c_str());
       DIR *d = opendir(path.c_str());
       if (!d) throw Error("opening directory '" + path + "': " + strerror(errno));
       while (auto *e = readdir(d)) {

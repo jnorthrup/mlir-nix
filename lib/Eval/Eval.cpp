@@ -1,5 +1,6 @@
 //===- Eval.cpp - Lazy evaluator over the nix dialect ---------------------===//
 
+#include "Nix/Prefetch.h"
 #include "Nix/Eval.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassRegistry.h"
@@ -1556,6 +1557,7 @@ std::string EvalState::resolveExprPath(std::string path) {
   // Follow symlinks (to the final target), then use default.nix for dirs.
   for (int i = 0; i < 1024; i++) {
     struct stat st;
+    nixprefetch::note('L', path.c_str());
     if (lstat(path.c_str(), &st) != 0) throw EvalError("path '" + path + "' does not exist");
     if (!S_ISLNK(st.st_mode)) break;
     char buf[PATH_MAX + 1];
@@ -1566,6 +1568,7 @@ std::string EvalState::resolveExprPath(std::string path) {
     path = nixfe::canonPath(tgt);
   }
   struct stat st;
+  nixprefetch::note('S', path.c_str());
   if (stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) path += "/default.nix";
   return path;
 }
@@ -1593,6 +1596,7 @@ Value *EvalState::evalFile(const std::string &pathIn) {
     origin->name = logical;
     origin->path = logical;
     origin->baseDir = nixstore::dirOf(logical);
+    nixprefetch::note('F', resolved.c_str());
     origin->text = settings.mapSources ? nixfe::Source::mapFile(resolved) : nullptr;
     if (!origin->text) origin->text = nixfe::Source::fromString(readSource(resolved));
     origins.push_back(origin);
