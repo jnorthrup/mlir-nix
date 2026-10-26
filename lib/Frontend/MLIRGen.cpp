@@ -50,7 +50,7 @@ public:
       // scope: <expr>, with the scope's names bound lexically.
       auto lam = nd::LambdaOp::create(b, loc(e->pos), valTy(), ArrayAttr(),
                                       DenseBoolArrayAttr(), false,
-                                      b.getStringAttr("scope"), StringAttr());
+                                      b.getStringAttr("scope"), StringAttr(), ArrayAttr());
       Block *lb = new Block();
       lam.getBody().push_back(lb);
       Value arg = lb->addArgument(valTy(), loc(e->pos));
@@ -301,7 +301,12 @@ private:
         l->hasFormals ? b.getDenseBoolArrayAttr(hasDef) : DenseBoolArrayAttr(),
         l->ellipsis,
         l->arg.empty() ? StringAttr() : b.getStringAttr(l->arg),
-        l->name.empty() ? StringAttr() : b.getStringAttr(l->name));
+        l->name.empty() ? StringAttr() : b.getStringAttr(l->name), ArrayAttr());
+    if (l->hasFormals) {
+      SmallVector<Attribute> locs;
+      for (auto &f : l->formals) locs.push_back(loc(f.pos));
+      lam.setFormalLocsAttr(b.getArrayAttr(locs));
+    }
     Block *blk = new Block();
     lam.getBody().push_back(blk);
     Value arg = blk->addArgument(valTy(), loc(l->pos));

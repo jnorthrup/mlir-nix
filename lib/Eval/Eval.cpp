@@ -1280,12 +1280,9 @@ nd::ExprOp EvalState::lowerToMLIR(nixfe::Expr *e, std::shared_ptr<nixfe::Origin>
   }
   std::string sym = "expr" + std::to_string(exprCounter++);
   nd::ExprOp op = nixfe::genExpr(*module, e, std::move(origin), sym, go);
-  if (settings.optimize) {
-    // Run the simplifier on this expression only (it is isolated from above).
-    PassManager pm(&ctx, nd::ExprOp::getOperationName());
-    // Pass operates on ModuleOp; run a nested module-less pipeline instead:
-    (void)pm;
-  }
+  // The expression is IsolatedFromAbove and not yet referenced by any frame,
+  // so it can be rewritten freely before evaluation starts.
+  if (settings.optimize) nd::simplifyExpr(op);
   return op;
 }
 

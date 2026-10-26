@@ -740,12 +740,11 @@ void registerBuiltins(EvalState &state) {
     EvalState::BindingsBuilder bb(st);
     auto defs = *lam.getFormalDefaults();
     // Positions of the formals come from the nix.formal ops in the body.
-    std::map<std::string, PosPtr> fpos;
-    for (Operation &op : lam.getBody().front())
-      if (auto f = dyn_cast<nd::FormalOp>(op)) fpos[f.getName().str()] = f->getLoc().getAsOpaquePointer();
+    auto locs = lam.getFormalLocs();
     for (size_t i = 0; i < lam.getFormals()->size(); i++) {
       std::string n = cast<StringAttr>((*lam.getFormals())[i]).getValue().str();
-      bb.insert(n, defs[i] ? &st.vTrue : &st.vFalse, fpos[n]);
+      PosPtr p = locs && i < locs->size() ? cast<LocationAttr>((*locs)[i]).getAsOpaquePointer() : nullptr;
+      bb.insert(n, defs[i] ? &st.vTrue : &st.vFalse, p);
     }
     st.mkAttrs(v, bb.finish());
   });

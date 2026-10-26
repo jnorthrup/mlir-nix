@@ -25,6 +25,9 @@ namespace mlir::nix {
 /// Canonicalisation + dead-binding elimination pipeline for nix IR.
 void registerNixPasses();
 std::unique_ptr<Pass> createNixSimplifyPass();
+/// Fold constants / builtin arithmetic and delete dead (possibly cyclic)
+/// bindings below `root` (an ExprOp or a ModuleOp).
+void simplifyExpr(Operation *root);
 } // namespace mlir::nix
 
 #endif

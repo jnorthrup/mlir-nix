@@ -155,6 +155,24 @@ struct FoldBuiltinArith : OpRewritePattern<ApplyOp> {
   }
 };
 
+/// `nix.apply %v()` (application to zero arguments) is the identity; it only
+/// exists to give a binding its own value identity.  When nothing else uses
+/// %v that identity is unobservable, so forward %v directly.
+struct ForwardUnobservableIdentity : OpRewritePattern<ApplyOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(ApplyOp op, PatternRewriter &rw) const override {
+    if (!op.getArgs().empty()) return failure();
+    Value callee = op.getCallee();
+    if (callee == op.getResult() || !callee.hasOneUse()) return failure();
+    // Placeholders/cycles: only forward values defined by real nix ops or
+    // block arguments.
+    if (Operation *d = callee.getDefiningOp())
+      if (!isa<NixDialect>(d->getDialect())) return failure();
+    rw.replaceOp(op, callee);
+    return success();
+  }
+};
+
 /// Graph regions can hold dead *cycles* (unused recursive bindings) that the
 /// generic dead-code elimination never removes. Mark from each terminator.
 void eliminateDeadBindings(Operation *root) {
@@ -204,6 +222,24 @@ void eliminateDeadBindings(Operation *root) {
   }
 }
 
+} // namespace
+
+void mlir::nix::simplifyExpr(Operation *root) {
+  MLIRContext *ctx = root->getContext();
+  RewritePatternSet patterns(ctx);
+  patterns.add<FoldBuiltinArith, ForwardUnobservableIdentity>(ctx);
+  for (RegisteredOperationName op : ctx->getRegisteredOperations())
+    if (op.getDialect().getNamespace() == "nix")
+      op.getCanonicalizationPatterns(patterns, ctx);
+  GreedyRewriteConfig cfg;
+  cfg.setRegionSimplificationLevel(GreedySimplifyRegionLevel::Disabled);
+  cfg.enableConstantCSE(false);
+  (void)applyPatternsGreedily(root, std::move(patterns), cfg);
+  eliminateDeadBindings(root);
+}
+
+namespace {
+
 struct NixSimplifyPass
     : public PassWrapper<NixSimplifyPass, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(NixSimplifyPass)
@@ -211,18 +247,7 @@ struct NixSimplifyPass
   StringRef getDescription() const override {
     return "Fold constants/builtin arithmetic and remove dead (cyclic) bindings";
   }
-  void runOnOperation() override {
-    RewritePatternSet patterns(&getContext());
-    patterns.add<FoldBuiltinArith>(&getContext());
-    for (RegisteredOperationName op : getContext().getRegisteredOperations())
-      if (op.getDialect().getNamespace() == "nix")
-        op.getCanonicalizationPatterns(patterns, &getContext());
-    GreedyRewriteConfig cfg;
-    cfg.setRegionSimplificationLevel(GreedySimplifyRegionLevel::Disabled);
-    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns), cfg)))
-      return signalPassFailure();
-    eliminateDeadBindings(getOperation());
-  }
+  void runOnOperation() override { simplifyExpr(getOperation()); }
 };
 } // namespace
 

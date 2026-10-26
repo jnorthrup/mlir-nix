@@ -85,7 +85,8 @@ def Nix_LambdaOp : Nix_Op<"lambda", [Pure, SingleBlock,
                        OptionalAttr<DenseBoolArrayAttr>:$formal_defaults,
                        UnitAttr:$ellipsis,
                        OptionalAttr<StrAttr>:$arg_name,
-                       OptionalAttr<StrAttr>:$name);
+                       OptionalAttr<StrAttr>:$name,
+                       OptionalAttr<ArrayAttr>:$formal_locs);
   let results = (outs NixVal:$result);
   let regions = (region SizedRegion<1>:$body);
   let assemblyFormat = "attr-dict-with-keyword $body";
