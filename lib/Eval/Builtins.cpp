@@ -714,8 +714,18 @@ void registerBuiltins(EvalState &state) {
     st.forceAttrs(*args[1], pos, "while evaluating the second argument passed to builtins.intersectAttrs");
     Bindings *b = st.allocBindings(std::min(args[0]->attrs->size(), args[1]->attrs->size()));
     size_t n = 0;
-    for (auto &a : *args[1]->attrs)
-      if (args[0]->attrs->get(a.name)) b->attrs[n++] = a;
+    // Walk the smaller set and probe the larger one.  callPackage intersects a
+    // function's ~10 formals with all of nixpkgs (~40k attributes): walking the
+    // large side did 40k failing probes and a 1 MB scan per call (90-96% of all
+    // attrset lookups in the NixOS and nixpkgs workloads).  Either way the result
+    // is sorted, with the entries of the second set.
+    if (args[0]->attrs->size() < args[1]->attrs->size()) {
+      for (auto &a : *args[0]->attrs)
+        if (const Attr *j = args[1]->attrs->get(a.name)) b->attrs[n++] = *j;
+    } else {
+      for (auto &a : *args[1]->attrs)
+        if (args[0]->attrs->get(a.name)) b->attrs[n++] = a;
+    }
     b->size_ = n;
     st.mkAttrs(v, b);
   });

@@ -67,6 +67,14 @@ CASES = [
     'builtins.replaceStrings ["" "a"] ["-" "A"] "banana"',
     'builtins.concatStringsSep ", " (builtins.attrValues { a = "1"; b = "2"; })',
     'with builtins; foldl\' (a: b: a + b) 0 (genList (x: x * x) 100)',
+    # --- intersectAttrs: walks the smaller side; values always come from the second set --------
+    'builtins.intersectAttrs { b = 1; d = 2; } { a = 10; b = 20; c = 30; d = 40; e = 50; }',
+    'builtins.intersectAttrs { a = 1; b = 2; c = 3; d = 4; e = 5; } { b = 20; d = 40; }',
+    'builtins.intersectAttrs { a = 1; b = 2; c = 3; } { b = 20; c = 30; z = 9; }',
+    'builtins.intersectAttrs { a = 1; } { b = 2; }',
+    'builtins.intersectAttrs { } { b = 2; }',
+    'builtins.intersectAttrs { b = 2; } { }',
+    'let big = builtins.listToAttrs (map (n: { name = "k${toString n}"; value = n; }) (builtins.genList (x: x) 300)); in [ (builtins.intersectAttrs { k7 = null; k250 = null; nope = null; } big) (builtins.attrNames (builtins.intersectAttrs big { k0 = 1; k299 = 2; k300 = 3; })) ]',
 ]
 
 def run_local(mlnix, expr):

@@ -64,7 +64,7 @@ and what it cost: `docs/COMBINATORS.md`. What follows from the declaration:
 
 `scripts/bench.py`, min of 3 runs, NixOS toplevel / 73 nixpkgs attrs. Every row
 has the identical result hash (same `.drv` paths), 466/466 on the lang suite,
-53/53 against Nix 2.35.4.
+60/60 against Nix 2.35.4.
 
     change                                          toplevel    nixpkgs-73   peak RSS
     v0.1.0 (nix-simplify = greedy driver per file)    4.59 s      4.91 s     2554 MB
@@ -74,6 +74,10 @@ has the identical result hash (same `.drv` paths), 466/466 on the lang suite,
     + ctx.disableMultithreading()                     3.82 s      3.38 s     2344 MB
     + literals without locations, filename attr once  3.59 s      3.13 s     2349 MB
     + Symbols keyed by StringAttr; CommonCrypto SHA   3.48 s      2.97 s     2378 MB
+    + intersectAttrs walks the smaller set            3.38 s      2.80 s     2359 MB
+
+The last row is an algorithm fix, not an MLIR change: one builtin made 90-96% of all
+attrset lookups (`docs/COLLECTIONS.md`).
 
 Optional pipeline stages, interleaved A/B against the default `nix-prims` (same
 binary, identical result hashes), NixOS toplevel / 73 attrs:
@@ -120,13 +124,30 @@ below are ordered by the profile, not by which dialects are fashionable.
 
 ## Next rungs (by measured weight)
 
-1. A lowering to a runtime dialect with *resolved addressing*: operand
-   (depth, slot) and Symbol ids as attributes, so `lookup` (10.6%, a hash probe
-   per operand) and the `TypeSwitch` chain in `evalOp` disappear. Progressive
-   lowering `nix + continents -> nixrt`.
-2. Core ops behind `NixEvalOpInterface` models; delete the `TypeSwitch`.
-3. Lexer (7.8% self): a table-driven scanner instead of per-character calls.
-4. Lowered-IR cache as MLIR bytecode, keyed by file hash (skips lex, parse and
+Fresh profile of the NixOS toplevel run (2 s main-thread sample, 1449 busy samples) and
+`/usr/bin/time -l`; these replace the earlier numbers in this list.
+
+    MLIR uniquing (locations 6.2%, string attrs 3.9%, rest 8%)   18.2%
+    lexer                                                        10.4%
+    memcmp (string attr equality, StringMap)                      9.3%
+    kernel time: 151,567 page reclaims over a 2.42 GB footprint   10%  (0.36 s of 3.46 s)
+    EvalState::lookup (operand -> Value*, a hash probe)            8.6%
+    malloc/free                                                    5.7%
+    Bindings::get                                    was 5.9%, now about 1% (see COLLECTIONS.md)
+
+1. Memory volume. The arena never frees, so 2.4 GB is touched fresh and the kernel
+   charges about 10% of the run for it. `//` alone copies 264 MB (toplevel) / 514 MB
+   (nixpkgs-73, a fifth of RSS); 374 calls with a 256+ entry left operand are 56% of that.
+   A persistent or layered attribute set is the one place a tree structure could pay
+   (`docs/COLLECTIONS.md`, section 6). Not built.
+2. A lowering to a runtime dialect with *resolved addressing*: operand
+   (depth, slot) and Symbol ids as attributes, so `lookup` (8.6%) and the `TypeSwitch`
+   chain in `evalOp` disappear. Progressive lowering `nix + continents -> nixrt`.
+3. Locations: 6.2% is FileLineColRange uniquing, one per op. Sharing locations per line
+   needs the column kept elsewhere (errors print it).
+4. Core ops behind `NixEvalOpInterface` models; delete the `TypeSwitch`.
+5. Lexer (10.4%): a table-driven scanner instead of per-character calls.
+6. Lowered-IR cache as MLIR bytecode, keyed by file hash (skips lex, parse and
    lowering on warm runs; the uniquing cost moves to the reader, so measure).
-5. Only then: closure conversion to `func` + the stock inliner, strictness
+7. Only then: closure conversion to `func` + the stock inliner, strictness
    analysis (needs a lattice type instead of the single `!nix.value`).
