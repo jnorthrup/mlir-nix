@@ -1,0 +1,257 @@
+//===- NixOps.td - The Nix language as an MLIR dialect ------*- tablegen -*-===//
+//
+// Design
+// ------
+// Every SSA value of type !nix.value denotes a *lazy* Nix value (a thunk).
+// Defining an op does not evaluate it; the evaluator materialises a thunk per
+// (op, activation frame) and only runs the op when the value is forced.  This
+// gives exact Nix call-by-need semantics with plain SSA data-flow.
+//
+// Bodies of `nix.expr` and `nix.lambda` are single-block *graph* regions, so
+// SSA values may be used before they are defined and may form cycles.  That is
+// precisely what `let` and `rec { }` need: recursive bindings are just
+// forward/cyclic SSA references, and all lexical scoping is resolved at
+// lowering time.  Only `with` remains dynamic (`nix.with_var`).
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef NIX_OPS_TD
+#define NIX_OPS_TD
+
+include "mlir/IR/OpBase.td"
+include "mlir/IR/AttrTypeBase.td"
+include "mlir/IR/RegionKindInterface.td"
+include "mlir/IR/SymbolInterfaces.td"
+include "mlir/Interfaces/SideEffectInterfaces.td"
+
+def Nix_Dialect : Dialect {
+  let name = "nix";
+  let cppNamespace = "::mlir::nix";
+  let summary = "The Nix expression language";
+  let description = [{
+    A lazy, purely functional dialect modelling the Nix expression language.
+    Values are untyped (`!nix.value`) lazy thunks; regions are graph regions.
+  }];
+  let useDefaultTypePrinterParser = 1;
+  let hasConstantMaterializer = 1;
+}
+
+class Nix_Type<string name, string typeMnemonic> : TypeDef<Nix_Dialect, name> {
+  let mnemonic = typeMnemonic;
+}
+
+def Nix_ValueType : Nix_Type<"Value", "value"> {
+  let summary = "a lazy Nix value";
+}
+
+class Nix_Op<string mnemonic, list<Trait> traits = []>
+    : Op<Nix_Dialect, mnemonic, traits>;
+
+defvar NixVal = Nix_ValueType;
+
+//===----------------------------------------------------------------------===//
+// Structure
+//===----------------------------------------------------------------------===//
+
+def Nix_ExprOp : Nix_Op<"expr", [
+    Symbol, SingleBlock, IsolatedFromAbove,
+    DeclareOpInterfaceMethods<RegionKindInterface>]> {
+  let summary = "a top-level Nix expression (one source file / -E string)";
+  let arguments = (ins SymbolNameAttr:$sym_name,
+                       OptionalAttr<StrAttr>:$source_path,
+                       OptionalAttr<StrAttr>:$base_dir);
+  let regions = (region SizedRegion<1>:$body);
+  let assemblyFormat = "$sym_name attr-dict-with-keyword $body";
+}
+
+def Nix_ReturnOp : Nix_Op<"return", [Terminator, Pure,
+    ParentOneOf<["ExprOp", "LambdaOp"]>]> {
+  let summary = "result of the enclosing expression / lambda body";
+  let arguments = (ins NixVal:$value);
+  let assemblyFormat = "$value attr-dict";
+}
+
+def Nix_LambdaOp : Nix_Op<"lambda", [Pure, SingleBlock,
+    DeclareOpInterfaceMethods<RegionKindInterface>]> {
+  let summary = "function abstraction";
+  let description = [{
+    The body is a graph region with exactly one block argument: the value the
+    function is applied to.  For pattern-matching lambdas (`{ a, b ? 1, ... }:`)
+    `formals`/`formal_defaults`/`ellipsis` describe the pattern; the body binds
+    each formal with `nix.formal`.  `arg_name` is the simple argument name or the
+    `@`-binding, kept for printing and diagnostics.
+  }];
+  let arguments = (ins OptionalAttr<StrArrayAttr>:$formals,
+                       OptionalAttr<DenseBoolArrayAttr>:$formal_defaults,
+                       UnitAttr:$ellipsis,
+                       OptionalAttr<StrAttr>:$arg_name,
+                       OptionalAttr<StrAttr>:$name);
+  let results = (outs NixVal:$result);
+  let regions = (region SizedRegion<1>:$body);
+  let assemblyFormat = "attr-dict-with-keyword $body";
+  let hasVerifier = 1;
+  let extraClassDeclaration = [{
+    bool hasFormals() { return getFormals().has_value(); }
+    ::mlir::BlockArgument getArgument() { return getBody().front().getArgument(0); }
+  }];
+}
+
+def Nix_FormalOp : Nix_Op<"formal", [Pure]> {
+  let summary = "bind one formal of a pattern lambda";
+  let description = [{
+    `arg.name` if the argument set has the attribute, otherwise `default`.
+  }];
+  let arguments = (ins NixVal:$arg, StrAttr:$name, Optional<NixVal>:$default_value);
+  let results = (outs NixVal:$result);
+  let assemblyFormat = "$arg $name (`default` $default_value^)? attr-dict";
+}
+
+//===----------------------------------------------------------------------===//
+// Constants / references
+//===----------------------------------------------------------------------===//
+
+def Nix_IntOp : Nix_Op<"int", [ConstantLike, Pure]> {
+  let arguments = (ins I64Attr:$value);
+  let results = (outs NixVal:$result);
+  let assemblyFormat = "$value attr-dict";
+  let hasFolder = 1;
+}
+
+def Nix_FloatOp : Nix_Op<"float", [ConstantLike, Pure]> {
+  let arguments = (ins F64Attr:$value);
+  let results = (outs NixVal:$result);
+  let assemblyFormat = "$value attr-dict";
+  let hasFolder = 1;
+}
+
+def Nix_StringOp : Nix_Op<"str", [ConstantLike, Pure]> {
+  let summary = "string literal (no context)";
+  let arguments = (ins StrAttr:$value);
+  let results = (outs NixVal:$result);
+  let assemblyFormat = "$value attr-dict";
+  let hasFolder = 1;
+}
+
+def Nix_PathOp : Nix_Op<"path", [Pure]> {
+  let summary = "absolute, canonical path literal";
+  let arguments = (ins StrAttr:$value);
+  let results = (outs NixVal:$result);
+  let assemblyFormat = "$value attr-dict";
+}
+
+def Nix_BuiltinOp : Nix_Op<"builtin", [Pure]> {
+  let summary = "reference to an entry of the global base environment";
+  let arguments = (ins StrAttr:$name);
+  let results = (outs NixVal:$result);
+  let assemblyFormat = "$name attr-dict";
+}
+
+def Nix_WithVarOp : Nix_Op<"with_var", [Pure]> {
+  let summary = "dynamically scoped variable lookup through `with` scopes";
+  let description = [{
+    Looks `name` up in each scope operand in order (innermost `with` first).
+  }];
+  let arguments = (ins StrAttr:$name, Variadic<NixVal>:$scopes);
+  let results = (outs NixVal:$result);
+  let assemblyFormat = "$name (`in` $scopes^)? attr-dict";
+}
+
+//===----------------------------------------------------------------------===//
+// Data constructors
+//===----------------------------------------------------------------------===//
+
+def Nix_ListOp : Nix_Op<"list", [Pure]> {
+  let arguments = (ins Variadic<NixVal>:$elements);
+  let results = (outs NixVal:$result);
+  let assemblyFormat = "`[` $elements `]` attr-dict";
+}
+
+def Nix_AttrsOp : Nix_Op<"attrs", [Pure, AttrSizedOperandSegments]> {
+  let summary = "attribute set construction";
+  let description = [{
+    `names[i]` is bound to `values[i]`.  Dynamic attributes (`${e} = v;`) pair
+    `dyn_names[j]` with `dyn_values[j]`; they are inserted in order at
+    evaluation time and a `null` name drops the attribute.
+  }];
+  let arguments = (ins StrArrayAttr:$names, Variadic<NixVal>:$values,
+                       Variadic<NixVal>:$dyn_names, Variadic<NixVal>:$dyn_values,
+                       OptionalAttr<ArrayAttr>:$positions);
+  let results = (outs NixVal:$result);
+  let assemblyFormat = [{
+    $names `(` $values `)` (`dynamic` `(` $dyn_names^ `)` `=` `(` $dyn_values `)`)? attr-dict
+  }];
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
+// Elimination forms
+//===----------------------------------------------------------------------===//
+
+def Nix_SelectOp : Nix_Op<"select", [Pure, AttrSizedOperandSegments]> {
+  let summary = "attribute path selection `e.a.b or d`";
+  let arguments = (ins NixVal:$base, Variadic<NixVal>:$keys,
+                       Optional<NixVal>:$default_value);
+  let results = (outs NixVal:$result);
+  let assemblyFormat = "$base `[` $keys `]` (`or` $default_value^)? attr-dict";
+}
+
+def Nix_HasAttrOp : Nix_Op<"has_attr", [Pure]> {
+  let summary = "attribute path test `e ? a.b`";
+  let arguments = (ins NixVal:$base, Variadic<NixVal>:$keys);
+  let results = (outs NixVal:$result);
+  let assemblyFormat = "$base `[` $keys `]` attr-dict";
+}
+
+def Nix_ApplyOp : Nix_Op<"apply", [Pure]> {
+  let summary = "(curried) function application";
+  let arguments = (ins NixVal:$callee, Variadic<NixVal>:$args);
+  let results = (outs NixVal:$result);
+  let assemblyFormat = "$callee `(` $args `)` attr-dict";
+}
+
+def Nix_IfOp : Nix_Op<"if", [Pure]> {
+  let arguments = (ins NixVal:$cond, NixVal:$then_value, NixVal:$else_value);
+  let results = (outs NixVal:$result);
+  let assemblyFormat = "$cond `then` $then_value `else` $else_value attr-dict";
+}
+
+def Nix_AssertOp : Nix_Op<"assert", [Pure]> {
+  let arguments = (ins NixVal:$cond, NixVal:$body, OptionalAttr<StrAttr>:$text);
+  let results = (outs NixVal:$result);
+  let assemblyFormat = "$cond `in` $body attr-dict";
+}
+
+//===----------------------------------------------------------------------===//
+// Native operators (the others desugar to calls of __sub, __mul, __div,
+// __lessThan exactly as upstream Nix does, so they remain overridable).
+//===----------------------------------------------------------------------===//
+
+class Nix_BinOp<string mnemonic> : Nix_Op<mnemonic, [Pure]> {
+  let arguments = (ins NixVal:$lhs, NixVal:$rhs);
+  let results = (outs NixVal:$result);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict";
+}
+
+def Nix_EqOp      : Nix_BinOp<"eq">;
+def Nix_NeqOp     : Nix_BinOp<"neq">;
+def Nix_AndOp     : Nix_BinOp<"and">;
+def Nix_OrOp      : Nix_BinOp<"or">;
+def Nix_ImplOp    : Nix_BinOp<"impl">;
+def Nix_UpdateOp  : Nix_BinOp<"update">;
+def Nix_ConcatListsOp : Nix_BinOp<"concat_lists">;
+
+def Nix_NotOp : Nix_Op<"not", [Pure]> {
+  let arguments = (ins NixVal:$operand);
+  let results = (outs NixVal:$result);
+  let assemblyFormat = "$operand attr-dict";
+}
+
+def Nix_ConcatStringsOp : Nix_Op<"concat_strings", [Pure]> {
+  let summary = "`+` (force_string = false) and string interpolation (true)";
+  let arguments = (ins Variadic<NixVal>:$parts, UnitAttr:$force_string);
+  let results = (outs NixVal:$result);
+  let assemblyFormat = "$parts attr-dict";
+  let hasFolder = 1;
+}
+
+#endif // NIX_OPS_TD

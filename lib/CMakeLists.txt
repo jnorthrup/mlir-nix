@@ -1,0 +1,19 @@
+add_mlir_dialect_library(MLIRNix
+  Dialect/NixDialect.cpp
+  PARTIAL_SOURCES_INTENDED
+  DEPENDS MLIRNixOpsIncGen
+  LINK_LIBS PUBLIC MLIRIR MLIRPass MLIRTransforms MLIRTransformUtils MLIRSideEffectInterfaces)
+
+add_library(NixStore STATIC Store/Hash.cpp Store/StorePaths.cpp Store/LocalStore.cpp)
+target_link_libraries(NixStore PUBLIC LLVMSupport)
+llvm_update_compile_flags(NixStore)
+
+add_library(NixFrontend STATIC Frontend/Parser.cpp Frontend/Printer.cpp Frontend/MLIRGen.cpp)
+add_dependencies(NixFrontend MLIRNixOpsIncGen)
+target_link_libraries(NixFrontend PUBLIC MLIRNix MLIRIR)
+llvm_update_compile_flags(NixFrontend)
+
+add_library(NixEval STATIC Eval/Eval.cpp Eval/Builtins.cpp Eval/StoreBuiltins.cpp Eval/Formats.cpp)
+add_dependencies(NixEval MLIRNixOpsIncGen)
+target_link_libraries(NixEval PUBLIC NixFrontend NixStore MLIRNix MLIRIR MLIRParser MLIRPass)
+llvm_update_compile_flags(NixEval)

@@ -1,0 +1,4 @@
+#!/bin/sh
+# Run reference Nix (2.35.4, docker container "nixref") with the given args.
+# The project is mounted at /work.
+exec docker exec -i -w "${NIXREF_CWD:-/work}" nixref "$@"

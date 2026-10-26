@@ -1,0 +1,8 @@
+set(LLVM_TARGET_DEFINITIONS NixOps.td)
+mlir_tablegen(NixOps.h.inc -gen-op-decls)
+mlir_tablegen(NixOps.cpp.inc -gen-op-defs)
+mlir_tablegen(NixDialect.h.inc -gen-dialect-decls -dialect=nix)
+mlir_tablegen(NixDialect.cpp.inc -gen-dialect-defs -dialect=nix)
+mlir_tablegen(NixTypes.h.inc -gen-typedef-decls -typedefs-dialect=nix)
+mlir_tablegen(NixTypes.cpp.inc -gen-typedef-defs -typedefs-dialect=nix)
+add_public_tablegen_target(MLIRNixOpsIncGen)
