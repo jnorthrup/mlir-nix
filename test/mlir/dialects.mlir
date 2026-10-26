@@ -8,10 +8,10 @@
 // CHECK: nixctx.has_context(
 // CHECK: nixlist.length(
 // CHECK: nixattr.attr_names(
-// CHECK: nixpath.path_exists(
+// CHECK: nixfs.path_exists(
 // CHECK: nixstore.to_file(
 // CHECK: nixhash.hash_string(
-// CHECK: nixfmt.to_json(
+// CHECK: nixjson.to_json(
 // CHECK: nixctl.seq(
 nix.expr @all {
   %a = nix.int 1
@@ -24,10 +24,10 @@ nix.expr @all {
   %3 = nixctx.has_context(%s)
   %4 = nixlist.length(%l)
   %5 = nixattr.attr_names(%at)
-  %6 = nixpath.path_exists(%s)
+  %6 = nixfs.path_exists(%s)
   %7 = nixstore.to_file(%s, %s)
   %8 = nixhash.hash_string(%s, %s)
-  %9 = nixfmt.to_json(%a)
+  %9 = nixjson.to_json(%a)
   %10 = nixctl.seq(%a, %s)
   nix.return %10
 }

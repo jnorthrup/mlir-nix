@@ -20,22 +20,22 @@ nix.expr @pure {
 nix.expr @user_code {
   %f = nix.builtin "toString"
   %l = nix.list []
-  %x = nixlist.map(%f, %l)
-  %y = nixlist.map(%f, %l)
+  %x = nixlistfn.map(%f, %l)
+  %y = nixlistfn.map(%f, %l)
   %r = nix.list [%x, %y]
   nix.return %r
 }
-// CHECK: nixlist.map(
-// CHECK: nixlist.map(
+// CHECK: nixlistfn.map(
+// CHECK: nixlistfn.map(
 
 // CHECK-LABEL: nix.expr @diagnostics
 nix.expr @diagnostics {
   %m = nix.str "hi"
   %v = nix.int 1
-  %x = nixctl.trace(%m, %v)
-  %y = nixctl.trace(%m, %v)
+  %x = nixtrace.trace(%m, %v)
+  %y = nixtrace.trace(%m, %v)
   %r = nix.list [%x, %y]
   nix.return %r
 }
-// CHECK: nixctl.trace(
-// CHECK: nixctl.trace(
+// CHECK: nixtrace.trace(
+// CHECK: nixtrace.trace(

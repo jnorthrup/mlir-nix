@@ -5,5 +5,5 @@
 // CHECK: nix.null
 // CHECK: nix.bool true
 // CHECK: nixlist.length(
-// CHECK: nixlist.map(
+// CHECK: nixlistfn.map(
 // CHECK-NOT: nix.builtin "builtins"
