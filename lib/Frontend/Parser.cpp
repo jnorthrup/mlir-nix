@@ -66,8 +66,25 @@ using namespace lex; // the character classes and matchers shared with the Confi
 /// The keyword with exactly this text, else T_ID.  The identifier rule matches every keyword's text, so a keyword is
 /// an identifier of the same length (the earlier rule wins the tie) and loses to a longer identifier (`iffy`).
 Tok keywordOf(std::string_view w) {
-  std::optional<Keyword> k = w.size() < 2 || w.size() > 7 ? std::nullopt : symbolizeKeyword(llvm::StringRef(w.data(), w.size()));
-  return k ? Tok(uint8_t(*k)) : T_ID;
+  switch (w.size()) {
+  case 2:
+    if (w == "if") return T_IF;
+    if (w == "in") return T_IN;
+    if (w == "or") return T_OR_KW;
+    return T_ID;
+  case 3:
+    if (w == "let") return T_LET;
+    if (w == "rec") return T_REC;
+    return T_ID;
+  case 4:
+    if (w == "then") return T_THEN;
+    if (w == "else") return T_ELSE;
+    if (w == "with") return T_WITH;
+    return T_ID;
+  case 6: return w == "assert" ? T_ASSERT : T_ID;
+  case 7: return w == "inherit" ? T_INHERIT : T_ID;
+  default: return T_ID;
+  }
 }
 
 static uint64_t gLexBytes[4], gLexTokens[4], gSrcBytes, gParsers[4];
