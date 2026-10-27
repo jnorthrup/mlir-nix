@@ -58,8 +58,12 @@ So the front end is span code (the tree is a region of `Slice`s, a token is a sp
 evaluator and the store are not: `Slice` appears nowhere in them, a list is a `Value **` read with `listSize()` in 72 + 54 places,
 the primops take `Value **args` without a count, and strings are built and returned as `std::string`. None of the
 (pointer, count) pairs in the arena (`Bindings`, `StringContext`, a list, a `Frame`) is a `Slice`; `Name` and `Source` are pairs of
-their own that hand out a `string_view`. What the run spends on `std::string` machinery is small (`memmove` leaves are 0.8% under `mkString`, 0.3% each under
-`SymbolTable::create` and `coerceToString` in the Mac profile), so this is a discipline measure, not a speed one.
+their own that hand out a `string_view`. What the owning containers cost, from the Mac profile of the evaluator thread (3,877 busy samples, frames of the container's own
+methods, so a lower bound: what the compiler inlined has no frame): `std::basic_string` 3.2%, `std::map` / `std::set` 3.4%,
+`std::vector` 0.15%. More than half of it is the derivation path: `Derivation::unparse` 0.6% in strings and 0.5% in maps, and the
+copy, the assignment and the destruction of a `Derivation` 1.5%; then `evalConcatStrings` 0.4%, `appendEscaped` 0.4%,
+`Hash::to_string` 0.3%. (`std::function` is 1.5% at most: `NarWriter::dump` 1.2%, `callPrimOp` 0.3%; the 39% under
+`runWithLargeStack` is the whole evaluation.)
 
 ## Measured and left alone
 
