@@ -17,17 +17,20 @@ its interleaved A/B with identical result hashes or it goes in the failures colu
 
 Two runs of the same expression touch the same files; cold, 29% of the run was the disk (docs/IO.md).
 
-## Where a run goes now (Mac, demand schedule, nixos-toplevel, after the name properties)
+## Where a run goes now (Mac, demand schedule, nixos-toplevel, after the arena and the names in the tree)
 
-`/usr/bin/sample` at 1 ms, 3 runs, the evaluator thread only (1,326 ms busy a run), every sample charged to the
-innermost phase on its stack:
+`/usr/bin/sample` at 1 ms, 3 runs, the evaluator thread only (1,436 ms busy a run; the arena's prefault thread is left out), every
+sample charged to the innermost phase on its stack:
 
-    eval            66.9%   evalOp / force 19.2, lookup / slotMap 15.9, other 11.6, symbols / strings 7.3,
-                            malloc / free 6.5, attrsets 6.1
-    parse           12.5%   lexer 7.4, malloc / free 2.1, strings 1.6, file I/O 0.9
-    store / drv     11.1%   the forcing a derivation does is charged to eval; this is the .drv text, hashing, files
-    demand mint      6.8%   MLIR uniquing 1.9 (was 5.6 before the names), op creation 0.7
-    file lowering    2.6%
+    eval            59.7%   evalOp / force 17.8, lookup / slotMap 13.0, other 10.7, symbols / strings 6.9,
+                            malloc / free 6.3, attrsets 4.4
+    parse           17.9%   lexer and parser 12.5 (the token pull, Parser::fill, is 10.5 of it), malloc / free 2.2, file I/O 1.3
+    store / drv     11.8%   the forcing a derivation does is charged to eval; this is the .drv text, hashing, files
+    demand mint      8.4%   MLIR uniquing 1.7, op creation 1.4
+    file lowering    2.2%
+
+The earlier table of this section put the parse at 12.5%. Timing the parser alone over the 2,889 files the run touches (33.8 MB)
+gives 270.6 ms, which is this table's 258 ms and not that table's 166 ms, so this one replaces it.
 
 Footprint, 1.57 GB peak: the evaluator's bump arena is 1,147 MB of it, and `MLNIX_STATS` splits it:
 
@@ -49,8 +52,27 @@ and the rest is the retained AST (188 MB: 1.59M nodes at 118 bytes, 5.5 bytes of
 
 The per-element cost of the interpreted fold is the same 68 ns as the reference C++ walker's, and
 constructing the list is twice as fast here. So "interpret ops" is not a tax this evaluator pays
-against the reference on expression-shaped work. The remaining 2.2x gap on the toplevel lives in
-codegen (work the reference never does), slot resolution, and footprint - not in the op loop.
+against the reference on expression-shaped work. The remaining gap on the toplevel (2.2x when this
+was written; see the head-to-head below) lives in codegen (work the reference never does), slot resolution, and footprint - not in the op loop.
+
+## Head to head (kali, x86_64)
+
+i7-6820HK, 4 cores and 8 threads, WSL2 with Linux; `scripts/vs-nix.py`, 5 interleaved rounds, every tool's output identical to the others';
+generation 09896c336 (the arena faulted in ahead of use, names in the tree). The medians swing +-8% with the host's load; min is the steadier figure.
+
+                      nixos-toplevel                          nixpkgs-73
+                      min      median   peak RSS              min      median   peak RSS
+    Nix 2.35.4        3.66 s   4.16 s    628 MB               3.47 s   3.62 s    594 MB
+    Lix 2.91.3        4.55 s   4.97 s    755 MB               4.16 s   4.59 s    757 MB
+    mlnix eager       4.40 s   4.64 s   1694 MB               3.89 s   3.93 s   1620 MB
+    mlnix demand      4.17 s   4.25 s   1593 MB               3.81 s   3.99 s   1500 MB
+    demand / Nix      x1.14    x1.02                          x1.10    x1.10
+    demand / Lix      x0.92    x0.86                          x0.92    x0.87
+
+Start-up (`--eval -E 1`, median of 5): Nix 31 ms, Lix 27-28 ms, mlnix 30-31 ms. So the evaluator is level with Nix on the
+toplevel by the median and 10 to 14% behind by the min, 8 to 14% ahead of Lix, and holds 2.5x Nix's memory. Nix's CPU time on
+nixpkgs-73 (4.86 s) exceeds its wall time (3.62 s): its collector marks on other threads, which this evaluator does not have.
+Not a win over Nix yet.
 
 ## Family by family
 

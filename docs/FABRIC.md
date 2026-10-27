@@ -184,9 +184,35 @@ Fresh profile of the NixOS toplevel run (2 s main-thread sample, 1449 busy sampl
    for about one percent.
    The tree (done): the AST owns no string either (`docs/COMPOSITE.md`): the corpus parses in 0.863 s against 1.012 s (-14.7%),
    in situ -2.1% / -2.4% (demand) and -2.6% / -1.4% (eager), footprint -0.9% to -2.4%.
-4. Core ops behind `NixEvalOpInterface` models; delete the `TypeSwitch`.
-5. Lexer (10.4%): a table-driven scanner instead of per-character calls.
-6. Lowered-IR cache as MLIR bytecode, keyed by file hash (skips lex, parse and
+4. Dead bands (measured, not built). Which bands of the source does an evaluation never enter? `MLNIX_TRACE_POS` dumps the
+   position of every evaluated op and `mlnix-parse -d` reads it against the Confix scan (`docs/COMPOSITE.md`; the code is on
+   branch `scratch/dead-bands`, not master). The NixOS toplevel touches 2,889 files and 33.8 MB; 71.8% of those bytes are in
+   maximal `{ [ (` bands with no evaluated position inside (86,188 bands), 66.0% in bands of at least 256 bytes (26,954),
+   56.4% at 512 (18,924), 27.7% at 1024 (5,405). A parser told to jump past exactly those bands (a stub where each was) gives the
+   baseline's output once the 24 to 28 bands in each list that were in fact entered are taken out (0.1%, found one at a time
+   from the stub that reports its position; an evaluated op without a position cannot mark its band live, and `nix.list`, which had
+   none, was given one in that branch). Interleaved, 11 runs, the
+   scan not counted: wall -10.8% skipping bands of 256 bytes and up, -10.8% at 512, -4.3% at 1024. Of the 194 ms the 256 list
+   saves, 127 ms is the parser (270.6 ms over those files to 144 ms) and about 67 ms lowering and minting.
+   That is the ceiling. Against it stand the scan (33.8 MB at 800 MB/s is 42 ms), the bands that are live (parsed later, and
+   scanned once already), and three things a real consumer has to solve:
+   (a) Nix merges `a = { x = 1; }; a.y = 2;` while parsing, so a `{` that is the value of a binding cannot be opaque: with a
+   `throw` stub the 256 list stopped the parse with `attribute 'environment.etc' already defined`; an empty attribute set as
+   the stub merges, and a real band would have to be expanded when a later binding extends its path;
+   (b) a deferred band needs its free variables for its captures, and finding them means reading its identifiers, which costs
+   what skipping it saves (the bands of the 256 list average 828 bytes). The runtime does not need captures:
+   `lookup` walks `Frame::up` to the frame of the region that defines a value, so a band could be minted later as a nested
+   region that names outer values directly, from a scope snapshot kept at its site. But deferred lambdas capture by value
+   today, and a lambda that contains a band would have to reach names only its band uses, so the two change together;
+   (c) a syntax error, or an undefined variable, inside a band nobody enters would go unreported, where Nix reports it at parse
+   time. A scan that does not balance falls back to the full parse, so lexical errors still surface.
+   A fair estimate of the net is a third to a half of the ceiling, that is 4 to 6% on the Mac, for a change that touches the
+   lambda deferral; the cheaper rungs above and below come first.
+5. Core ops behind `NixEvalOpInterface` models; delete the `TypeSwitch`.
+6. Lexer: `Parser::fill`, the token pull with its 88-byte `Token` and a deque, is 10.5% of the evaluator thread; the parse
+   phase is 17.9% (258 ms; 270.6 ms parsing the touched files alone). The identifier shortcut took 3.4% off the parse
+   (`keywordOf`); a compact token and a lookahead that does not copy are the next step, and benefit every schedule.
+7. Lowered-IR cache as MLIR bytecode, keyed by file hash (skips lex, parse and
    lowering on warm runs; the uniquing cost moves to the reader, so measure).
-7. Only then: closure conversion to `func` + the stock inliner, strictness
+8. Only then: closure conversion to `func` + the stock inliner, strictness
    analysis (needs a lattice type instead of the single `!nix.value`).
