@@ -9,7 +9,7 @@ schedule, `nixos-toplevel` and `nixpkgs-73`) unless it says kali. Written 2026-1
 
 The encoding is MLIR; the execution is not.
 
-    ODS/IRDL     NixBase.td 225 + NixOps.td 280 lines: 28 ops, 1 type, 1 interface; NixPrims.irdl.mlir 628 lines: 105 primops in 22 dialects
+    ODS/IRDL     NixBase.td 225 + NixOps.td 280 lines: 28 ops, 1 type, 1 interface; NixPrims.irdl.mlir 628 lines: 105 primops in 24 dialects
     dialect C++  NixDialect.cpp 515, NixPrimDialects.cpp 252, NixDialect.h 140; passes nix-prims, nix-fold, nix-dce, join-densify
     hand C++     evaluator (lib/Eval, Eval.h, Arena.h) 5,690 lines; front end 3,722; store 2,704; tools 1,187
 
