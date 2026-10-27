@@ -70,14 +70,14 @@ def Nix_LambdaOp : Nix_Op<"lambda", [SingleBlock,
     trait) refuses it, and it can be neither printed as custom syntax nor read
     back.  The evaluator never verifies, and `mlnix emit-mlir` lowers eagerly.
   }];
-  let arguments = (ins OptionalAttr<StrArrayAttr>:$formals,
+  let arguments = !con((ins OptionalAttr<StrArrayAttr>:$formals,
                        OptionalAttr<DenseBoolArrayAttr>:$formal_defaults,
                        UnitAttr:$ellipsis,
                        OptionalAttr<StrAttr>:$arg_name,
                        OptionalAttr<StrAttr>:$name,
-                       OptionalAttr<ArrayAttr>:$formal_locs,
+                       OptionalAttr<DenseI64ArrayAttr>:$formal_locs,
                        Variadic<NixVal>:$captures,
-                       OptionalAttr<I64Attr>:$body_index);
+                       OptionalAttr<I64Attr>:$body_index), NixPos);
   let results = (outs NixFreshVal:$result);
   let regions = (region SizedRegion<1>:$body);
   let assemblyFormat = "(`(`$captures^`)`)? attr-dict-with-keyword $body";
@@ -93,7 +93,7 @@ def Nix_FormalOp : Nix_Op<"formal", [Pure]> {
   let description = [{
     `arg.name` if the argument set has the attribute, otherwise `default`.
   }];
-  let arguments = (ins NixVal:$arg, StrAttr:$name, Optional<NixVal>:$default_value);
+  let arguments = !con((ins NixVal:$arg, StrAttr:$name, Optional<NixVal>:$default_value), NixPos);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$arg $name (`default` $default_value^)? attr-dict";
 }
@@ -103,14 +103,14 @@ def Nix_FormalOp : Nix_Op<"formal", [Pure]> {
 //===----------------------------------------------------------------------===//
 
 def Nix_IntOp : Nix_Op<"int", [ConstantLike, Pure]> {
-  let arguments = (ins I64Attr:$value);
+  let arguments = !con((ins I64Attr:$value), NixPos);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$value attr-dict";
   let hasFolder = 1;
 }
 
 def Nix_FloatOp : Nix_Op<"float", [ConstantLike, Pure]> {
-  let arguments = (ins F64Attr:$value);
+  let arguments = !con((ins F64Attr:$value), NixPos);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$value attr-dict";
   let hasFolder = 1;
@@ -118,7 +118,7 @@ def Nix_FloatOp : Nix_Op<"float", [ConstantLike, Pure]> {
 
 def Nix_StringOp : Nix_Op<"str", [ConstantLike, Pure]> {
   let summary = "string literal (no context)";
-  let arguments = (ins StrAttr:$value);
+  let arguments = !con((ins StrAttr:$value), NixPos);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$value attr-dict";
   let hasFolder = 1;
@@ -141,7 +141,7 @@ def Nix_NullOp : Nix_Op<"null", [ConstantLike, Pure]> {
 
 def Nix_PathOp : Nix_Op<"path", [Pure]> {
   let summary = "absolute, canonical path literal";
-  let arguments = (ins StrAttr:$value);
+  let arguments = !con((ins StrAttr:$value), NixPos);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$value attr-dict";
 }
@@ -158,7 +158,7 @@ def Nix_WithVarOp : Nix_Op<"with_var", [Pure]> {
   let description = [{
     Looks `name` up in each scope operand in order (innermost `with` first).
   }];
-  let arguments = (ins StrAttr:$name, Variadic<NixVal>:$scopes);
+  let arguments = !con((ins StrAttr:$name, Variadic<NixVal>:$scopes), NixPos);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$name (`in` $scopes^)? attr-dict";
 }
@@ -168,7 +168,7 @@ def Nix_WithVarOp : Nix_Op<"with_var", [Pure]> {
 //===----------------------------------------------------------------------===//
 
 def Nix_ListOp : Nix_Op<"list"> {
-  let arguments = (ins Variadic<NixVal>:$elements);
+  let arguments = !con((ins Variadic<NixVal>:$elements), NixPos);
   let results = (outs NixFreshVal:$result);
   let assemblyFormat = "`[` $elements `]` attr-dict";
 }
@@ -180,9 +180,9 @@ def Nix_AttrsOp : Nix_Op<"attrs", [AttrSizedOperandSegments]> {
     `dyn_names[j]` with `dyn_values[j]`; they are inserted in order at
     evaluation time and a `null` name drops the attribute.
   }];
-  let arguments = (ins StrArrayAttr:$names, Variadic<NixVal>:$values,
+  let arguments = !con((ins StrArrayAttr:$names, Variadic<NixVal>:$values,
                        Variadic<NixVal>:$dyn_names, Variadic<NixVal>:$dyn_values,
-                       OptionalAttr<ArrayAttr>:$positions);
+                       OptionalAttr<DenseI64ArrayAttr>:$positions), NixPos);
   let results = (outs NixFreshVal:$result);
   let assemblyFormat = [{
     $names `(` $values `)` (`dynamic` `(` $dyn_names^ `)` `=` `(` $dyn_values `)`)? attr-dict
@@ -204,8 +204,8 @@ def Nix_SelectOp : Nix_Op<"select", [Pure, AttrSizedOperandSegments, NixModes<[0
 
         %v = nix.select %set ["pkgs", %k, "version"] or %default
   }];
-  let arguments = (ins NixVal:$base, Variadic<NixVal>:$dyn_keys,
-                       Optional<NixVal>:$default_value, ArrayAttr:$path);
+  let arguments = !con((ins NixVal:$base, Variadic<NixVal>:$dyn_keys,
+                       Optional<NixVal>:$default_value, ArrayAttr:$path), NixPos);
   let results = (outs NixVal:$result);
   let assemblyFormat =
       "$base custom<AttrPath>($path, $dyn_keys) (`or` $default_value^)? attr-dict";
@@ -215,7 +215,7 @@ def Nix_SelectOp : Nix_Op<"select", [Pure, AttrSizedOperandSegments, NixModes<[0
 def Nix_HasAttrOp : Nix_Op<"has_attr", [Pure, NixModes<[0], []>]> {
   let summary = "attribute path test `e ? a.b`";
   let description = [{ `path`/`dyn_keys` as in `nix.select`. }];
-  let arguments = (ins NixVal:$base, Variadic<NixVal>:$dyn_keys, ArrayAttr:$path);
+  let arguments = !con((ins NixVal:$base, Variadic<NixVal>:$dyn_keys, ArrayAttr:$path), NixPos);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$base custom<AttrPath>($path, $dyn_keys) attr-dict";
   let hasVerifier = 1;
@@ -223,19 +223,19 @@ def Nix_HasAttrOp : Nix_Op<"has_attr", [Pure, NixModes<[0], []>]> {
 
 def Nix_ApplyOp : Nix_Op<"apply", NixFxUser> {
   let summary = "(curried) function application";
-  let arguments = (ins NixVal:$callee, Variadic<NixVal>:$args);
+  let arguments = !con((ins NixVal:$callee, Variadic<NixVal>:$args), NixPos);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$callee `(` $args `)` attr-dict";
 }
 
 def Nix_IfOp : Nix_Op<"if", [Pure, NixModes<[0], [1, 2]>]> {
-  let arguments = (ins NixVal:$cond, NixVal:$then_value, NixVal:$else_value);
+  let arguments = !con((ins NixVal:$cond, NixVal:$then_value, NixVal:$else_value), NixPos);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$cond `then` $then_value `else` $else_value attr-dict";
 }
 
 def Nix_AssertOp : Nix_Op<"assert", [Pure, NixModes<[0], [1]>]> {
-  let arguments = (ins NixVal:$cond, NixVal:$body, OptionalAttr<StrAttr>:$text);
+  let arguments = !con((ins NixVal:$cond, NixVal:$body, OptionalAttr<StrAttr>:$text), NixPos);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$cond `in` $body attr-dict";
 }
@@ -246,7 +246,7 @@ def Nix_AssertOp : Nix_Op<"assert", [Pure, NixModes<[0], [1]>]> {
 //===----------------------------------------------------------------------===//
 
 class Nix_BinOp<string mnemonic, list<Trait> traits = [Pure]> : Nix_Op<mnemonic, traits> {
-  let arguments = (ins NixVal:$lhs, NixVal:$rhs);
+  let arguments = !con((ins NixVal:$lhs, NixVal:$rhs), NixPos);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$lhs `,` $rhs attr-dict";
 }
@@ -264,14 +264,14 @@ def Nix_UpdateOp  : Nix_FreshBinOp<"update">;
 def Nix_ConcatListsOp : Nix_FreshBinOp<"concat_lists">;
 
 def Nix_NotOp : Nix_Op<"not", [Pure, NixModes<[0], []>]> {
-  let arguments = (ins NixVal:$operand);
+  let arguments = !con((ins NixVal:$operand), NixPos);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$operand attr-dict";
 }
 
 def Nix_ConcatStringsOp : Nix_Op<"concat_strings", [Pure]> {
   let summary = "`+` (force_string = false) and string interpolation (true)";
-  let arguments = (ins Variadic<NixVal>:$parts, UnitAttr:$force_string);
+  let arguments = !con((ins Variadic<NixVal>:$parts, UnitAttr:$force_string), NixPos);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$parts attr-dict";
   let hasFolder = 1;

@@ -5,7 +5,10 @@ Mirrors tests/functional/lang.sh: parse-okay/parse-fail/eval-okay/eval-fail.
 Semantic pass  = right exit status and (for *-okay) identical stdout.
 Exact pass     = additionally identical stderr (error messages, traces).
 
-usage: run-lang-tests.py [--mlnix PATH] [--verbose] [--filter SUBSTR] [--show-diff]
+usage: run-lang-tests.py [--mlnix PATH] [--verbose] [--filter SUBSTR] [--show-diff] [--save DIR]
+
+--save DIR keeps what every case printed (NAME.out, NAME.err, NAME.rc), so two builds can be compared
+byte for byte: run once per build into two directories and `diff -r` them.
 """
 import argparse, os, subprocess, sys, tempfile, shutil, glob, difflib
 
@@ -37,9 +40,19 @@ def main():
     ap.add_argument("--verbose", "-v", action="store_true")
     ap.add_argument("--filter", default="")
     ap.add_argument("--show-diff", action="store_true")
+    ap.add_argument("--save", metavar="DIR")
     args = ap.parse_args()
 
     tmp = tempfile.mkdtemp(prefix="mlnix-lang-")
+    if args.save:
+        os.makedirs(args.save, exist_ok=True)
+
+    def keep(name, rc, out, err):
+        if not args.save:
+            return
+        for ext, text in ((".out", out), (".err", err), (".rc", f"{rc}\n")):
+            with open(os.path.join(args.save, name + ext), "w", encoding="utf-8", errors="replace") as f:
+                f.write(text)
     mlnix = os.path.abspath(args.mlnix)
     pwd = TESTDIR
     env = dict(os.environ)
@@ -66,6 +79,7 @@ def main():
     for name in names("parse-fail-"):
         src = open(os.path.join(TESTDIR, "lang", name + ".nix"), "rb").read()
         rc, out, err = run(instantiate + ["--parse", "-"], stdin=src, env=env)
+        keep(name, rc, out, err)
         open(os.path.join(tmp, name + ".err"), "w").write(err)
         postprocess(name, os.path.join(tmp, name))
         err = read(os.path.join(tmp, name + ".err"))
@@ -75,6 +89,7 @@ def main():
     for name in names("parse-okay-"):
         src = open(os.path.join(TESTDIR, "lang", name + ".nix"), "rb").read()
         rc, out, err = run(instantiate + ["--parse", "-"], stdin=src, env=env)
+        keep(name, rc, out, err)
         out = out.replace(pwd, "/pwd")
         exp = read(os.path.join(TESTDIR, "lang", name + ".exp"))
         sem = rc == 0 and out == exp
@@ -89,6 +104,7 @@ def main():
             flags = ["--eval", "--strict", "--show-trace"]
         rc, out, err = run(instantiate + flags + ["lang/" + name + ".nix"], env=env)
         err = err.replace(pwd, "/pwd")
+        keep(name, rc, out, err)
         open(os.path.join(tmp, name + ".err"), "w").write(err)
         postprocess(name, os.path.join(tmp, name))
         err = read(os.path.join(tmp, name + ".err"))
@@ -101,6 +117,7 @@ def main():
         base = os.path.join(TESTDIR, "lang", name)
         if os.path.exists(base + ".exp.xml"):
             rc, out, err = run(instantiate + ["--eval", "--xml", "--no-location", "--strict", "lang/" + name + ".nix"], env=e2)
+            keep(name, rc, out, err)
             exp = read(base + ".exp.xml")
             sem = rc == 0 and out == exp
             detail = err if rc != 0 else "".join(difflib.unified_diff((exp or "").splitlines(True), out.splitlines(True), "expected", "got"))
@@ -114,6 +131,7 @@ def main():
         rc, out, err = run(instantiate + flags + ["--eval", "--strict", "lang/" + name + ".nix"], env=e2)
         out = out.replace(pwd, "/pwd")
         err = err.replace(pwd, "/pwd")
+        keep(name, rc, out, err)
         open(os.path.join(tmp, name + ".out"), "w").write(out)
         open(os.path.join(tmp, name + ".err"), "w").write(err)
         postprocess(name, os.path.join(tmp, name))

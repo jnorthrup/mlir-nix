@@ -665,13 +665,12 @@ void registerBuiltins(EvalState &state) {
     st.forceAttrs(*args[1], pos);
     const Attr *a = args[1]->attrs->get(st.symbols.create(name));
     if (!a || !a->pos) { st.mkNull(v); return; }
-    Location loc = Location::getFromOpaquePointer(a->pos);
-    auto f = dyn_cast<FileLineColLoc>(loc);
+    auto f = nd::decodePos(a->pos);
     if (!f) { st.mkNull(v); return; }
     EvalState::BindingsBuilder bb(st);
-    st.mkString(bb.alloc(st.s.file), f.getFilename().str());
-    st.mkInt(bb.alloc(st.s.line), f.getLine());
-    st.mkInt(bb.alloc(st.s.column), f.getColumn());
+    st.mkString(bb.alloc(st.s.file), f->file);
+    st.mkInt(bb.alloc(st.s.line), f->line);
+    st.mkInt(bb.alloc(st.s.column), f->col);
     st.mkAttrs(v, bb.finish());
   });
   S.addPrimOp("__hasAttr", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
@@ -753,7 +752,7 @@ void registerBuiltins(EvalState &state) {
     auto locs = lam.getFormalLocs();
     for (size_t i = 0; i < lam.getFormals()->size(); i++) {
       std::string n = cast<StringAttr>((*lam.getFormals())[i]).getValue().str();
-      PosPtr p = locs && i < locs->size() ? cast<LocationAttr>((*locs)[i]).getAsOpaquePointer() : nullptr;
+      PosPtr p = locs && i < locs->size() ? nd::posOfWord(uint64_t((*locs)[i])) : nullptr;
       bb.insert(n, defs[i] ? &st.vTrue : &st.vFalse, p);
     }
     st.mkAttrs(v, bb.finish());

@@ -338,17 +338,10 @@ void EvalState::addConstant(const std::string &name, Value *v) {
 // Positions & errors
 //===----------------------------------------------------------------------===//
 
-static std::optional<FileLineColLoc> toFileLoc(PosPtr pos) {
-  if (!pos) return std::nullopt;
-  Location loc = Location::getFromOpaquePointer(pos);
-  if (auto f = dyn_cast<FileLineColLoc>(loc)) return f;
-  return std::nullopt;
-}
-
 std::string EvalState::showPos(PosPtr pos) const {
-  auto f = toFileLoc(pos);
+  auto f = nd::decodePos(pos);
   if (!f) return "«none»:0";
-  return f->getFilename().str() + ":" + std::to_string(f->getLine()) + ":" + std::to_string(f->getColumn());
+  return f->file + ":" + std::to_string(f->line) + ":" + std::to_string(f->col);
 }
 
 void EvalState::throwError(const std::string &msg, PosPtr pos) { throw EvalError(msg, pos); }
@@ -468,7 +461,7 @@ Value *EvalState::lookup(Frame *f, mlir::Value v) {
   }
   if (auto b = dyn_cast<nd::BuiltinOp>(op)) {
     Value *bv = baseEnvValue(b.getName());
-    if (!bv) throw EvalError("undefined variable '" + b.getName().str() + "'", op->getLoc().getAsOpaquePointer());
+    if (!bv) throw EvalError("undefined variable '" + b.getName().str() + "'", nd::posOfOp(op));
     return slot = bv;
   }
   Value *nv = allocValue();
@@ -700,7 +693,7 @@ void EvalState::callLambda(Value &fun, Value *arg, Value &out, PosPtr pos) {
     try {
       forceAttrs(*arg, pos, "while evaluating the value passed for the lambda argument");
     } catch (EvalError &e) {
-      e.addTrace(lam->getLoc().getAsOpaquePointer(), "while calling " + fnName());
+      e.addTrace(nd::posOfOp(lam), "while calling " + fnName());
       throw;
     }
     auto defs = *lam.getFormalDefaults();
@@ -710,7 +703,7 @@ void EvalState::callLambda(Value &fun, Value *arg, Value &out, PosPtr pos) {
       if (arg->attrs->get(symbols.create(name))) nFound++;
       else if (!defs[i])
         throw EvalError(fnName() + " called without required argument '" + name.str() + "'", pos)
-            .addTrace(lam->getLoc().getAsOpaquePointer(), "from call site");
+            .addTrace(nd::posOfOp(lam), "from call site");
     }
     if (!lam.getEllipsis() && nFound != arg->attrs->size()) {
       for (auto &a : *arg->attrs) {
@@ -719,7 +712,7 @@ void EvalState::callLambda(Value &fun, Value *arg, Value &out, PosPtr pos) {
           if (cast<StringAttr>(fa).getValue() == symbols[a.name]) { known = true; break; }
         if (!known)
           throw EvalError(fnName() + " called with unexpected argument '" + symbols[a.name].str() + "'", pos)
-              .addTrace(lam->getLoc().getAsOpaquePointer(), "from call site");
+              .addTrace(nd::posOfOp(lam), "from call site");
       }
     }
   }
@@ -872,7 +865,7 @@ void EvalState::autoCallFunction(const std::map<std::string, Value *> &autoArgs,
     else if (!defs[i])
       throw EvalError("cannot evaluate a function that has an argument without a value ('" + name +
                           "')\nNix attempted to evaluate a function as a top level expression; in this case it must have its arguments supplied either by default values, or passed explicitly with '--arg' or '--argstr'. See https://nix.dev/manual/nix/stable/language/syntax.html#functions.",
-                      lam->getLoc().getAsOpaquePointer());
+                      nd::posOfOp(lam));
   }
   if (lam.getEllipsis())
     for (auto &[k, v] : autoArgs) bb.insert(k, v);
@@ -889,11 +882,10 @@ void EvalState::evalAttrs(nd::AttrsOp op, Frame *env, Value &out) {
   auto names = op.getNames();
   auto values = op.getValues();
   auto dynNames = op.getDynNames();
-  std::optional<ArrayAttr> positions = op.getPositions();
+  auto positions = op.getPositions(); // one position word per name, or none
   BindingsBuilder bb(*this);
   for (size_t i = 0; i < names.size(); i++) {
-    PosPtr p = positions && i < positions->size()
-                   ? cast<LocationAttr>((*positions)[i]).getAsOpaquePointer() : nullptr;
+    PosPtr p = positions && i < positions->size() ? nd::posOfWord(uint64_t((*positions)[i])) : nullptr;
     bb.insert(symbolOf(cast<StringAttr>(names[i])), lookup(env, values[i]), p);
   }
   if (dynNames.empty()) {
@@ -907,14 +899,14 @@ void EvalState::evalAttrs(nd::AttrsOp op, Frame *env, Value &out) {
   auto dynValues = op.getDynValues();
   for (size_t j = 0; j < dynNames.size(); j++) {
     Value *nv = lookup(env, dynNames[j]);
-    PosPtr p = dynNames[j].getLoc().getAsOpaquePointer();
+    PosPtr p = nd::posOfValue(dynNames[j]);
     forceValue(*nv, p);
     if (nv->type == VType::Null) continue;
     auto name = forceStringNoCtx(*nv, p, "while evaluating the name of a dynamic attribute");
     Symbol sym = symbols.create(name);
     if (seen.count(sym))
       throw EvalError("dynamic attribute '" + std::string(name) + "' already defined at " +
-                          showPos(seen[sym] ? seen[sym] : op->getLoc().getAsOpaquePointer()),
+                          showPos(seen[sym] ? seen[sym] : nd::posOfOp(op)),
                       p);
     seen[sym] = p;
     bb.insert(sym, lookup(env, dynValues[j]), p);
@@ -932,7 +924,7 @@ void EvalState::evalConcatStrings(nd::ConcatStringsOp op, Frame *env, Value &out
   bool first = !forceString;
   VType firstType = VType::String;
   for (mlir::Value pv : parts) {
-    PosPtr ppos = pv.getLoc().getAsOpaquePointer();
+    PosPtr ppos = nd::posOfValue(pv);
     Value *v = lookup(env, pv);
     forceValue(*v, ppos);
     if (first) firstType = v->type;
@@ -957,7 +949,7 @@ void EvalState::evalConcatStrings(nd::ConcatStringsOp op, Frame *env, Value &out
     }
     first = false;
   }
-  PosPtr pos = op->getLoc().getAsOpaquePointer();
+  PosPtr pos = nd::posOfOp(op);
   if (firstType == VType::Int) mkInt(out, n);
   else if (firstType == VType::Float) mkFloat(out, nf);
   else if (firstType == VType::Path) {
@@ -977,7 +969,7 @@ Symbol EvalState::pathSymbol(mlir::Attribute comp, mlir::OperandRange dyn, unsig
 
 void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
   if (statsEnabled) evaluated.insert(op);
-  PosPtr pos = op->getLoc().getAsOpaquePointer();
+  PosPtr pos = nd::posOfOp(op);
   auto copyFrom = [&](Value *v) {
     forceValue(*v, pos);
     out = *v;
@@ -1117,7 +1109,7 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
         Symbol sym = symbolOf(w.getNameAttr());
         for (mlir::Value sc : w.getScopes()) {
           Value *sv = lookup(env, sc);
-          forceAttrs(*sv, sc.getLoc().getAsOpaquePointer(), "while evaluating the first subexpression of a with expression");
+          forceAttrs(*sv, nd::posOfValue(sc), "while evaluating the first subexpression of a with expression");
           if (const Attr *a = sv->attrs->get(sym)) return copyFrom(a->value);
         }
         throw EvalError("undefined variable '" + w.getName().str() + "'", pos);
@@ -1491,7 +1483,7 @@ struct TracePrinter {
       auto lam = cast<nd::LambdaOp>(v.thunk.op);
       out << "«lambda";
       if (auto n = lam.getName()) out << " " << n->str();
-      out << " @ " << st.showPos(lam->getLoc().getAsOpaquePointer()) << "»";
+      out << " @ " << st.showPos(nd::posOfOp(lam)) << "»";
       break;
     }
     case VType::PrimOp: out << "«primop " << v.primOp->name << "»"; break;
@@ -1907,8 +1899,8 @@ std::string formatError(EvalState *state, const EvalError &e) {
   if (state && state->settings.showTrace) {
     for (auto it = e.traces.rbegin(); it != e.traces.rend(); ++it) {
       out += "\n       … " + it->msg;
-      if (auto f = toFileLoc(it->pos)) {
-        appendPos(out, state, f->getFilename().str(), f->getLine(), f->getColumn());
+      if (auto f = nd::decodePos(it->pos)) {
+        appendPos(out, state, f->file, f->line, f->col);
         out += "\n";
       } else {
         out += "\n";
@@ -1923,7 +1915,7 @@ std::string formatError(EvalState *state, const EvalError &e) {
     if (msg[i] == '\n') ind += "       ";
   }
   std::string res = out.empty() ? "error: " + ind : "error:" + out + "\n       error: " + ind;
-  if (auto f = toFileLoc(e.pos)) appendPos(res, state, f->getFilename().str(), f->getLine(), f->getColumn());
+  if (auto f = nd::decodePos(e.pos)) appendPos(res, state, f->file, f->line, f->col);
   return res;
 }
 

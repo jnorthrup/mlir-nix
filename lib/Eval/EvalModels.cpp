@@ -25,7 +25,7 @@ struct PrimEvalModel : public nd::NixEvalOpInterface::FallbackModel<PrimEvalMode
     unsigned n = op->getNumOperands();
     assert(n <= kMaxArity && "primop arity above the evaluator's limit");
     for (unsigned i = 0; i < n; i++) args[i] = st.lookup(env, op->getOperand(i));
-    st.callPrimOp(*prim, args, out, op->getLoc().getAsOpaquePointer());
+    st.callPrimOp(*prim, args, out, nd::posOfOp(op));
   }
 };
 
@@ -39,7 +39,7 @@ const PrimOp *EvalState::primFor(Operation *op) {
   const PrimOp *p = primOpByKey(info->key);
   if (!p)
     throw EvalError("primop '" + info->key.str() + "' is declared in the IRDL but has no implementation",
-                    op->getLoc().getAsOpaquePointer());
+                    nd::posOfOp(op));
   primForOp[k] = p;
   return p;
 }

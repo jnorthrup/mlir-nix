@@ -347,13 +347,11 @@ struct XMLWriter {
 };
 
 void posToXML(EvalState &st, XMLWriter::Attrs &as, PosPtr pos) {
-  if (!pos) return;
-  auto loc = dyn_cast<FileLineColLoc>(Location::getFromOpaquePointer(pos));
+  auto loc = nd::decodePos(pos);
   if (!loc) return;
-  std::string f = loc.getFilename().str();
-  if (!f.empty() && f[0] == '/') as["path"] = f;
-  as["line"] = std::to_string(loc.getLine());
-  as["column"] = std::to_string(loc.getColumn());
+  if (!loc->file.empty() && loc->file[0] == '/') as["path"] = loc->file;
+  as["line"] = std::to_string(loc->line);
+  as["column"] = std::to_string(loc->col);
 }
 
 void toXML(EvalState &st, XMLWriter &doc, Value &v, bool strict, bool location, NixStringContext &ctx,
@@ -420,7 +418,7 @@ void toXML(EvalState &st, XMLWriter &doc, Value &v, bool strict, bool location, 
   case VType::Lambda: {
     auto lam = cast<nd::LambdaOp>(v.thunk.op);
     XMLWriter::Attrs as;
-    if (location) posToXML(st, as, lam->getLoc().getAsOpaquePointer());
+    if (location) posToXML(st, as, nd::posOfOp(lam));
     doc.open("function", as);
     if (lam.getFormals()) {
       XMLWriter::Attrs pa;

@@ -10,6 +10,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "Nix/MLIRGen.h"
+#include "Nix/Pos.h"
 
 #include "mlir/IR/Builders.h"
 #include "llvm/ADT/DenseMap.h"
@@ -186,7 +187,7 @@ public:
 
   nd::ExprOp run(const Expr *e, StringRef symName) {
     b.setInsertionPointToEnd(module.getBody());
-    auto exprOp = nd::ExprOp::create(b, loc(Pos{}), b.getStringAttr(symName),
+    auto exprOp = nd::ExprOp::create(b, noLoc(), b.getStringAttr(symName),
                                      origin->path.empty() ? StringAttr() : b.getStringAttr(origin->path),
                                      b.getStringAttr(origin->baseDir));
     Block *blk = new Block();
@@ -196,13 +197,13 @@ public:
     Value result;
     if (opts.scoped) {
       // scope: <expr>, with the scope's names bound lexically.
-      auto lam = nd::LambdaOp::create(b, loc(e->pos), valTy(), ArrayAttr(),
+      auto lam = nd::LambdaOp::create(b, noLoc(), valTy(), ArrayAttr(),
                                       DenseBoolArrayAttr(), false,
-                                      b.getStringAttr("scope"), StringAttr(), ArrayAttr(),
-                                      ValueRange{}, IntegerAttr());
+                                      b.getStringAttr("scope"), StringAttr(), DenseI64ArrayAttr(),
+                                      ValueRange{}, IntegerAttr(), at(e->pos));
       Block *lb = new Block();
       lam.getBody().push_back(lb);
-      Value arg = lb->addArgument(valTy(), loc(e->pos));
+      Value arg = lb->addArgument(valTy(), noLoc());
       OpBuilder::InsertionGuard g(b);
       b.setInsertionPointToEnd(lb);
       Scope s;
@@ -254,17 +255,15 @@ private:
 
   Type valTy() { return nd::ValueType::get(ctx); }
 
-  StringAttr fileAttr;
-  Location loc(Pos p) {
-    if (!p.valid()) return UnknownLoc::get(ctx);
-    // The file name is uniqued once per file, not hashed again per op.
-    if (!fileAttr) fileAttr = b.getStringAttr(origin->name);
-    return FileLineColLoc::get(fileAttr, p.line, p.col);
+  /// The position word of `p` (Nix/Pos.h): what an op carries in its `pos` property.  The FileLineColLoc
+  /// it replaces was hashed, probed for and allocated by the context for every distinct position.
+  int64_t at(Pos p) {
+    if (!p.valid()) return 0;
+    if (!origin->fileId) origin->fileId = FileTable::get().add(origin->name);
+    return static_cast<int64_t>(PackedPos::pack(origin->fileId, p.line, p.col));
   }
 
-  /// Ops that cannot fail (literals, lists, returns) get no location: creating
-  /// and uniquing a FileLineColLoc for every one of them was a measurable share
-  /// of the run time.
+  /// Every op is made with the same Location; the position is in the op, not in the context.
   Location noLoc() { return UnknownLoc::get(ctx); }
 
   /// A few consumers report errors at the position of an *operand* (a `with`
@@ -272,8 +271,8 @@ private:
   /// literal operand its position back.
   Value positioned(Value v, Pos p) {
     if (Operation *d = v.getDefiningOp())
-      if (isa<UnknownLoc>(d->getLoc()) && isa<nd::StringOp, nd::IntOp, nd::FloatOp, nd::PathOp, nd::ListOp>(d))
-        d->setLoc(loc(p));
+      if (isa<nd::StringOp, nd::IntOp, nd::FloatOp, nd::PathOp, nd::ListOp>(d) && nd::getPos(d) == 0)
+        nd::setPos(d, static_cast<uint64_t>(at(p)));
     return v;
   }
 
@@ -282,7 +281,7 @@ private:
   }
 
   Value placeholder(Pos p) {
-    return UnrealizedConversionCastOp::create(b, loc(p), TypeRange{valTy()}, ValueRange{})
+    return UnrealizedConversionCastOp::create(b, noLoc(), TypeRange{valTy()}, ValueRange{})
         .getResult(0);
   }
 
@@ -294,7 +293,7 @@ private:
     for (size_t i = 0; i < values.size(); i++) {
       Value v = values[i];
       if (v.getDefiningOp<UnrealizedConversionCastOp>())
-        v = nd::ApplyOp::create(b, loc(poses[i]), valTy(), v, ValueRange{});
+        v = nd::ApplyOp::create(b, noLoc(), valTy(), v, ValueRange{}, at(poses[i]));
       finals.push_back(v);
     }
     // Other value lists that may hold placeholders must be remapped before the
@@ -324,7 +323,7 @@ private:
     }
   }
   Value identity(Value v, Pos p) {
-    return nd::ApplyOp::create(b, loc(p), valTy(), v, ValueRange{});
+    return nd::ApplyOp::create(b, noLoc(), valTy(), v, ValueRange{}, at(p));
   }
 
   Value builtin(StringRef name) {
@@ -369,7 +368,7 @@ private:
     }
     if (opts.isBaseName && opts.isBaseName(name)) return baseRef(name);
     if (withs.empty()) error("undefined variable '" + name + "'", p);
-    return nd::WithVarOp::create(b, loc(p), valTy(), b.getStringAttr(name), withs);
+    return nd::WithVarOp::create(b, noLoc(), valTy(), b.getStringAttr(name), withs, at(p));
   }
 
   /// A select/has_attr path: literal components become string attributes,
@@ -393,15 +392,15 @@ private:
 
   /// `base.key` with a literal key and no default.
   Value selectLiteral(Pos p, Value base, StringRef key, Value def = Value()) {
-    return nd::SelectOp::create(b, loc(p), valTy(), base, ValueRange{}, def,
-                                b.getArrayAttr({b.getStringAttr(key)}));
+    return nd::SelectOp::create(b, noLoc(), valTy(), base, ValueRange{}, def,
+                                b.getArrayAttr({b.getStringAttr(key)}), at(p));
   }
 
   /// Generate the bindings of an attrs node into `names/values`, resolving
   /// each def in the proper scope.
   void genBindings(const ExprAttrs *a, Scope *defScope, Scope *outerScope,
                    Scope *inheritFromScope, SmallVectorImpl<Attribute> &names,
-                   SmallVectorImpl<Value> &values, SmallVectorImpl<Attribute> &positions) {
+                   SmallVectorImpl<Value> &values, SmallVectorImpl<int64_t> &positions) {
     // Values of `inherit (e)` sources.
     SmallVector<Value> fromVals;
     for (auto *fe : a->inheritFromExprs) fromVals.push_back(gen(fe, inheritFromScope));
@@ -419,12 +418,13 @@ private:
       }
       names.push_back(b.getStringAttr(name));
       values.push_back(v);
-      positions.push_back(loc(def.pos));
+      positions.push_back(at(def.pos));
     }
   }
 
   Value genAttrs(const ExprAttrs *a, Scope *s) {
-    SmallVector<Attribute> names, positions;
+    SmallVector<Attribute> names;
+    SmallVector<int64_t> positions;
     SmallVector<Value> values, dynNames, dynValues;
     if (!a->recursive) {
       genBindings(a, s, s, s, names, values, positions);
@@ -469,13 +469,13 @@ private:
       auto finals = finalizeGroup(phv, values, poses, {&dynNames, &dynValues});
       values.assign(finals.begin(), finals.end());
       if (ovIdx >= 0) {
-        Value attrs = nd::AttrsOp::create(b, loc(a->pos), valTy(), b.getArrayAttr(names), values, dynNames,
-                                          dynValues, b.getArrayAttr(positions));
-        return nd::UpdateOp::create(b, loc(a->pos), valTy(), attrs, values[ovIdx]);
+        Value attrs = nd::AttrsOp::create(b, noLoc(), valTy(), b.getArrayAttr(names), values, dynNames,
+                                          dynValues, b.getDenseI64ArrayAttr(positions), at(a->pos));
+        return nd::UpdateOp::create(b, noLoc(), valTy(), attrs, values[ovIdx], at(a->pos));
       }
     }
-    return nd::AttrsOp::create(b, loc(a->pos), valTy(), b.getArrayAttr(names), values,
-                               dynNames, dynValues, b.getArrayAttr(positions));
+    return nd::AttrsOp::create(b, noLoc(), valTy(), b.getArrayAttr(names), values,
+                               dynNames, dynValues, b.getDenseI64ArrayAttr(positions), at(a->pos));
   }
 
   Value genLet(const ExprLet *l, Scope *s) {
@@ -487,7 +487,8 @@ private:
       phs[name] = ph;
       ns.vars[name] = ph;
     }
-    SmallVector<Attribute> names, positions;
+    SmallVector<Attribute> names;
+    SmallVector<int64_t> positions;
     SmallVector<Value> values;
     genBindings(l->attrs, &ns, s, &ns, names, values, positions);
     SmallVector<Value> phv;
@@ -558,21 +559,19 @@ private:
       row = defer(l, s, caps);
       bodyIndex = b.getI64IntegerAttr(static_cast<int64_t>(BodyIndex(opts.pool->file, row).raw));
     }
+    SmallVector<int64_t> formalLocs;
+    for (auto &f : l->formals) formalLocs.push_back(at(f.pos));
     auto lam = nd::LambdaOp::create(
-        b, loc(l->pos), valTy(),
+        b, noLoc(), valTy(),
         l->hasFormals ? b.getArrayAttr(formalNames) : ArrayAttr(),
         l->hasFormals ? b.getDenseBoolArrayAttr(hasDef) : DenseBoolArrayAttr(),
         l->ellipsis,
         l->arg.empty() ? StringAttr() : b.getStringAttr(l->arg),
-        l->name.empty() ? StringAttr() : b.getStringAttr(l->name), ArrayAttr(), caps, bodyIndex);
-    if (l->hasFormals) {
-      SmallVector<Attribute> locs;
-      for (auto &f : l->formals) locs.push_back(loc(f.pos));
-      lam.setFormalLocsAttr(b.getArrayAttr(locs));
-    }
+        l->name.empty() ? StringAttr() : b.getStringAttr(l->name),
+        l->hasFormals ? b.getDenseI64ArrayAttr(formalLocs) : DenseI64ArrayAttr(), caps, bodyIndex, at(l->pos));
     Block *blk = new Block();
     lam.getBody().push_back(blk);
-    blk->addArgument(valTy(), loc(l->pos));
+    blk->addArgument(valTy(), noLoc());
     if (deferred) { // the node exists, its graph does not: the pool holds the rest
       opts.pool->attach(row, lam);
       return lam.getResult();
@@ -604,8 +603,8 @@ private:
       SmallVector<Value> fvs;
       for (size_t i = 0; i < l->formals.size(); i++) {
         auto &f = l->formals[i];
-        fvs.push_back(nd::FormalOp::create(b, loc(f.pos), valTy(), arg,
-                                           b.getStringAttr(f.name), defs[i]));
+        fvs.push_back(nd::FormalOp::create(b, noLoc(), valTy(), arg,
+                                           b.getStringAttr(f.name), defs[i], at(f.pos)));
       }
       for (size_t i = 0; i < l->formals.size(); i++) {
         phs[i].replaceAllUsesWith(fvs[i]);
@@ -642,8 +641,8 @@ private:
           nd::IntOp::create(b, noLoc(), valTy(), b.getI64IntegerAttr(e->pos.col)),
           str(origin->path, e->pos),
           nd::IntOp::create(b, noLoc(), valTy(), b.getI64IntegerAttr(e->pos.line))};
-      return nd::AttrsOp::create(b, loc(e->pos), valTy(), b.getArrayAttr(names), vals,
-                                 ValueRange{}, ValueRange{}, ArrayAttr());
+      return nd::AttrsOp::create(b, noLoc(), valTy(), b.getArrayAttr(names), vals,
+                                 ValueRange{}, ValueRange{}, DenseI64ArrayAttr(), at(e->pos));
     }
     case ExprKind::InheritFrom:
       error("internal error: stray inherit-from", e->pos);
@@ -652,14 +651,14 @@ private:
       Value base = gen(sel->e, s);
       GenPath path = genPath(sel->path, s);
       Value def = sel->def ? gen(sel->def, s) : Value();
-      return nd::SelectOp::create(b, loc(sel->pos), valTy(), base, path.dyn, def,
-                                  b.getArrayAttr(path.comps));
+      return nd::SelectOp::create(b, noLoc(), valTy(), base, path.dyn, def,
+                                  b.getArrayAttr(path.comps), at(sel->pos));
     }
     case ExprKind::HasAttr: {
       auto *h = static_cast<const ExprHasAttr *>(e);
       Value base = gen(h->e, s);
       GenPath path = genPath(h->path, s);
-      return nd::HasAttrOp::create(b, loc(h->pos), valTy(), base, path.dyn, b.getArrayAttr(path.comps));
+      return nd::HasAttrOp::create(b, noLoc(), valTy(), base, path.dyn, b.getArrayAttr(path.comps), at(h->pos));
     }
     case ExprKind::Attrs:
       return genAttrs(static_cast<const ExprAttrs *>(e), s);
@@ -675,7 +674,7 @@ private:
       Value f = gen(c->fun, s);
       SmallVector<Value> args;
       for (auto *a : c->args) args.push_back(gen(a, s));
-      return nd::ApplyOp::create(b, loc(c->pos), valTy(), f, args);
+      return nd::ApplyOp::create(b, noLoc(), valTy(), f, args, at(c->pos));
     }
     case ExprKind::Let: {
       Value v = genLet(static_cast<const ExprLet *>(e), s);
@@ -694,37 +693,37 @@ private:
     case ExprKind::If: {
       auto *i = static_cast<const ExprIf *>(e);
       Value c = gen(i->cond, s), t = gen(i->then, s), el = gen(i->else_, s);
-      return nd::IfOp::create(b, loc(i->pos), valTy(), c, t, el);
+      return nd::IfOp::create(b, noLoc(), valTy(), c, t, el, at(i->pos));
     }
     case ExprKind::Assert: {
       auto *a = static_cast<const ExprAssert *>(e);
       Value c = gen(a->cond, s), body = gen(a->body, s);
       std::ostringstream os;
       showExpr(os, a->cond);
-      return nd::AssertOp::create(b, loc(a->pos), valTy(), c, body, b.getStringAttr(os.str()));
+      return nd::AssertOp::create(b, noLoc(), valTy(), c, body, b.getStringAttr(os.str()), at(a->pos));
     }
     case ExprKind::Not:
-      return nd::NotOp::create(b, loc(e->pos), valTy(), gen(static_cast<const ExprNot *>(e)->e, s));
+      return nd::NotOp::create(b, noLoc(), valTy(), gen(static_cast<const ExprNot *>(e)->e, s), at(e->pos));
     case ExprKind::Eq: case ExprKind::NEq: case ExprKind::And: case ExprKind::Or:
     case ExprKind::Impl: case ExprKind::Update: case ExprKind::ConcatLists: {
       auto *bn = static_cast<const ExprBin *>(e);
       Value l = gen(bn->e1, s), r = gen(bn->e2, s);
-      Location lc = loc(e->pos);
+      int64_t w = at(e->pos);
       switch (e->kind) {
-      case ExprKind::Eq: return nd::EqOp::create(b, lc, valTy(), l, r);
-      case ExprKind::NEq: return nd::NeqOp::create(b, lc, valTy(), l, r);
-      case ExprKind::And: return nd::AndOp::create(b, lc, valTy(), l, r);
-      case ExprKind::Or: return nd::OrOp::create(b, lc, valTy(), l, r);
-      case ExprKind::Impl: return nd::ImplOp::create(b, lc, valTy(), l, r);
-      case ExprKind::Update: return nd::UpdateOp::create(b, lc, valTy(), l, r);
-      default: return nd::ConcatListsOp::create(b, lc, valTy(), l, r);
+      case ExprKind::Eq: return nd::EqOp::create(b, noLoc(), valTy(), l, r, w);
+      case ExprKind::NEq: return nd::NeqOp::create(b, noLoc(), valTy(), l, r, w);
+      case ExprKind::And: return nd::AndOp::create(b, noLoc(), valTy(), l, r, w);
+      case ExprKind::Or: return nd::OrOp::create(b, noLoc(), valTy(), l, r, w);
+      case ExprKind::Impl: return nd::ImplOp::create(b, noLoc(), valTy(), l, r, w);
+      case ExprKind::Update: return nd::UpdateOp::create(b, noLoc(), valTy(), l, r, w);
+      default: return nd::ConcatListsOp::create(b, noLoc(), valTy(), l, r, w);
       }
     }
     case ExprKind::ConcatStrings: {
       auto *c = static_cast<const ExprConcatStrings *>(e);
       SmallVector<Value> parts;
       for (auto &[p, x] : c->es) parts.push_back(positioned(gen(x, s), x->pos));
-      return nd::ConcatStringsOp::create(b, loc(c->pos), valTy(), parts, c->forceString);
+      return nd::ConcatStringsOp::create(b, noLoc(), valTy(), parts, c->forceString, at(c->pos));
     }
     }
     error("internal error: unknown expression kind", e->pos);

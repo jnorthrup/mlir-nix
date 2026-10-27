@@ -153,8 +153,11 @@ Fresh profile of the NixOS toplevel run (2 s main-thread sample, 1449 busy sampl
 2. A lowering to a runtime dialect with *resolved addressing*: operand
    (depth, slot) and Symbol ids as attributes, so `lookup` (8.6%) and the `TypeSwitch`
    chain in `evalOp` disappear. Progressive lowering `nix + continents -> nixrt`.
-3. Locations: 6.2% is FileLineColRange uniquing, one per op. Sharing locations per line
-   needs the column kept elsewhere (errors print it).
+3. Locations (done): 6.2% was FileLineColRange uniquing, one per op; sampled again on the demand
+   schedule it was 143 of 269 ms of uniquing per run. A position is now a 64-bit word in the op's
+   `pos` property (`include/Nix/Pos.h`, `docs/COMPOSITE.md`): wall -9.2% / -8.7% (demand) and
+   -11.8% / -13.0% (eager) on toplevel / nixpkgs-73, identical hashes. What is left of the uniquing
+   in the same profile is `StringAttr` (63 ms) and `ArrayAttr` (43 ms): names, and the arrays of them.
 4. Core ops behind `NixEvalOpInterface` models; delete the `TypeSwitch`.
 5. Lexer (10.4%): a table-driven scanner instead of per-character calls.
 6. Lowered-IR cache as MLIR bytecode, keyed by file hash (skips lex, parse and

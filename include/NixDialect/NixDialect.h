@@ -67,6 +67,48 @@ class NixModes : public OpTrait::TraitBase<ConcreteType, NixModes> {};
 #define GET_OP_CLASSES
 #include "NixDialect/NixOps.h.inc"
 
+#include "Nix/Pos.h"
+
+#include <optional>
+#include <string>
+
+namespace mlir::nix {
+/// Source positions.  An op that can fail carries its position in its `pos` property (a nixfe::PackedPos
+/// word).  The evaluator passes positions around as a PosPtr (`const void *`), which is one of three things,
+/// told apart by the top bits:
+///   bit 63   a packed word: the position of an attribute definition (AttrsOp `positions`);
+///   bit 62   an op, whose position is looked up only when a message prints it, so the happy path pays
+///            what it paid for a Location pointer: nothing;
+///   neither  a Location pointer: a devirtualized primop keeps the FileLineColLoc of its call, because an
+///            IRDL op has no property to hold the word.
+static_assert(sizeof(void *) == 8, "PosPtr tags live in the top bits of a 64-bit pointer");
+inline constexpr uintptr_t kOpPosTag = uintptr_t(1) << 62;
+inline const void *posOfOp(Operation *op) {
+  return op ? reinterpret_cast<const void *>(reinterpret_cast<uintptr_t>(op) | kOpPosTag) : nullptr;
+}
+/// The position of the value `v`: what `v.getLoc()` was for the operands that report errors.  An op's result
+/// has its op's position; a block argument was made at the position of the lambda it belongs to.
+inline const void *posOfValue(Value v) {
+  if (Operation *def = v.getDefiningOp()) return posOfOp(def);
+  if (auto arg = dyn_cast<BlockArgument>(v)) return posOfOp(arg.getOwner()->getParentOp());
+  return nullptr;
+}
+inline const void *posOfWord(uint64_t word) { return reinterpret_cast<const void *>(word); }
+
+struct SrcPos {
+  std::string file;
+  unsigned line = 0, col = 0;
+};
+/// File, line and column of a PosPtr; nullopt when it holds none.
+std::optional<SrcPos> decodePos(const void *pos);
+/// The packed word of an op that has the `pos` property (0 for any other op), and its setter.
+uint64_t getPos(Operation *op);
+void setPos(Operation *op, uint64_t word);
+/// The word of a FileLineColLoc (0 for any other Location), and the Location of a word.
+uint64_t packLoc(Location loc);
+Location locOfWord(MLIRContext *ctx, uint64_t word);
+} // namespace mlir::nix
+
 namespace mlir::nix {
 /// Register / load the core dialect and all continent dialects.
 void registerNixDialects(DialectRegistry &registry);

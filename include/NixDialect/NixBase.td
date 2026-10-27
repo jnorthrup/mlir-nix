@@ -23,6 +23,13 @@ include "mlir/IR/OpBase.td"
 include "mlir/IR/AttrTypeBase.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
+// A source position, nixfe::PackedPos: (file, line, column) in the 64 bits of a join::TwInt, stored in the
+// op.  It replaces the FileLineColLoc every op used to carry, which the context hashed, probed for and
+// allocated once per distinct position (a tenth of the evaluation).  Zero is "none".  No assembly
+// format mentions it, so it is neither printed nor parsed, as a Location is not.
+def Nix_PosProp : DefaultValuedProp<I64Prop, "0">;
+defvar NixPos = (ins Nix_PosProp:$pos);
+
 def Nix_Dialect : Dialect {
   let name = "nix";
   let cppNamespace = "::mlir::nix";

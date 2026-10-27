@@ -123,17 +123,73 @@ bool NixDialect::evaluatesInPlace(Value v) const {
 
 Operation *NixDialect::materializeConstant(OpBuilder &b, Attribute value,
                                            Type type, Location loc) {
+  Operation *op = nullptr;
   if (auto bl = dyn_cast<BoolAttr>(value)) // before IntegerAttr: i1 integers
     return BoolOp::create(b, loc, type, bl);
   if (isa<UnitAttr>(value))
     return NullOp::create(b, loc, type);
   if (auto i = dyn_cast<IntegerAttr>(value))
-    return IntOp::create(b, loc, type, i);
-  if (auto f = dyn_cast<FloatAttr>(value))
-    return FloatOp::create(b, loc, type, f);
-  if (auto s = dyn_cast<StringAttr>(value))
-    return StringOp::create(b, loc, type, s);
-  return nullptr;
+    op = IntOp::create(b, loc, type, i);
+  else if (auto f = dyn_cast<FloatAttr>(value))
+    op = FloatOp::create(b, loc, type, f);
+  else if (auto s = dyn_cast<StringAttr>(value))
+    op = StringOp::create(b, loc, type, s);
+  if (op) setPos(op, packLoc(loc)); // a folded call keeps the position its operands were reported at
+  return op;
+}
+
+//===----------------------------------------------------------------------===//
+// Positions
+//===----------------------------------------------------------------------===//
+
+/// Every op class with the `pos` property (NixPos in NixOps.td).
+#define NIX_POSITIONED_OPS                                                                                 \
+  LambdaOp, FormalOp, IntOp, FloatOp, StringOp, PathOp, WithVarOp, ListOp, AttrsOp, SelectOp, HasAttrOp, \
+      ApplyOp, IfOp, AssertOp, EqOp, NeqOp, AndOp, OrOp, ImplOp, UpdateOp, ConcatListsOp, NotOp,          \
+      ConcatStringsOp
+
+uint64_t nix::getPos(Operation *op) {
+  return llvm::TypeSwitch<Operation *, uint64_t>(op)
+      .Case<NIX_POSITIONED_OPS>([](auto o) { return uint64_t(o.getPos()); })
+      .Default([](Operation *) { return uint64_t(0); });
+}
+
+void nix::setPos(Operation *op, uint64_t word) {
+  llvm::TypeSwitch<Operation *>(op).Case<NIX_POSITIONED_OPS>([&](auto o) { o.setPos(int64_t(word)); });
+}
+
+uint64_t nix::packLoc(Location loc) {
+  auto f = dyn_cast<FileLineColLoc>(loc);
+  if (!f) return 0;
+  return nixfe::PackedPos::pack(nixfe::FileTable::get().add(f.getFilename().str()), f.getLine(), f.getColumn());
+}
+
+Location nix::locOfWord(MLIRContext *ctx, uint64_t word) {
+  if (!nixfe::PackedPos::is(word)) return UnknownLoc::get(ctx);
+  std::string file = nixfe::FileTable::get().name(nixfe::PackedPos::file(word));
+  if (file.empty()) return UnknownLoc::get(ctx);
+  return FileLineColLoc::get(ctx, file, nixfe::PackedPos::line(word), nixfe::PackedPos::col(word));
+}
+
+std::optional<SrcPos> nix::decodePos(const void *p) {
+  uint64_t raw = reinterpret_cast<uintptr_t>(p);
+  if (!raw) return std::nullopt;
+  auto ofWord = [](uint64_t w) -> std::optional<SrcPos> {
+    std::string file = nixfe::FileTable::get().name(nixfe::PackedPos::file(w));
+    if (file.empty()) return std::nullopt;
+    return SrcPos{std::move(file), nixfe::PackedPos::line(w), nixfe::PackedPos::col(w)};
+  };
+  auto ofLoc = [](Location l) -> std::optional<SrcPos> {
+    if (auto f = dyn_cast<FileLineColLoc>(l)) return SrcPos{f.getFilename().str(), f.getLine(), f.getColumn()};
+    return std::nullopt;
+  };
+  if (nixfe::PackedPos::is(raw)) return ofWord(raw);
+  if (raw & kOpPosTag) {
+    auto *op = reinterpret_cast<Operation *>(raw & ~uint64_t(kOpPosTag));
+    if (uint64_t w = getPos(op)) return ofWord(w);
+    return ofLoc(op->getLoc()); // an IRDL primop: the Location of its call
+  }
+  return ofLoc(Location::getFromOpaquePointer(p));
 }
 
 //===----------------------------------------------------------------------===//
@@ -257,12 +313,15 @@ struct DevirtualizePrimCall : OpRewritePattern<ApplyOp> {
     }
     if (!info || op.getArgs().size() < info->arity)
       return failure();
-    OperationState st(op.getLoc(), info->name);
+    // An IRDL op has no property to hold the position, so a primop keeps the call's FileLineColLoc: made
+    // here, for the calls that are primops, not for every op.
+    OperationState st(locOfWord(op.getContext(), op.getPos()), info->name);
     st.addOperands(op.getArgs().take_front(info->arity));
     st.addTypes(op.getType());
     Value res = rw.create(st)->getResult(0);
     if (op.getArgs().size() > info->arity)
-      res = ApplyOp::create(rw, op.getLoc(), op.getType(), res, op.getArgs().drop_front(info->arity));
+      res = ApplyOp::create(rw, UnknownLoc::get(op.getContext()), op.getType(), res,
+                            op.getArgs().drop_front(info->arity), op.getPos());
     rw.replaceOp(op, res);
     return success();
   }

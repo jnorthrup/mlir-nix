@@ -52,6 +52,7 @@ struct Origin {
   std::string path;   // absolute file path if a file, else empty
   std::string baseDir;
   std::shared_ptr<const Source> text;
+  uint32_t fileId = 0; // number in nixfe::FileTable, given the first time a position of this file is made
 };
 
 struct ParseError : std::runtime_error {
