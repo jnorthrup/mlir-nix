@@ -166,6 +166,12 @@ Fresh profile of the NixOS toplevel run (2 s main-thread sample, 1449 busy sampl
    -11.8% / -13.0% (eager) on toplevel / nixpkgs-73 on the Mac, identical hashes; on kali a few percent (min of N: demand
    -1.5% to -3.2%, eager -5.6%). What is left of the uniquing
    in the same profile is `StringAttr` (63 ms) and `ArrayAttr` (43 ms): names, and the arrays of them.
+   Names (done): `nixfe::Name`, a pointer and a length, is the property of the ops that carry text, with the evaluator's Symbol
+   cached in the op (`docs/COMPOSITE.md`): wall -6.6% / -6.8% (demand), -8.8% / -8.3% (eager) on the Mac, -5.6% / -5.2% and
+   -13.3% / -7.1% on kali. Uniquing inside mint went from 5.6% to 1.9% of the evaluator thread (20 ms a run: the attributes
+   of lambdas, `body_index`, integer literals). Not converted, on purpose: a lambda's `arg_name` / `name` / `formals`, because
+   a property is not an inherent attribute and the custom syntax of `nix.lambda` (`attributes {arg_name = "x"}`) would change
+   for about one percent.
 4. Core ops behind `NixEvalOpInterface` models; delete the `TypeSwitch`.
 5. Lexer (10.4%): a table-driven scanner instead of per-character calls.
 6. Lowered-IR cache as MLIR bytecode, keyed by file hash (skips lex, parse and

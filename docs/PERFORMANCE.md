@@ -17,6 +17,28 @@ its interleaved A/B with identical result hashes or it goes in the failures colu
 
 Two runs of the same expression touch the same files; cold, 29% of the run was the disk (docs/IO.md).
 
+## Where a run goes now (Mac, demand schedule, nixos-toplevel, after the name properties)
+
+`/usr/bin/sample` at 1 ms, 3 runs, the evaluator thread only (1,326 ms busy a run), every sample charged to the
+innermost phase on its stack:
+
+    eval            66.9%   evalOp / force 19.2, lookup / slotMap 15.9, other 11.6, symbols / strings 7.3,
+                            malloc / free 6.5, attrsets 6.1
+    parse           12.5%   lexer 7.4, malloc / free 2.1, strings 1.6, file I/O 0.9
+    store / drv     11.1%   the forcing a derivation does is charged to eval; this is the .drv text, hashing, files
+    demand mint      6.8%   MLIR uniquing 1.9 (was 5.6 before the names), op creation 0.7
+    file lowering    2.6%
+
+Footprint, 1.57 GB peak: the evaluator's bump arena is 1,147 MB of it, and `MLNIX_STATS` splits it:
+
+    Value        462 MB   14.4M objects of 32 bytes (a tag and a 24-byte union; Nix's Value is 16)
+    frames       315 MB    5.4M frames, 58 bytes on average (after an in-place value stopped getting a slot: 465 MB before)
+    attrsets     315 MB    1.64M Bindings of 192 bytes on average (24 bytes per attribute: symbol, value, position)
+    strings       40 MB, lists 15 MB, contexts 0
+
+and the rest is the retained AST (188 MB: 1.59M nodes at 118 bytes, 5.5 bytes of heap per byte of source, measured with
+`malloc_zone_statistics` around the parse), the MLIR ops and the sources.  The reference holds the same evaluation in 626 MB.
+
 ## The headline measurement: the interpreter is not the bottleneck on this workload
 
 2M-element fold, min of 3, hot (ns per list element):
