@@ -18,6 +18,7 @@
 #include "llvm/ADT/StringMap.h"
 #include <functional>
 #include <memory>
+#include <vector>
 
 // The evaluator library is a client of the dialects, never a dependency: the
 // interfaces below only mention its types.
@@ -56,6 +57,43 @@ namespace mlir::nix {
 /// `kStrictMask` / `kTailMask`, which the dialect collects into `operandModes`.
 template <typename ConcreteType>
 class NixModes : public OpTrait::TraitBase<ConcreteType, NixModes> {};
+} // namespace mlir::nix
+
+namespace mlir::nix {
+/// Frame slots.  The evaluator keeps the slot of an op's result in the op (the `slot` property of every op
+/// that defines a value): bit 31 says the result evaluates in place, the low 31 bits are the slot + 1, 0 is
+/// "not indexed".  The property is not first in the properties of every class (TableGen puts the attributes
+/// before the properties), so where it sits is a fact of the class: this table, built when the dialect loads,
+/// answers it for the 26 classes through a perfect hash of the op-name pointer, in a few instructions and
+/// in the L1 cache.  An op of another class (an IRDL primop) has no slot property: word() is null.
+inline constexpr uint32_t kSlotInPlace = uint32_t(1) << 31;
+/// The `slot` argument of an op made by `create`: not indexed yet.
+inline constexpr int32_t kUnindexed = 0;
+
+class SlotLayout {
+public:
+  uint32_t *word(Operation *op) const {
+    const void *name = op->getName().getAsOpaquePointer();
+    const Entry &e = table[index(name)];
+    if (e.name != name) return nullptr;
+    return reinterpret_cast<uint32_t *>(static_cast<char *>(op->getPropertiesStorage().as<void *>()) + e.offset);
+  }
+  /// One entry per op class: the registered name and the offset of `slot` in its Properties.  Fails the
+  /// load (a table that would collide cannot happen with the constants searched here) rather than guess.
+  void add(OperationName name, uint32_t offset) { entries.push_back({name.getAsOpaquePointer(), offset}); }
+  void seal();
+
+private:
+  struct Entry {
+    const void *name = nullptr;
+    uint32_t offset = 0;
+  };
+  static constexpr unsigned kBits = 7; // 128 entries for ~26 classes
+  size_t index(const void *name) const { return size_t((uint64_t(reinterpret_cast<uintptr_t>(name) >> 4) * mult) >> (64 - kBits)); }
+  Entry table[1u << kBits];
+  uint64_t mult = 0;
+  std::vector<Entry> entries;
+};
 } // namespace mlir::nix
 
 #include "NixDialect/NixInterfaces.h.inc"
@@ -107,6 +145,9 @@ void setPos(Operation *op, uint64_t word);
 /// The word of a FileLineColLoc (0 for any other Location), and the Location of a word.
 uint64_t packLoc(Location loc);
 Location locOfWord(MLIRContext *ctx, uint64_t word);
+
+/// Sets the slot word of an op of the dialect that defines a value; false for any other op.
+bool setSlotWord(Operation *op, uint32_t word);
 } // namespace mlir::nix
 
 namespace mlir::nix {

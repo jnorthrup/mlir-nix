@@ -197,7 +197,7 @@ public:
     Value result;
     if (opts.scoped) {
       // scope: <expr>, with the scope's names bound lexically.
-      auto lam = nd::LambdaOp::create(b, noLoc(), valTy(), ArrayAttr(),
+      auto lam = nd::LambdaOp::create(b, noLoc(), valTy(), nd::kUnindexed, ArrayAttr(),
                                       DenseBoolArrayAttr(), false,
                                       b.getStringAttr("scope"), StringAttr(), DenseI64ArrayAttr(),
                                       ValueRange{}, IntegerAttr(), at(e->pos));
@@ -293,7 +293,7 @@ private:
     for (size_t i = 0; i < values.size(); i++) {
       Value v = values[i];
       if (v.getDefiningOp<UnrealizedConversionCastOp>())
-        v = nd::ApplyOp::create(b, noLoc(), valTy(), v, ValueRange{}, at(poses[i]));
+        v = nd::ApplyOp::create(b, noLoc(), valTy(), nd::kUnindexed, v, ValueRange{}, at(poses[i]));
       finals.push_back(v);
     }
     // Other value lists that may hold placeholders must be remapped before the
@@ -323,7 +323,7 @@ private:
     }
   }
   Value identity(Value v, Pos p) {
-    return nd::ApplyOp::create(b, noLoc(), valTy(), v, ValueRange{}, at(p));
+    return nd::ApplyOp::create(b, noLoc(), valTy(), nd::kUnindexed, v, ValueRange{}, at(p));
   }
 
   Value builtin(StringRef name) {
@@ -331,7 +331,7 @@ private:
     if (it != builtinCache.end()) return it->second;
     OpBuilder::InsertionGuard g(b);
     b.setInsertionPointToStart(topBlock);
-    Value v = nd::BuiltinOp::create(b, UnknownLoc::get(ctx), valTy(), b.getStringAttr(name));
+    Value v = nd::BuiltinOp::create(b, UnknownLoc::get(ctx), valTy(), nd::kUnindexed, b.getStringAttr(name));
     builtinCache[name] = v;
     return v;
   }
@@ -346,14 +346,14 @@ private:
     OpBuilder::InsertionGuard g(b);
     b.setInsertionPointToStart(topBlock);
     Location l = UnknownLoc::get(ctx);
-    Value v = name == "null" ? nd::NullOp::create(b, l, valTy()).getResult()
-                             : nd::BoolOp::create(b, l, valTy(), b.getBoolAttr(name == "true")).getResult();
+    Value v = name == "null" ? nd::NullOp::create(b, l, valTy(), nd::kUnindexed).getResult()
+                             : nd::BoolOp::create(b, l, valTy(), nd::kUnindexed, b.getBoolAttr(name == "true")).getResult();
     builtinCache[name] = v;
     return v;
   }
 
   Value str(StringRef s, Pos p = {}) {
-    return nd::StringOp::create(b, noLoc(), valTy(), b.getStringAttr(s));
+    return nd::StringOp::create(b, noLoc(), valTy(), nd::kUnindexed, b.getStringAttr(s));
   }
 
   Value lookupVar(const std::string &name, Pos p, Scope *s) {
@@ -368,7 +368,7 @@ private:
     }
     if (opts.isBaseName && opts.isBaseName(name)) return baseRef(name);
     if (withs.empty()) error("undefined variable '" + name + "'", p);
-    return nd::WithVarOp::create(b, noLoc(), valTy(), b.getStringAttr(name), withs, at(p));
+    return nd::WithVarOp::create(b, noLoc(), valTy(), nd::kUnindexed, b.getStringAttr(name), withs, at(p));
   }
 
   /// A select/has_attr path: literal components become string attributes,
@@ -392,7 +392,7 @@ private:
 
   /// `base.key` with a literal key and no default.
   Value selectLiteral(Pos p, Value base, StringRef key, Value def = Value()) {
-    return nd::SelectOp::create(b, noLoc(), valTy(), base, ValueRange{}, def,
+    return nd::SelectOp::create(b, noLoc(), valTy(), nd::kUnindexed, base, ValueRange{}, def,
                                 b.getArrayAttr({b.getStringAttr(key)}), at(p));
   }
 
@@ -469,12 +469,12 @@ private:
       auto finals = finalizeGroup(phv, values, poses, {&dynNames, &dynValues});
       values.assign(finals.begin(), finals.end());
       if (ovIdx >= 0) {
-        Value attrs = nd::AttrsOp::create(b, noLoc(), valTy(), b.getArrayAttr(names), values, dynNames,
+        Value attrs = nd::AttrsOp::create(b, noLoc(), valTy(), nd::kUnindexed, b.getArrayAttr(names), values, dynNames,
                                           dynValues, b.getDenseI64ArrayAttr(positions), at(a->pos));
-        return nd::UpdateOp::create(b, noLoc(), valTy(), attrs, values[ovIdx], at(a->pos));
+        return nd::UpdateOp::create(b, noLoc(), valTy(), nd::kUnindexed, attrs, values[ovIdx], at(a->pos));
       }
     }
-    return nd::AttrsOp::create(b, noLoc(), valTy(), b.getArrayAttr(names), values,
+    return nd::AttrsOp::create(b, noLoc(), valTy(), nd::kUnindexed, b.getArrayAttr(names), values,
                                dynNames, dynValues, b.getDenseI64ArrayAttr(positions), at(a->pos));
   }
 
@@ -562,7 +562,7 @@ private:
     SmallVector<int64_t> formalLocs;
     for (auto &f : l->formals) formalLocs.push_back(at(f.pos));
     auto lam = nd::LambdaOp::create(
-        b, noLoc(), valTy(),
+        b, noLoc(), valTy(), nd::kUnindexed,
         l->hasFormals ? b.getArrayAttr(formalNames) : ArrayAttr(),
         l->hasFormals ? b.getDenseBoolArrayAttr(hasDef) : DenseBoolArrayAttr(),
         l->ellipsis,
@@ -603,7 +603,7 @@ private:
       SmallVector<Value> fvs;
       for (size_t i = 0; i < l->formals.size(); i++) {
         auto &f = l->formals[i];
-        fvs.push_back(nd::FormalOp::create(b, noLoc(), valTy(), arg,
+        fvs.push_back(nd::FormalOp::create(b, noLoc(), valTy(), nd::kUnindexed, arg,
                                            b.getStringAttr(f.name), defs[i], at(f.pos)));
       }
       for (size_t i = 0; i < l->formals.size(); i++) {
@@ -619,15 +619,15 @@ private:
   Value gen(const Expr *e, Scope *s) {
     switch (e->kind) {
     case ExprKind::Int:
-      return nd::IntOp::create(b, noLoc(), valTy(),
+      return nd::IntOp::create(b, noLoc(), valTy(), nd::kUnindexed,
                                b.getI64IntegerAttr(static_cast<const ExprInt *>(e)->v));
     case ExprKind::Float:
-      return nd::FloatOp::create(b, noLoc(), valTy(),
+      return nd::FloatOp::create(b, noLoc(), valTy(), nd::kUnindexed,
                                  b.getF64FloatAttr(static_cast<const ExprFloat *>(e)->v));
     case ExprKind::String:
       return str(static_cast<const ExprString *>(e)->v, e->pos);
     case ExprKind::Path:
-      return nd::PathOp::create(b, noLoc(), valTy(),
+      return nd::PathOp::create(b, noLoc(), valTy(), nd::kUnindexed,
                                 b.getStringAttr(static_cast<const ExprPath *>(e)->v));
     case ExprKind::Var: {
       auto *v = static_cast<const ExprVar *>(e);
@@ -638,10 +638,10 @@ private:
       SmallVector<Attribute> names{b.getStringAttr("column"), b.getStringAttr("file"),
                                    b.getStringAttr("line")};
       SmallVector<Value> vals{
-          nd::IntOp::create(b, noLoc(), valTy(), b.getI64IntegerAttr(e->pos.col)),
+          nd::IntOp::create(b, noLoc(), valTy(), nd::kUnindexed, b.getI64IntegerAttr(e->pos.col)),
           str(origin->path, e->pos),
-          nd::IntOp::create(b, noLoc(), valTy(), b.getI64IntegerAttr(e->pos.line))};
-      return nd::AttrsOp::create(b, noLoc(), valTy(), b.getArrayAttr(names), vals,
+          nd::IntOp::create(b, noLoc(), valTy(), nd::kUnindexed, b.getI64IntegerAttr(e->pos.line))};
+      return nd::AttrsOp::create(b, noLoc(), valTy(), nd::kUnindexed, b.getArrayAttr(names), vals,
                                  ValueRange{}, ValueRange{}, DenseI64ArrayAttr(), at(e->pos));
     }
     case ExprKind::InheritFrom:
@@ -651,21 +651,21 @@ private:
       Value base = gen(sel->e, s);
       GenPath path = genPath(sel->path, s);
       Value def = sel->def ? gen(sel->def, s) : Value();
-      return nd::SelectOp::create(b, noLoc(), valTy(), base, path.dyn, def,
+      return nd::SelectOp::create(b, noLoc(), valTy(), nd::kUnindexed, base, path.dyn, def,
                                   b.getArrayAttr(path.comps), at(sel->pos));
     }
     case ExprKind::HasAttr: {
       auto *h = static_cast<const ExprHasAttr *>(e);
       Value base = gen(h->e, s);
       GenPath path = genPath(h->path, s);
-      return nd::HasAttrOp::create(b, noLoc(), valTy(), base, path.dyn, b.getArrayAttr(path.comps), at(h->pos));
+      return nd::HasAttrOp::create(b, noLoc(), valTy(), nd::kUnindexed, base, path.dyn, b.getArrayAttr(path.comps), at(h->pos));
     }
     case ExprKind::Attrs:
       return genAttrs(static_cast<const ExprAttrs *>(e), s);
     case ExprKind::List: {
       SmallVector<Value> elems;
       for (auto *x : static_cast<const ExprList *>(e)->elems) elems.push_back(gen(x, s));
-      return nd::ListOp::create(b, noLoc(), valTy(), elems);
+      return nd::ListOp::create(b, noLoc(), valTy(), nd::kUnindexed, elems);
     }
     case ExprKind::Lambda:
       return genLambda(static_cast<const ExprLambda *>(e), s);
@@ -674,7 +674,7 @@ private:
       Value f = gen(c->fun, s);
       SmallVector<Value> args;
       for (auto *a : c->args) args.push_back(gen(a, s));
-      return nd::ApplyOp::create(b, noLoc(), valTy(), f, args, at(c->pos));
+      return nd::ApplyOp::create(b, noLoc(), valTy(), nd::kUnindexed, f, args, at(c->pos));
     }
     case ExprKind::Let: {
       Value v = genLet(static_cast<const ExprLet *>(e), s);
@@ -693,37 +693,37 @@ private:
     case ExprKind::If: {
       auto *i = static_cast<const ExprIf *>(e);
       Value c = gen(i->cond, s), t = gen(i->then, s), el = gen(i->else_, s);
-      return nd::IfOp::create(b, noLoc(), valTy(), c, t, el, at(i->pos));
+      return nd::IfOp::create(b, noLoc(), valTy(), nd::kUnindexed, c, t, el, at(i->pos));
     }
     case ExprKind::Assert: {
       auto *a = static_cast<const ExprAssert *>(e);
       Value c = gen(a->cond, s), body = gen(a->body, s);
       std::ostringstream os;
       showExpr(os, a->cond);
-      return nd::AssertOp::create(b, noLoc(), valTy(), c, body, b.getStringAttr(os.str()), at(a->pos));
+      return nd::AssertOp::create(b, noLoc(), valTy(), nd::kUnindexed, c, body, b.getStringAttr(os.str()), at(a->pos));
     }
     case ExprKind::Not:
-      return nd::NotOp::create(b, noLoc(), valTy(), gen(static_cast<const ExprNot *>(e)->e, s), at(e->pos));
+      return nd::NotOp::create(b, noLoc(), valTy(), nd::kUnindexed, gen(static_cast<const ExprNot *>(e)->e, s), at(e->pos));
     case ExprKind::Eq: case ExprKind::NEq: case ExprKind::And: case ExprKind::Or:
     case ExprKind::Impl: case ExprKind::Update: case ExprKind::ConcatLists: {
       auto *bn = static_cast<const ExprBin *>(e);
       Value l = gen(bn->e1, s), r = gen(bn->e2, s);
       int64_t w = at(e->pos);
       switch (e->kind) {
-      case ExprKind::Eq: return nd::EqOp::create(b, noLoc(), valTy(), l, r, w);
-      case ExprKind::NEq: return nd::NeqOp::create(b, noLoc(), valTy(), l, r, w);
-      case ExprKind::And: return nd::AndOp::create(b, noLoc(), valTy(), l, r, w);
-      case ExprKind::Or: return nd::OrOp::create(b, noLoc(), valTy(), l, r, w);
-      case ExprKind::Impl: return nd::ImplOp::create(b, noLoc(), valTy(), l, r, w);
-      case ExprKind::Update: return nd::UpdateOp::create(b, noLoc(), valTy(), l, r, w);
-      default: return nd::ConcatListsOp::create(b, noLoc(), valTy(), l, r, w);
+      case ExprKind::Eq: return nd::EqOp::create(b, noLoc(), valTy(), nd::kUnindexed, l, r, w);
+      case ExprKind::NEq: return nd::NeqOp::create(b, noLoc(), valTy(), nd::kUnindexed, l, r, w);
+      case ExprKind::And: return nd::AndOp::create(b, noLoc(), valTy(), nd::kUnindexed, l, r, w);
+      case ExprKind::Or: return nd::OrOp::create(b, noLoc(), valTy(), nd::kUnindexed, l, r, w);
+      case ExprKind::Impl: return nd::ImplOp::create(b, noLoc(), valTy(), nd::kUnindexed, l, r, w);
+      case ExprKind::Update: return nd::UpdateOp::create(b, noLoc(), valTy(), nd::kUnindexed, l, r, w);
+      default: return nd::ConcatListsOp::create(b, noLoc(), valTy(), nd::kUnindexed, l, r, w);
       }
     }
     case ExprKind::ConcatStrings: {
       auto *c = static_cast<const ExprConcatStrings *>(e);
       SmallVector<Value> parts;
       for (auto &[p, x] : c->es) parts.push_back(positioned(gen(x, s), x->pos));
-      return nd::ConcatStringsOp::create(b, noLoc(), valTy(), parts, c->forceString, at(c->pos));
+      return nd::ConcatStringsOp::create(b, noLoc(), valTy(), nd::kUnindexed, parts, c->forceString, at(c->pos));
     }
     }
     error("internal error: unknown expression kind", e->pos);

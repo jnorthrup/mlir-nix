@@ -70,7 +70,7 @@ def Nix_LambdaOp : Nix_Op<"lambda", [SingleBlock,
     trait) refuses it, and it can be neither printed as custom syntax nor read
     back.  The evaluator never verifies, and `mlnix emit-mlir` lowers eagerly.
   }];
-  let arguments = !con((ins OptionalAttr<StrArrayAttr>:$formals,
+  let arguments = !con(NixSlot, (ins OptionalAttr<StrArrayAttr>:$formals,
                        OptionalAttr<DenseBoolArrayAttr>:$formal_defaults,
                        UnitAttr:$ellipsis,
                        OptionalAttr<StrAttr>:$arg_name,
@@ -93,7 +93,7 @@ def Nix_FormalOp : Nix_Op<"formal", [Pure]> {
   let description = [{
     `arg.name` if the argument set has the attribute, otherwise `default`.
   }];
-  let arguments = !con((ins NixVal:$arg, StrAttr:$name, Optional<NixVal>:$default_value), NixPos);
+  let arguments = !con(NixSlot, (ins NixVal:$arg, StrAttr:$name, Optional<NixVal>:$default_value), NixPos);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$arg $name (`default` $default_value^)? attr-dict";
 }
@@ -103,14 +103,14 @@ def Nix_FormalOp : Nix_Op<"formal", [Pure]> {
 //===----------------------------------------------------------------------===//
 
 def Nix_IntOp : Nix_Op<"int", [ConstantLike, Pure]> {
-  let arguments = !con((ins I64Attr:$value), NixPos);
+  let arguments = !con(NixSlot, (ins I64Attr:$value), NixPos);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$value attr-dict";
   let hasFolder = 1;
 }
 
 def Nix_FloatOp : Nix_Op<"float", [ConstantLike, Pure]> {
-  let arguments = !con((ins F64Attr:$value), NixPos);
+  let arguments = !con(NixSlot, (ins F64Attr:$value), NixPos);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$value attr-dict";
   let hasFolder = 1;
@@ -118,7 +118,7 @@ def Nix_FloatOp : Nix_Op<"float", [ConstantLike, Pure]> {
 
 def Nix_StringOp : Nix_Op<"str", [ConstantLike, Pure]> {
   let summary = "string literal (no context)";
-  let arguments = !con((ins StrAttr:$value), NixPos);
+  let arguments = !con(NixSlot, (ins StrAttr:$value), NixPos);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$value attr-dict";
   let hasFolder = 1;
@@ -126,7 +126,7 @@ def Nix_StringOp : Nix_Op<"str", [ConstantLike, Pure]> {
 
 def Nix_BoolOp : Nix_Op<"bool", [ConstantLike, Pure]> {
   let summary = "the literals `true` and `false`";
-  let arguments = (ins BoolAttr:$value);
+  let arguments = !con(NixSlot, (ins BoolAttr:$value));
   let results = (outs NixVal:$result);
   let assemblyFormat = "$value attr-dict";
   let hasFolder = 1;
@@ -134,6 +134,7 @@ def Nix_BoolOp : Nix_Op<"bool", [ConstantLike, Pure]> {
 
 def Nix_NullOp : Nix_Op<"null", [ConstantLike, Pure]> {
   let summary = "the literal `null`";
+  let arguments = NixSlot;
   let results = (outs NixVal:$result);
   let assemblyFormat = "attr-dict";
   let hasFolder = 1;
@@ -141,14 +142,14 @@ def Nix_NullOp : Nix_Op<"null", [ConstantLike, Pure]> {
 
 def Nix_PathOp : Nix_Op<"path", [Pure]> {
   let summary = "absolute, canonical path literal";
-  let arguments = !con((ins StrAttr:$value), NixPos);
+  let arguments = !con(NixSlot, (ins StrAttr:$value), NixPos);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$value attr-dict";
 }
 
 def Nix_BuiltinOp : Nix_Op<"builtin", [Pure]> {
   let summary = "reference to an entry of the global base environment";
-  let arguments = (ins StrAttr:$name);
+  let arguments = !con(NixSlot, (ins StrAttr:$name));
   let results = (outs NixVal:$result);
   let assemblyFormat = "$name attr-dict";
 }
@@ -158,7 +159,7 @@ def Nix_WithVarOp : Nix_Op<"with_var", [Pure]> {
   let description = [{
     Looks `name` up in each scope operand in order (innermost `with` first).
   }];
-  let arguments = !con((ins StrAttr:$name, Variadic<NixVal>:$scopes), NixPos);
+  let arguments = !con(NixSlot, (ins StrAttr:$name, Variadic<NixVal>:$scopes), NixPos);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$name (`in` $scopes^)? attr-dict";
 }
@@ -168,7 +169,7 @@ def Nix_WithVarOp : Nix_Op<"with_var", [Pure]> {
 //===----------------------------------------------------------------------===//
 
 def Nix_ListOp : Nix_Op<"list"> {
-  let arguments = !con((ins Variadic<NixVal>:$elements), NixPos);
+  let arguments = !con(NixSlot, (ins Variadic<NixVal>:$elements), NixPos);
   let results = (outs NixFreshVal:$result);
   let assemblyFormat = "`[` $elements `]` attr-dict";
 }
@@ -180,7 +181,7 @@ def Nix_AttrsOp : Nix_Op<"attrs", [AttrSizedOperandSegments]> {
     `dyn_names[j]` with `dyn_values[j]`; they are inserted in order at
     evaluation time and a `null` name drops the attribute.
   }];
-  let arguments = !con((ins StrArrayAttr:$names, Variadic<NixVal>:$values,
+  let arguments = !con(NixSlot, (ins StrArrayAttr:$names, Variadic<NixVal>:$values,
                        Variadic<NixVal>:$dyn_names, Variadic<NixVal>:$dyn_values,
                        OptionalAttr<DenseI64ArrayAttr>:$positions), NixPos);
   let results = (outs NixFreshVal:$result);
@@ -204,7 +205,7 @@ def Nix_SelectOp : Nix_Op<"select", [Pure, AttrSizedOperandSegments, NixModes<[0
 
         %v = nix.select %set ["pkgs", %k, "version"] or %default
   }];
-  let arguments = !con((ins NixVal:$base, Variadic<NixVal>:$dyn_keys,
+  let arguments = !con(NixSlot, (ins NixVal:$base, Variadic<NixVal>:$dyn_keys,
                        Optional<NixVal>:$default_value, ArrayAttr:$path), NixPos);
   let results = (outs NixVal:$result);
   let assemblyFormat =
@@ -215,7 +216,7 @@ def Nix_SelectOp : Nix_Op<"select", [Pure, AttrSizedOperandSegments, NixModes<[0
 def Nix_HasAttrOp : Nix_Op<"has_attr", [Pure, NixModes<[0], []>]> {
   let summary = "attribute path test `e ? a.b`";
   let description = [{ `path`/`dyn_keys` as in `nix.select`. }];
-  let arguments = !con((ins NixVal:$base, Variadic<NixVal>:$dyn_keys, ArrayAttr:$path), NixPos);
+  let arguments = !con(NixSlot, (ins NixVal:$base, Variadic<NixVal>:$dyn_keys, ArrayAttr:$path), NixPos);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$base custom<AttrPath>($path, $dyn_keys) attr-dict";
   let hasVerifier = 1;
@@ -223,19 +224,19 @@ def Nix_HasAttrOp : Nix_Op<"has_attr", [Pure, NixModes<[0], []>]> {
 
 def Nix_ApplyOp : Nix_Op<"apply", NixFxUser> {
   let summary = "(curried) function application";
-  let arguments = !con((ins NixVal:$callee, Variadic<NixVal>:$args), NixPos);
+  let arguments = !con(NixSlot, (ins NixVal:$callee, Variadic<NixVal>:$args), NixPos);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$callee `(` $args `)` attr-dict";
 }
 
 def Nix_IfOp : Nix_Op<"if", [Pure, NixModes<[0], [1, 2]>]> {
-  let arguments = !con((ins NixVal:$cond, NixVal:$then_value, NixVal:$else_value), NixPos);
+  let arguments = !con(NixSlot, (ins NixVal:$cond, NixVal:$then_value, NixVal:$else_value), NixPos);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$cond `then` $then_value `else` $else_value attr-dict";
 }
 
 def Nix_AssertOp : Nix_Op<"assert", [Pure, NixModes<[0], [1]>]> {
-  let arguments = !con((ins NixVal:$cond, NixVal:$body, OptionalAttr<StrAttr>:$text), NixPos);
+  let arguments = !con(NixSlot, (ins NixVal:$cond, NixVal:$body, OptionalAttr<StrAttr>:$text), NixPos);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$cond `in` $body attr-dict";
 }
@@ -246,7 +247,7 @@ def Nix_AssertOp : Nix_Op<"assert", [Pure, NixModes<[0], [1]>]> {
 //===----------------------------------------------------------------------===//
 
 class Nix_BinOp<string mnemonic, list<Trait> traits = [Pure]> : Nix_Op<mnemonic, traits> {
-  let arguments = !con((ins NixVal:$lhs, NixVal:$rhs), NixPos);
+  let arguments = !con(NixSlot, (ins NixVal:$lhs, NixVal:$rhs), NixPos);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$lhs `,` $rhs attr-dict";
 }
@@ -264,14 +265,14 @@ def Nix_UpdateOp  : Nix_FreshBinOp<"update">;
 def Nix_ConcatListsOp : Nix_FreshBinOp<"concat_lists">;
 
 def Nix_NotOp : Nix_Op<"not", [Pure, NixModes<[0], []>]> {
-  let arguments = !con((ins NixVal:$operand), NixPos);
+  let arguments = !con(NixSlot, (ins NixVal:$operand), NixPos);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$operand attr-dict";
 }
 
 def Nix_ConcatStringsOp : Nix_Op<"concat_strings", [Pure]> {
   let summary = "`+` (force_string = false) and string interpolation (true)";
-  let arguments = !con((ins Variadic<NixVal>:$parts, UnitAttr:$force_string), NixPos);
+  let arguments = !con(NixSlot, (ins Variadic<NixVal>:$parts, UnitAttr:$force_string), NixPos);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$parts attr-dict";
   let hasFolder = 1;

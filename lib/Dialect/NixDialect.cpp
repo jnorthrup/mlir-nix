@@ -96,6 +96,47 @@ template <typename OpT> void collectModes(NixDialect &d, MLIRContext *ctx) {
 template <typename... Ops> void collectAllModes(NixDialect &d, MLIRContext *ctx) { (collectModes<Ops>(d, ctx), ...); }
 } // namespace
 
+/// Every op class of the dialect that defines a value (NixSlot in NixOps.td).
+#define NIX_VALUE_OPS                                                                                      \
+  LambdaOp, FormalOp, IntOp, FloatOp, StringOp, BoolOp, NullOp, PathOp, BuiltinOp, WithVarOp, ListOp,   \
+      AttrsOp, SelectOp, HasAttrOp, ApplyOp, IfOp, AssertOp, EqOp, NeqOp, AndOp, OrOp, ImplOp, UpdateOp, \
+      ConcatListsOp, NotOp, ConcatStringsOp
+
+/// Where `slot` sits in the properties of each op class: TableGen puts the attributes before the properties,
+/// so it is a fact of the class, read here off a Properties object.
+template <class... Ops> static void addSlotLayouts(SlotLayout &layout, MLIRContext *ctx) {
+  ((void)[&] {
+    typename Ops::Properties p;
+    layout.add(OperationName(Ops::getOperationName(), ctx),
+               uint32_t(reinterpret_cast<char *>(&p.slot) - reinterpret_cast<char *>(&p)));
+  }(), ...);
+}
+
+/// A multiplier for which the hash of the 26 op-name pointers has no collision, searched at load time (a
+/// random multiplier does in about one case in fourteen).  The pointers differ from run to run, so the
+/// multiplier does too; the table is right either way.
+void SlotLayout::seal() {
+  for (uint64_t k = 0; k < 1000000; k++) {
+    mult = (0x9E3779B97F4A7C15ull + k * 0x2545F4914F6CDD1Dull) | 1;
+    for (Entry &e : table) e = Entry();
+    bool clean = true;
+    for (const Entry &e : entries) {
+      Entry &slot = table[index(e.name)];
+      if (slot.name) {
+        clean = false;
+        break;
+      }
+      slot = e;
+    }
+    if (clean) {
+      entries.clear();
+      entries.shrink_to_fit();
+      return;
+    }
+  }
+  llvm::report_fatal_error("the nix dialect: no collision-free hash for the slot layout");
+}
+
 void NixDialect::initialize() {
   addTypes<
 #define GET_TYPEDEF_LIST
@@ -109,6 +150,8 @@ void NixDialect::initialize() {
 #define GET_OP_LIST
 #include "NixDialect/NixOps.cpp.inc"
       >(*this, getContext());
+  addSlotLayouts<NIX_VALUE_OPS>(slotLayout, getContext());
+  slotLayout.seal();
 }
 
 bool NixDialect::evaluatesInPlace(Value v) const {
@@ -125,15 +168,15 @@ Operation *NixDialect::materializeConstant(OpBuilder &b, Attribute value,
                                            Type type, Location loc) {
   Operation *op = nullptr;
   if (auto bl = dyn_cast<BoolAttr>(value)) // before IntegerAttr: i1 integers
-    return BoolOp::create(b, loc, type, bl);
+    return BoolOp::create(b, loc, type, kUnindexed, bl);
   if (isa<UnitAttr>(value))
-    return NullOp::create(b, loc, type);
+    return NullOp::create(b, loc, type, kUnindexed);
   if (auto i = dyn_cast<IntegerAttr>(value))
-    op = IntOp::create(b, loc, type, i);
+    op = IntOp::create(b, loc, type, kUnindexed, i);
   else if (auto f = dyn_cast<FloatAttr>(value))
-    op = FloatOp::create(b, loc, type, f);
+    op = FloatOp::create(b, loc, type, kUnindexed, f);
   else if (auto s = dyn_cast<StringAttr>(value))
-    op = StringOp::create(b, loc, type, s);
+    op = StringOp::create(b, loc, type, kUnindexed, s);
   if (op) setPos(op, packLoc(loc)); // a folded call keeps the position its operands were reported at
   return op;
 }
@@ -147,6 +190,15 @@ Operation *NixDialect::materializeConstant(OpBuilder &b, Attribute value,
   LambdaOp, FormalOp, IntOp, FloatOp, StringOp, PathOp, WithVarOp, ListOp, AttrsOp, SelectOp, HasAttrOp, \
       ApplyOp, IfOp, AssertOp, EqOp, NeqOp, AndOp, OrOp, ImplOp, UpdateOp, ConcatListsOp, NotOp,          \
       ConcatStringsOp
+
+bool nix::setSlotWord(Operation *op, uint32_t word) {
+  return llvm::TypeSwitch<Operation *, bool>(op)
+      .Case<NIX_VALUE_OPS>([&](auto o) {
+        o.setSlot(int32_t(word));
+        return true;
+      })
+      .Default([](Operation *) { return false; });
+}
 
 uint64_t nix::getPos(Operation *op) {
   return llvm::TypeSwitch<Operation *, uint64_t>(op)
@@ -320,7 +372,7 @@ struct DevirtualizePrimCall : OpRewritePattern<ApplyOp> {
     st.addTypes(op.getType());
     Value res = rw.create(st)->getResult(0);
     if (op.getArgs().size() > info->arity)
-      res = ApplyOp::create(rw, UnknownLoc::get(op.getContext()), op.getType(), res,
+      res = ApplyOp::create(rw, UnknownLoc::get(op.getContext()), op.getType(), kUnindexed, res,
                             op.getArgs().drop_front(info->arity), op.getPos());
     rw.replaceOp(op, res);
     return success();

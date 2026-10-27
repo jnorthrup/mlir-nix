@@ -204,6 +204,7 @@ EvalState::EvalState(EvalSettings st, std::shared_ptr<nixstore::Store> store)
   ctx.disableMultithreading();
   nd::loadNixDialects(ctx);
   registerEvalModels(ctx);
+  slotLayout = &ctx.getLoadedDialect<nd::NixDialect>()->slotLayout;
   ctx.getLoadedDialect<nd::NixDialect>()->primFolder = [this](llvm::StringRef key,
                                                               llvm::ArrayRef<mlir::Attribute> args) {
     return foldPrimOp(key, args);
@@ -402,13 +403,19 @@ void EvalState::indexRegion(Region &r) {
   Block &blk = r.front();
   unsigned slot = 0;
   auto *core = ctx.getLoadedDialect<nd::NixDialect>();
-  for (BlockArgument a : blk.getArguments()) slotMap[a.getAsOpaquePointer()] = {ri, slot++, false};
+  slot += blk.getNumArguments(); // a block argument is its own number: whereIs() needs no entry for it
   for (Operation &op : blk) {
     if (auto ret = dyn_cast<nd::ReturnOp>(op)) {
       ri->result = ret.getValue();
       continue;
     }
-    for (mlir::Value res : op.getResults()) slotMap[res.getAsOpaquePointer()] = {ri, slot++, inPlaceEnabled && core->evaluatesInPlace(res)};
+    for (mlir::Value res : op.getResults()) {
+      bool inPlace = inPlaceEnabled && core->evaluatesInPlace(res);
+      // The slot lives in the op that defines the value; only a primop (no property storage) needs the map.
+      if (op.getNumResults() != 1 || !nd::setSlotWord(&op, (slot + 1) | (inPlace ? nd::kSlotInPlace : 0)))
+        dynSlots[res.getAsOpaquePointer()] = {ri, slot, inPlace};
+      slot++;
+    }
     // A deferred lambda's region is a shell until its first call; it is indexed when it is minted.
     auto lam = dyn_cast<nd::LambdaOp>(op);
     if (lam && lam.getBodyIndex()) continue;
@@ -435,14 +442,34 @@ Frame *EvalState::newFrame(RegionInfo *ri, Frame *up) {
   return f;
 }
 
+bool EvalState::whereIs(mlir::Value v, Where &w) const {
+  if (Operation *op = v.getDefiningOp()) {
+    if (uint32_t *word = slotLayout->word(op)) {
+      uint32_t raw = *word;
+      if (!raw) return false;
+      w = {op->getParentRegion(), (raw & ~nd::kSlotInPlace) - 1, (raw & nd::kSlotInPlace) != 0};
+      return true;
+    }
+    auto it = dynSlots.find(v.getAsOpaquePointer());
+    if (it == dynSlots.end()) return false;
+    w = {op->getParentRegion(), it->second.idx, it->second.inPlace};
+    return true;
+  }
+  auto arg = cast<BlockArgument>(v);
+  w = {arg.getOwner()->getParent(), arg.getArgNumber(), false};
+  return true;
+}
+
 Value *EvalState::lookup(Frame *f, mlir::Value v) {
-  auto it = slotMap.find(v.getAsOpaquePointer());
-  if (it == slotMap.end()) throw EvalError("internal error: unindexed SSA value");
-  RegionInfo *ri = it->second.ri;
-  unsigned idx = it->second.idx;
-  while (f && f->info != ri) f = f->up;
+  Where w;
+  if (!whereIs(v, w)) throw EvalError("internal error: unindexed SSA value");
+  return lookupAt(f, v, w);
+}
+
+Value *EvalState::lookupAt(Frame *f, mlir::Value v, const Where &w) {
+  while (f && f->info->region != w.region) f = f->up;
   if (!f) throw EvalError("internal error: SSA value used outside its scope");
-  Value *&slot = f->slots[idx];
+  Value *&slot = f->slots[w.idx];
   if (slot) return slot;
   Operation *op = v.getDefiningOp();
   if (!op) throw EvalError("internal error: unbound block argument");
@@ -489,23 +516,25 @@ void EvalState::evalDefinition(mlir::Operation *def, Frame *f, Value &dest) {
 }
 
 Value &EvalState::operand(Frame *f, mlir::Value v, Value &tmp) {
-  auto it = slotMap.find(v.getAsOpaquePointer());
-  if (it != slotMap.end() && it->second.inPlace && f && f->info == it->second.ri) {
+  Where w;
+  if (!whereIs(v, w)) throw EvalError("internal error: unindexed SSA value");
+  if (w.inPlace && f && f->info->region == w.region) {
     if (statsEnabled) nInPlace++;
     evalDefinition(v.getDefiningOp(), f, tmp);
     return tmp;
   }
-  return *lookup(f, v);
+  return *lookupAt(f, v, w);
 }
 
 void EvalState::evalTail(Frame *f, mlir::Value v, Value &out, PosPtr pos) {
-  auto it = slotMap.find(v.getAsOpaquePointer());
-  if (it != slotMap.end() && it->second.inPlace && f && f->info == it->second.ri) {
+  Where w;
+  if (!whereIs(v, w)) throw EvalError("internal error: unindexed SSA value");
+  if (w.inPlace && f && f->info->region == w.region) {
     if (statsEnabled) nInPlace++;
     evalDefinition(v.getDefiningOp(), f, out);
     return;
   }
-  Value *p = lookup(f, v);
+  Value *p = lookupAt(f, v, w);
   forceValue(*p, pos);
   out = *p;
 }

@@ -30,6 +30,14 @@ include "mlir/Interfaces/SideEffectInterfaces.td"
 def Nix_PosProp : DefaultValuedProp<I64Prop, "0">;
 defvar NixPos = (ins Nix_PosProp:$pos);
 
+// The frame slot of the op's result, kept by the evaluator (EvalState::indexRegion): bit 31 says the single
+// strict consumer evaluates it in place, the low 31 bits are the slot + 1, 0 means "not indexed".  Every op
+// that defines a value has it; the evaluator finds it through NixDialect::slotLayout (the offset of `slot`
+// in the properties of each op class), so a hash probe per operand in a table of every value becomes a probe
+// of a table of the 26 op classes, and a load.  No assembly format mentions it.
+def Nix_SlotProp : DefaultValuedProp<I32Prop, "0">;
+defvar NixSlot = (ins Nix_SlotProp:$slot);
+
 def Nix_Dialect : Dialect {
   let name = "nix";
   let cppNamespace = "::mlir::nix";
@@ -48,6 +56,9 @@ def Nix_Dialect : Dialect {
     using PrimFolder = std::function<::mlir::Attribute(
         ::llvm::StringRef key, ::llvm::ArrayRef<::mlir::Attribute> args)>;
     PrimFolder primFolder;
+
+    /// Where the `slot` property sits in the properties of each op class that defines a value.
+    SlotLayout slotLayout;
 
     /// Operand modalities, collected from the `NixModes` traits of the ops: bit i of
     /// `strict` says operand i is forced before the op returns and never retained;

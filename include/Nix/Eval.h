@@ -182,6 +182,13 @@ struct Slot {
   bool inPlace;
 };
 
+/// The same, resolved for one use: the region as the pointer MLIR already has, so no table is probed.
+struct Where {
+  mlir::Region *region;
+  unsigned idx;
+  bool inPlace;
+};
+
 //===----------------------------------------------------------------------===//
 // Errors
 //===----------------------------------------------------------------------===//
@@ -455,6 +462,10 @@ public:
   /// next computed key (operand), forced to a string.
   Symbol pathSymbol(mlir::Attribute comp, mlir::OperandRange dyn, unsigned &nextDyn, Frame *env, PosPtr pos);
   Value *lookup(Frame *f, mlir::Value v);
+  /// Where `v` lives, read from its defining op (the `slot` property), its block, or `dynSlots`.  False when
+  /// its region has not been indexed.
+  bool whereIs(mlir::Value v, Where &w) const;
+  Value *lookupAt(Frame *f, mlir::Value v, const Where &w);
   void evalOp(mlir::Operation *op, Frame *env, Value &out);
   RegionInfo *regionInfo(mlir::Region *r);
   Frame *newFrame(RegionInfo *ri, Frame *up);
@@ -474,7 +485,10 @@ public:
   std::function<void(const std::string &)> printTrace;
 
 private:
-  llvm::DenseMap<void *, Slot> slotMap;
+  /// The slots of the values that cannot hold their own: those of the IRDL primops, which have no
+  /// property storage (0.7% of the ops).  Every other op keeps its slot in itself.
+  llvm::DenseMap<void *, Slot> dynSlots;
+  const mlir::nix::SlotLayout *slotLayout = nullptr; // set once the dialects are loaded
   uint64_t nUpdLayered = 0, nUpdMerged = 0, nUpdBase = 0, nUpdTop = 0; // MLNIX_STATS: `//` as a layer / a flat merge, entries not copied / copied
   uint64_t nInPlace = 0, nThunks = 0; // MLNIX_STATS: operands evaluated in place / thunks created by lookup()
   uint64_t nDemandMinted = 0; // MLNIX_STATS: lambda bodies minted on first call
