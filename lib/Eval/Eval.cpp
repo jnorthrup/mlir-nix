@@ -113,6 +113,7 @@ Bindings *EvalState::updateAttrs(Bindings *a, Bindings *b) {
     base = L.base;
     top = mergeBindings(alloc, L.top, b);
   }
+  if (base->layered()) base = base->flat();
   if (statsEnabled) {
     if (base->size_ >= kMinBase && top->size_ * kRatio <= base->size_) { nUpdLayered++; nUpdBase += base->size_; nUpdTop += top->size_; }
     else { nUpdMerged++; nUpdTop += base->size_ + top->size_; }
@@ -121,7 +122,18 @@ Bindings *EvalState::updateAttrs(Bindings *a, Bindings *b) {
     void *mem = alloc.Allocate(sizeof(Bindings) + sizeof(Bindings::Layer), alignof(Bindings));
     auto *r = new (mem) Bindings();
     r->size_ = Bindings::kLayered;
-    r->layer() = {top, base, nullptr, &alloc};
+    auto *L = new (static_cast<void *>(r->attrs)) Bindings::Layer{top, base, nullptr, &alloc, {}};
+    // The rows of the layer, in name order, as a selection: one word a row, side 1 for `top`.  Both sides are sorted, so
+    // this is one walk over them and no row is copied; an equal name takes `top`'s row and shadows `base`'s.
+    L->sel.cells.reserve(size_t(base->size_) + top->size_);
+    size_t i = 0, j = 0;
+    while (i < base->size_ || j < top->size_) {
+      if (j == top->size_ || (i < base->size_ && base->attrs[i].name < top->attrs[j].name))
+        L->sel.append(uint32_t(i++ << 1));
+      else if (i == base->size_ || top->attrs[j].name < base->attrs[i].name)
+        L->sel.append(uint32_t(j++ << 1) | 1);
+      else { L->sel.append(uint32_t(j++ << 1) | 1); i++; } // equal: top wins, base's row is shadowed
+    }
     return r;
   }
   return mergeBindings(alloc, base, top);
@@ -1303,8 +1315,9 @@ bool EvalState::eqValues(Value &v1, Value &v2, PosPtr pos) {
       }
     }
     if (v1.attrs->size() != v2.attrs->size()) return false;
+    auto ra = v1.attrs->rows(), rb = v2.attrs->rows(); // the rows as Series: a layer reads through its selection
     for (size_t k = 0; k < v1.attrs->size(); k++) {
-      const Attr &a = v1.attrs->begin()[k], &b = v2.attrs->begin()[k];
+      const Attr &a = ra[uint32_t(k)], &b = rb[uint32_t(k)];
       if (a.name != b.name) return false;
       if (a.value == b.value) continue;
       if (!eqValues(*a.value, *b.value, pos)) return false;

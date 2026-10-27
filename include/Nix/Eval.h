@@ -78,12 +78,14 @@ struct Bindings {
   PosPtr pos = nullptr;
   Attr attrs[0];
 
-  /// `base // top` as a view instead of a copy: `top` shadows `base`, both flat sorted sets.  Built
-  /// by `//` when `top` is small next to `base` (O(|top|) instead of O(|base| + |top|)); looked up
-  /// without copying; flattened once, on the first iteration or size query.
+  /// `base // top`: the rows of both in name order, `top` shadowing `base`.  A Series, not a copy: `sel` holds one word a
+  /// row — `(row << 1) | side`, side 1 for `top` — and a row is read where it lies (4 bytes a row of selection, against a
+  /// row apiece for a copy).  Built by `//` when `top` is small next to `base`; `flat` is the materialisation for the one
+  /// consumer that needs cells (a later merge of it), and nothing else asks for it.
   struct Layer {
     Bindings *top, *base, *flat;
     Arena *alloc; // where flat() allocates
+    cp::MutableSeries<uint32_t> sel; // the rows of the layer, in name order
   };
   static inline uint64_t flattened = 0; // MLNIX_STATS
   static inline uint64_t merged = 0, mergedCells = 0; // MLNIX_STATS: flat sets made by mergeBindings, and their cells
@@ -92,12 +94,41 @@ struct Bindings {
   /// The set as one sorted array: itself, or the union of its layers, built once.
   Bindings *flat() const;
 
-  size_t size() const { return layered() ? flat()->size_ : size_; }
+  /// The rows of the set, flat or layered, as a Series: size j index.  A layered set indexes through its selection and
+  /// copies nothing; a side that is itself layered is read the same way, so a layer of a layer is still a view.
+  struct Rows {
+    const Bindings *b;
+    const Attr &operator()(uint32_t i) const {
+      const Bindings *s = b;
+      if (s->layered()) {
+        const Layer &L = s->layer();
+        uint32_t w = L.sel[i];
+        s = (w & 1) ? L.top : L.base;
+        i = w >> 1;
+        if (s->layered()) return (*s).rows()[i];
+      }
+      return s->attrs[i];
+    }
+  };
+  cp::Series<Rows> rows() const { return {uint32_t(size()), Rows{this}}; }
+
+  /// A walk over the rows.  The iterator carries the index function itself (eight bytes: the set), not a pointer to a
+  /// Series that a caller made on the way in — a range-for over a set has no Series of its own to keep alive.
+  struct iterator {
+    Rows r;
+    uint32_t i = 0;
+    const Attr &operator*() const { return r(i); }
+    iterator &operator++() {
+      ++i;
+      return *this;
+    }
+    bool operator==(const iterator &o) const { return i == o.i; }
+  };
+
+  size_t size() const { return layered() ? layer().sel.size() : size_; }
   bool empty() const { return !layered() && size_ == 0; }
-  Attr *begin() { return flat()->attrs; }
-  Attr *end() { Bindings *f = flat(); return f->attrs + f->size_; }
-  const Attr *begin() const { return flat()->attrs; }
-  const Attr *end() const { Bindings *f = flat(); return f->attrs + f->size_; }
+  iterator begin() const { return {Rows{this}, 0}; }
+  iterator end() const { return {Rows{this}, uint32_t(size())}; }
   const Attr *get(Symbol s) const;
   /// Attributes sorted by name (string order).
   std::vector<const Attr *> lexicographicOrder(const SymbolTable &st) const;
