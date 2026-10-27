@@ -738,12 +738,19 @@ void EvalState::callLambda(Value &fun, Value *arg, Value &out, PosPtr pos) {
       throw;
     }
     auto defs = *lam.getFormalDefaults();
+    if (ri->formalsOf != lam.getOperation()) {
+      auto *syms = static_cast<Symbol *>(alloc.Allocate(formals->size() * sizeof(Symbol), alignof(Symbol)));
+      for (size_t i = 0; i < formals->size(); i++) syms[i] = symbols.create(cast<StringAttr>((*formals)[i]).getValue());
+      ri->formalSyms = syms;
+      ri->formalsOf = lam.getOperation();
+    }
+    const Symbol *formalSyms = ri->formalSyms;
     size_t nFound = 0;
     for (size_t i = 0; i < formals->size(); i++) {
-      auto name = cast<StringAttr>((*formals)[i]).getValue();
-      if (arg->attrs->get(symbols.create(name))) nFound++;
+      if (arg->attrs->get(formalSyms[i])) nFound++;
       else if (!defs[i])
-        throw EvalError(fnName() + " called without required argument '" + name.str() + "'", pos)
+        throw EvalError(fnName() + " called without required argument '" +
+                            cast<StringAttr>((*formals)[i]).getValue().str() + "'", pos)
             .addTrace(nd::posOfOp(lam), "from call site");
     }
     if (!lam.getEllipsis() && nFound != arg->attrs->size()) {
@@ -829,7 +836,7 @@ void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out,
       i++;
     } else if (cur->type == VType::PrimOp || cur->type == VType::PrimOpApp) {
       // Collect already-applied arguments.
-      std::vector<Value *> applied;
+      llvm::SmallVector<Value *, 6> applied;
       Value *p = cur;
       while (p->type == VType::PrimOpApp) {
         applied.push_back(p->app.right);
@@ -853,7 +860,7 @@ void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out,
         }
         return;
       }
-      std::vector<Value *> all = applied;
+      llvm::SmallVector<Value *, 6> all(applied);
       for (size_t k = 0; k < need; k++) all.push_back(args[i + k]);
       i += need;
       res = (i == nargs) ? &out : allocValue();

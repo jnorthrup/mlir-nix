@@ -182,6 +182,10 @@ struct RegionInfo {
   mlir::Region *region;
   unsigned numSlots;
   mlir::Value result;
+  /// For a lambda body: the symbols of the lambda's formals (made at its first call, by EvalState::callLambda) and the op
+  /// they were made from.
+  const Symbol *formalSyms = nullptr;
+  mlir::Operation *formalsOf = nullptr;
 };
 
 struct Frame {
@@ -343,7 +347,7 @@ public:
     size_t size() const { return attrs.size(); }
   private:
     EvalState &st;
-    std::vector<Attr> attrs;
+    llvm::SmallVector<Attr, 12> attrs; // accumulated here, then drained into the arena by finish()
   };
 
   // -- Forcing -------------------------------------------------------------
