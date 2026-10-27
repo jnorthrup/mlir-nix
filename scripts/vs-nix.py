@@ -146,7 +146,8 @@ def main():
         if not same:
             rc = 1
         spent = time.monotonic() - t_start
-        print(f"== {name}  ({rounds} interleaved rounds, {spent:.0f} s{f' of a {a.budget:.0f} s budget' if a.budget else ''}; "
+        h = f"output sha256 {next(iter(hashes[arms[0][0]]))}; " if same else ""
+        print(f"== {name}  ({rounds} interleaved rounds, {spent:.0f} s{f' of a {a.budget:.0f} s budget' if a.budget else ''}; {h}"
               f"identical output from all: {'yes' if same else 'NO ' + str(hashes)})")
         for n, binary in refs:
             if a.budget and (time.monotonic() - t_start) + 1.3 * times[n][0] > a.budget:
