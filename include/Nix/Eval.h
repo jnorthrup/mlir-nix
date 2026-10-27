@@ -22,6 +22,7 @@
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/OwningOpRef.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/Support/Compiler.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/Support/Allocator.h"
@@ -470,7 +471,21 @@ public:
   /// Symbol of one select/has_attr path component: literal (a name) or the
   /// next computed key (operand), forced to a string.
   Symbol pathSymbol(const nixfe::Name &comp, mlir::OperandRange dyn, unsigned &nextDyn, Frame *env, PosPtr pos);
-  Value *lookup(Frame *f, mlir::Value v);
+  /// The cell of an SSA value: its slot in the frame of its region, made (a thunk, a constant, a builtin) on the first ask.
+  /// The made cell is one probe of slotMap and a walk up the frames; making it is out of line.
+  Value *lookup(Frame *f, mlir::Value v) {
+    auto it = slotMap.find(v.getAsOpaquePointer());
+    if (LLVM_LIKELY(it != slotMap.end()))
+      if (Value *p = cellOf(f, it->second)) return p;
+    return lookupFirst(f, v);
+  }
+  /// The slot of `s` in the frame chain of `f`, null if it has none yet (or no frame of its region).
+  static Value *cellOf(Frame *f, const Slot &s) {
+    if (s.idx == kNoSlot) return nullptr;
+    while (f && f->info != s.ri) f = f->up;
+    return f ? f->slots[s.idx] : nullptr;
+  }
+  Value *lookupFirst(Frame *f, mlir::Value v);
   void evalOp(mlir::Operation *op, Frame *env, Value &out);
   RegionInfo *regionInfo(mlir::Region *r);
   Frame *newFrame(RegionInfo *ri, Frame *up);

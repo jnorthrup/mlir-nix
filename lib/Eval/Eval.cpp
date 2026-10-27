@@ -466,7 +466,7 @@ Frame *EvalState::newFrame(RegionInfo *ri, Frame *up) {
   return f;
 }
 
-Value *EvalState::lookup(Frame *f, mlir::Value v) {
+Value *EvalState::lookupFirst(Frame *f, mlir::Value v) {
   auto it = slotMap.find(v.getAsOpaquePointer());
   if (it == slotMap.end()) throw EvalError("internal error: unindexed SSA value");
   RegionInfo *ri = it->second.ri;
@@ -522,22 +522,31 @@ void EvalState::evalDefinition(mlir::Operation *def, Frame *f, Value &dest) {
 
 Value &EvalState::operand(Frame *f, mlir::Value v, Value &tmp) {
   auto it = slotMap.find(v.getAsOpaquePointer());
-  if (it != slotMap.end() && it->second.inPlace && f && f->info == it->second.ri) {
-    if (statsEnabled) nInPlace++;
-    evalDefinition(v.getDefiningOp(), f, tmp);
-    return tmp;
+  if (LLVM_LIKELY(it != slotMap.end())) {
+    const Slot &s = it->second;
+    if (s.inPlace && f && f->info == s.ri) {
+      if (statsEnabled) nInPlace++;
+      evalDefinition(v.getDefiningOp(), f, tmp);
+      return tmp;
+    }
+    if (Value *p = cellOf(f, s)) return *p;
   }
-  return *lookup(f, v);
+  return *lookupFirst(f, v);
 }
 
 void EvalState::evalTail(Frame *f, mlir::Value v, Value &out, PosPtr pos) {
   auto it = slotMap.find(v.getAsOpaquePointer());
-  if (it != slotMap.end() && it->second.inPlace && f && f->info == it->second.ri) {
-    if (statsEnabled) nInPlace++;
-    evalDefinition(v.getDefiningOp(), f, out);
-    return;
+  Value *p = nullptr;
+  if (LLVM_LIKELY(it != slotMap.end())) {
+    const Slot &s = it->second;
+    if (s.inPlace && f && f->info == s.ri) {
+      if (statsEnabled) nInPlace++;
+      evalDefinition(v.getDefiningOp(), f, out);
+      return;
+    }
+    p = cellOf(f, s);
   }
-  Value *p = lookup(f, v);
+  if (!p) p = lookupFirst(f, v);
   forceValue(*p, pos);
   out = *p;
 }
