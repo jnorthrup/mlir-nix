@@ -58,7 +58,9 @@ stage_bench() {
   for w in nixos-toplevel nixpkgs-73; do
     say "bench $w"
     # a competitor left behind (scripts/benchref.py) is not timed again; an mlnix run past 1.2x its record is stopped, its state kept
-    timeout 180 python3 scripts/vs-nix.py --native --demand --budget 165 --auto-pin --cap --diag "$OUT/diag" --workload $w "${refs[@]}" \
+    # on disk: a core is the size of the run (3 GB), and /tmp is RAM on kali, where two of them slowed the rounds after them
+    timeout 180 python3 scripts/vs-nix.py --native --demand --budget 165 --auto-pin --cap --diag "$HOME/kb-diag/$(basename "$OUT")" \
+      --workload $w "${refs[@]}" \
       > "$OUT/$w.txt" 2>&1
     say "$w rc=$?"
   done
