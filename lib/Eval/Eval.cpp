@@ -1470,11 +1470,7 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
         forceList(*r, pos, "in the right operand of the list concatenation operator");
         if (l->listSize() == 0) { out = *r; return; }
         if (r->listSize() == 0) { out = *l; return; }
-        size_t n1 = l->listSize(), n2 = r->listSize();
-        Value **e1 = l->list.elems, **e2 = r->list.elems;
-        mkList(out, n1 + n2);
-        memcpy(out.list.elems, e1, n1 * sizeof(Value *));
-        memcpy(out.list.elems + n1, e2, n2 * sizeof(Value *));
+        mkList(out, l->items() + r->items());
       })
       .Case<nd::ConcatStringsOp>([&](nd::ConcatStringsOp c) { evalConcatStrings(c, env, out); })
       .Case<nd::WithVarOp>([&](nd::WithVarOp w) {
@@ -1644,11 +1640,8 @@ bool EvalState::eqValues(Value &v1, Value &v2, PosPtr pos) {
   case VType::Path: return v1.pathView() == v2.pathView();
   case VType::List:
     if (v1.listSize() != v2.listSize()) return false;
-    for (size_t i = 0; i < v1.listSize(); i++) {
-      Value *a = v1.list.elems[i], *b = v2.list.elems[i];
-      if (a == b) continue; // value identity optimisation
-      if (!eqValues(*a, *b, pos)) return false;
-    }
+    for (auto [a, b] : cp::joins(v1.items(), v2.items()))
+      if (a != b && !eqValues(*a, *b, pos)) return false; // a == b: one value, equal without a look
     return true;
   case VType::Attrs: {
     if (v1.attrs == v2.attrs) return true;
@@ -2181,8 +2174,7 @@ void EvalState::realiseContext(const NixStringContext &ctx, PosPtr pos) {
 
 std::string EvalState::findFile(Value &searchPath, std::string_view name, PosPtr pos) {
   forceList(searchPath, pos);
-  for (size_t i = 0; i < searchPath.listSize(); i++) {
-    Value &e = *searchPath.list.elems[i];
+  for (Value &e : searchPath.values()) {
     forceAttrs(e, pos);
     std::string prefix;
     if (const Attr *a = e.attrs->get(s.prefix)) prefix = std::string(forceStringNoCtx(*a->value, pos));

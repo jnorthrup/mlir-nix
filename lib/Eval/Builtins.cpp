@@ -665,8 +665,7 @@ void registerBuiltins(EvalState &state) {
   S.addPrimOp("__listToAttrs", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[0], pos, "while evaluating the argument passed to builtins.listToAttrs");
     EvalState::BindingsBuilder bb(st);
-    for (size_t i = 0; i < args[0]->listSize(); i++) {
-      Value &e = *args[0]->list.elems[i];
+    for (Value &e : args[0]->values()) {
       st.forceAttrs(e, pos, "while evaluating an element of the list passed to builtins.listToAttrs");
       const Attr *n = e.attrs->get(st.s.name);
       if (!n) throw EvalError("attribute 'name' missing", pos)
@@ -703,8 +702,7 @@ void registerBuiltins(EvalState &state) {
     Symbol name = st.symbols.create(st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.catAttrs"));
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.catAttrs");
     std::vector<Value *> res;
-    for (size_t i = 0; i < args[1]->listSize(); i++) {
-      Value &e = *args[1]->list.elems[i];
+    for (Value &e : args[1]->values()) {
       st.forceAttrs(e, pos, "while evaluating an element in the list passed as second argument to builtins.catAttrs");
       if (const Attr *a = e.attrs->get(name)) res.push_back(a->value);
     }
@@ -743,8 +741,7 @@ void registerBuiltins(EvalState &state) {
   S.addPrimOp("__zipAttrsWith", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.zipAttrsWith");
     std::map<Symbol, std::vector<Value *>> m;
-    for (size_t i = 0; i < args[1]->listSize(); i++) {
-      Value &e = *args[1]->list.elems[i];
+    for (Value &e : args[1]->values()) {
       st.forceAttrs(e, pos, "while evaluating a value of the list passed as second argument to builtins.zipAttrsWith");
       for (auto &a : *e.attrs) m[a.name].push_back(a.value);
     }
@@ -797,34 +794,32 @@ void registerBuiltins(EvalState &state) {
   S.addPrimOp("__elem", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.elem");
     bool res = false;
-    for (size_t i = 0; i < args[1]->listSize(); i++) {
-      Value *e = args[1]->list.elems[i];
+    for (Value *e : args[1]->items()) {
       if (e == args[0] || st.eqValues(*args[0], *e, pos)) { res = true; break; }
     }
     st.mkBool(v, res);
   });
   S.addPrimOp("__concatLists", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[0], pos, "while evaluating the first argument passed to builtins.concatLists");
-    std::vector<Value *> res;
-    for (size_t i = 0; i < args[0]->listSize(); i++) {
-      Value &l = *args[0]->list.elems[i];
-      st.forceList(l, pos, "while evaluating a value of the list passed to builtins.concatLists");
-      for (size_t j = 0; j < l.listSize(); j++) res.push_back(l.list.elems[j]);
-    }
-    MLNIX_FILL(st, EvalState::FillConcatLists, res.size());
-    st.mkList(v, res);
+    cp::Combine all(args[0]->items() |cp::α| [&](Value *l) {
+      st.forceList(*l, pos, "while evaluating a value of the list passed to builtins.concatLists");
+      return l->items();
+    });
+    MLNIX_FILL(st, EvalState::FillConcatLists, all.size());
+    st.mkList(v, all);
   });
   S.addPrimOp("__concatMap", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.concatMap");
-    std::vector<Value *> res;
-    for (size_t i = 0; i < args[1]->listSize(); i++) {
+    llvm::SmallVector<Value *, 16> rs; // one per call: the elements are not copied before the list is
+    for (Value *x : args[1]->items()) {
       Value *r = st.allocValue();
-      st.callFunction(*args[0], *args[1]->list.elems[i], *r, pos);
+      st.callFunction(*args[0], *x, *r, pos);
       st.forceList(*r, pos, "while evaluating the return value of the function passed to builtins.concatMap");
-      for (size_t j = 0; j < r->listSize(); j++) res.push_back(r->list.elems[j]);
+      rs.push_back(r);
     }
-    MLNIX_FILL(st, EvalState::FillConcatMap, res.size());
-    st.mkList(v, res);
+    cp::Combine all(rs |cp::α| [](Value *r) { return r->items(); });
+    MLNIX_FILL(st, EvalState::FillConcatMap, all.size());
+    st.mkList(v, all);
   });
   S.addPrimOp("__filter", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.filter");
@@ -843,21 +838,19 @@ void registerBuiltins(EvalState &state) {
   });
   S.addPrimOp("__any", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.any");
-    for (size_t i = 0; i < args[1]->listSize(); i++) {
+    st.mkBool(v, std::ranges::any_of(args[1]->items(), [&](Value *e) {
       Value r;
-      st.callFunction(*args[0], *args[1]->list.elems[i], r, pos);
-      if (st.forceBool(r, pos, "while evaluating the return value of the function passed to builtins.any")) { st.mkBool(v, true); return; }
-    }
-    st.mkBool(v, false);
+      st.callFunction(*args[0], *e, r, pos);
+      return st.forceBool(r, pos, "while evaluating the return value of the function passed to builtins.any");
+    }));
   });
   S.addPrimOp("__all", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.all");
-    for (size_t i = 0; i < args[1]->listSize(); i++) {
+    st.mkBool(v, std::ranges::all_of(args[1]->items(), [&](Value *e) {
       Value r;
-      st.callFunction(*args[0], *args[1]->list.elems[i], r, pos);
-      if (!st.forceBool(r, pos, "while evaluating the return value of the function passed to builtins.all")) { st.mkBool(v, false); return; }
-    }
-    st.mkBool(v, true);
+      st.callFunction(*args[0], *e, r, pos);
+      return st.forceBool(r, pos, "while evaluating the return value of the function passed to builtins.all");
+    }));
   });
   S.addPrimOp("__foldl'", 3, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceFunction(*args[0], pos, "while evaluating the first argument passed to builtins.foldlStrict");
@@ -912,8 +905,7 @@ void registerBuiltins(EvalState &state) {
   S.addPrimOp("__partition", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.partition");
     std::vector<Value *> right, wrong;
-    for (size_t i = 0; i < args[1]->listSize(); i++) {
-      Value *e = args[1]->list.elems[i];
+    for (Value *e : args[1]->items()) {
       st.forceValue(*e, pos);
       Value r;
       st.callFunction(*args[0], *e, r, pos);
@@ -931,8 +923,7 @@ void registerBuiltins(EvalState &state) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.groupBy");
     std::map<Symbol, std::vector<Value *>> m;
     std::vector<Symbol> order;
-    for (size_t i = 0; i < args[1]->listSize(); i++) {
-      Value *e = args[1]->list.elems[i];
+    for (Value *e : args[1]->items()) {
       Value r;
       st.callFunction(*args[0], *e, r, pos);
       Symbol key = st.symbols.create(st.forceStringNoCtx(r, pos, "while evaluating the return value of the grouping function passed to builtins.groupBy"));

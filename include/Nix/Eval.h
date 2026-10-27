@@ -28,11 +28,9 @@
 
 namespace mlir { class PassManager; }
 
-#include <algorithm>
 #include <functional>
 #include <map>
 #include <memory>
-#include <ranges>
 #include <set>
 #include <string>
 #include <vector>
@@ -174,6 +172,8 @@ struct Value {
   std::string_view sv() const { return {str.s, aux}; }
   std::string_view pathView() const { return {path.s, aux}; }
   size_t listSize() const { return aux; }
+  auto items() const { return cp::series(list.elems, aux); }                               // the cells of a list, a Series
+  auto values() const { return items() |cp::α| [](Value *p) -> Value & { return *p; }; } // and what they point at
 };
 static_assert(sizeof(Value) == 24, "a Value is a tag, a count and two words");
 
@@ -343,10 +343,11 @@ public:
   void mkString(Value &v, std::string_view s, const NixStringContext &ctx = {});
   void mkPath(Value &v, std::string_view p);
   void mkList(Value &v, size_t n);
-  /// A list drained from a sized range of Value * (a Series, a vector): the one fill loop, with the α of the caller inlined.
-  template <std::ranges::sized_range S> void mkList(Value &v, const S &s) {
-    mkList(v, size_t(std::ranges::size(s)));
-    std::ranges::copy(s, v.list.elems);
+  /// A list drained from a series of Value * (a Series, a vector, a combine): the one fill loop, the α of the caller inlined.
+  template <class S> requires requires(const S &s, Value **o) { s.size(); cp::drain(s, o); }
+  void mkList(Value &v, const S &s) {
+    mkList(v, size_t(s.size()));
+    cp::drain(s, v.list.elems);
   }
   void mkAttrs(Value &v, Bindings *b) { v.type = VType::Attrs; v.attrs = b; }
   void mkApp(Value &v, Value *f, Value *x) { v.type = VType::App; v.app.left = f; v.app.right = x; }

@@ -290,21 +290,17 @@ private:
                                    ArrayRef<Pos> poses,
                                    ArrayRef<SmallVectorImpl<Value> *> remap = {}) {
     SmallVector<Value> finals;
-    for (size_t i = 0; i < values.size(); i++) {
-      Value v = values[i];
-      if (v.getDefiningOp<UnrealizedConversionCastOp>())
-        v = nd::ApplyOp::create(b, noLoc(), valTy(), v, ValueRange{}, at(poses[i]));
-      finals.push_back(v);
-    }
+    for (auto [v, p] : cp::joins(values, poses))
+      finals.push_back(v.getDefiningOp<UnrealizedConversionCastOp>()
+                           ? Value(nd::ApplyOp::create(b, noLoc(), valTy(), v, ValueRange{}, at(p))) : v);
     // Other value lists that may hold placeholders must be remapped before the
     // placeholders are erased.
     for (auto *vec : remap)
       for (Value &v : *vec)
         for (size_t i = 0; i < phs.size(); i++)
           if (v == phs[i]) v = finals[i];
-    for (size_t i = 0; i < phs.size(); i++) {
-      Value ph = phs[i];
-      ph.replaceAllUsesWith(finals[i]);
+    for (auto [ph, fin] : cp::joins(phs, finals)) {
+      ph.replaceAllUsesWith(fin);
       ph.getDefiningOp()->erase();
     }
     return finals;
@@ -599,11 +595,8 @@ private:
       // Create all formal ops before replacing any placeholder: defaults may
       // refer to other formals' placeholders.
       SmallVector<Value> fvs;
-      for (size_t i = 0; i < l->formals.size(); i++) {
-        auto &f = l->formals[i];
-        fvs.push_back(nd::FormalOp::create(b, noLoc(), valTy(), arg,
-                                           f.name, defs[i], at(f.pos)));
-      }
+      for (auto [f, d] : cp::joins(l->formals, defs))
+        fvs.push_back(nd::FormalOp::create(b, noLoc(), valTy(), arg, f.name, d, at(f.pos)));
       for (size_t i = 0; i < l->formals.size(); i++) {
         phs[i].replaceAllUsesWith(fvs[i]);
         phs[i].getDefiningOp()->erase();
