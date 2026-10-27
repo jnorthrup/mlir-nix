@@ -1,0 +1,12 @@
+11:24:53 build rc=0, error lines: 0
+11:25:10 lang eager: TOTAL        semantic  473/473   exact  215/473
+11:25:26 lang demand: TOTAL        semantic  473/473   exact  215/473
+11:25:27 mlir tests: mlir tests: 13 passed, 0 failed, 4 run lines skipped (cse-dynamic-ops)
+11:25:27 primops: primops: 105 registered, 105 declared
+11:25:33 difftest eager (rc=0): 72/72 identical to Nix 2.35.4;71/72 identical to Lix 2.91.3;
+11:25:40 difftest demand (rc=0): 72/72 identical to Nix 2.35.4;71/72 identical to Lix 2.91.3;
+11:25:40 bench nixos-toplevel
+11:27:16 nixos-toplevel rc=0
+11:27:16 bench nixpkgs-73
+11:28:41 nixpkgs-73 rc=0
+11:28:41 done
