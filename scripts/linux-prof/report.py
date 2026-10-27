@@ -25,9 +25,9 @@ SYMBOLIZER = os.environ.get("LLVM_SYMBOLIZER") or next(
 
 # The innermost matching frame names the phase.  First match, scanning from the leaf outwards.
 PHASES = [
-    ("parse",            r"nixfe::parse|nixfe::\(anonymous namespace\)::Parser|nixfe::Source|nixfe::Lexer"),
+    ("parse",            r"nixfe::.*Parser|nixfe::parse|nixfe::Source|nixfe::Lexer|nixfe::ExprArena"),
     ("mint (demand)",    r"EvalState::mintLambda|nixfe::mintBody"),
-    ("lower (file)",     r"EvalState::lowerToMLIR|nixfe::genExpr|nixfe::lower"),
+    ("lower (file)",     r"EvalState::lowerToMLIR|nixfe::genExpr|nixfe::lower|nixfe::Gen::"),
     ("drv / store",      r"nixstore::|derivationStrict|hashDerivation|nixev::.*[Dd]rv"),
     ("eval",             r"EvalState::(evalOp|forceThunk|forceValue|callFunction|callLambda|evalTail|evalFile|evalDefinition|operand|lookup)"),
     ("startup",          r"loadNixDialects|loadPrimDialects|registerEvalModels|MLIRContext::MLIRContext|irdl::|EvalState::EvalState"),
@@ -35,19 +35,40 @@ PHASES = [
 ]
 PHASES = [(n, re.compile(rx)) for n, rx in PHASES]
 
-# Kinds of leaf work.  First match wins.
+# Kinds of leaf work.  First match wins.  A stripped library shows as "name.so?".
 KINDS = [
     ("MLIR uniquing",    r"StorageUniquer|AttributeUniquer|ParametricStorageUniquer|FileLineColRange|StringAttrStorage|DenseSetImpl|getOrCreate"),
     ("MLIR ops / IR",    r"mlir::(Operation|OpBuilder|Block|Region|Builder|OperationState|RewritePattern|PatternApplicator|Value|OpResult|detail::OperandStorage)|OpBuilder"),
-    ("operand lookup",   r"EvalState::(lookup|operand)|DenseMap<void \*, nixev::Slot|nixev::Slot"),
+    ("operand lookup",   r"EvalState::(lookup|operand)|nixev::Slot|DenseMapBase::LookupBucketFor"),
     ("evaluator",        r"nixev::|EvalModels|CoreEval"),
     ("parser / lexer",   r"nixfe::|Parser::|Lexer"),
-    ("malloc / free",    r"\b(malloc|free|calloc|realloc|_int_malloc|_int_free|malloc_consolidate|operator new|operator delete|cfree|sysmalloc|brk|madvise)\b|BumpPtrAllocator"),
-    ("memory ops",       r"\b(memcpy|memmove|memset|memcmp|strlen|bcmp|__memcpy|__memmove|__memset)\w*"),
+    ("malloc / free",    r"^(malloc|free|calloc|realloc|operator_new|operator_delete|_int_malloc|_int_free|cfree)$|BumpPtrAllocator|safe_malloc"),
+    ("memory ops",       r"^(memcpy|memmove|memset|memcmp|strlen|bcmp)\w*$|^__mem\w+"),
     ("hashing",          r"xxh3|sha256|SHA|Hash"),
-    ("kernel / faults",  r"^\[kernel\]"),
+    ("libc (stripped)",  r"^libc\.so"),
+    ("libLLVM",          r"^libLLVM"),
+    ("libstdc++",        r"^libstdc\+\+"),
 ]
 KINDS = [(n, re.compile(rx)) for n, rx in KINDS]
+
+
+_TEMPLATE_ARGS = re.compile(r"<[^<>]*>")
+_PARAMS = re.compile(r"\([^()]*\)")
+_OPERATOR = re.compile(r"operator\s*(\(\)|<=>|<<=|>>=|<<|>>|<=|>=|->\*|->|\[\]|&&|\|\||\+\+|--|[-+*/%^&|~!=<>,]=?)")
+_QUALIFIERS = re.compile(r"(\s+(const|volatile|noexcept|&&|&))+$")
+
+
+def shorten(name):
+    """'ret ns::Class::method<T>(args) const' -> 'ns::Class::method': what a profile groups on."""
+    s = name.replace("(anonymous namespace)", "{anon}")
+    s = re.sub(r"operator\s+(new|delete)", r"operator_\1", s)
+    s = _OPERATOR.sub(lambda m: "operator_call" if m.group(1) == "()" else "operator_op", s)
+    while _TEMPLATE_ARGS.search(s):
+        s = _TEMPLATE_ARGS.sub("", s)
+    while _PARAMS.search(s):
+        s = _PARAMS.sub("", s)
+    s = _QUALIFIERS.sub("", s.strip())
+    return s.split()[-1] if s.split() else name
 
 
 def elf_loads(path):
@@ -81,7 +102,7 @@ class Profile:
             for line in fh:
                 if line.startswith("S "):
                     f = line.split()
-                    self.stacks.append((int(f[1]), [int(x, 16) for x in f[2:]]))
+                    self.stacks.append((int(f[1], 16), [int(x, 16) for x in f[2:]]))
                 elif line.startswith("M "):
                     m = re.match(r"M ([0-9a-f]+)-([0-9a-f]+) (\S+) ([0-9a-f]+) \S+ \d+\s*(.*)$", line)
                     if m and "x" in m.group(3) and m.group(5).startswith("/"):
@@ -135,14 +156,15 @@ def symbolize(profile, wanted, loads_cache):
         per_module[path].append(((pc, leaf), vaddr))
     for path, items in per_module.items():
         base = os.path.basename(path)
-        cmd = [SYMBOLIZER, f"--obj={path}", "--demangle", "--functions=short", "--no-inlines"]
+        # No --functions=short: without DWARF it answers ?? where the default reads the symbol table.
+        cmd = [SYMBOLIZER, f"--obj={path}", "--demangle", "--no-inlines"]
         text = "".join(f"0x{v:x}\n" for _k, v in items)
         res = subprocess.run(cmd, input=text, capture_output=True, text=True)
         lines = res.stdout.split("\n")
         # three lines per address: function, file:line:col, blank
         for idx, (key, _v) in enumerate(items):
             fn = lines[idx * 3].strip() if idx * 3 < len(lines) else "??"
-            out[key] = (fn if fn and fn != "??" else f"{base}?", base)
+            out[key] = (shorten(fn) if fn and fn != "??" else f"{base}?", base)
     return out
 
 
