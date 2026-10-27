@@ -27,19 +27,17 @@ using namespace mlir::nix;
 #include "NixDialect/NixTypes.cpp.inc"
 
 namespace mlir::nix {
-/// `[ "a", %k, "b" ]`: literal components are string attributes, computed ones
-/// are operands (recorded as unit attributes in `path`).
-static ParseResult parseAttrPath(OpAsmParser &p, ArrayAttr &path,
+/// `[ "a", %k, "b" ]`: literal components are names, computed ones are operands (recorded as the null name in
+/// `path`).
+static ParseResult parseAttrPath(OpAsmParser &p, SmallVectorImpl<nixfe::Name> &path,
                                  SmallVectorImpl<OpAsmParser::UnresolvedOperand> &dyn) {
-  Builder b(p.getContext());
-  SmallVector<Attribute> comps;
   if (p.parseLSquare())
     return failure();
   do {
     std::string lit;
     OpAsmParser::UnresolvedOperand operand;
     if (succeeded(p.parseOptionalString(&lit))) {
-      comps.push_back(b.getStringAttr(lit));
+      path.push_back(nixfe::Name::persist(lit));
     } else {
       OptionalParseResult r = p.parseOptionalOperand(operand);
       if (!r.has_value())
@@ -47,39 +45,30 @@ static ParseResult parseAttrPath(OpAsmParser &p, ArrayAttr &path,
       if (failed(*r))
         return failure();
       dyn.push_back(operand);
-      comps.push_back(b.getUnitAttr());
+      path.push_back(nixfe::Name());
     }
   } while (succeeded(p.parseOptionalComma()));
-  if (p.parseRSquare())
-    return failure();
-  path = b.getArrayAttr(comps);
-  return success();
+  return p.parseRSquare();
 }
 
-static void printAttrPath(OpAsmPrinter &p, Operation *, ArrayAttr path, OperandRange dyn) {
+static void printAttrPath(OpAsmPrinter &p, Operation *, ArrayRef<nixfe::Name> path, OperandRange dyn) {
   p << "[";
   unsigned next = 0;
-  llvm::interleaveComma(path, p, [&](Attribute a) {
-    if (isa<StringAttr>(a))
-      p.printAttribute(a);
+  llvm::interleaveComma(path, p, [&](const nixfe::Name &n) {
+    if (!n.isNull())
+      p.printString(n.str());
     else
       p.printOperand(dyn[next++]);
   });
   p << "]";
 }
 
-static LogicalResult verifyAttrPath(Operation *op, ArrayAttr path, unsigned numDyn) {
+static LogicalResult verifyAttrPath(Operation *op, ArrayRef<nixfe::Name> path, unsigned numDyn) {
   if (path.empty())
     return op->emitOpError("path must have at least one component");
-  unsigned units = 0;
-  for (Attribute a : path) {
-    if (isa<UnitAttr>(a))
-      ++units;
-    else if (!isa<StringAttr>(a))
-      return op->emitOpError("path components must be strings or units");
-  }
-  if (units != numDyn)
-    return op->emitOpError("has ") << units << " computed path component(s) but " << numDyn << " operand(s)";
+  unsigned computed = llvm::count_if(path, [](const nixfe::Name &n) { return n.isNull(); });
+  if (computed != numDyn)
+    return op->emitOpError("has ") << computed << " computed path component(s) but " << numDyn << " operand(s)";
   return success();
 }
 } // namespace mlir::nix
@@ -133,7 +122,7 @@ Operation *NixDialect::materializeConstant(OpBuilder &b, Attribute value,
   else if (auto f = dyn_cast<FloatAttr>(value))
     op = FloatOp::create(b, loc, type, f);
   else if (auto s = dyn_cast<StringAttr>(value))
-    op = StringOp::create(b, loc, type, s);
+    op = StringOp::create(b, loc, type, nixfe::Name::persist(s.getValue()));
   if (op) setPos(op, packLoc(loc)); // a folded call keeps the position its operands were reported at
   return op;
 }
@@ -228,10 +217,9 @@ LogicalResult AttrsOp::verify() {
   if (getDynNames().size() != getDynValues().size())
     return emitOpError("dyn_names and dyn_values must have equal length");
   llvm::StringSet<llvm::MallocAllocator> seen;
-  for (Attribute a : getNames())
-    if (!seen.insert(cast<StringAttr>(a).getValue()).second)
-      return emitOpError("duplicate attribute '")
-             << cast<StringAttr>(a).getValue() << "'";
+  for (const nixfe::Name &n : getNames())
+    if (!seen.insert(n.str()).second)
+      return emitOpError("duplicate attribute '") << n.str() << "'";
   return success();
 }
 
@@ -241,7 +229,7 @@ LogicalResult AttrsOp::verify() {
 
 OpFoldResult IntOp::fold(FoldAdaptor) { return getValueAttr(); }
 OpFoldResult FloatOp::fold(FoldAdaptor) { return getValueAttr(); }
-OpFoldResult StringOp::fold(FoldAdaptor) { return getValueAttr(); }
+OpFoldResult StringOp::fold(FoldAdaptor) { return StringAttr::get(getContext(), getValue().str()); }
 OpFoldResult BoolOp::fold(FoldAdaptor) { return getValueAttr(); }
 OpFoldResult NullOp::fold(FoldAdaptor) { return UnitAttr::get(getContext()); }
 
@@ -292,7 +280,7 @@ struct DevirtualizePrimCall : OpRewritePattern<ApplyOp> {
     const NixDialect::PrimInfo *info = nullptr;
     Value callee = op.getCallee();
     if (auto b = callee.getDefiningOp<BuiltinOp>()) {
-      auto it = core->prims.find(b.getName());
+      auto it = core->prims.find(b.getName().str());
       if (it != core->prims.end())
         info = &it->second;
     } else if (auto sel = callee.getDefiningOp<SelectOp>()) {
@@ -300,14 +288,14 @@ struct DevirtualizePrimCall : OpRewritePattern<ApplyOp> {
       if (sel.getDefaultValue() || sel.getPath().size() != 1)
         return failure();
       auto base = sel.getBase().getDefiningOp<BuiltinOp>();
-      auto key = dyn_cast<StringAttr>(sel.getPath()[0]);
-      if (!base || base.getName() != "builtins" || !key)
+      const nixfe::Name &key = sel.getPath()[0];
+      if (!base || base.getName().str() != "builtins" || key.isNull())
         return failure();
       llvm::SmallString<48> internal("__");
-      internal += key.getValue();
+      internal += key.str();
       auto it = core->prims.find(internal);
       if (it == core->prims.end())
-        it = core->prims.find(key.getValue());
+        it = core->prims.find(key.str());
       if (it != core->prims.end())
         info = &it->second;
     }

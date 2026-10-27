@@ -1,4 +1,4 @@
-// Select / has_attr paths mix literal components (attributes) with computed
+// Select / has_attr paths mix literal components (names) with computed
 // ones (operands); the printed form round-trips and the verifier checks that
 // computed components and operands agree.
 // RUN: mlnix-opt %s | mlnix-opt | FileCheck %s

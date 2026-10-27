@@ -30,6 +30,59 @@ include "mlir/Interfaces/SideEffectInterfaces.td"
 def Nix_PosProp : DefaultValuedProp<I64Prop, "0">;
 defvar NixPos = (ins Nix_PosProp:$pos);
 
+// A name, or the text of a literal: a nixfe::Name (include/Nix/Name.h), a pointer and a length into bytes that live
+// as long as the process.  It is not an attribute: the context neither hashes nor uniques it, and the evaluator's
+// Symbol for it is kept in the op the first time the op is evaluated, so a name in code nobody runs costs a copy.
+// The null Name is "no name"; in a path it is the computed component, and as an attribute it is a unit.
+def Nix_NameProp : Property<"::nixfe::Name", "name", "const ::nixfe::Name &"> {
+  let convertFromStorage = "$_storage";
+  let assignToStorage = "$_storage = $_value";
+  let convertToAttribute = [{
+    ::mlir::Attribute attr;
+    if ($_storage.isNull())
+      attr = ::mlir::UnitAttr::get($_ctxt);
+    else
+      attr = ::mlir::StringAttr::get($_ctxt, $_storage.str());
+    return attr;
+  }];
+  let convertFromAttribute = [{
+    if (::llvm::isa_and_present<::mlir::UnitAttr>($_attr)) {
+      $_storage = ::nixfe::Name();
+      return ::mlir::success();
+    }
+    auto text = ::llvm::dyn_cast_if_present<::mlir::StringAttr>($_attr);
+    if (!text)
+      return $_diag() << "expected a string";
+    $_storage = ::nixfe::Name::persist(text.getValue());
+    return ::mlir::success();
+  }];
+  let hashProperty = "::nixfe::hash_value($_storage)";
+  let parser = [{
+    std::string text;
+    if (::mlir::failed($_parser.parseString(&text)))
+      return ::mlir::failure();
+    $_storage = ::nixfe::Name::persist(text);
+  }];
+  let optionalParser = [{
+    std::string text;
+    if (::mlir::failed($_parser.parseOptionalString(&text)))
+      return std::nullopt;
+    $_storage = ::nixfe::Name::persist(text);
+  }];
+  let printer = "$_printer.printString($_storage.str())";
+  let readFromMlirBytecode = [{
+    ::llvm::StringRef text;
+    if (::mlir::failed($_reader.readString(text)))
+      return ::mlir::failure();
+    $_storage = ::nixfe::Name::persist(text);
+  }];
+  let writeToMlirBytecode = [{
+    $_writer.writeOwnedString($_storage.str());
+  }];
+}
+def Nix_NamesProp : ArrayProp<Nix_NameProp>;
+def Nix_I64sProp : ArrayProp<I64Prop>;
+
 def Nix_Dialect : Dialect {
   let name = "nix";
   let cppNamespace = "::mlir::nix";

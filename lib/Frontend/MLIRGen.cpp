@@ -331,7 +331,7 @@ private:
     if (it != builtinCache.end()) return it->second;
     OpBuilder::InsertionGuard g(b);
     b.setInsertionPointToStart(topBlock);
-    Value v = nd::BuiltinOp::create(b, UnknownLoc::get(ctx), valTy(), b.getStringAttr(name));
+    Value v = nd::BuiltinOp::create(b, UnknownLoc::get(ctx), valTy(), nixfe::Name::persist(name));
     builtinCache[name] = v;
     return v;
   }
@@ -353,7 +353,7 @@ private:
   }
 
   Value str(StringRef s, Pos p = {}) {
-    return nd::StringOp::create(b, noLoc(), valTy(), b.getStringAttr(s));
+    return nd::StringOp::create(b, noLoc(), valTy(), nixfe::Name::persist(s));
   }
 
   Value lookupVar(const std::string &name, Pos p, Scope *s) {
@@ -368,22 +368,22 @@ private:
     }
     if (opts.isBaseName && opts.isBaseName(name)) return baseRef(name);
     if (withs.empty()) error("undefined variable '" + name + "'", p);
-    return nd::WithVarOp::create(b, noLoc(), valTy(), b.getStringAttr(name), withs, at(p));
+    return nd::WithVarOp::create(b, noLoc(), valTy(), nixfe::Name::persist(name), withs, at(p));
   }
 
-  /// A select/has_attr path: literal components become string attributes,
-  /// computed ones (`${e}`) unit attributes plus an operand (see nix.select).
+  /// A select/has_attr path: literal components become names, computed ones (`${e}`) the null name plus an
+  /// operand (see nix.select).
   struct GenPath {
-    SmallVector<Attribute> comps;
+    SmallVector<nixfe::Name> comps;
     SmallVector<Value> dyn;
   };
   GenPath genPath(const AttrPath &path, Scope *s) {
     GenPath r;
     for (auto &a : path) {
       if (a.symbol) {
-        r.comps.push_back(b.getStringAttr(*a.symbol));
+        r.comps.push_back(nixfe::Name::persist(*a.symbol));
       } else {
-        r.comps.push_back(b.getUnitAttr());
+        r.comps.push_back(nixfe::Name());
         r.dyn.push_back(gen(a.expr, s));
       }
     }
@@ -392,14 +392,14 @@ private:
 
   /// `base.key` with a literal key and no default.
   Value selectLiteral(Pos p, Value base, StringRef key, Value def = Value()) {
-    return nd::SelectOp::create(b, noLoc(), valTy(), base, ValueRange{}, def,
-                                b.getArrayAttr({b.getStringAttr(key)}), at(p));
+    nixfe::Name path[1] = {nixfe::Name::persist(key)};
+    return nd::SelectOp::create(b, noLoc(), valTy(), base, ValueRange{}, def, path, at(p));
   }
 
   /// Generate the bindings of an attrs node into `names/values`, resolving
   /// each def in the proper scope.
   void genBindings(const ExprAttrs *a, Scope *defScope, Scope *outerScope,
-                   Scope *inheritFromScope, SmallVectorImpl<Attribute> &names,
+                   Scope *inheritFromScope, SmallVectorImpl<nixfe::Name> &names,
                    SmallVectorImpl<Value> &values, SmallVectorImpl<int64_t> &positions) {
     // Values of `inherit (e)` sources.
     SmallVector<Value> fromVals;
@@ -416,14 +416,14 @@ private:
         break;
       }
       }
-      names.push_back(b.getStringAttr(name));
+      names.push_back(nixfe::Name::persist(name));
       values.push_back(v);
       positions.push_back(at(def.pos));
     }
   }
 
   Value genAttrs(const ExprAttrs *a, Scope *s) {
-    SmallVector<Attribute> names;
+    SmallVector<nixfe::Name> names;
     SmallVector<int64_t> positions;
     SmallVector<Value> values, dynNames, dynValues;
     if (!a->recursive) {
@@ -469,13 +469,12 @@ private:
       auto finals = finalizeGroup(phv, values, poses, {&dynNames, &dynValues});
       values.assign(finals.begin(), finals.end());
       if (ovIdx >= 0) {
-        Value attrs = nd::AttrsOp::create(b, noLoc(), valTy(), b.getArrayAttr(names), values, dynNames,
-                                          dynValues, b.getDenseI64ArrayAttr(positions), at(a->pos));
+        Value attrs = nd::AttrsOp::create(b, noLoc(), valTy(), names, values, dynNames, dynValues, positions,
+                                          at(a->pos));
         return nd::UpdateOp::create(b, noLoc(), valTy(), attrs, values[ovIdx], at(a->pos));
       }
     }
-    return nd::AttrsOp::create(b, noLoc(), valTy(), b.getArrayAttr(names), values,
-                               dynNames, dynValues, b.getDenseI64ArrayAttr(positions), at(a->pos));
+    return nd::AttrsOp::create(b, noLoc(), valTy(), names, values, dynNames, dynValues, positions, at(a->pos));
   }
 
   Value genLet(const ExprLet *l, Scope *s) {
@@ -487,7 +486,7 @@ private:
       phs[name] = ph;
       ns.vars[name] = ph;
     }
-    SmallVector<Attribute> names;
+    SmallVector<nixfe::Name> names;
     SmallVector<int64_t> positions;
     SmallVector<Value> values;
     genBindings(l->attrs, &ns, s, &ns, names, values, positions);
@@ -604,7 +603,7 @@ private:
       for (size_t i = 0; i < l->formals.size(); i++) {
         auto &f = l->formals[i];
         fvs.push_back(nd::FormalOp::create(b, noLoc(), valTy(), arg,
-                                           b.getStringAttr(f.name), defs[i], at(f.pos)));
+                                           nixfe::Name::persist(f.name), defs[i], at(f.pos)));
       }
       for (size_t i = 0; i < l->formals.size(); i++) {
         phs[i].replaceAllUsesWith(fvs[i]);
@@ -627,22 +626,21 @@ private:
     case ExprKind::String:
       return str(static_cast<const ExprString *>(e)->v, e->pos);
     case ExprKind::Path:
-      return nd::PathOp::create(b, noLoc(), valTy(),
-                                b.getStringAttr(static_cast<const ExprPath *>(e)->v));
+      return nd::PathOp::create(b, noLoc(), valTy(), nixfe::Name::persist(static_cast<const ExprPath *>(e)->v));
     case ExprKind::Var: {
       auto *v = static_cast<const ExprVar *>(e);
       return lookupVar(v->name, v->pos, s);
     }
     case ExprKind::CurPos: {
       if (origin->path.empty()) return lookupVar("null", e->pos, nullptr);
-      SmallVector<Attribute> names{b.getStringAttr("column"), b.getStringAttr("file"),
-                                   b.getStringAttr("line")};
+      SmallVector<nixfe::Name> names{nixfe::Name::persist("column"), nixfe::Name::persist("file"),
+                                     nixfe::Name::persist("line")};
       SmallVector<Value> vals{
           nd::IntOp::create(b, noLoc(), valTy(), b.getI64IntegerAttr(e->pos.col)),
           str(origin->path, e->pos),
           nd::IntOp::create(b, noLoc(), valTy(), b.getI64IntegerAttr(e->pos.line))};
-      return nd::AttrsOp::create(b, noLoc(), valTy(), b.getArrayAttr(names), vals,
-                                 ValueRange{}, ValueRange{}, DenseI64ArrayAttr(), at(e->pos));
+      return nd::AttrsOp::create(b, noLoc(), valTy(), names, vals, ValueRange{}, ValueRange{}, ArrayRef<int64_t>{},
+                                 at(e->pos));
     }
     case ExprKind::InheritFrom:
       error("internal error: stray inherit-from", e->pos);
@@ -651,14 +649,13 @@ private:
       Value base = gen(sel->e, s);
       GenPath path = genPath(sel->path, s);
       Value def = sel->def ? gen(sel->def, s) : Value();
-      return nd::SelectOp::create(b, noLoc(), valTy(), base, path.dyn, def,
-                                  b.getArrayAttr(path.comps), at(sel->pos));
+      return nd::SelectOp::create(b, noLoc(), valTy(), base, path.dyn, def, path.comps, at(sel->pos));
     }
     case ExprKind::HasAttr: {
       auto *h = static_cast<const ExprHasAttr *>(e);
       Value base = gen(h->e, s);
       GenPath path = genPath(h->path, s);
-      return nd::HasAttrOp::create(b, noLoc(), valTy(), base, path.dyn, b.getArrayAttr(path.comps), at(h->pos));
+      return nd::HasAttrOp::create(b, noLoc(), valTy(), base, path.dyn, path.comps, at(h->pos));
     }
     case ExprKind::Attrs:
       return genAttrs(static_cast<const ExprAttrs *>(e), s);

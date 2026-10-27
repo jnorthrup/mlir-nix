@@ -25,6 +25,6 @@ nix.expr @too_many {
 nix.expr @path_mismatch {
   %s = nix.attrs [](  )
   // expected-error @+1 {{has 1 computed path component(s) but 0 operand(s)}}
-  %0 = "nix.select"(%s) {path = [unit], operandSegmentSizes = array<i32: 1, 0, 0>} : (!nix.value) -> !nix.value
+  %0 = "nix.select"(%s) <{path = [unit], operandSegmentSizes = array<i32: 1, 0, 0>}> : (!nix.value) -> !nix.value
   nix.return %0
 }

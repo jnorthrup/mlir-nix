@@ -443,18 +443,26 @@ public:
   /// Constant folding hook of the continent dialects: run primop `key` on
   /// scalar constants; null when it throws or yields a non-scalar.
   mlir::Attribute foldPrimOp(llvm::StringRef key, llvm::ArrayRef<mlir::Attribute> args);
-  /// The evaluator Symbol of a name that MLIR has already interned as a
-  /// StringAttr.  Keyed by the attribute's address, so no string is hashed or
-  /// compared (the uniquer did that once, at lowering).
+  /// The evaluator Symbol of a Name held by an op: hashed by the first evaluation that asks and kept in the Name
+  /// (in the op), so a name is hashed at most once per op, and never when its code is never run.  Pass the
+  /// property in place (`op.getName()` and `getPath()` return references into the op), not a copy of it.
+  Symbol symbolOf(const nixfe::Name &n) {
+    if (n.symbol) return n.symbol - 1;
+    Symbol s = symbols.create(n.str());
+    n.symbol = s + 1;
+    return s;
+  }
+  /// The same for a name MLIR has interned as a StringAttr (the formals and names of lambdas).  Keyed by the
+  /// attribute's address, so no string is hashed or compared (the uniquer did that once, at lowering).
   Symbol symbolOf(mlir::StringAttr a) {
     auto [it, inserted] = attrSymbols.try_emplace(a.getAsOpaquePointer(), Symbol());
     if (inserted) it->second = symbols.create(a.getValue());
     return it->second;
   }
   llvm::DenseMap<const void *, Symbol> attrSymbols;
-  /// Symbol of one select/has_attr path component: literal (attribute) or the
+  /// Symbol of one select/has_attr path component: literal (a name) or the
   /// next computed key (operand), forced to a string.
-  Symbol pathSymbol(mlir::Attribute comp, mlir::OperandRange dyn, unsigned &nextDyn, Frame *env, PosPtr pos);
+  Symbol pathSymbol(const nixfe::Name &comp, mlir::OperandRange dyn, unsigned &nextDyn, Frame *env, PosPtr pos);
   Value *lookup(Frame *f, mlir::Value v);
   void evalOp(mlir::Operation *op, Frame *env, Value &out);
   RegionInfo *regionInfo(mlir::Region *r);

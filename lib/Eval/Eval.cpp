@@ -481,16 +481,16 @@ Value *EvalState::lookup(Frame *f, mlir::Value v) {
     Value *cv = allocValue();
     if (auto i = dyn_cast<nd::IntOp>(op)) mkInt(*cv, i.getValue());
     else if (auto fl = dyn_cast<nd::FloatOp>(op)) mkFloat(*cv, fl.getValue().convertToDouble());
-    else if (auto s = dyn_cast<nd::StringOp>(op)) mkString(*cv, s.getValue());
+    else if (auto s = dyn_cast<nd::StringOp>(op)) mkString(*cv, s.getValue().str());
     else if (auto bl = dyn_cast<nd::BoolOp>(op)) mkBool(*cv, bl.getValue());
     else if (isa<nd::NullOp>(op)) mkNull(*cv);
-    else mkPath(*cv, cast<nd::PathOp>(op).getValue());
+    else mkPath(*cv, cast<nd::PathOp>(op).getValue().str());
     constCache[op] = cv;
     return slot = cv;
   }
   if (auto b = dyn_cast<nd::BuiltinOp>(op)) {
-    Value *bv = baseEnvValue(b.getName());
-    if (!bv) throw EvalError("undefined variable '" + b.getName().str() + "'", nd::posOfOp(op));
+    Value *bv = baseEnvValue(b.getName().str());
+    if (!bv) throw EvalError("undefined variable '" + b.getName().toString() + "'", nd::posOfOp(op));
     return slot = bv;
   }
   Value *nv = allocValue();
@@ -914,8 +914,8 @@ void EvalState::evalAttrs(nd::AttrsOp op, Frame *env, Value &out) {
   auto positions = op.getPositions(); // one position word per name, or none
   BindingsBuilder bb(*this);
   for (size_t i = 0; i < names.size(); i++) {
-    PosPtr p = positions && i < positions->size() ? nd::posOfWord(uint64_t((*positions)[i])) : nullptr;
-    bb.insert(symbolOf(cast<StringAttr>(names[i])), lookup(env, values[i]), p);
+    PosPtr p = i < positions.size() ? nd::posOfWord(uint64_t(positions[i])) : nullptr;
+    bb.insert(symbolOf(names[i]), lookup(env, values[i]), p);
   }
   if (dynNames.empty()) {
     mkAttrs(out, bb.finish());
@@ -924,7 +924,7 @@ void EvalState::evalAttrs(nd::AttrsOp op, Frame *env, Value &out) {
   // Dynamic attributes are inserted one by one with duplicate checks.
   std::map<Symbol, PosPtr> seen;
   for (size_t i = 0; i < names.size(); i++)
-    seen[symbolOf(cast<StringAttr>(names[i]))] = nullptr;
+    seen[symbolOf(names[i])] = nullptr;
   auto dynValues = op.getDynValues();
   for (size_t j = 0; j < dynNames.size(); j++) {
     Value *nv = lookup(env, dynNames[j]);
@@ -990,9 +990,9 @@ void EvalState::evalConcatStrings(nd::ConcatStringsOp op, Frame *env, Value &out
   }
 }
 
-Symbol EvalState::pathSymbol(mlir::Attribute comp, mlir::OperandRange dyn, unsigned &nextDyn, Frame *env,
+Symbol EvalState::pathSymbol(const nixfe::Name &comp, mlir::OperandRange dyn, unsigned &nextDyn, Frame *env,
                              PosPtr pos) {
-  if (auto lit = mlir::dyn_cast<mlir::StringAttr>(comp)) return symbolOf(lit);
+  if (!comp.isNull()) return symbolOf(comp);
   return symbols.create(forceStringNoCtx(*lookup(env, dyn[nextDyn++]), pos, "while evaluating an attribute name"));
 }
 
@@ -1016,7 +1016,7 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
         Value *cur = dyn.empty() ? &operand(env, sel.getBase(), tb) : lookup(env, sel.getBase());
         mlir::Value def = sel.getDefaultValue();
         unsigned nextDyn = 0;
-        for (mlir::Attribute comp : sel.getPath()) {
+        for (const nixfe::Name &comp : sel.getPath()) {
           Symbol sym = pathSymbol(comp, dyn, nextDyn, env, pos);
           forceValue(*cur, pos);
           if (def) {
@@ -1038,7 +1038,7 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
         Value tb;
         Value *cur = dyn.empty() ? &operand(env, h.getBase(), tb) : lookup(env, h.getBase());
         unsigned nextDyn = 0;
-        for (mlir::Attribute comp : h.getPath()) {
+        for (const nixfe::Name &comp : h.getPath()) {
           forceValue(*cur, pos);
           Symbol sym = pathSymbol(comp, dyn, nextDyn, env, pos);
           if (cur->type != VType::Attrs) return mkBool(out, false);
@@ -1135,28 +1135,28 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
       })
       .Case<nd::ConcatStringsOp>([&](nd::ConcatStringsOp c) { evalConcatStrings(c, env, out); })
       .Case<nd::WithVarOp>([&](nd::WithVarOp w) {
-        Symbol sym = symbolOf(w.getNameAttr());
+        Symbol sym = symbolOf(w.getName());
         for (mlir::Value sc : w.getScopes()) {
           Value *sv = lookup(env, sc);
           forceAttrs(*sv, nd::posOfValue(sc), "while evaluating the first subexpression of a with expression");
           if (const Attr *a = sv->attrs->get(sym)) return copyFrom(a->value);
         }
-        throw EvalError("undefined variable '" + w.getName().str() + "'", pos);
+        throw EvalError("undefined variable '" + w.getName().toString() + "'", pos);
       })
       .Case<nd::FormalOp>([&](nd::FormalOp f) {
         Value *arg = lookup(env, f.getArg());
         forceAttrs(*arg, pos);
-        if (const Attr *a = arg->attrs->get(symbolOf(f.getNameAttr()))) return copyFrom(a->value);
-        if (!f.getDefaultValue()) throw EvalError("missing formal argument '" + f.getName().str() + "'", pos);
+        if (const Attr *a = arg->attrs->get(symbolOf(f.getName()))) return copyFrom(a->value);
+        if (!f.getDefaultValue()) throw EvalError("missing formal argument '" + f.getName().toString() + "'", pos);
         copyFrom(lookup(env, f.getDefaultValue()));
       })
       .Case<nd::IntOp>([&](nd::IntOp i) { mkInt(out, i.getValue()); })
       .Case<nd::BoolOp>([&](nd::BoolOp b) { mkBool(out, b.getValue()); })
       .Case<nd::NullOp>([&](nd::NullOp) { mkNull(out); })
       .Case<nd::FloatOp>([&](nd::FloatOp fl) { mkFloat(out, fl.getValue().convertToDouble()); })
-      .Case<nd::StringOp>([&](nd::StringOp s) { mkString(out, s.getValue()); })
-      .Case<nd::PathOp>([&](nd::PathOp p) { mkPath(out, p.getValue()); })
-      .Case<nd::BuiltinOp>([&](nd::BuiltinOp b) { copyFrom(baseEnvValue(b.getName())); })
+      .Case<nd::StringOp>([&](nd::StringOp s) { mkString(out, s.getValue().str()); })
+      .Case<nd::PathOp>([&](nd::PathOp p) { mkPath(out, p.getValue().str()); })
+      .Case<nd::BuiltinOp>([&](nd::BuiltinOp b) { copyFrom(baseEnvValue(b.getName().str())); })
       .Default([&](Operation *o) {
         // Everything else (all primop ops of the continent dialects) runs
         // through the externally attached NixEvalOpInterface model.

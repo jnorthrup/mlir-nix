@@ -13,6 +13,7 @@
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Rewrite/FrozenRewritePatternSet.h"
+#include "Nix/Name.h" // before the generated ops: their properties are Names
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/ADT/StringMap.h"
