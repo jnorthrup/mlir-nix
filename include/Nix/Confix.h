@@ -73,6 +73,8 @@ struct Bands {
     ends.cells.reserve(n + 1);
   }
   static uint64_t word(const join::TwInt &s, std::memory_order o) { return std::atomic_ref(const_cast<uint64_t &>(s.raw)).load(o); }
+  /// Whether band i has closed, without waiting.
+  bool closed(uint32_t i) const { return join::TwInt(word(rows.col<BandCol::Span>()[i], std::memory_order_acquire)).second(); }
   /// The span of band i once it has closed.
   join::TwInt span(uint32_t i) const {
     for (bool done = false;; std::this_thread::yield()) {
@@ -98,6 +100,8 @@ struct Bands {
     return it != e && join::TwInt(word(*it, std::memory_order_relaxed)).first() == off ? uint32_t(it - c) : kNone;
   }
   bool operator==(const Bands &o) const { return rows.cols == o.rows.cols && ends == o.ends; }
+  /// The table of another, at its size (the storage reserved for a scan ahead stays with the other).
+  void copyFrom(const Bands &o) { rows.cols = o.rows.cols, ends = o.ends, done(o.balanced); }
 };
 
 /// Bands being written, as the scan or the lexer meets delimiters: the bands still open, and for each of them (and the

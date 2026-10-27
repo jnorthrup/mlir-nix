@@ -1268,9 +1268,10 @@ struct Parser {
       return Name();
     }
   }
-  /// The statement ends where the scan said (layer 1): checked wherever a statement's semicolon is met.
+  /// The statement ends where the scan said (layer 1): checked wherever a statement's semicolon is met, in a band the scan
+  /// has closed (a scan ahead of the parse closes the band of a large set only at its end: the parse does not wait for it).
   void stmtEnd(const Ctx &c) {
-    if (!hasBand(c.band) || !atChar(';')) return;
+    if (!hasBand(c.band) || !atChar(';') || !bands->closed(c.band)) return;
     auto ends = bands->stmts(c.band);
     if (c.stmt >= ends.size() || ends[c.stmt] != cur().offset)
       error("internal error: the scan ends this statement elsewhere", cur().pos);
@@ -2490,13 +2491,20 @@ constexpr size_t kScanAhead = 64 * 1024;
 
 nd::ExprOp genExpr(mlir::ModuleOp module, std::shared_ptr<Origin> origin, const ParseOptions &po, llvm::StringRef symName,
                    const GenOptions &opts) {
-  confix::Bands &into = opts.pool ? opts.pool->bands : scratchBands();
   std::string_view text = origin->text->view();
-  if (text.size() < kScanAhead) return Parser(Mode::Gen, origin, po, &scanned(origin, po, into), module, &opts).genTop(symName);
+  if (text.size() < kScanAhead) {
+    confix::Bands &into = opts.pool ? opts.pool->bands : scratchBands();
+    return Parser(Mode::Gen, origin, po, &scanned(origin, po, into), module, &opts).genTop(symName);
+  }
+  confix::Bands &into = scratchBands(); // reserved for the most bands the source can hold, and kept for the next
   into.clear();
-  std::jthread ahead([&] { confix::scan(text, into); }); // joined when the parse returns or throws
+  into.reserveFor(text.size());
+  std::jthread ahead([&] { confix::scan(text, into); });
   try {
-    return Parser(Mode::Gen, origin, po, &into, module, &opts).genTop(symName);
+    nd::ExprOp op = Parser(Mode::Gen, origin, po, &into, module, &opts).genTop(symName);
+    ahead.join();
+    if (opts.pool) opts.pool->bands.copyFrom(into); // a pool keeps the table at its size, for its bodies' calls
+    return op;
   } catch (...) { // a source the scan refuses: the parser's own words for it, as when the scan runs first
     ahead.join();
     if (!into.balanced.load(std::memory_order_relaxed)) refused(origin, po);

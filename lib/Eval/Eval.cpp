@@ -355,8 +355,7 @@ void EvalState::printStats() {
     total += e.getValue();
   }
   auto sorted = [](llvm::StringMap<size_t> &m) {
-    std::vector<std::pair<std::string, size_t>> v;
-    for (auto &e : m) v.push_back({e.getKey().str(), e.getValue()});
+    auto v = llvm::to_vector(llvm::map_range(m, [](auto &e) { return std::pair(e.getKey().str(), e.getValue()); }));
     std::sort(v.begin(), v.end(), [](auto &a, auto &b) { return a.second > b.second; });
     return v;
   };
@@ -384,8 +383,7 @@ void EvalState::printStats() {
     // their rows (nix.str, nix.int, nix.path, nix.lambda, nix.bool) read low; the rest is the dead code.
     llvm::StringMap<size_t> ev;
     for (Operation *op : evaluated) ev[op->getName().getStringRef()]++;
-    std::vector<std::pair<std::string, size_t>> rows;
-    for (auto &e : opStats) rows.push_back({e.getKey().str(), e.getValue()});
+    auto rows = llvm::to_vector(llvm::map_range(opStats, [](auto &e) { return std::pair(e.getKey().str(), e.getValue()); }));
     std::sort(rows.begin(), rows.end(), [](auto &a, auto &b) { return a.second > b.second; });
     llvm::errs() << "== per op kind: lowered, evaluated (distinct), share\n";
     for (size_t i = 0; i < rows.size() && i < 12; i++)
@@ -628,8 +626,7 @@ void EvalState::printStats() {
   section("scopes", perScope);
   section("continents", perContinent);
   section("dialects", perDialect);
-  std::vector<std::pair<std::string, size_t>> o;
-  for (auto &e : opStats) o.push_back({e.getKey().str(), e.getValue()});
+  auto o = llvm::to_vector(llvm::map_range(opStats, [](auto &e) { return std::pair(e.getKey().str(), e.getValue()); }));
   std::sort(o.begin(), o.end(), [](auto &a, auto &b) { return a.second > b.second; });
   llvm::errs() << "== top ops\n";
   for (size_t i = 0; i < o.size() && i < 14; i++)

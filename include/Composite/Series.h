@@ -12,10 +12,7 @@
 //                      operands) it reads xs in place, as a view, so xs must outlive it; over a temporary it keeps it.
 //   joins(a, b)        row i is a[i] j b[i]: two series side by side, across the rows (TrikeShed's `joins`).
 //   a + b, combine     the rows of a, then of b: along the rows (TrikeShed's combine).  drain() copies one part by part.
-//   Slice<T>           a Series over cells in memory that is never freed: size j (i -> p[i]) with a name, so it can be
-//                      a member.  16 bytes, trivially destructible; what the syntax tree holds in place of a vector.
 //   MutableSeries<T>   a list that is mutated says so in its type.  It accumulates (append), then drains.
-//   Grow<T>            the MutableSeries of a region: a Slice that is still being filled.  `done()` is the Slice.
 //   anchor             ↺, the constant anchor: the first force of a cell mints it, every read after is
 //                      the constant it produced.
 //   Cursor<T...>       the instance pool of one type: a MutableSeries per column, plus the column names, which are the
@@ -33,8 +30,6 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
-#include <new>
 #include <ranges>
 #include <tuple>
 #include <type_traits>
@@ -93,28 +88,6 @@ template <class A, class B> constexpr Join<A, B> operator|(JoinLeft<A> l, B b) {
 template <class T> constexpr auto series(T *p, uint32_t n) {
   return n |j| [p](uint32_t i) -> T & { return p[i]; };
 }
-
-/// The `b` of a Series over contiguous memory, as a type with a name (the lambda of `series` has none).
-template <class T> struct At {
-  T *p;
-  T &operator()(uint32_t i) const { return p[i]; }
-};
-
-/// `n j (i -> p[i])` over cells in a region that is never freed.  It is copied by value and never destroys its cells;
-/// the cells are as mutable as the region (the parser sorts formals in place).  As in every Series, `n` is the word of
-/// whoever built it and `xs[i]` is not checked.  Range-for walks the cells themselves, through pointers.
-template <class T> struct Slice : Join<uint32_t, At<T>> {
-  using Base = Join<uint32_t, At<T>>;
-  constexpr Slice() : Base{0, At<T>{nullptr}} {}
-  constexpr Slice(T *p, uint32_t n) : Base{n, At<T>{p}} {}
-  constexpr uint32_t size() const { return this->a; }
-  constexpr bool empty() const { return this->a == 0; }
-  constexpr T *data() const { return this->b.p; }
-  constexpr T *begin() const { return this->b.p; }
-  constexpr T *end() const { return this->b.p + this->a; }
-  constexpr T &front() const { return this->b.p[0]; }
-  constexpr T &back() const { return this->b.p[this->a - 1]; }
-};
 
 //===----------------------------------------------------------------------===//
 // α: lazy projection
@@ -180,39 +153,6 @@ template <class T> struct MutableSeries {
   /// pointer into the cells, so an append that moves them does not leave it dangling.
   auto view() const {
     return size() |j| [this](uint32_t i) -> const T & { return cells[i]; };
-  }
-};
-
-/// A Slice that is still being filled: the MutableSeries of a region.  `Region` is anything with `template <class U> U
-/// *Allocate(size_t n)` (llvm::BumpPtrAllocator).  An append past the capacity copies the cells to a run of twice the
-/// size and leaves the old run in the region, so the region holds at most twice the final size.  Cells are copied, never
-/// destroyed: T is trivially copyable.  `done()` is the Slice over what was appended; the capacity is not kept.
-template <class T> struct Grow : Slice<T> {
-  static_assert(std::is_trivially_copyable_v<T> && std::is_trivially_destructible_v<T>, "cells live in a region that is not freed");
-  uint32_t cap = 0;
-
-  Grow() = default;
-  /// Reopen a finished Slice: the cells are copied (the Slice's run has no room), with room for `extra` more.
-  template <class Region> static Grow from(Region &region, Slice<T> s, uint32_t extra) {
-    Grow g;
-    g.reserve(region, s.size() + extra);
-    if (s.size()) std::memcpy(static_cast<void *>(g.b.p), static_cast<const void *>(s.data()), s.size() * sizeof(T));
-    g.a = s.size();
-    return g;
-  }
-  template <class Region> void push(Region &region, const T &v) {
-    if (this->a == cap) reserve(region, cap ? cap * 2 : 4);
-    new (static_cast<void *>(this->b.p + this->a)) T(v);
-    this->a++;
-  }
-  constexpr Slice<T> done() const { return Slice<T>(this->b.p, this->a); }
-
-  template <class Region> void reserve(Region &region, uint32_t want) {
-    if (want <= cap) return;
-    T *run = region.template Allocate<T>(want);
-    if (this->a) std::memcpy(static_cast<void *>(run), static_cast<const void *>(this->b.p), this->a * sizeof(T));
-    this->b.p = run;
-    cap = want;
   }
 };
 
