@@ -169,12 +169,17 @@ const StringContext *EvalState::makeContext(const NixStringContext &c) {
   return ctx;
 }
 
-void EvalState::mkString(Value &v, std::string_view s, const NixStringContext &ctx) {
+void EvalState::mkString(Value &v, std::string_view s) {
   MLNIX_FILL(*this, EvalState::FillMkString, s.size());
   if (s.size() > UINT32_MAX) throw EvalError("string of 4 GiB or more");
   v.type = VType::String;
   v.str.s = copyString(s);
   v.aux = static_cast<uint32_t>(s.size());
+  v.str.ctx = nullptr;
+}
+
+void EvalState::mkString(Value &v, std::string_view s, const NixStringContext &ctx) {
+  mkString(v, s);
   v.str.ctx = makeContext(ctx);
 }
 
@@ -300,7 +305,6 @@ struct FillName { const char *what, *fill, *drain; uint32_t cap; };
 const FillName kFill[EvalState::FillCount] = {
     {"BindingsBuilder", "SmallVector<Attr, 12>", "finish(): sort, copy into the arena", 12},
     {"callFunction applied", "SmallVector<Value *, 6>", "PrimOpApp chain walked into an array", 6},
-    {"callFunction all", "SmallVector<Value *, 6>", "copy of applied + the new arguments", 6},
     {"evalOp apply args", "SmallVector<Value *, 4>", "operands looked up, passed on", 4},
     {"evalConcatStrings", "std::string", "mkString: copy into the arena", 15},
     {"mkList (every list)", "-", "arena cells", 0},
@@ -1101,12 +1105,16 @@ void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out,
         }
         return;
       }
-      llvm::SmallVector<Value *, 6> all(applied);
-      for (size_t k = 0; k < need; k++) all.push_back(args[i + k]);
-      MLNIX_FILL(*this, EvalState::FillAll, all.size());
+      // A primop nothing has been applied to takes its arguments straight from the caller's array; only the chain of a PrimOpApp
+      // has arguments to put in front of the new ones.
+      Value **argv = args + i;
+      if (!applied.empty()) {
+        for (size_t k = 0; k < need; k++) applied.push_back(args[i + k]);
+        argv = applied.data();
+      }
       i += need;
       res = (i == nargs) ? &out : allocValue();
-      callPrimOp(*op, all.data(), *res, pos);
+      callPrimOp(*op, argv, *res, pos);
     } else if (cur->type == VType::Attrs && cur->attrs->get(s.functor)) {
       const Attr *f = cur->attrs->get(s.functor);
       Value *self = cur;
@@ -1316,10 +1324,19 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
       .Case<nd::ApplyOp>([&](nd::ApplyOp ap) {
         Value *f = lookup(env, ap.getCallee());
         auto as = ap.getArgs();
-        llvm::SmallVector<Value *, 4> args;
-        for (mlir::Value a : as) args.push_back(lookup(env, a));
-        MLNIX_FILL(*this, EvalState::FillApplyArgs, args.size());
-        callFunction(*f, args.size(), args.data(), out, pos);
+        // Nearly every application has one or two arguments (docs/FILL-DRAIN.md): they are looked up into an array on the stack.
+        // A longer list gets an array from the heap that is not zeroed.
+        size_t n = as.size(), k = 0;
+        Value *inl[4];
+        std::unique_ptr<Value *[]> big;
+        Value **argv = inl;
+        if (n > 4) {
+          big = std::make_unique_for_overwrite<Value *[]>(n);
+          argv = big.get();
+        }
+        for (mlir::Value a : as) argv[k++] = lookup(env, a);
+        MLNIX_FILL(*this, EvalState::FillApplyArgs, n);
+        callFunction(*f, n, argv, out, pos);
         if (statsEnabled) noteCallee(ap.getOperation(), *f);
       })
       .Case<nd::IfOp>([&](nd::IfOp i) {

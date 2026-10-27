@@ -337,7 +337,9 @@ public:
   void mkFloat(Value &v, double d) { v.type = VType::Float; v.fpoint = d; }
   void mkBool(Value &v, bool b) { v.type = VType::Bool; v.boolean = b; }
   void mkNull(Value &v) { v.type = VType::Null; }
-  void mkString(Value &v, std::string_view s, const NixStringContext &ctx = {});
+  /// A string without a context (nearly all of them): no NixStringContext is built for the call.
+  void mkString(Value &v, std::string_view s);
+  void mkString(Value &v, std::string_view s, const NixStringContext &ctx);
   void mkPath(Value &v, std::string_view p);
   void mkList(Value &v, size_t n);
   void mkAttrs(Value &v, Bindings *b) { v.type = VType::Attrs; v.attrs = b; }
@@ -469,7 +471,7 @@ public:
   bool statsEnabled = false;
   /// The fill/drain pairs of the evaluator (docs/FILL-DRAIN.md), counted under MLNIX_STATS: how often each fills, with how many
   /// cells in all, and how many fills were past the inline capacity of the fill buffer (what stays in L1 and never reaches malloc).
-  enum Fill : unsigned { FillAttrs, FillApplied, FillAll, FillApplyArgs, FillConcatStr, FillMkList, FillMkString, FillPrimCalls,
+  enum Fill : unsigned { FillAttrs, FillApplied, FillApplyArgs, FillConcatStr, FillMkList, FillMkString, FillPrimCalls,
                          FillConcatLists, FillConcatMap, FillFilter, FillCatAttrs, FillSort, FillGenericClosure, FillSplit, FillCount };
   struct FillStat { uint64_t fills = 0, cells = 0, max = 0, over = 0; };
   FillStat fillStats[FillCount];
