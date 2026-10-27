@@ -150,6 +150,16 @@ Fresh profile of the NixOS toplevel run (2 s main-thread sample, 1449 busy sampl
    operand are 56% / 67% of that). A persistent or layered attribute set is the one place
    a tree structure could pay, and a 24-byte `Value` saves ~200 MB
    (`docs/COLLECTIONS.md`, section 6). Neither is built.
+   What is done is the first touch of those pages, a page fault on the one thread that evaluates. The arena
+   (`include/Nix/Arena.h`) takes 4 MiB slabs in order from reserved ranges of address space, and a helper thread
+   populates the next slab while the evaluator fills the current one. Mac wall -2.1% / -3.1% (demand), -3.5% / -2.7%
+   (eager), identical hashes. The carved arena alone, helper off, loses (+2.3% / +2.0% demand, +1.7% / +0.7% eager,
+   against malloc slabs): the helper is what pays. On Linux the ranges are 2 MiB aligned and `MADV_HUGEPAGE`, which takes
+   the minor faults of a toplevel run from 87,492 to 7,875. Kali, against the generation before, 7 interleaved runs,
+   min / median: demand -6.5% / -12.2% (toplevel) and -12.1% / -21.1% (nixpkgs-73), eager -5.0% / -17.1% and
+   -6.8% / -8.3%; the helper off against on, same build, demand: -3.9% / -7.6% (min). The medians overstate it: the old arm's
+   median sits 11-16% above its min in four of four cells, the new arm's 1-10%. Why that host spreads the old arena's runs
+   more is not measured; the min-based figures are the ones to expect.
 2. A lowering to a runtime dialect with *resolved addressing*: operand
    (depth, slot) and Symbol ids as attributes, so `lookup` (8.6%) and the `TypeSwitch`
    chain in `evalOp` disappear. Progressive lowering `nix + continents -> nixrt`.
@@ -172,6 +182,8 @@ Fresh profile of the NixOS toplevel run (2 s main-thread sample, 1449 busy sampl
    of lambdas, `body_index`, integer literals). Not converted, on purpose: a lambda's `arg_name` / `name` / `formals`, because
    a property is not an inherent attribute and the custom syntax of `nix.lambda` (`attributes {arg_name = "x"}`) would change
    for about one percent.
+   The tree (done): the AST owns no string either (`docs/COMPOSITE.md`): the corpus parses in 0.863 s against 1.012 s (-14.7%),
+   in situ -2.1% / -2.4% (demand) and -2.6% / -1.4% (eager), footprint -0.9% to -2.4%.
 4. Core ops behind `NixEvalOpInterface` models; delete the `TypeSwitch`.
 5. Lexer (10.4%): a table-driven scanner instead of per-character calls.
 6. Lowered-IR cache as MLIR bytecode, keyed by file hash (skips lex, parse and
