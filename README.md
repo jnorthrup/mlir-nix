@@ -39,6 +39,9 @@ exists yet beyond the query and opt tools. The next steps the measurements suppo
 
 - Make `nix.lambda` an isolated unit (closure conversion). Until then no pass can run on a lambda body, no pass can use several threads, a
   lambda cannot be loaded lazily from bytecode, and nothing can compile one ([docs/MLIR.md](docs/MLIR.md)).
+- Subsume the library code that sits on the border. Of the lambda calls of a NixOS evaluation, 91% run inside nixpkgs' `lib`, which is
+  Nix code over the primops, and 18 small functions of it are 31% of the calls ([docs/LIBRARY.md](docs/LIBRARY.md) has the map, a bound on
+  what moving them across is worth, and the design).
 - Keep the footprint down: `mlnix` still holds more than twice Nix's peak memory (the RSS column below), and the fill-then-drain
   containers of the evaluator are mapped in [docs/FILL-DRAIN.md](docs/FILL-DRAIN.md).
 - Collapse the primop set into its declaration: it is declared once in IRDL and registered again in C++, and `scripts/check-prims.py` only
@@ -131,6 +134,7 @@ compares the hash of their output.
 | [FABRIC](docs/FABRIC.md) | the dialect fabric: logic moved into dialects, what it bought |
 | [MLIR](docs/MLIR.md) | what is MLIR here and what is C++, the dynamic profile, the MLIR survey |
 | [PERFORMANCE](docs/PERFORMANCE.md) | the profile, the head-to-head history, the families examined, the failures |
+| [LIBRARY](docs/LIBRARY.md) | where the lambda calls are: nixpkgs' `lib` is the workload, and what moving it across the border is worth |
 | [FILL-DRAIN](docs/FILL-DRAIN.md) | fill-then-drain containers of the evaluator and what translating them is worth |
 | [COMBINATORS](docs/COMBINATORS.md) | declarations as IR, and what failed |
 | [COLLECTIONS](docs/COLLECTIONS.md) | collections: measured, built, failed |
