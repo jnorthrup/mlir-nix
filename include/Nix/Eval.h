@@ -163,10 +163,19 @@ struct Value {
 static_assert(sizeof(Value) == 24, "a Value is a tag, a count and two words");
 
 
+/// A primop is a function pointer: most are lambdas without captures, and a call through a std::function costs two indirect calls
+/// (the line profile put 1.6% of a run on them).  The few made by a registering loop that captures (type predicates, arithmetic,
+/// bit operations, rounding) keep a closure.
+using PrimFn = void (*)(EvalState &, Value **args, Value &out, PosPtr pos);
 struct PrimOp {
   std::string name;
   unsigned arity;
-  std::function<void(EvalState &, Value **args, Value &out, PosPtr pos)> fn;
+  PrimFn fn; // null for a closure
+  std::function<void(EvalState &, Value **args, Value &out, PosPtr pos)> closure;
+  void call(EvalState &st, Value **args, Value &out, PosPtr pos) const {
+    if (fn) fn(st, args, out, pos);
+    else closure(st, args, out, pos);
+  }
 };
 
 struct RegionInfo {
@@ -419,9 +428,11 @@ public:
   void realiseContext(const NixStringContext &ctx, PosPtr pos);
 
   // -- Builtins -----------------------------------------------------------------
-  void addPrimOp(const std::string &name, unsigned arity,
-                 std::function<void(EvalState &, Value **, Value &, PosPtr)> fn);
+  void addPrimOp(const std::string &name, unsigned arity, PrimFn fn);
+  /// For a primop that captures (a registering loop's parameter).
+  void addPrimOpClosure(const std::string &name, unsigned arity, std::function<void(EvalState &, Value **, Value &, PosPtr)> fn);
   void addConstant(const std::string &name, Value *v);
+  void registerPrimOp(const std::string &name, PrimOp *p);
   void createBaseEnv();
 
   // Interpreter internals (public for builtins).

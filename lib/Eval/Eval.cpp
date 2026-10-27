@@ -340,13 +340,22 @@ Value *EvalState::baseEnvValue(llvm::StringRef name) {
   return it == baseEnv.end() ? nullptr : it->second;
 }
 
-void EvalState::addPrimOp(const std::string &name, unsigned arity,
-                          std::function<void(EvalState &, Value **, Value &, PosPtr)> fn) {
-  auto *p = new PrimOp{name.rfind("__", 0) == 0 ? name.substr(2) : name, arity, std::move(fn)};
+static std::string primOpName(const std::string &name) { return name.rfind("__", 0) == 0 ? name.substr(2) : name; }
+
+void EvalState::addPrimOp(const std::string &name, unsigned arity, PrimFn fn) {
+  registerPrimOp(name, new PrimOp{primOpName(name), arity, fn, nullptr});
+}
+
+void EvalState::addPrimOpClosure(const std::string &name, unsigned arity,
+                                 std::function<void(EvalState &, Value **, Value &, PosPtr)> fn) {
+  registerPrimOp(name, new PrimOp{primOpName(name), arity, nullptr, std::move(fn)});
+}
+
+void EvalState::registerPrimOp(const std::string &name, PrimOp *p) {
   Value *v = allocValue();
-  if (arity == 0) {
+  if (p->arity == 0) {
     // A constant computed by calling fn immediately.
-    p->fn(*this, nullptr, *v, nullptr);
+    p->call(*this, nullptr, *v, nullptr);
   } else {
     v->type = VType::PrimOp;
     v->primOp = p;
@@ -756,7 +765,7 @@ void EvalState::callLambda(Value &fun, Value *arg, Value &out, PosPtr pos) {
 
 void EvalState::callPrimOp(const PrimOp &op, Value **args, Value &out, PosPtr pos) {
   try {
-    op.fn(*this, args, out, pos);
+    op.call(*this, args, out, pos);
   } catch (EvalError &e) {
     if (op.name != "throw" && op.name != "abort" && op.name != "addErrorContext")
       e.addTrace(pos, "while calling the '" + op.name + "' builtin");
@@ -785,7 +794,7 @@ mlir::Attribute EvalState::foldPrimOp(llvm::StringRef key, llvm::ArrayRef<mlir::
   }
   Value out;
   try {
-    op->fn(*this, vals.data(), out, nullptr);
+    op->call(*this, vals.data(), out, nullptr);
     forceValue(out, nullptr);
   } catch (std::exception &) {
     return {}; // stays a run-time error, with its original position and trace

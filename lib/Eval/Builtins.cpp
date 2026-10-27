@@ -268,7 +268,7 @@ void registerBuiltins(EvalState &state) {
 
   // -- Types ---------------------------------------------------------------
   auto typePred = [&](const char *name, auto pred) {
-    S.addPrimOp(name, 1, [pred](EvalState &st, A args, Value &v, PosPtr pos) {
+    S.addPrimOpClosure(name, 1, [pred](EvalState &st, A args, Value &v, PosPtr pos) {
       st.forceValue(*args[0], pos);
       st.mkBool(v, pred(*args[0]));
     });
@@ -289,7 +289,7 @@ void registerBuiltins(EvalState &state) {
 
   // -- Arithmetic ------------------------------------------------------------
   auto arith = [&](const char *name, char op) {
-    S.addPrimOp(name, 2, [op](EvalState &st, A args, Value &v, PosPtr pos) {
+    S.addPrimOpClosure(name, 2, [op](EvalState &st, A args, Value &v, PosPtr pos) {
       st.forceValue(*args[0], pos);
       st.forceValue(*args[1], pos);
       Value &a = *args[0], &b = *args[1];
@@ -327,7 +327,7 @@ void registerBuiltins(EvalState &state) {
   arith("__mul", '*');
   arith("__div", '/');
   auto bitop = [&](const char *name, char op) {
-    S.addPrimOp(name, 2, [op](EvalState &st, A args, Value &v, PosPtr pos) {
+    S.addPrimOpClosure(name, 2, [op](EvalState &st, A args, Value &v, PosPtr pos) {
       int64_t a = st.forceInt(*args[0], pos), b = st.forceInt(*args[1], pos);
       st.mkInt(v, op == '&' ? (a & b) : op == '|' ? (a | b) : (a ^ b));
     });
@@ -339,7 +339,7 @@ void registerBuiltins(EvalState &state) {
     st.mkBool(v, st.lessThan(*args[0], *args[1], pos));
   });
   auto rounding = [&](const char *name, bool up) {
-    S.addPrimOp(name, 1, [up](EvalState &st, A args, Value &v, PosPtr pos) {
+    S.addPrimOpClosure(name, 1, [up](EvalState &st, A args, Value &v, PosPtr pos) {
       st.forceValue(*args[0], pos);
       if (args[0]->type == VType::Int) { v = *args[0]; return; }
       double d = st.forceFloat(*args[0], pos);
