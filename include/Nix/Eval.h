@@ -13,7 +13,6 @@
 #ifndef NIX_EVAL_H
 #define NIX_EVAL_H
 
-#include "Nix/AST.h"
 #include "Nix/MLIRGen.h"
 #include "Nix/Store.h"
 #include "NixDialect/NixDialect.h"
@@ -440,13 +439,8 @@ public:
                     const std::string &originName = "«string»");
   /// Parse only.
   nixfe::ParseOptions parseOptions();
-  /// Parse a source text with a fresh origin (kept alive by the state).
-  nixfe::Expr *parseSource(const std::string &text, const std::string &name, const std::string &path,
-                           const std::string &baseDir, std::shared_ptr<nixfe::Origin> *originOut = nullptr);
-  nixfe::Expr *parseString(nixfe::ExprArena &arena, const std::string &text, const std::string &baseDir,
-                           const std::string &originName);
-  mlir::nix::ExprOp lowerToMLIR(nixfe::Expr *e, std::shared_ptr<nixfe::Origin> origin,
-                                const std::vector<std::string> *scopeNames = nullptr);
+  /// Parse a source into the module (kept alive by the state, as its origin is).
+  mlir::nix::ExprOp lowerToMLIR(std::shared_ptr<nixfe::Origin> origin, const std::vector<std::string> *scopeNames = nullptr);
   Value *evalExprOp(mlir::nix::ExprOp op);
   /// Load all nix.expr ops of an MLIR module (from mlnix compile) and
   /// evaluate the one named `sym` (or the first).
@@ -530,12 +524,10 @@ public:
   std::map<std::string, std::string> srcToStore;
   std::map<std::string, Value *> fileEvalCache;
   std::map<std::string, Value *> scopedImportCache;
-  std::vector<nixfe::ExprArena *> arenas;
   std::vector<std::shared_ptr<nixfe::Origin>> origins;
   /// MLNIX_DEFER: one pool of deferred lambdas per lowered file.  The `body_index` of a nix.lambda is a
-  /// nixfe::BodyIndex (`file j row`) into these; freeMemo holds the free names of every lambda walked so far.
+  /// nixfe::BodyIndex (`file j row`) into these.
   std::vector<std::unique_ptr<nixfe::FilePool>> pools;
-  nixfe::FreeMemo freeMemo;
   unsigned exprCounter = 0;
   std::function<void(const std::string &)> printTrace;
 

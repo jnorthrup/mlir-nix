@@ -10,8 +10,8 @@
 // nodes: do not allocate parse results, parse them into a fixed buffer.  The scan writes the same structure as
 // rows of one buffer, reused from source to source, and the parser takes its view of the buffer by position.
 //
-//   layer 0  syn.band   the delimiters: { } [ ] ( ) "..." ''...'' ${ }        built: Confix.cpp, mlnix-parse -b
-//   layer 1  syn.semi   the qualified semicolons, the statements of a band    to build: the scan, ahead of the parser
+//   layer 0  syn.band   the delimiters: { } [ ] ( ) "..." ''...'' ${ } let-in  built: Confix.cpp, mlnix-parse -b
+//   layer 1  syn.semi   the qualified semicolons, the statements of a band    built: the same scan, mlnix-parse -b
 //   layer 2  heads      the names a statement binds, read where it starts     to build: Parser.cpp
 //   layer 3  values     the nix dialect, parsed in the scope the heads made   to build: Parser.cpp, MLIRGen.cpp
 //
@@ -133,7 +133,8 @@ def Syn_BandKind : I32EnumAttr<"BandKind", "the delimiter that opens a band", [
     I32EnumAttrCase<"K_PAREN", 40, "paren">,
     I32EnumAttrCase<"K_STRING", 34, "string">,
     I32EnumAttrCase<"K_IND_STRING", 39, "ind_string">,
-    I32EnumAttrCase<"K_INTERP", 36, "interp">
+    I32EnumAttrCase<"K_INTERP", 36, "interp">,
+    I32EnumAttrCase<"K_LET", 108, "let">
   ]> {
   let cppNamespace = "::nixfe::confix";
   let underlyingType = "uint8_t";
