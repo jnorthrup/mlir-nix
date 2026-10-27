@@ -163,7 +163,8 @@ Fresh profile of the NixOS toplevel run (2 s main-thread sample, 1449 busy sampl
 3. Locations (done): 6.2% was FileLineColRange uniquing, one per op; sampled again on the demand
    schedule it was 143 of 269 ms of uniquing per run. A position is now a 64-bit word in the op's
    `pos` property (`include/Nix/Pos.h`, `docs/COMPOSITE.md`): wall -9.2% / -8.7% (demand) and
-   -11.8% / -13.0% (eager) on toplevel / nixpkgs-73, identical hashes. What is left of the uniquing
+   -11.8% / -13.0% (eager) on toplevel / nixpkgs-73 on the Mac, identical hashes; on kali a few percent (min of N: demand
+   -1.5% to -3.2%, eager -5.6%). What is left of the uniquing
    in the same profile is `StringAttr` (63 ms) and `ArrayAttr` (43 ms): names, and the arrays of them.
 4. Core ops behind `NixEvalOpInterface` models; delete the `TypeSwitch`.
 5. Lexer (10.4%): a table-driven scanner instead of per-character calls.
