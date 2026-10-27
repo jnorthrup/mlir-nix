@@ -93,6 +93,8 @@ void FreeVars::Walk::walk(const Expr *e) {
     return;
   }
   case ExprKind::Lambda:
+    for (const FreeName &f : fv.of(static_cast<const ExprLambda *>(e)))
+      ref(f.name, f.pos, f.strict && withs == 0);
     return;
   case ExprKind::Let:
   case ExprKind::Attrs: {

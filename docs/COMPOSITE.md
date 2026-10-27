@@ -12,10 +12,12 @@ nothing uses is a placeholder. This is what exists, what consumes it, and what d
 | the JVM stops at Long; LLVM has `iN` | the same pass, any width: a segment `<i32,<i32,i32>>` -> `i96`, `Twin<i64>` -> `i128`, floats by their bits | built | `join.mlir`, `join-invalid.mlir` (a pair of `index` is refused) |
 | segments: "index first, reify later", no mutation of the mmap'd input | tape lexer: a token is a `TwInt` (start,end) of an immutable `nixfe::Source`; text that is not a slice (an unescaped string) is appended to a pool | built | 40,131 files parse to byte-identical ASTs (`scripts/parse-corpus.py`); parser 2.49 -> 1.02 s per 104 MB |
 | strref | no dialect of its own: it is a join of (buffer, start, end), `i96` dense | decided | no standalone MLIR dialect fits (IREE `util.buffer`, LingoDB `util.varlen32`, `memref` + `subview`, upstream resource blobs are the nearest; none is usable without its host project) |
-| `Series<T>` = size + index function | runtime only: `a // b` is a `Bindings::Layer` view, flattened on first iteration | built (runtime) | -3.7% / -8.3% footprint, `docs/COLLECTIONS.md` 6b |
+| `Series<T>` = size + index function | runtime: `a // b` is a `Bindings::Layer` view, flattened on first iteration; C++: `composite::Series` is `Join<uint32_t, F>` with unchecked indexing (`include/Composite/Series.h`) | built | -3.7% / -8.3% footprint, `docs/COLLECTIONS.md` 6b; the free-name view of `Gen::defer`, `docs/SEA-OF-NODES.md` |
 | `MetaSeries` | the meta is "sorted by symbol, unique": a property of `Bindings`, not a type | not a type | |
-| `α`, `get(range)`, fusion | none | **not built** | a `series` dialect would have no IR consumer yet: lists are `Value**` arrays read directly in ~100 places |
-| `Cursor`, `RowVec`, `ColumnMeta` | none | **not built** | |
+| `α`, `get(range)`, fusion | `α` in `Series.h`, infix over a Series, fusion a `static_assert`; no `series` dialect | `α` built; `get(range)` **not built** | `Gen::defer` projects each free name through the live scope; a dialect would still have no IR consumer: lists are `Value**` arrays read directly in ~100 places |
+| `↺`, left identity / constant anchor | `composite::anchor`: the first force of a cell mints it, every read after is the constant it produced | built | `EvalState::bodyOf`, the body of a deferred lambda |
+| a list that is mutated says so in its type | `composite::MutableSeries`: `append`, `drain`, `view` | built (the accumulate half) | the columns of `nixfe::FilePool`: rows accumulate as lowering defers lambdas, drain as evaluation mints them |
+| `Cursor`, `RowVec`, `ColumnMeta` | `composite::Cursor<T...>`: a MutableSeries per column plus the column names | columns built; the `Series<RowVec>` face **not built** | `nixfe::FilePool`, the pool of deferred lambdas; `MLNIX_STATS` prints it by column name |
 | Confix index, JSON as a tree of cursors | none; `fromJSON` still builds the whole value | **not built** | a lazy `fromJSON` needs a lazy value; no benchmark workload spends measurable time in it |
 | userspace uring, mapped memory kept apart from I/O | `nixprefetch`: record the files an evaluation touches, replay them through one ring; imports are mapped read-only | built (not CCEK) | cold start -19.5% / -16.8% on Linux, `docs/IO.md` |
 
@@ -39,3 +41,11 @@ nothing uses is a placeholder. This is what exists, what consumes it, and what d
 - A "hot" benchmark row followed a cache drop and was cold.
 - On MLIR 22 stock CSE does not unify two identical IRDL-defined ops; 3 of 12 FileCheck tests fail
   there. The 466 lang tests do not depend on it.
+- The first `Series.h` said it held only what the sea of nodes consumes. `Join`, `Twin` and `view()` had no
+  caller, and `view()` held a raw pointer into cells that a later append moves. Checked against this file's
+  rule (nothing is built until something consumes it): `Series` is now the `Join` alias, `j` pairs each
+  free name with its resolution in `Gen::defer`, `view()` indexes through the series and feeds the stats
+  loop, `anchor` is `bodyOf`'s one line, and `Twin` and `empty()` are deleted.
+- The upstream lang suite is blind to the free-name rules of the demand schedule: a mutation that read
+  `inherit x;` inside its own group passed 466/466. `test/lang/eval-okay-demand-scope.nix` (expected
+  output from Nix 2.35.4) kills it and six others; `docs/SEA-OF-NODES.md` has the table.

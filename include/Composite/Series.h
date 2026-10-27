@@ -2,7 +2,8 @@
 //
 // The kernel algebra of ../TrikeShed/PRELOAD.md as plain C++, and only what the sea of nodes
 // (docs/SEA-OF-NODES.md) calls.  Header-only, no MLIR, no LLVM: every type is a value the optimizer
-// sees through.  Each name below has a caller outside this file; the one that is not called is said so.
+// sees through.  Each name below has a caller outside this file, except the `Series` alias (it names
+// what `series`, `α` and `view` return) and the gap said under Cursor.
 //
 //   a |j| b            Join<A,B>, the base binary composition; `j` is the infix constructor.
 //   Series<F>          Join<uint32_t, F>, as PRELOAD aliases it: size j index-function.  xs[i] is NOT

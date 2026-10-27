@@ -401,6 +401,8 @@ int runEvalCommandIn(Options &o, bool build, EvalState &st, std::shared_ptr<nixs
       std::cout << "\n";
       return nullptr;
     }
+    // The IR is printed whole: a deferred body would print as an empty shell, which is not the program.
+    if (o.emitMLIR) st.settings.deferBodies = false;
     auto op = st.lowerToMLIR(e, origin);
     if (o.emitMLIR) {
       mlir::OpPrintingFlags flags;

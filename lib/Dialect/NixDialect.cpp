@@ -151,7 +151,7 @@ LogicalResult LambdaOp::verify() {
   Block &b = getBody().front();
   if (b.getNumArguments() != 1)
     return emitOpError("body must have exactly one block argument");
-  if (!getBodyIndex() && !isa<ReturnOp>(b.back()))
+  if (!isa<ReturnOp>(b.back()))
     return emitOpError("body must end in nix.return");
   if (getFormals()) {
     if (!getFormalDefaults() ||

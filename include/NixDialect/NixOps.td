@@ -63,9 +63,12 @@ def Nix_LambdaOp : Nix_Op<"lambda", [SingleBlock,
     reads from the enclosing scopes: the `with` chain, innermost first, then the
     free names the pool row lists.  The body is minted on the first call, from
     the retained AST, by the same generator that mints it eagerly.  The captures
-    are real operands so that the uses the waiting body will make exist already;
-    a lowered `.mlir` file cannot re-mint a deferred body, the expression lives
-    in the arena.
+    are real operands so that the uses the waiting body will make exist already.
+
+    A deferred lambda is a shell that exists only in memory, between lowering
+    and its first call: its block is empty, so this verifier (the SingleBlock
+    trait) refuses it, and it can be neither printed as custom syntax nor read
+    back.  The evaluator never verifies, and `mlnix emit-mlir` lowers eagerly.
   }];
   let arguments = (ins OptionalAttr<StrArrayAttr>:$formals,
                        OptionalAttr<DenseBoolArrayAttr>:$formal_defaults,

@@ -70,6 +70,12 @@ So the team-up with the measured headroom is not the JIT. It is:
    (the tape lexer and zero-copy AST exist partly to make retention cheap). 75-85% of generated ops
    are never evaluated; the lever is ~12-17% of a hot run and 300+ MB, and it is a dialect-side
    change (a deferred `nix.expr` region materialized on demand), not a C++ one.
+   **Built, behind `MLNIX_DEFER=1`; the default is unchanged** (`docs/SEA-OF-NODES.md`). Measured on
+   the two real workloads, identical result hashes: -8.8% to -14.7% wall, -6.8% to -8.7% peak footprint
+   (about 130-160 MB), and 89-90% of the eager schedule's ops are never evaluated. It needed the
+   dialect (captures and a `body_index` on `nix.lambda`) and C++ (a pool of deferred lambdas, a
+   free-name analysis, a mint on first call), so "not a C++ one" was wrong. It costs +7.5% to +9.8% on
+   a file whose lambdas are all called; break-even is near 88% called, and the real workloads call 15-18%.
 2. **Slot addressing on the ops.** The DenseMap<Value, Slot> probe per operand (~8%) becomes a
    property read or an `nixrt` index once frames are addressed by declaration.
 3. **The transform dialect as the composer**, so the driver's stages are inspectable IR.
