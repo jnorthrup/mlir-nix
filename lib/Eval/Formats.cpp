@@ -255,8 +255,7 @@ struct JSONParser {
         if (p < s.size() && s[p] == ']') { p++; break; }
         fail("syntax error; expected ']'");
       }
-      st.mkList(v, elems.size());
-      for (size_t i = 0; i < elems.size(); i++) v.list.elems[i] = elems[i];
+      st.mkList(v, elems);
       return;
     }
     if (c == '"') { st.mkString(v, string()); return; }
@@ -749,13 +748,11 @@ struct TomlParser {
     if (c == '"') {
       std::string sv = basicString();
       if (sv.find('\0') != std::string::npos) fail("string contains a NUL byte");
-      Value *v = st.allocValue();
-      st.mkString(*v, sv);
+      Value *v = st.newString(sv);
       return v;
     }
     if (c == '\'') {
-      Value *v = st.allocValue();
-      st.mkString(*v, literalString());
+      Value *v = st.newString(literalString());
       return v;
     }
     if (s.substr(p, 4) == "true" && !isBare(peek(4))) { p += 4; return &st.vTrue; }
@@ -773,8 +770,7 @@ struct TomlParser {
         fail("expected ',' or ']' in array");
       }
       Value *v = st.allocValue();
-      st.mkList(*v, elems.size());
-      for (size_t i = 0; i < elems.size(); i++) v->list.elems[i] = elems[i];
+      st.mkList(*v, elems);
       return v;
     }
     if (c == '{') {
@@ -829,8 +825,7 @@ struct TomlParser {
     if (n.kind == TomlNode::Leaf) return n.leaf;
     Value *v = st.allocValue();
     if (n.kind == TomlNode::Array) {
-      st.mkList(*v, n.array.size());
-      for (size_t i = 0; i < n.array.size(); i++) v->list.elems[i] = toValue(*n.array[i]);
+      st.mkList(*v, n.array |cp::α| [&](const auto &x) { return toValue(*x); });
       return v;
     }
     EvalState::BindingsBuilder bb(st);

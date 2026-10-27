@@ -277,10 +277,8 @@ static void addPath(EvalState &st, PosPtr pos, std::string name, const std::stri
     filter = [&](const std::string &p) {
       // Map physical path back to the logical one.
       std::string logical = path + p.substr(real.size());
-      Value *arg1 = st.allocValue();
-      st.mkString(*arg1, logical);
-      Value *arg2 = st.allocValue();
-      st.mkString(*arg2, fileTypeOf(p));
+      Value *arg1 = st.newString(logical);
+      Value *arg2 = st.newString(fileTypeOf(p));
       Value *fargs[2] = {arg1, arg2};
       Value r;
       st.callFunction(*filterFun, 2, fargs, r, pos);
