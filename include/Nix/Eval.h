@@ -28,9 +28,11 @@
 
 namespace mlir { class PassManager; }
 
+#include <algorithm>
 #include <functional>
 #include <map>
 #include <memory>
+#include <ranges>
 #include <set>
 #include <string>
 #include <vector>
@@ -38,6 +40,7 @@ namespace mlir { class PassManager; }
 #include "Nix/Arena.h"
 
 namespace nixev {
+namespace cp = ::composite;
 
 /// The hooks of the fill/drain table (docs/FILL-DRAIN.md) sit in hot functions, so they exist only in a build configured with
 /// -DMLNIX_FILL_STATS=ON; otherwise this is no code at all.  `st` is the EvalState, `f` an EvalState::Fill.
@@ -340,9 +343,15 @@ public:
   void mkString(Value &v, std::string_view s, const NixStringContext &ctx = {});
   void mkPath(Value &v, std::string_view p);
   void mkList(Value &v, size_t n);
+  /// A list drained from a sized range of Value * (a Series, a vector): the one fill loop, with the α of the caller inlined.
+  template <std::ranges::sized_range S> void mkList(Value &v, const S &s) {
+    mkList(v, size_t(std::ranges::size(s)));
+    std::ranges::copy(s, v.list.elems);
+  }
   void mkAttrs(Value &v, Bindings *b) { v.type = VType::Attrs; v.attrs = b; }
   void mkApp(Value &v, Value *f, Value *x) { v.type = VType::App; v.app.left = f; v.app.right = x; }
   Value *mkAppValue(Value *f, Value *x) { Value *v = allocValue(); mkApp(*v, f, x); return v; }
+  Value *newString(std::string_view s, const NixStringContext &ctx = {}) { Value *v = allocValue(); mkString(*v, s, ctx); return v; }
 
   /// Builder for attribute sets.
   class BindingsBuilder {

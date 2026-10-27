@@ -1346,9 +1346,7 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
   };
   llvm::TypeSwitch<Operation *>(op)
       .Case<nd::ListOp>([&](nd::ListOp l) {
-        auto elems = l.getElements();
-        mkList(out, elems.size());
-        for (size_t i = 0; i < elems.size(); i++) out.list.elems[i] = lookup(env, elems[i]);
+        mkList(out, l.getElements() |cp::α| [&](mlir::Value x) { return lookup(env, x); });
       })
       .Case<nd::AttrsOp>([&](nd::AttrsOp a) { evalAttrs(a, env, out); })
       .Case<nd::SelectOp>([&](nd::SelectOp sel) {

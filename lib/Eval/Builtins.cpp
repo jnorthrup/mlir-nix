@@ -87,6 +87,12 @@ static std::regex &getRegex(EvalState &st, const std::string &re, PosPtr pos) {
   }
 }
 
+/// A group of a regex match as Nix gives it: its text, or null where the group took no part.
+static Value *groupValue(EvalState &st, const std::ssub_match &g) {
+  if (!g.matched) { Value *e = st.allocValue(); st.mkNull(*e); return e; }
+  return st.newString(g.str());
+}
+
 //===----------------------------------------------------------------------===//
 // Registration
 //===----------------------------------------------------------------------===//
@@ -106,18 +112,15 @@ void EvalState::createBaseEnv() {
     addConstant("__langVersion", v);
   }
   {
-    Value *v = allocValue();
-    mkString(*v, "2.35.4");
+    Value *v = newString("2.35.4");
     addConstant("__nixVersion", v);
   }
   {
-    Value *v = allocValue();
-    mkString(*v, store->storeDir());
+    Value *v = newString(store->storeDir());
     addConstant("__storeDir", v);
   }
   if (!settings.pureEval) {
-    Value *v = allocValue();
-    mkString(*v, settings.currentSystem);
+    Value *v = newString(settings.currentSystem);
     addConstant("__currentSystem", v);
     Value *t = allocValue();
     mkInt(*t, (int64_t)time(nullptr));
@@ -125,15 +128,14 @@ void EvalState::createBaseEnv() {
   }
   {
     Value *v = allocValue();
-    mkList(*v, settings.nixPath.size());
-    for (size_t i = 0; i < settings.nixPath.size(); i++) {
+    mkList(*v, settings.nixPath |cp::α| [&](const auto &p) {
       BindingsBuilder bb(*this);
-      mkString(bb.alloc(s.path), settings.nixPath[i].path);
-      mkString(bb.alloc(s.prefix), settings.nixPath[i].prefix);
+      mkString(bb.alloc(s.path), p.path);
+      mkString(bb.alloc(s.prefix), p.prefix);
       Value *e = allocValue();
       mkAttrs(*e, bb.finish());
-      v->list.elems[i] = e;
-    }
+      return e;
+    });
     addConstant("__nixPath", v);
   }
 
@@ -441,14 +443,7 @@ void registerBuiltins(EvalState &state) {
     auto s = st.coerceToString(*args[1], ctx, false, true, pos, "while evaluating the second argument passed to builtins.match");
     std::smatch m;
     if (!std::regex_match(s, m, regex)) { st.mkNull(v); return; }
-    size_t n = m.size() - 1;
-    st.mkList(v, n);
-    for (size_t i = 0; i < n; i++) {
-      Value *e = st.allocValue();
-      if (!m[i + 1].matched) st.mkNull(*e);
-      else st.mkString(*e, m[i + 1].str());
-      v.list.elems[i] = e;
-    }
+    st.mkList(v, uint32_t(m.size() - 1) |cp::j| [&](uint32_t i) { return groupValue(st, m[i + 1]); });
   });
   S.addPrimOp("__split", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     auto re = str(st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.split"));
@@ -464,26 +459,17 @@ void registerBuiltins(EvalState &state) {
     for (auto i = begin; i != end; ++i) {
       any = true;
       const std::smatch &m = *i;
-      Value *pre = st.allocValue();
-      st.mkString(*pre, str(std::string_view(s).substr(lastEnd, m.position(0) - lastEnd)));
+      Value *pre = st.newString(str(std::string_view(s).substr(lastEnd, m.position(0) - lastEnd)));
       out.push_back(pre);
       Value *groups = st.allocValue();
-      st.mkList(*groups, m.size() - 1);
-      for (size_t g = 1; g < m.size(); g++) {
-        Value *e = st.allocValue();
-        if (m[g].matched) st.mkString(*e, m[g].str());
-        else st.mkNull(*e);
-        groups->list.elems[g - 1] = e;
-      }
+      st.mkList(*groups, uint32_t(m.size() - 1) |cp::j| [&](uint32_t g) { return groupValue(st, m[g + 1]); });
       out.push_back(groups);
       lastEnd = m.position(0) + m.length(0);
     }
-    Value *rest = st.allocValue();
-    st.mkString(*rest, any ? s.substr(lastEnd) : s);
+    Value *rest = st.newString(any ? s.substr(lastEnd) : s);
     out.push_back(rest);
     MLNIX_FILL(st, EvalState::FillSplit, out.size());
-    st.mkList(v, out.size());
-    for (size_t i = 0; i < out.size(); i++) v.list.elems[i] = out[i];
+    st.mkList(v, out);
   });
   S.addPrimOp("__compareVersions", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     auto a = st.forceStringNoCtx(*args[0], pos), b = st.forceStringNoCtx(*args[1], pos);
@@ -498,12 +484,7 @@ void registerBuiltins(EvalState &state) {
       if (c.empty()) break;
       comps.push_back(str(c));
     }
-    st.mkList(v, comps.size());
-    for (size_t i = 0; i < comps.size(); i++) {
-      Value *e = st.allocValue();
-      st.mkString(*e, comps[i]);
-      v.list.elems[i] = e;
-    }
+    st.mkList(v, comps |cp::α| [&](const auto &c) { return st.newString(c); });
   });
   S.addPrimOp("__parseDrvName", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
     auto name = str(st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.parseDrvName"));
@@ -596,12 +577,7 @@ void registerBuiltins(EvalState &state) {
       if (info.all) ib.insert("allOutputs", &st.vTrue);
       if (!info.outputs.empty()) {
         Value &ol = ib.alloc("outputs");
-        st.mkList(ol, info.outputs.size());
-        for (size_t i = 0; i < info.outputs.size(); i++) {
-          Value *e = st.allocValue();
-          st.mkString(*e, info.outputs[i]);
-          ol.list.elems[i] = e;
-        }
+        st.mkList(ol, info.outputs |cp::α| [&](const auto &o) { return st.newString(o); });
       }
       Value &iv = bb.alloc(path);
       st.mkAttrs(iv, ib.finish());
@@ -640,18 +616,12 @@ void registerBuiltins(EvalState &state) {
   S.addPrimOp("__attrNames", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceAttrs(*args[0], pos, "while evaluating the argument passed to builtins.attrNames");
     auto sorted = args[0]->attrs->lexicographicOrder(st.symbols);
-    st.mkList(v, sorted.size());
-    for (size_t i = 0; i < sorted.size(); i++) {
-      Value *e = st.allocValue();
-      st.mkString(*e, st.symbols[sorted[i]->name]);
-      v.list.elems[i] = e;
-    }
+    st.mkList(v, sorted |cp::α| [&](const Attr *a) { return st.newString(st.symbols[a->name]); });
   });
   S.addPrimOp("__attrValues", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceAttrs(*args[0], pos, "while evaluating the argument passed to builtins.attrValues");
     auto sorted = args[0]->attrs->lexicographicOrder(st.symbols);
-    st.mkList(v, sorted.size());
-    for (size_t i = 0; i < sorted.size(); i++) v.list.elems[i] = sorted[i]->value;
+    st.mkList(v, sorted |cp::α| [](const Attr *a) { return a->value; });
   });
   S.addPrimOp("__getAttr", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     auto name = st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.getAttr");
@@ -739,8 +709,7 @@ void registerBuiltins(EvalState &state) {
       if (const Attr *a = e.attrs->get(name)) res.push_back(a->value);
     }
     MLNIX_FILL(st, EvalState::FillCatAttrs, res.size());
-    st.mkList(v, res.size());
-    for (size_t i = 0; i < res.size(); i++) v.list.elems[i] = res[i];
+    st.mkList(v, res);
   });
   S.addPrimOp("__functionArgs", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceValue(*args[0], pos);
@@ -764,8 +733,7 @@ void registerBuiltins(EvalState &state) {
     Bindings *b = st.allocBindings(args[1]->attrs->size());
     size_t n = 0;
     for (auto &a : *args[1]->attrs) {
-      Value *name = st.allocValue();
-      st.mkString(*name, st.symbols[a.name]);
+      Value *name = st.newString(st.symbols[a.name]);
       Value *f1 = st.mkAppValue(args[0], name);
       b->attrs[n++] = {a.name, st.mkAppValue(f1, a.value), a.pos};
     }
@@ -782,11 +750,9 @@ void registerBuiltins(EvalState &state) {
     }
     EvalState::BindingsBuilder bb(st);
     for (auto &[sym, vals] : m) {
-      Value *name = st.allocValue();
-      st.mkString(*name, st.symbols[sym]);
+      Value *name = st.newString(st.symbols[sym]);
       Value *list = st.allocValue();
-      st.mkList(*list, vals.size());
-      for (size_t i = 0; i < vals.size(); i++) list->list.elems[i] = vals[i];
+      st.mkList(*list, vals);
       bb.insert(sym, st.mkAppValue(st.mkAppValue(args[0], name), list));
     }
     st.mkAttrs(v, bb.finish());
@@ -799,8 +765,7 @@ void registerBuiltins(EvalState &state) {
     if (!n) { v = *args[1]; return; }
     Value **src = args[1]->list.elems;
     Value *f = args[0];
-    st.mkList(v, n);
-    for (size_t i = 0; i < n; i++) v.list.elems[i] = st.mkAppValue(f, src[i]);
+    st.mkList(v, cp::series(src, n) |cp::α| [&](Value *x) { return st.mkAppValue(f, x); });
   });
   S.addPrimOp("__length", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[0], pos, "while evaluating the first argument passed to builtins.length");
@@ -818,8 +783,7 @@ void registerBuiltins(EvalState &state) {
     if (!args[0]->listSize()) throw EvalError("'builtins.tail' called on an empty list", pos);
     size_t n = args[0]->listSize() - 1;
     Value **src = args[0]->list.elems;
-    st.mkList(v, n);
-    for (size_t i = 0; i < n; i++) v.list.elems[i] = src[i + 1];
+    st.mkList(v, cp::series(src + 1, n));
   });
   S.addPrimOp("__elemAt", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[0], pos, "while evaluating the first argument passed to builtins.elemAt");
@@ -848,8 +812,7 @@ void registerBuiltins(EvalState &state) {
       for (size_t j = 0; j < l.listSize(); j++) res.push_back(l.list.elems[j]);
     }
     MLNIX_FILL(st, EvalState::FillConcatLists, res.size());
-    st.mkList(v, res.size());
-    for (size_t i = 0; i < res.size(); i++) v.list.elems[i] = res[i];
+    st.mkList(v, res);
   });
   S.addPrimOp("__concatMap", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.concatMap");
@@ -861,8 +824,7 @@ void registerBuiltins(EvalState &state) {
       for (size_t j = 0; j < r->listSize(); j++) res.push_back(r->list.elems[j]);
     }
     MLNIX_FILL(st, EvalState::FillConcatMap, res.size());
-    st.mkList(v, res.size());
-    for (size_t i = 0; i < res.size(); i++) v.list.elems[i] = res[i];
+    st.mkList(v, res);
   });
   S.addPrimOp("__filter", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.filter");
@@ -877,8 +839,7 @@ void registerBuiltins(EvalState &state) {
     }
     if (same) { v = *args[1]; return; }
     MLNIX_FILL(st, EvalState::FillFilter, res.size());
-    st.mkList(v, res.size());
-    for (size_t i = 0; i < res.size(); i++) v.list.elems[i] = res[i];
+    st.mkList(v, res);
   });
   S.addPrimOp("__any", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.any");
@@ -946,8 +907,7 @@ void registerBuiltins(EvalState &state) {
     };
     std::stable_sort(elems.begin(), elems.end(), cmp);
     MLNIX_FILL(st, EvalState::FillSort, n);
-    st.mkList(v, n);
-    for (size_t i = 0; i < n; i++) v.list.elems[i] = elems[i];
+    st.mkList(v, elems);
   });
   S.addPrimOp("__partition", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.partition");
@@ -962,11 +922,9 @@ void registerBuiltins(EvalState &state) {
     }
     EvalState::BindingsBuilder bb(st);
     Value &rv = bb.alloc(st.s.right);
-    st.mkList(rv, right.size());
-    for (size_t i = 0; i < right.size(); i++) rv.list.elems[i] = right[i];
+    st.mkList(rv, right);
     Value &wv = bb.alloc(st.s.wrong);
-    st.mkList(wv, wrong.size());
-    for (size_t i = 0; i < wrong.size(); i++) wv.list.elems[i] = wrong[i];
+    st.mkList(wv, wrong);
     st.mkAttrs(v, bb.finish());
   });
   S.addPrimOp("__groupBy", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
@@ -983,8 +941,7 @@ void registerBuiltins(EvalState &state) {
     EvalState::BindingsBuilder bb(st);
     for (auto &[k, vals] : m) {
       Value &l = bb.alloc(k);
-      st.mkList(l, vals.size());
-      for (size_t i = 0; i < vals.size(); i++) l.list.elems[i] = vals[i];
+      st.mkList(l, vals);
     }
     st.mkAttrs(v, bb.finish());
   });
@@ -1017,8 +974,7 @@ void registerBuiltins(EvalState &state) {
       for (size_t i = 0; i < r.listSize(); i++) queue.push_back(r.list.elems[i]);
     }
     MLNIX_FILL(st, EvalState::FillGenericClosure, res.size());
-    st.mkList(v, res.size());
-    for (size_t i = 0; i < res.size(); i++) v.list.elems[i] = res[i];
+    st.mkList(v, res);
   });
 
   // -- Environment -----------------------------------------------------------

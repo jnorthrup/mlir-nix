@@ -8,7 +8,8 @@
 //   a |j| b            Join<A,B>, the base binary composition; `j` is the infix constructor.
 //   Series<F>          Join<uint32_t, F>, as PRELOAD aliases it: size j index-function.  xs[i] is NOT
 //                      bounds-checked: the index came from the builder that issued it, never from the user.
-//   xs |α| f           lazy projection, still a Series: size j { i -> f(xs[i]) }.
+//   xs |α| f           lazy projection, still a Series: size j { i -> f(xs[i]) }.  Over a named xs (a vector, a range of
+//                      operands) it reads xs in place, as a view, so xs must outlive it; over a temporary it keeps it.
 //   Slice<T>           a Series over cells in memory that is never freed: size j (i -> p[i]) with a name, so it can be
 //                      a member.  16 bytes, trivially destructible; what the syntax tree holds in place of a vector.
 //   MutableSeries<T>   a list that is mutated says so in its type.  It accumulates (append), then drains.
@@ -52,16 +53,20 @@ template <class A, class B> struct Join {
     return b(i);
   }
 
-  // The `.view` bridge: range-for over a Series.
+  // The `.view` bridge: range-for, and every loop op of the STL (std::ranges::copy, any_of, find_if, ...) over a Series.
+  // A std::forward_iterator whose operator* is the index function: a value, not a cell.
   struct iterator {
-    const Join *s;
-    uint32_t i;
+    using value_type = std::remove_cvref_t<std::invoke_result_t<const B &, uint32_t>>;
+    using difference_type = std::ptrdiff_t;
+    const Join *s = nullptr;
+    uint32_t i = 0;
     constexpr decltype(auto) operator*() const { return (*s)[i]; }
     constexpr iterator &operator++() {
       ++i;
       return *this;
     }
-    constexpr bool operator!=(const iterator &o) const { return i != o.i; }
+    constexpr iterator operator++(int) { return {s, i++}; }
+    constexpr bool operator==(const iterator &o) const { return i == o.i; }
   };
   constexpr iterator begin() const requires std::same_as<A, uint32_t> { return {this, 0}; }
   constexpr iterator end() const requires std::same_as<A, uint32_t> { return {this, a}; }
@@ -115,10 +120,10 @@ inline constexpr AlphaTag α{};
 template <class S> struct AlphaLeft {
   S s;
 };
-template <class S> constexpr AlphaLeft<S> operator|(S s, AlphaTag) { return {std::move(s)}; }
+template <class S> constexpr AlphaLeft<S> operator|(S &&s, AlphaTag) { return {std::forward<S>(s)}; }
 template <class S, class G> constexpr auto operator|(AlphaLeft<S> l, G g) {
-  uint32_t n = l.s.size();
-  return n |j| [s = std::move(l.s), g = std::move(g)](uint32_t i) { return g(s[i]); };
+  uint32_t n = uint32_t(l.s.size());
+  return n |j| [l = std::move(l), g = std::move(g)](uint32_t i) { return g(l.s[i]); };
 }
 
 //===----------------------------------------------------------------------===//
