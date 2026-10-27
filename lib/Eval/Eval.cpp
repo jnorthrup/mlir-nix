@@ -842,7 +842,7 @@ void EvalState::forceValueDeep(Value &v) {
         try {
           rec(*a.value);
         } catch (EvalError &e) {
-          e.addTrace(a.pos, "while evaluating the attribute '" + symbols[a.name].str() + "'");
+          e.addTrace(posOf(a), "while evaluating the attribute '" + symbols[a.name].str() + "'");
           throw;
         }
       }
@@ -1172,13 +1172,11 @@ void EvalState::evalAttrs(nd::AttrsOp op, Frame *env, Value &out) {
   auto names = op.getNames();
   auto values = op.getValues();
   auto dynNames = op.getDynNames();
-  auto positions = op.getPositions(); // one position word per name, or none
+  PosIdx posBase = PosIdx(op.getPosBase()); // the row of the first name's position, the others follow; 0: none
   if (statsEnabled) statLiteral(op.getOperation(), names.size(), !dynNames.empty());
   BindingsBuilder bb(*this);
-  for (size_t i = 0; i < names.size(); i++) {
-    PosPtr p = i < positions.size() ? nd::posOfWord(uint64_t(positions[i])) : nullptr;
-    bb.insert(symbolOf(names[i]), lookup(env, values[i]), p);
-  }
+  for (size_t i = 0; i < names.size(); i++)
+    bb.insert(symbolOf(names[i]), lookup(env, values[i]), posBase ? posBase + PosIdx(i) : 0);
   if (dynNames.empty()) {
     mkAttrs(out, bb.finish());
     return;
@@ -1200,7 +1198,7 @@ void EvalState::evalAttrs(nd::AttrsOp op, Frame *env, Value &out) {
                           showPos(seen[sym] ? seen[sym] : nd::posOfOp(op)),
                       p);
     seen[sym] = p;
-    bb.insert(sym, lookup(env, dynValues[j]), p);
+    bb.insert(sym, lookup(env, dynValues[j]), nixfe::PosTable::get().intern(reinterpret_cast<uintptr_t>(p)));
   }
   mkAttrs(out, bb.finish());
 }

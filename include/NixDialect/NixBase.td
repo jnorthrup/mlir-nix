@@ -28,6 +28,8 @@ include "mlir/Interfaces/SideEffectInterfaces.td"
 // allocated once per distinct position (a tenth of the evaluation).  Zero is "none".  No assembly
 // format mentions it, so it is neither printed nor parsed, as a Location is not.
 def Nix_PosProp : DefaultValuedProp<I64Prop, "0">;
+/// The first row, in nixfe::PosTable, of the positions of an op's static names: name i is at row base + i; 0 is none.
+def Nix_PosBaseProp : DefaultValuedProp<I64Prop, "0">;
 defvar NixPos = (ins Nix_PosProp:$pos);
 
 // A name, or the text of a literal: a nixfe::Name (include/Nix/Name.h), a pointer and a length into bytes that live
@@ -81,7 +83,6 @@ def Nix_NameProp : Property<"::nixfe::Name", "name", "const ::nixfe::Name &"> {
   }];
 }
 def Nix_NamesProp : ArrayProp<Nix_NameProp>;
-def Nix_I64sProp : ArrayProp<I64Prop>;
 
 def Nix_Dialect : Dialect {
   let name = "nix";

@@ -178,11 +178,13 @@ def Nix_AttrsOp : Nix_Op<"attrs", [AttrSizedOperandSegments]> {
   let description = [{
     `names[i]` is bound to `values[i]`.  Dynamic attributes (`${e} = v;`) pair
     `dyn_names[j]` with `dyn_values[j]`; they are inserted in order at
-    evaluation time and a `null` name drops the attribute.
+    evaluation time and a `null` name drops the attribute.  `pos_base` is the
+    first row, in the position table (nixfe::PosTable), of the positions of the
+    names' definitions: `names[i]` was defined at row `pos_base + i`.
   }];
   let arguments = !con((ins Nix_NamesProp:$names, Variadic<NixVal>:$values,
                        Variadic<NixVal>:$dyn_names, Variadic<NixVal>:$dyn_values,
-                       Nix_I64sProp:$positions), NixPos);
+                       Nix_PosBaseProp:$pos_base), NixPos);
   let results = (outs NixFreshVal:$result);
   let assemblyFormat = [{
     $names `(` $values `)` (`dynamic` `(` $dyn_names^ `)` `=` `(` $dyn_values `)`)? attr-dict

@@ -665,8 +665,8 @@ void registerBuiltins(EvalState &state) {
     auto name = st.forceStringNoCtx(*args[0], pos);
     st.forceAttrs(*args[1], pos);
     const Attr *a = args[1]->attrs->get(st.symbols.create(name));
-    if (!a || !a->pos) { st.mkNull(v); return; }
-    auto f = nd::decodePos(a->pos);
+    if (!a || !posOf(*a)) { st.mkNull(v); return; }
+    auto f = nd::decodePos(posOf(*a));
     if (!f) { st.mkNull(v); return; }
     EvalState::BindingsBuilder bb(st);
     st.mkString(bb.alloc(st.s.file), f->file);
@@ -754,7 +754,7 @@ void registerBuiltins(EvalState &state) {
     auto locs = lam.getFormalLocs();
     for (size_t i = 0; i < lam.getFormals()->size(); i++) {
       std::string n = cast<StringAttr>((*lam.getFormals())[i]).getValue().str();
-      PosPtr p = locs && i < locs->size() ? nd::posOfWord(uint64_t((*locs)[i])) : nullptr;
+      PosIdx p = locs && i < locs->size() ? nixfe::PosTable::get().intern(uint64_t((*locs)[i])) : 0;
       bb.insert(n, defs[i] ? &st.vTrue : &st.vFalse, p);
     }
     st.mkAttrs(v, bb.finish());
@@ -767,7 +767,7 @@ void registerBuiltins(EvalState &state) {
       Value *name = st.allocValue();
       st.mkString(*name, st.symbols[a.name]);
       Value *f1 = st.mkAppValue(args[0], name);
-      b->attrs[n++] = {a.name, st.mkAppValue(f1, a.value), a.pos};
+      b->attrs[n++] = {a.name, a.pos, st.mkAppValue(f1, a.value)};
     }
     b->size_ = n;
     st.mkAttrs(v, b);

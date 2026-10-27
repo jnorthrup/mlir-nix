@@ -15,6 +15,7 @@
 
 #include "Nix/AST.h"
 #include "Nix/MLIRGen.h"
+#include "Nix/Pos.h"
 #include "Nix/Store.h"
 #include "NixDialect/NixDialect.h"
 
@@ -78,11 +79,18 @@ class EvalState;
 /// Opaque position: an mlir::Location's opaque pointer (or null).
 using PosPtr = const void *;
 
+/// The position of an attribute definition as a cell holds it: a row of nixfe::PosTable, 0 for none.
+using PosIdx = uint32_t;
+
+/// One attribute: the name and the position in a word, and the value.
 struct Attr {
   Symbol name;
+  PosIdx pos;
   Value *value;
-  PosPtr pos;
 };
+static_assert(sizeof(Attr) == 2 * sizeof(void *), "an attribute is a word and a pointer");
+/// The position a cell holds, as the PosPtr it was before it was a row.
+inline PosPtr posOf(const Attr &a) { return reinterpret_cast<PosPtr>(nixfe::PosTable::get().word(a.pos)); }
 
 struct Bindings {
   /// `size_` of a layered set (below).
@@ -348,14 +356,14 @@ public:
   class BindingsBuilder {
   public:
     BindingsBuilder(EvalState &st) : st(st) {}
-    void insert(Symbol s, Value *v, PosPtr pos = nullptr) { attrs.push_back({s, v, pos}); }
-    void insert(llvm::StringRef name, Value *v, PosPtr pos = nullptr) { insert(st.symbols.create(name), v, pos); }
-    Value &alloc(llvm::StringRef name, PosPtr pos = nullptr) {
+    void insert(Symbol s, Value *v, PosIdx pos = 0) { attrs.push_back({s, pos, v}); }
+    void insert(llvm::StringRef name, Value *v, PosIdx pos = 0) { insert(st.symbols.create(name), v, pos); }
+    Value &alloc(llvm::StringRef name, PosIdx pos = 0) {
       Value *v = st.allocValue();
       insert(name, v, pos);
       return *v;
     }
-    Value &alloc(Symbol s, PosPtr pos = nullptr) {
+    Value &alloc(Symbol s, PosIdx pos = 0) {
       Value *v = st.allocValue();
       insert(s, v, pos);
       return *v;

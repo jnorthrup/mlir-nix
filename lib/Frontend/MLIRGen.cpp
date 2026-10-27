@@ -395,6 +395,11 @@ private:
     return nd::SelectOp::create(b, noLoc(), valTy(), base, ValueRange{}, def, path, at(p));
   }
 
+  /// The positions of the names of one attribute set as consecutive rows of the position table: the first row, 0 for none.
+  static int64_t posBase(const SmallVectorImpl<int64_t> &positions) {
+    return nixfe::PosTable::get().addRange(positions.data(), positions.size());
+  }
+
   /// Generate the bindings of an attrs node into `names/values`, resolving
   /// each def in the proper scope.
   void genBindings(const ExprAttrs *a, Scope *defScope, Scope *outerScope,
@@ -468,12 +473,12 @@ private:
       auto finals = finalizeGroup(phv, values, poses, {&dynNames, &dynValues});
       values.assign(finals.begin(), finals.end());
       if (ovIdx >= 0) {
-        Value attrs = nd::AttrsOp::create(b, noLoc(), valTy(), names, values, dynNames, dynValues, positions,
+        Value attrs = nd::AttrsOp::create(b, noLoc(), valTy(), names, values, dynNames, dynValues, posBase(positions),
                                           at(a->pos));
         return nd::UpdateOp::create(b, noLoc(), valTy(), attrs, values[ovIdx], at(a->pos));
       }
     }
-    return nd::AttrsOp::create(b, noLoc(), valTy(), names, values, dynNames, dynValues, positions, at(a->pos));
+    return nd::AttrsOp::create(b, noLoc(), valTy(), names, values, dynNames, dynValues, posBase(positions), at(a->pos));
   }
 
   Value genLet(const ExprLet *l, Scope *s) {
@@ -638,7 +643,7 @@ private:
           nd::IntOp::create(b, noLoc(), valTy(), b.getI64IntegerAttr(e->pos.col)),
           str(origin->path, e->pos),
           nd::IntOp::create(b, noLoc(), valTy(), b.getI64IntegerAttr(e->pos.line))};
-      return nd::AttrsOp::create(b, noLoc(), valTy(), names, vals, ValueRange{}, ValueRange{}, ArrayRef<int64_t>{},
+      return nd::AttrsOp::create(b, noLoc(), valTy(), names, vals, ValueRange{}, ValueRange{}, /*posBase=*/int64_t(0),
                                  at(e->pos));
     }
     case ExprKind::InheritFrom:
