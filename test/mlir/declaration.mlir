@@ -2,8 +2,8 @@
 // a copy of NixPrims.irdl.mlir (MLNIX_PRIMS_IRDL=...) changes what the stock passes
 // and verifier do, with no C++ and no rebuild.
 //
-// RUN: mlnix-opt %s -cse | FileCheck %s --check-prefix=PURE
-// RUN: MLNIX_PRIMS_IRDL=%S/inputs/impure-add.irdl.mlir mlnix-opt %s -cse | FileCheck %s --check-prefix=IMPURE
+// RUN: [cse-dynamic-ops] mlnix-opt %s -cse | FileCheck %s --check-prefix=PURE
+// RUN: [cse-dynamic-ops] MLNIX_PRIMS_IRDL=%S/inputs/impure-add.irdl.mlir mlnix-opt %s -cse | FileCheck %s --check-prefix=IMPURE
 // RUN: MLNIX_PRIMS_IRDL=%S/inputs/unary-add.irdl.mlir not mlnix-opt %s 2>&1 | FileCheck %s --check-prefix=ARITY
 // RUN: MLNIX_PRIMS_IRDL=%S/inputs/bad-fx.irdl.mlir not --crash mlnix-opt %s 2>&1 | FileCheck %s --check-prefix=BADFX
 // RUN: MLNIX_PRIMS_IRDL=%S/inputs/dup-key.irdl.mlir not --crash mlnix-opt %s 2>&1 | FileCheck %s --check-prefix=DUP

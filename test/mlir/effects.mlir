@@ -1,7 +1,7 @@
 // Effects are declared, so the stock CSE pass is sound on Nix IR without any
 // Nix-specific code: pure primops are merged, ops that may run user code or
 // emit diagnostics are not.
-// RUN: mlnix-opt %s -cse | FileCheck %s
+// RUN: [cse-dynamic-ops] mlnix-opt %s -cse | FileCheck %s
 
 // CHECK-LABEL: nix.expr @pure
 nix.expr @pure {

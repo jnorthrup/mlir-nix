@@ -7,7 +7,7 @@
 //     equal calls are kept;
 //   * an unused fresh value is still dead, but a call that may run user code is not.
 //
-// RUN: mlnix-opt %s -cse | FileCheck %s
+// RUN: [cse-dynamic-ops] mlnix-opt %s -cse | FileCheck %s
 // RUN: mlnix-opt %s -canonicalize | FileCheck %s --check-prefix=DEAD
 
 // CHECK-LABEL: nix.expr @functions
