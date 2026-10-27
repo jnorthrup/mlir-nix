@@ -39,6 +39,17 @@ namespace mlir { class PassManager; }
 
 namespace nixev {
 
+/// The hooks of the fill/drain table (docs/FILL-DRAIN.md) sit in hot functions, so they exist only in a build configured with
+/// -DMLNIX_FILL_STATS=ON; otherwise this is no code at all.  `st` is the EvalState, `f` an EvalState::Fill.
+#ifdef MLNIX_FILL_STATS
+#define MLNIX_FILL(st, f, n) \
+  do {                       \
+    if ((st).statsEnabled) (st).statFill(f, n); \
+  } while (0)
+#else
+#define MLNIX_FILL(st, f, n) ((void)0)
+#endif
+
 using Symbol = uint32_t;
 
 class SymbolTable {
@@ -456,6 +467,14 @@ public:
   /// MLNIX_STATS=1: op histogram of every module lowered, printed at exit.
   llvm::StringMap<size_t> opStats;
   bool statsEnabled = false;
+  /// The fill/drain pairs of the evaluator (docs/FILL-DRAIN.md), counted under MLNIX_STATS: how often each fills, with how many
+  /// cells in all, and how many fills were past the inline capacity of the fill buffer (what stays in L1 and never reaches malloc).
+  enum Fill : unsigned { FillAttrs, FillApplied, FillAll, FillApplyArgs, FillConcatStr, FillMkList, FillMkString, FillPrimCalls,
+                         FillConcatLists, FillConcatMap, FillFilter, FillCatAttrs, FillSort, FillGenericClosure, FillSplit, FillCount };
+  struct FillStat { uint64_t fills = 0, cells = 0, max = 0, over = 0; };
+  FillStat fillStats[FillCount];
+  void statFill(Fill f, size_t n);
+  void printFillStats();
   bool inPlaceEnabled = true;
 
   /// The operand `v` of the op being evaluated in frame `f`, for a consumer that forces it
