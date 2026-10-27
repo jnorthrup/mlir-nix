@@ -30,8 +30,7 @@ struct Pos {
 /// The immutable bytes of one input.  A file is mapped read-only; anything else is owned.  Nothing
 /// ever writes to it: the lexer's tokens are segments (start, end) of it, and text that is not a
 /// slice of it (an unescaped string) is a separate, appended entry.
-class Source {
-public:
+struct Source {
   Source(const Source &) = delete;
   Source &operator=(const Source &) = delete;
   ~Source();
@@ -40,7 +39,6 @@ public:
   static std::shared_ptr<const Source> mapFile(const std::string &path);
   std::string_view view() const { return {data_, size_}; }
 
-private:
   Source() = default;
   const char *data_ = nullptr;
   size_t size_ = 0;

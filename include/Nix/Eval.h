@@ -52,8 +52,7 @@ namespace cp = ::composite;
 
 using Symbol = uint32_t;
 
-class SymbolTable {
-public:
+struct SymbolTable {
   Symbol create(llvm::StringRef s) {
     auto it = map.find(s);
     if (it != map.end()) return it->second;
@@ -65,7 +64,6 @@ public:
   llvm::StringRef operator[](Symbol s) const { return names[s]; }
   size_t size() const { return names.size(); }
 
-private:
   llvm::StringMap<Symbol> map;
   std::vector<llvm::StringRef> names;
 };
@@ -73,7 +71,7 @@ private:
 struct Value;
 struct Frame;
 struct RegionInfo;
-class EvalState;
+struct EvalState;
 
 /// Opaque position: an mlir::Location's opaque pointer (or null).
 using PosPtr = const void *;
@@ -289,8 +287,7 @@ struct EvalSettings {
 // EvalState
 //===----------------------------------------------------------------------===//
 
-class EvalState {
-public:
+struct EvalState {
   EvalState(EvalSettings settings, std::shared_ptr<nixstore::Store> store);
   ~EvalState();
 
@@ -354,8 +351,7 @@ public:
   Value *newString(std::string_view s, const NixStringContext &ctx = {}) { Value *v = allocValue(); mkString(*v, s, ctx); return v; }
 
   /// Builder for attribute sets.
-  class BindingsBuilder {
-  public:
+  struct BindingsBuilder {
     BindingsBuilder(EvalState &st) : st(st) {}
     void insert(Symbol s, Value *v, PosPtr pos = nullptr) { attrs.push_back({s, v, pos}); }
     void insert(llvm::StringRef name, Value *v, PosPtr pos = nullptr) { insert(st.symbols.create(name), v, pos); }
@@ -371,7 +367,6 @@ public:
     }
     Bindings *finish(); // sorts; later inserts of the same name win? (no: first)
     size_t size() const { return attrs.size(); }
-  private:
     EvalState &st;
     llvm::SmallVector<Attr, 12> attrs; // accumulated here, then drained into the arena by finish()
   };
@@ -531,7 +526,6 @@ public:
   unsigned exprCounter = 0;
   std::function<void(const std::string &)> printTrace;
 
-private:
   llvm::DenseMap<void *, Slot> slotMap;
   uint64_t nUpdLayered = 0, nUpdMerged = 0, nUpdBase = 0, nUpdTop = 0; // MLNIX_STATS: `//` as a layer / a flat merge, entries not copied / copied
   uint64_t nInPlace = 0, nThunks = 0; // MLNIX_STATS: operands evaluated in place / thunks created by lookup()

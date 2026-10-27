@@ -45,8 +45,7 @@ struct Hash {
   bool operator<(const Hash &o) const;
 };
 
-class HashSink {
-public:
+struct HashSink {
   explicit HashSink(HashAlgo a);
   ~HashSink();
   HashSink(const HashSink &) = delete;
@@ -54,7 +53,6 @@ public:
   Hash finish();
   uint64_t bytes() const { return total; }
 
-private:
   HashAlgo algo;
   void *impl;
   uint64_t total = 0;
@@ -187,8 +185,7 @@ struct StoreSettings {
   std::string system;
 };
 
-class Store {
-public:
+struct Store {
   explicit Store(StoreSettings s);
   const std::string &storeDir() const { return settings.storeDir; }
   const StoreSettings &config() const { return settings; }
@@ -244,7 +241,6 @@ public:
 
   std::function<void(const std::string &)> log;
 
-private:
   StoreSettings settings;
   std::map<std::string, std::map<std::string, Hash>> drvHashes;
   std::map<std::string, Derivation> drvCache;

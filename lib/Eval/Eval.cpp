@@ -1011,13 +1011,12 @@ static std::string pipelineText(const EvalSettings &settings) {
 
 RegionInfo *EvalState::mintLambda(nixfe::FilePool &p, uint32_t row) {
   auto t0 = std::chrono::steady_clock::now();
-  nixfe::Row r = p.read(row); // a copy: the pool grows while the body mints
-  auto lam = cast<nd::LambdaOp>(r.op);
+  auto lam = cast<nd::LambdaOp>(p.rows.col<nixfe::PoolCol::Op>()[row]);
   nixfe::GenOptions go;
   go.isBaseName = [this](llvm::StringRef n) { return isBaseName(n); };
   go.deferBodies = true; // lambdas nested in this body wait for their own first call
   go.pool = &p;
-  nixfe::mintBody(lam, p, r, go);
+  nixfe::mintBody(lam, p, row, go);
   if (settings.optimize) {
     if (!devirt) devirt = std::make_unique<mlir::FrozenRewritePatternSet>(mlir::nix::makeDevirtualizePatterns(&ctx));
     mlir::nix::devirtualizePrims(lam, *devirt);

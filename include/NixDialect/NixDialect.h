@@ -25,7 +25,7 @@
 namespace nixev {
 struct Value;
 struct Frame;
-class EvalState;
+struct EvalState;
 } // namespace nixev
 
 // SideEffects::Resource::getName() became const in LLVM 23 (the distro packages are 22).

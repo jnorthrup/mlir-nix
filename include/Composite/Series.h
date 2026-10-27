@@ -20,8 +20,8 @@
 //                      the constant it produced.
 //   Cursor<T...>       the instance pool of one type: a MutableSeries per column, plus the column names, which are the
 //                      cases of its enum in TrikeShed.td (the dialect of this algebra).
-//                      PRELOAD's Cursor is Series<RowVec>, the row-shaped face of the same columns; no
-//                      caller reads a pool row as a RowVec, so that face is a known gap, not built.
+//                      PRELOAD's Cursor is Series<RowVec>, the row-shaped face of the same columns: `row(i)` reads
+//                      one out as a tuple, column by column (a mint reads its pool row so); the Series face is not built.
 //
 //===----------------------------------------------------------------------===//
 
@@ -165,6 +165,7 @@ template <class Parts, class T> constexpr T *drain(const Combine<Parts> &c, T *o
 
 template <class T> struct MutableSeries {
   std::vector<T> cells;
+  bool operator==(const MutableSeries &) const = default;
   uint32_t size() const { return uint32_t(cells.size()); }
   T &operator[](uint32_t i) { return cells[i]; }
   const T &operator[](uint32_t i) const { return cells[i]; }
@@ -206,7 +207,6 @@ template <class T> struct Grow : Slice<T> {
   }
   constexpr Slice<T> done() const { return Slice<T>(this->b.p, this->a); }
 
-private:
   template <class Region> void reserve(Region &region, uint32_t want) {
     if (want <= cap) return;
     T *run = region.template Allocate<T>(want);
@@ -244,14 +244,13 @@ template <class... T> struct Cursor {
   template <auto K> const auto &col() const { return std::get<size_t(K)>(cols); }
   /// Accumulate one row; the result is its index.
   uint32_t append(T... cell) {
-    uint32_t row = size();
-    appendFrom<0>(std::move(cell)...);
-    return row;
+    std::apply([&](auto &...c) { (c.append(std::move(cell)), ...); }, cols);
+    return size() - 1;
   }
-  template <size_t K, class First, class... Rest> void appendFrom(First &&first, Rest &&...rest) {
-    std::get<K>(cols).append(std::forward<First>(first));
-    if constexpr (sizeof...(Rest) > 0) appendFrom<K + 1>(std::forward<Rest>(rest)...);
-  }
+  /// Row i, its cells copied out (a row is read before an append can move the cells), column by column.
+  auto row(uint32_t i) const { return std::apply([i](const auto &...c) { return std::tuple(c[i]...); }, cols); }
+  void clear() { std::apply([](auto &...c) { (c.cells.clear(), ...); }, cols); }
+  void reserve(size_t n) { std::apply([n](auto &...c) { (c.cells.reserve(n), ...); }, cols); }
 };
 
 //===----------------------------------------------------------------------===//

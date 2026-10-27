@@ -37,16 +37,6 @@ struct FreeName {
 /// so reading it back is unchecked.
 using BodyIndex = ::join::TwInt;
 
-/// A pool row read out: where the lambda starts, the op that waits for its body, how many leading captures are
-/// the `with` chain (innermost first), and the names of the captures after them.
-struct Row {
-  uint32_t at = 0;
-  Pos pos;
-  mlir::Operation *op = nullptr;
-  unsigned withs = 0;
-  llvm::SmallVector<llvm::StringRef, 8> names;
-};
-
 /// The instance pool of deferred lambdas of one lowered file: the sea of nodes at lambda grain.  Rows accumulate as
 /// lowering defers a lambda and drain as evaluation mints its body.  A body is parsed again from where its lambda
 /// starts, with the source's bands and statements (kept here) for its groups; what a skim of an enclosing body learned
@@ -79,16 +69,6 @@ struct FilePool {
     return rows.append(at, pos, nullptr, withs, span, nullptr);
   }
   void attach(uint32_t row, mlir::Operation *op) { rows.col<PoolCol::Op>()[row] = op; }
-  Row read(uint32_t row) const {
-    Row r;
-    r.at = rows.col<PoolCol::At>()[row];
-    r.pos = rows.col<PoolCol::AtPos>()[row];
-    r.op = rows.col<PoolCol::Op>()[row];
-    r.withs = rows.col<PoolCol::Withs>()[row];
-    ::join::TwInt span = rows.col<PoolCol::Names>()[row];
-    for (uint32_t i = 0; i < span.second(); i++) r.names.push_back(nameCol[span.first() + i]);
-    return r;
-  }
   /// The body is minted: the op leaves the pool, the row keeps its anchor (Body).
   void drain(uint32_t row) { rows.col<PoolCol::Op>().drain(row); }
   void see(uint32_t at, uint32_t end, Pos endPos, llvm::ArrayRef<FreeName> free) {
@@ -118,7 +98,7 @@ mlir::nix::ExprOp genExpr(mlir::ModuleOp module, std::shared_ptr<Origin> origin,
 
 /// Mint the body of a deferred lambda from its pool row: the demand half of the schedule.  The same
 /// parse as genExpr's, so eager and demand-minted bodies are the same ops.
-void mintBody(mlir::nix::LambdaOp lam, FilePool &pool, const Row &r, const GenOptions &opts);
+void mintBody(mlir::nix::LambdaOp lam, FilePool &pool, uint32_t row, const GenOptions &opts);
 
 } // namespace nixfe
 

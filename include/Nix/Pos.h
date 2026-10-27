@@ -49,8 +49,7 @@ static_assert(PackedPos::pack(0, 1, 1) == 0 && PackedPos::pack(1, 0, 1) == 0, "n
 
 /// The names of the files positions refer to, by number (1-based).  Append-only, one process-wide table:
 /// a position is a number, so the name is looked up only when a message prints it.
-class FileTable {
-public:
+struct FileTable {
   static FileTable &get() {
     static FileTable t;
     return t;
@@ -66,7 +65,6 @@ public:
     return id >= 1 && id <= names.size() ? names[id - 1] : std::string();
   }
 
-private:
   mutable std::mutex m;
   std::unordered_map<std::string, uint32_t> ids;
   std::deque<std::string> names;

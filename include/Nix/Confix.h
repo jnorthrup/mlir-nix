@@ -24,7 +24,9 @@
 #include "Composite/TrikeShedEnums.h.inc"
 
 #include <algorithm>
+#include <atomic>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace nixfe::confix {
@@ -39,53 +41,85 @@ using Kind = BandKind;
 /// NixDialect/NixSyntax.td): the qualified semicolons and commas of each band, as `first j count` into `ends`, where a
 /// band's are together and in order.  The opening delimiter of a band is at `first`, its closing delimiter at `second`
 /// (a string's closing quote, an indented string's first closing quote, the `in` of a `let`).
+///
+/// The scan of a large source runs on a thread of its own, ahead of the parse that reads the table (layer 1 shoots
+/// ahead; layers 2 and 3 take each band once it has closed).  The storage is reserved for the most bands the source can
+/// hold, so no row moves while it is read; `through` says how far the scan has read (every band opening before it is
+/// one of the first `opened` rows), and a band's span is stored last when it closes: a span whose second() is 0 is a
+/// band still open.  The reads below wait for what they need; after a scan on the parse's own thread they never do.
 struct Bands {
   composite::Cursor<join::TwInt, uint8_t, join::TwInt> rows{BandCol{}};
   composite::MutableSeries<uint32_t> ends;
-  uint32_t size() const { return rows.size(); }
-  /// Empty the table and keep its storage, for a scan of the next source.
+  static constexpr uint32_t kDone = ~0u, kNone = ~0u;
+  std::atomic<uint32_t> through{kDone}, opened{0};
+  std::atomic<bool> balanced{true}; // the verdict, once `through` is kDone
+  /// What a reader sees when the scan ended without balancing the source while it waited on a band.
+  struct Refused {};
+
+  uint32_t size() const { return through.load(std::memory_order_acquire) == kDone ? rows.size() : opened.load(std::memory_order_acquire); }
+  /// Empty the table, open for a scan of the next source, and keep its storage.
   void clear() {
-    rows.col<BandCol::Span>().cells.clear();
-    rows.col<BandCol::Kind>().cells.clear();
-    rows.col<BandCol::Stmts>().cells.clear();
+    rows.clear();
     ends.cells.clear();
+    opened.store(0, std::memory_order_relaxed);
+    through.store(0, std::memory_order_release);
   }
-  join::TwInt span(uint32_t i) const { return rows.col<BandCol::Span>()[i]; }
+  /// The scan has ended, with this verdict: every wait is over.
+  bool done(bool ok) { balanced = ok; through = kDone; return ok; }
+  /// Room for every band and every end a source of n bytes can hold (a band takes two bytes, an end one), so that a scan
+  /// on another thread never moves a row; the pages a scan does not reach are never touched.
+  void reserveFor(size_t n) {
+    rows.reserve(n / 2 + 2);
+    ends.cells.reserve(n + 1);
+  }
+  static uint64_t word(const join::TwInt &s, std::memory_order o) { return std::atomic_ref(const_cast<uint64_t &>(s.raw)).load(o); }
+  /// The span of band i once it has closed.
+  join::TwInt span(uint32_t i) const {
+    for (bool done = false;; std::this_thread::yield()) {
+      if (join::TwInt s(word(rows.col<BandCol::Span>()[i], std::memory_order_acquire)); s.second()) return s;
+      if (done) throw Refused{};
+      done = through.load(std::memory_order_acquire) == kDone;
+    }
+  }
   Kind kind(uint32_t i) const { return Kind(rows.col<BandCol::Kind>()[i]); }
-  /// The ends of the statements of band i, in order: a view of `ends`.
+  /// The ends of the statements of band i, in order, once it has closed: a view of `ends`.
   auto stmts(uint32_t i) const {
+    span(i);
     join::TwInt s = rows.col<BandCol::Stmts>()[i];
     return composite::series(ends.cells.data() + s.first(), s.second());
   }
-  /// The band that opens at `off`, or size() when none does.
+  /// The band that opens at `off`, or kNone when none does.
   uint32_t at(uint32_t off) const {
-    const auto &c = rows.col<BandCol::Span>().cells;
-    auto it = std::lower_bound(c.begin(), c.end(), off, [](join::TwInt s, uint32_t o) { return s.first() < o; });
-    return it != c.end() && it->first() == off ? uint32_t(it - c.begin()) : size();
+    while (through.load(std::memory_order_acquire) <= off) std::this_thread::yield();
+    const join::TwInt *c = rows.col<BandCol::Span>().cells.data(), *e = c + size();
+    auto it = std::lower_bound(c, e, off, [](const join::TwInt &s, uint32_t o) {
+      return join::TwInt(word(s, std::memory_order_relaxed)).first() < o;
+    });
+    return it != e && join::TwInt(word(*it, std::memory_order_relaxed)).first() == off ? uint32_t(it - c) : kNone;
   }
-  bool operator==(const Bands &o) const {
-    return rows.col<BandCol::Span>().cells == o.rows.col<BandCol::Span>().cells && rows.col<BandCol::Kind>().cells == o.rows.col<BandCol::Kind>().cells &&
-           rows.col<BandCol::Stmts>().cells == o.rows.col<BandCol::Stmts>().cells && ends.cells == o.ends.cells;
-  }
+  bool operator==(const Bands &o) const { return rows.cols == o.rows.cols && ends == o.ends; }
 };
 
 /// Bands being written, as the scan or the lexer meets delimiters: the bands still open, and for each of them (and the
 /// source) the semicolons its `with`s and `assert`s are still owed, and the qualified ends met so far.
-class Layers {
-public:
+struct Layers {
   explicit Layers(Bands &b) : out(b) {}
   void open(Kind k, size_t at) {
     stack.push_back({out.rows.append(join::TwInt(uint32_t(at), 0), uint8_t(k), join::TwInt()), 0, uint32_t(pend.size())});
+    out.opened.store(out.rows.size(), std::memory_order_release);
+    out.through.store(uint32_t(at) + 1, std::memory_order_release);
   }
   /// Close the innermost band at `at`; it must be of kind `a` or `b`.
   bool close(Kind a, Kind b, size_t at) {
     if (stack.empty() || (out.kind(stack.back().row) != a && out.kind(stack.back().row) != b)) return false;
     Open o = stack.back();
     stack.pop_back();
-    out.rows.col<BandCol::Span>()[o.row] = join::TwInt(out.span(o.row).first(), uint32_t(at));
+    join::TwInt &span = out.rows.col<BandCol::Span>()[o.row];
     out.rows.col<BandCol::Stmts>()[o.row] = join::TwInt(out.ends.size(), uint32_t(pend.size() - o.from));
     out.ends.cells.insert(out.ends.cells.end(), pend.begin() + o.from, pend.end());
     pend.resize(o.from);
+    std::atomic_ref<uint64_t>(span.raw).store(join::TwInt(span.first(), uint32_t(at)).raw, std::memory_order_release);
+    out.through.store(uint32_t(at), std::memory_order_release);
     return true;
   }
   /// A `with` or an `assert`: the next semicolon of its band is its own.
@@ -101,7 +135,6 @@ public:
   bool inside(Kind k) const { return !stack.empty() && out.kind(stack.back().row) == k; }
   bool balanced() const { return stack.empty(); }
 
-private:
   struct Open {
     uint32_t row, owed, from; // the band, the semicolons it is owed, where its ends begin in `pend`
   };
