@@ -153,6 +153,13 @@ Fresh profile of the NixOS toplevel run (2 s main-thread sample, 1449 busy sampl
 2. A lowering to a runtime dialect with *resolved addressing*: operand
    (depth, slot) and Symbol ids as attributes, so `lookup` (8.6%) and the `TypeSwitch`
    chain in `evalOp` disappear. Progressive lowering `nix + continents -> nixrt`.
+   Two cheaper forms of the same idea were measured and lose, so `lookup` is not a hash-probe problem:
+   the slot of a value kept in a `slot` property of its defining op, found through a per-class offset
+   table (branch `exp/slot-prop`): +0.3% / +2.1% (demand) and +3.2% / +2.1% (eager) wall on toplevel /
+   nixpkgs-73, identical hashes; and `operand()` / `evalTail()` handing the slot they already found to
+   `lookup()` instead of probing twice: +2.5% / +0.4% (demand; CPU -0.3% / +0.6%). The cost that is
+   left is more likely the memory behind the slot (frames 465 MB, Values 842 MB, the first item of this
+   list); that is an inference from the two results, not a measurement.
 3. Locations (done): 6.2% was FileLineColRange uniquing, one per op; sampled again on the demand
    schedule it was 143 of 269 ms of uniquing per run. A position is now a 64-bit word in the op's
    `pos` property (`include/Nix/Pos.h`, `docs/COMPOSITE.md`): wall -9.2% / -8.7% (demand) and
