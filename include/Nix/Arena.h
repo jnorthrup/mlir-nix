@@ -39,8 +39,7 @@ inline size_t pageSize() {
 }
 
 /// One helper thread that makes ranges of fresh memory resident.
-class Prefaulter {
-public:
+struct Prefaulter {
   static Prefaulter &get() {
     static Prefaulter *p = new Prefaulter(); // never destroyed: the thread may outlive main()
     return *p;
@@ -58,7 +57,6 @@ public:
     cv.notify_one();
   }
 
-private:
   Prefaulter() : disabled(getenv("MLNIX_NO_PREFAULT") != nullptr) {}
   void run() {
     for (;;) {
@@ -90,8 +88,7 @@ private:
 } // namespace arena_detail
 
 /// The slab source of the arena.  Slabs are page multiples, carved from reserved ranges of address space in order.
-class PrefaultSlabs {
-public:
+struct PrefaultSlabs {
   static constexpr size_t kSlab = 4u << 20;         // the size of an ordinary slab, and how far ahead pages are touched
   static constexpr size_t kChunk = size_t(1) << 30; // address space reserved at a time
 
@@ -129,7 +126,6 @@ public:
   }
   void Deallocate(const void *, size_t, size_t) {} // never freed
 
-private:
   char *cur = nullptr;
   char *end = nullptr;
   unsigned carved = 0;

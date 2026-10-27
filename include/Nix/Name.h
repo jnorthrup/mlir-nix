@@ -51,7 +51,6 @@ struct Name {
   bool operator==(const Name &o) const { return isNull() == o.isNull() && str() == o.str(); }
   bool operator!=(const Name &o) const { return !(*this == o); }
 
-private:
   Name(const char *d, size_t n) : data(d), size(static_cast<uint32_t>(n)) {}
 };
 

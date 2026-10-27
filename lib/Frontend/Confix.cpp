@@ -30,17 +30,14 @@ struct StopTables {
 };
 constexpr StopTables kStop;
 
-class Scanner : Rules {
-public:
+struct Scanner : Rules {
   Scanner(std::string_view s, Bands &b) : Rules(s), bands(b), layers(b) {}
 
   bool run() {
     if (src.size() >= UINT32_MAX) return false; // segments are 32-bit
     st.assign(1, S_INITIAL);
     const size_t n = src.size();
-    bands.rows.col<BandCol::Span>().cells.reserve(n / 48 + 16); // about one band per 56 bytes of nixpkgs
-    bands.rows.col<BandCol::Kind>().cells.reserve(n / 48 + 16);
-    bands.rows.col<BandCol::Stmts>().cells.reserve(n / 48 + 16);
+    bands.reserveFor(n);
     for (;;) {
       if (p >= n) {
         // At the end of the input a path ends (the lexer emits its end token), and a path with a trailing slash is an error.
@@ -61,7 +58,6 @@ public:
     return st.size() == 1 && layers.balanced();
   }
 
-private:
   enum State : uint8_t { S_INITIAL, S_DEFAULT, S_STRING, S_IND_STRING, S_INPATH, S_INPATH_SLASH };
 
   Bands &bands;
@@ -332,7 +328,7 @@ private:
 
 } // namespace
 
-bool scan(std::string_view src, Bands &out) { return Scanner(src, out).run(); }
+bool scan(std::string_view src, Bands &out) { return out.done(Scanner(src, out).run()); }
 
 } // namespace nixfe::confix
 

@@ -35,6 +35,7 @@
 #include <variant>
 
 namespace nixfe {
+using composite::α;
 
 namespace {
 
@@ -69,8 +70,7 @@ Tok keywordOf(std::string_view w) {
   return k ? Tok(uint8_t(*k)) : T_ID;
 }
 
-class Lexer : public lex::Rules {
-public:
+struct Lexer : public lex::Rules {
   Lexer(std::shared_ptr<Origin> o, const ParseOptions &opts)
       : Rules(o->text->view()), origin(std::move(o)), opts(opts) {
     if (src.size() >= UINT32_MAX) throw ParseError("input too large (segments are 32-bit)", Pos{1, 1}, origin);
@@ -141,7 +141,6 @@ public:
     throw ParseError(msg, posAt(off), origin);
   }
 
-private:
   enum State { S_INITIAL, S_DEFAULT, S_STRING, S_IND_STRING, S_INPATH, S_INPATH_SLASH };
   std::shared_ptr<Origin> origin;
   const ParseOptions &opts;
@@ -610,8 +609,7 @@ struct Hdr {
   llvm::SmallVector<Formal, 8> fs; // ordered by name once read
 };
 
-class Parser {
-public:
+struct Parser {
   Parser(Mode m, std::shared_ptr<Origin> o, const ParseOptions &po, const confix::Bands *bands,
          mlir::ModuleOp module = {}, const GenOptions *go = nullptr)
       : mode(m), origin(std::move(o)), opts(po), lx(origin, opts), bands(bands), module(module),
@@ -638,6 +636,7 @@ public:
     op.getBody().push_back(topBlock);
     b.setInsertionPointToEnd(topBlock);
     Value result;
+    eagerAt = cur().offset;
     if (go->scoped) { // scope: <expr>, with the scope's names bound lexically
       auto lam = nd::LambdaOp::create(b, noLoc(), valTy(), mlir::ArrayAttr(), mlir::DenseBoolArrayAttr(), false,
                                       b.getStringAttr("scope"), mlir::StringAttr(), mlir::DenseI64ArrayAttr(),
@@ -665,24 +664,25 @@ public:
 
   /// The demand half of the schedule: the lexical scope of the lambda rebuilt from its captures, and its header and body
   /// parsed again from its first token, into its block, by the same path as when nothing waits.
-  void mint(nd::LambdaOp lam, const Row &r) {
+  void mint(nd::LambdaOp lam, const FilePool &pool, uint32_t row) {
     minting = true;
     topBlock = &lam.getBody().front(); // anchored constants (builtins, true/false/null) head the body
     mlir::OperandRange caps = lam.getCaptures();
+    auto [at, pos, op, withs, names, anchor] = pool.rows.row(row); // copied: the pool grows while the body mints
     Scope lex;
-    for (size_t i = 0; i < r.names.size(); i++) bindTo(lex, Name::of(r.names[i]), caps[r.withs + i]);
+    for (uint32_t i = 0; i < names.second(); i++) bindTo(lex, Name::of(pool.nameCol[names.first() + i]), caps[withs + i]);
     // `with` never binds lexically and a lexical binding beats every `with`, so the flat map plus the with-chain
     // (outermost pushed first, so the walk meets the innermost first) is the same scope extensionally.
     std::deque<Scope> frames;
     sc = &lex;
-    for (unsigned i = r.withs; i-- > 0;) {
+    for (unsigned i = withs; i-- > 0;) {
       Scope &f = frames.emplace_back();
       f.parent = sc;
       f.isWith = true;
       f.with = caps[i];
       sc = &f;
     }
-    jump(r.at, r.pos);
+    jump(at, pos);
     b.setInsertionPointToEnd(topBlock);
     Hdr h;
     Node body = lambdaBody(h, lam.getArgument());
@@ -690,7 +690,6 @@ public:
     done();
   }
 
-private:
   Mode mode;
   std::shared_ptr<Origin> origin;
   const ParseOptions &opts;
@@ -706,6 +705,10 @@ private:
   std::optional<ParseError> undefinedErr; // the first undefined variable: upstream reports it once the source parses
   uint32_t orphans = 0;                   // names a set was given ahead that nothing bound (a parse error must follow)
   bool minting = false;
+  /// Where a lambda is lowered with its body even when bodies wait: the whole source, which its importer calls, and
+  /// the body of such a lambda when that is a lambda too (`self: super: ...`).  Its body is parsed once, not skimmed
+  /// at the import and parsed again at the call.
+  uint32_t eagerAt = ~0u;
   std::deque<Set> sets;
   std::vector<uint32_t> freeSets;
   std::deque<Scope> recScopes; // a rec set's scope lives until the set is made
@@ -987,8 +990,7 @@ private:
     }
     if (mode == Mode::Skip) return mk(K_CALL, p);
     Value fv = val(f);
-    llvm::SmallVector<Value> av;
-    for (Node &a : args) av.push_back(val(a));
+    auto av = llvm::to_vector(args |α| [&](Node &a) { return val(a); });
     return mk(K_CALL, p, nd::ApplyOp::create(b, noLoc(), valTy(), fv, av, at(p)));
   }
   /// `(f a) b` is `f a b` (upstream's makeCall): an argument after a call is one more argument of that call.
@@ -1073,8 +1075,7 @@ private:
       return text(s + ")", K_EXPR, p);
     }
     if (mode == Mode::Skip) return mk(K_EXPR, p);
-    llvm::SmallVector<Value> vs;
-    for (Node &x : parts) vs.push_back(positioned(val(x), x.pos));
+    auto vs = llvm::to_vector(parts |α| [&](Node &x) { return positioned(val(x), x.pos); });
     return mk(K_EXPR, p, nd::ConcatStringsOp::create(b, noLoc(), valTy(), vs, forceString, at(p)));
   }
   Node intLit(int64_t v, Pos p) {
@@ -1733,7 +1734,8 @@ private:
   Node lambda() {
     Pos pos = cur().pos;
     uint32_t at0 = cur().offset;
-    if (mode == Mode::Gen && go->deferBodies) return defer(pos, at0);
+    bool eager = at0 == eagerAt;
+    if (mode == Mode::Gen && go->deferBodies && !eager) return defer(pos, at0);
     Hdr h;
     if (mode == Mode::Show) {
       Node body = lambdaBody(h, Value());
@@ -1770,7 +1772,7 @@ private:
     Value arg = blk->addArgument(valTy(), noLoc());
     mlir::OpBuilder::InsertPoint ip = b.saveInsertionPoint();
     b.setInsertionPointToEnd(blk);
-    Node body = lambdaBody(h, arg);
+    Node body = lambdaBody(h, arg, eager);
     nd::ReturnOp::create(b, noLoc(), val(body));
     b.restoreInsertionPoint(ip);
     nd::LambdaOp lam = shell(h, pos, {}, mlir::IntegerAttr());
@@ -1844,10 +1846,11 @@ private:
   }
 
   /// A lambda's header and body, into the current block (Gen), whose argument is `arg`.
-  Node lambdaBody(Hdr &h, Value arg) {
+  Node lambdaBody(Hdr &h, Value arg, bool eager = false) {
     Scope ns;
     ns.parent = sc;
     header(h, ns, arg);
+    if (eager) eagerAt = cur().offset;
     Scope *s0 = sc;
     sc = &ns;
     Node body = parseFunction();
@@ -1906,9 +1909,8 @@ private:
     }
     validate(h, pos);
     if (mode == Mode::Gen) { // the formals' ops, ordered by name, then their placeholders replaced
-      llvm::SmallVector<Value> fvs;
-      for (Formal &f : h.fs)
-        fvs.push_back(nd::FormalOp::create(b, noLoc(), valTy(), arg, f.name, f.hasDef ? val(f.def) : Value(), at(f.pos)));
+      auto fvs = llvm::to_vector(h.fs |α| [&](Formal &f) -> Value {
+        return nd::FormalOp::create(b, noLoc(), valTy(), arg, f.name, f.hasDef ? val(f.def) : Value(), at(f.pos)); });
       for (size_t i = 0; i < h.fs.size(); i++) {
         Value ph = member(ns, h.fs[i].name);
         ph.replaceAllUsesWith(fvs[i]);
@@ -2322,8 +2324,7 @@ private:
           return text(s + "]", K_EXPR, pos);
         }
         if (mode == Mode::Skip) return mk(K_EXPR, pos);
-        llvm::SmallVector<Value> vs;
-        for (Node &e : elems) vs.push_back(val(e));
+        auto vs = llvm::to_vector(elems |α| [&](Node &e) { return val(e); });
         return mk(K_EXPR, pos, nd::ListOp::create(b, noLoc(), valTy(), vs));
       }
       unexpected();
@@ -2470,23 +2471,41 @@ static confix::Bands &scratchBands() {
   return b;
 }
 
-/// The bands and statements of a source.  A source the scan refuses has a syntax error, which a parse that needs no
-/// statements reports in the parser's own words.
-static const confix::Bands &scanned(const std::shared_ptr<Origin> &origin, const ParseOptions &po, confix::Bands &into) {
-  into.clear();
-  if (confix::scan(origin->text->view(), into)) return into;
+/// A source the scan refuses has a syntax error, which a parse that needs no statements reports in the parser's own words.
+[[noreturn]] static void refused(const std::shared_ptr<Origin> &origin, const ParseOptions &po) {
   Parser(Mode::Show, origin, po, nullptr).show();
   throw ParseError("internal error: the scan refused a source the parser accepts", Pos{1, 1}, origin);
 }
 
-nd::ExprOp genExpr(mlir::ModuleOp module, std::shared_ptr<Origin> origin, const ParseOptions &po, llvm::StringRef symName,
-                   const GenOptions &opts) {
-  const confix::Bands &bands = scanned(origin, po, opts.pool ? opts.pool->bands : scratchBands());
-  return Parser(Mode::Gen, origin, po, &bands, module, &opts).genTop(symName);
+/// The bands and statements of a source.
+static const confix::Bands &scanned(const std::shared_ptr<Origin> &origin, const ParseOptions &po, confix::Bands &into) {
+  into.clear();
+  if (!confix::scan(origin->text->view(), into)) refused(origin, po);
+  return into;
 }
 
-void mintBody(nd::LambdaOp lam, FilePool &pool, const Row &r, const GenOptions &opts) {
-  Parser(Mode::Gen, pool.origin, pool.opts, &pool.bands, lam->getParentOfType<mlir::ModuleOp>(), &opts).mint(lam, r);
+/// From this size up, the scan runs on a thread of its own, ahead of the parse (which waits on a band only until the
+/// scan has closed it); a smaller source is scanned first, in less time than a thread takes to start.
+constexpr size_t kScanAhead = 64 * 1024;
+
+nd::ExprOp genExpr(mlir::ModuleOp module, std::shared_ptr<Origin> origin, const ParseOptions &po, llvm::StringRef symName,
+                   const GenOptions &opts) {
+  confix::Bands &into = opts.pool ? opts.pool->bands : scratchBands();
+  std::string_view text = origin->text->view();
+  if (text.size() < kScanAhead) return Parser(Mode::Gen, origin, po, &scanned(origin, po, into), module, &opts).genTop(symName);
+  into.clear();
+  std::jthread ahead([&] { confix::scan(text, into); }); // joined when the parse returns or throws
+  try {
+    return Parser(Mode::Gen, origin, po, &into, module, &opts).genTop(symName);
+  } catch (...) { // a source the scan refuses: the parser's own words for it, as when the scan runs first
+    ahead.join();
+    if (!into.balanced.load(std::memory_order_relaxed)) refused(origin, po);
+    throw;
+  }
+}
+
+void mintBody(nd::LambdaOp lam, FilePool &pool, uint32_t row, const GenOptions &opts) {
+  Parser(Mode::Gen, pool.origin, pool.opts, &pool.bands, lam->getParentOfType<mlir::ModuleOp>(), &opts).mint(lam, pool, row);
 }
 
 void showSource(std::ostream &os, std::shared_ptr<Origin> origin, const ParseOptions &po) {
@@ -2508,37 +2527,37 @@ bool confix::lexBands(std::shared_ptr<Origin> origin, const ParseOptions &opts, 
     for (Token t = lx.nextToken(), n;; t = n) {
       n = t.t == T_EOF ? t : lx.nextToken();
       switch (t.t) {
-      case T_EOF: return ls.balanced();
+      case T_EOF: return out.done(ls.balanced());
       case T_DOLLAR_CURLY: ls.open(confix::K_INTERP, t.offset); break;
       case T_IND_STRING_OPEN: ls.open(confix::K_IND_STRING, t.offset); break;
       case T_IND_STRING_CLOSE:
-        if (!ls.close(confix::K_IND_STRING, confix::K_IND_STRING, t.offset)) return false;
+        if (!ls.close(confix::K_IND_STRING, confix::K_IND_STRING, t.offset)) return out.done(false);
         break;
       case T_LET:
         if (!(n.t == T_CHAR && n.ch == '{')) ls.open(confix::K_LET, t.offset);
         break;
       case T_IN:
-        if (!ls.close(confix::K_LET, confix::K_LET, t.offset)) return false;
+        if (!ls.close(confix::K_LET, confix::K_LET, t.offset)) return out.done(false);
         break;
       case T_WITH: case T_ASSERT: ls.owe(); break;
       case T_CHAR:
         switch (t.ch) {
         case '{': ls.open(confix::K_BRACE, t.offset); break;
         case '}':
-          if (!ls.close(confix::K_BRACE, confix::K_INTERP, t.offset)) return false;
+          if (!ls.close(confix::K_BRACE, confix::K_INTERP, t.offset)) return out.done(false);
           break;
         case '(': ls.open(confix::K_PAREN, t.offset); break;
         case ')':
-          if (!ls.close(confix::K_PAREN, confix::K_PAREN, t.offset)) return false;
+          if (!ls.close(confix::K_PAREN, confix::K_PAREN, t.offset)) return out.done(false);
           break;
         case '[': ls.open(confix::K_BRACKET, t.offset); break;
         case ']':
-          if (!ls.close(confix::K_BRACKET, confix::K_BRACKET, t.offset)) return false;
+          if (!ls.close(confix::K_BRACKET, confix::K_BRACKET, t.offset)) return out.done(false);
           break;
         case '"':
           // Inside a string the next quote closes it (an interpolation would have opened a band of its own).
           if (ls.inside(confix::K_STRING)) {
-            if (!ls.close(confix::K_STRING, confix::K_STRING, t.offset)) return false;
+            if (!ls.close(confix::K_STRING, confix::K_STRING, t.offset)) return out.done(false);
           } else {
             ls.open(confix::K_STRING, t.offset);
           }
@@ -2552,7 +2571,7 @@ bool confix::lexBands(std::shared_ptr<Origin> origin, const ParseOptions &opts, 
       }
     }
   } catch (const ParseError &) {
-    return false;
+    return out.done(false);
   }
 }
 
