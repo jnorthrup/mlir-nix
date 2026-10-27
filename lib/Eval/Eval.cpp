@@ -55,7 +55,7 @@ const Attr *Bindings::get(Symbol s) const {
 }
 
 /// The union of two flat sorted sets, `y` winning on equal names, as a new flat set of exactly its size.
-static Bindings *mergeBindings(llvm::BumpPtrAllocator &alloc, const Bindings *x, const Bindings *y) {
+static Bindings *mergeBindings(Arena &alloc, const Bindings *x, const Bindings *y) {
   size_t i = 0, j = 0, n = 0;
   while (i < x->size_ && j < y->size_) {
     Symbol a = x->attrs[i].name, b = y->attrs[j].name;

@@ -35,6 +35,8 @@ namespace mlir { class PassManager; }
 #include <string>
 #include <vector>
 
+#include "Nix/Arena.h"
+
 namespace nixev {
 
 using Symbol = uint32_t;
@@ -83,7 +85,7 @@ struct Bindings {
   /// without copying; flattened once, on the first iteration or size query.
   struct Layer {
     Bindings *top, *base, *flat;
-    llvm::BumpPtrAllocator *alloc; // where flat() allocates
+    Arena *alloc; // where flat() allocates
   };
   static inline uint64_t flattened = 0; // MLNIX_STATS
   bool layered() const { return size_ == kLayered; }
@@ -265,7 +267,7 @@ public:
   /// The demand schedule's optimizer: devirtualization (the default pipeline's one stage) with its
   /// pattern set frozen once.  A lambda body is not IsolatedFromAbove, so no PassManager runs on it.
   std::unique_ptr<mlir::FrozenRewritePatternSet> devirt;
-  llvm::BumpPtrAllocator alloc;
+  Arena alloc;
 
   // Frequently used symbols.
   struct {
