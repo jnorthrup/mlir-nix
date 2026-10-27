@@ -431,7 +431,11 @@ void EvalState::indexRegion(Region &r) {
       ri->result = ret.getValue();
       continue;
     }
-    for (mlir::Value res : op.getResults()) slotMap[res.getAsOpaquePointer()] = {ri, slot++, inPlaceEnabled && core->evaluatesInPlace(res)};
+    for (mlir::Value res : op.getResults()) {
+      // A value evaluated in place has exactly one use, strict or tail: it needs no cell that outlives that use.
+      bool inPlace = inPlaceEnabled && core->evaluatesInPlace(res);
+      slotMap[res.getAsOpaquePointer()] = {ri, inPlace ? kNoSlot : slot++, inPlace};
+    }
     // A deferred lambda's region is a shell until its first call; it is indexed when it is minted.
     auto lam = dyn_cast<nd::LambdaOp>(op);
     if (lam && lam.getBodyIndex()) continue;
@@ -466,7 +470,8 @@ Value *EvalState::lookup(Frame *f, mlir::Value v) {
   unsigned idx = it->second.idx;
   while (f && f->info != ri) f = f->up;
   if (!f) throw EvalError("internal error: SSA value used outside its scope");
-  Value *&slot = f->slots[idx];
+  Value *noCell = nullptr; // an in-place value reached through lookup(): its one use gets its own thunk
+  Value *&slot = idx == kNoSlot ? noCell : f->slots[idx];
   if (slot) return slot;
   Operation *op = v.getDefiningOp();
   if (!op) throw EvalError("internal error: unbound block argument");
