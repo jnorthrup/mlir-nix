@@ -32,7 +32,7 @@ namespace nixfe {
 
 namespace {
 
-enum Tok {
+enum Tok : uint8_t {
   T_EOF, T_ID, T_INT, T_FLOAT, T_STR, T_IND_STR, T_PATH, T_HPATH, T_SPATH,
   T_URI, T_PATH_END, T_DOLLAR_CURLY, T_IND_STRING_OPEN, T_IND_STRING_CLOSE,
   T_IF, T_THEN, T_ELSE, T_ASSERT, T_WITH, T_LET, T_IN, T_REC, T_INHERIT,
@@ -46,11 +46,13 @@ struct Token {
   char ch = 0;
   bool hasIndent = false; // IND_STR from the main rule
   bool derived = false;   // the text is not a slice of the input: span.first() indexes the lexer's pool
+  uint32_t offset = 0;    // where the lexeme starts in the input (segments are 32-bit)
   join::TwInt span;       // [start, end) of the lexeme in the input: a segment, never a copy
-  int64_t i = 0;
-  double f = 0;
+  union {                 // the value of an integer or a float token
+    int64_t i = 0;
+    double f;
+  };
   Pos pos;
-  size_t offset = 0;
 };
 
 std::string tokName(const Token &t) {
@@ -145,18 +147,32 @@ public:
       t = Token();
       t.t = T_EOF;
       t.pos = posAt(src.size());
-      t.offset = src.size();
+      t.offset = uint32_t(src.size());
     }
     return t;
   }
 
+  /// Where an offset is: its line, and its column counted in bytes from the start of the line.  Offsets are asked for in
+  /// order, so the line is found by going from newline to newline (one memchr a line, not a test of every byte), and a
+  /// token on the line already reached costs one comparison.
   Pos posAt(size_t off) {
-    // Positions are computed incrementally (offsets are monotonic).
-    while (lineScan < off && lineScan < src.size()) {
-      if (src[lineScan] == '\n') { line++; lineStart = lineScan + 1; }
-      lineScan++;
+    if (off < lineStart) { // earlier than the last ask: start again
+      line = 1;
+      lineStart = 0;
+      nextNl = newlineFrom(0);
+    }
+    while (nextNl < off) {
+      line++;
+      lineStart = nextNl + 1;
+      nextNl = newlineFrom(lineStart);
     }
     return Pos{line, uint32_t(off - lineStart + 1)};
+  }
+  /// The offset of the first newline at or after `from`; the size of the input when there is none.
+  size_t newlineFrom(size_t from) const {
+    if (from >= src.size()) return src.size();
+    const void *q = std::memchr(src.data() + from, '\n', src.size() - from);
+    return q ? static_cast<size_t>(static_cast<const char *>(q) - src.data()) : src.size();
   }
 
   [[noreturn]] void error(const std::string &msg, size_t off) {
@@ -187,7 +203,8 @@ private:
   std::vector<State> stack;
   size_t p = 0;
   uint32_t line = 1;
-  size_t lineStart = 0, lineScan = 0;
+  size_t lineStart = 0;          // the offset where `line` starts
+  size_t nextNl = newlineFrom(0); // the first newline at or after lineStart
 
   State top() { return stack.back(); }
   void push(State s) { stack.push_back(s); }
@@ -226,17 +243,32 @@ private:
           pop();
           t.t = T_PATH_END;
           t.pos = posAt(p);
-          t.offset = p;
+          t.offset = uint32_t(p);
           return true;
         }
         if (s == S_INPATH_SLASH)
           error("path has a trailing slash", p);
         return false;
       }
+      State st = top();
+      if (st == S_INITIAL || st == S_DEFAULT) {
+        // Between two tokens the commonest things are blanks and `#` comments: one loop, no token made for them.
+        size_t q = p, n = src.size();
+        for (;;) {
+          while (q < n && (src[q] == ' ' || src[q] == '\n' || src[q] == '\t' || src[q] == '\r')) q++;
+          if (q < n && src[q] == '#') {
+            while (q < n && src[q] != '\n' && src[q] != '\r') q++;
+            continue;
+          }
+          break;
+        }
+        p = q;
+        if (eof(p)) continue; // the end of the input is handled at the top
+      }
       t = Token();
-      t.offset = p;
+      t.offset = uint32_t(p);
       t.pos = posAt(p);
-      switch (top()) {
+      switch (st) {
       case S_STRING:
         return lexString(t);
       case S_IND_STRING:
@@ -296,7 +328,7 @@ private:
       p = src.size();
       t.t = T_EOF;
       t.pos = posAt(p);
-      t.offset = p;
+      t.offset = uint32_t(p);
       return true;
     }
     t.t = T_STR;
