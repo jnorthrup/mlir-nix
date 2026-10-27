@@ -2,7 +2,10 @@
 """Differential tests: evaluate the same expressions with mlnix and with
 reference Nix (docker container `nixref`, see scripts/nixref) and compare.
 
-usage: difftest.py [--mlnix PATH] [-v]
+usage: difftest.py [--mlnix PATH] [-v] [--native --ref NAME=PATH ...]
+
+With --native the references are nix-instantiate binaries on this machine (the benchmark host has
+Nix 2.35.4 and Lix 2.91.3); the first one decides the exit code, the others are reported.
 """
 import os, subprocess, sys, argparse
 
@@ -97,16 +100,34 @@ def run_local(mlnix, expr):
                        capture_output=True, env=env, timeout=60)
     return p.returncode, p.stdout.decode(errors="replace").strip()
 
-def run_ref(expr):
-    p = subprocess.run(["docker", "exec", "-w", "/work", "nixref", "nix-instantiate", "--readonly-mode",
-                        "--eval", "--strict", "-E", expr], capture_output=True, timeout=120)
+def run_ref(expr, ref):
+    """ref is (name, path): path None means the docker container `nixref`, else a native nix-instantiate."""
+    _name, path = ref
+    if path is None:
+        cmd = ["docker", "exec", "-w", "/work", "nixref", "nix-instantiate", "--readonly-mode",
+               "--eval", "--strict", "-E", expr]
+        cwd = None
+    else:
+        cmd = [path, "--readonly-mode", "--eval", "--strict", "-E", expr]
+        cwd = ROOT
+    p = subprocess.run(cmd, capture_output=True, timeout=120, cwd=cwd)
     return p.returncode, p.stdout.decode(errors="replace").strip()
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mlnix", default=os.path.join(ROOT, "build", "bin", "mlnix"))
     ap.add_argument("-v", action="store_true")
+    ap.add_argument("--native", action="store_true",
+                    help="reference evaluators run on this machine (Linux) instead of in the container")
+    ap.add_argument("--ref", action="append", default=[], metavar="NAME=PATH",
+                    help="with --native: a reference nix-instantiate; the first is the oracle that decides the exit code")
     a = ap.parse_args()
+    if a.native:
+        if not a.ref:
+            sys.exit("--native needs at least one --ref NAME=/path/to/nix-instantiate")
+        refs = [(r.split("=", 1)[0], r.split("=", 1)[1]) for r in a.ref]
+    else:
+        refs = [("Nix 2.35.4", None)]
     os.makedirs(os.path.join(FIX, "dir", "sub"), exist_ok=True)
     open(os.path.join(FIX, "file.txt"), "w").write("hello\n")
     open(os.path.join(FIX, "dir", "a.txt"), "w").write("a\n")
@@ -116,19 +137,29 @@ def main():
     link = os.path.join(FIX, "dir", "link")
     if not os.path.islink(link):
         os.symlink("a.txt", link)
-    ok = 0
+    ok = [0] * len(refs)
+    disagree = 0
+    failed = False
     for e in CASES:
         r1 = run_local(a.mlnix, e)
-        r2 = run_ref(e)
-        good = r1 == r2
-        ok += good
-        if not good or a.v:
-            print(("PASS " if good else "FAIL ") + e)
-            if not good:
+        rs = [run_ref(e, ref) for ref in refs]
+        good = [r1 == r for r in rs]
+        for i, g in enumerate(good):
+            ok[i] += g
+        split = any(r != rs[0] for r in rs[1:])
+        disagree += split
+        failed |= not good[0]
+        if not all(good) or split or a.v:
+            print(("PASS " if all(good) else "FAIL ") + e)
+            if not all(good) or split:
                 print("   mlnix:", r1)
-                print("   nix:  ", r2)
-    print(f"{ok}/{len(CASES)} identical to Nix 2.35.4")
-    return 0 if ok == len(CASES) else 1
+                for (name, _p), r, g in zip(refs, rs, good):
+                    print(f"   {name + ':':12s}", r, "" if g else "   <- differs from mlnix")
+    for (name, _p), n in zip(refs, ok):
+        print(f"{n}/{len(CASES)} identical to {name}")
+    if disagree:
+        print(f"{disagree} case(s) where the references disagree with each other (shown above)")
+    return 1 if failed else 0
 
 if __name__ == "__main__":
     sys.exit(main())
