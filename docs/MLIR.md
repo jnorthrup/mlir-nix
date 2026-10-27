@@ -22,7 +22,7 @@ What is not used, counted as references in `lib/`, `include/` and `tools/`:
     bytecode (lazy loading of IsolatedFromAbove ops)      0   in LLVM 22 (kali) and 23 (Mac): BytecodeReader.h `lazyLoad`, isMaterializable, materialize
     ExecutionEngine / ORC                                  0   libMLIRExecutionEngine.a on both
     transform dialect                                      0   libMLIRTransformDialect.a on both; the driver is pipeline text
-    PDL / PDLL                                             0   tried on exp/pdl-devirt, lost on every count (COMBINATORS.md)
+    PDL / PDLL                                             0   tried at 638f015, lost on every count (COMBINATORS.md)
     dataflow framework, Liveness                           0   libMLIRAnalysis.a on both
     inliner interface, CallOpInterface, CallableOpInterface  0
     getUsedValuesDefinedAbove                              0   (the front end has its own FreeVars walk)

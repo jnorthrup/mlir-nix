@@ -211,8 +211,8 @@ Devirtualization silently stopped (the default exact-match count fell 208 -> 207
 `nix-prims` is right; `builtin.module(...)` and `nix.expr(...)` wrappers are silent
 no-ops here too. It was caught only because a count moved by one.
 
-**F16. PDL as the devirtualizer loses on every count. (tested)** Branch
-`exp/pdl-devirt`: a generator that builds ~300 `pdl.pattern`s from the primop table at
+**F16. PDL as the devirtualizer loses on every count. (tested)** Commit
+`638f015` (the branch `exp/pdl-devirt`): a generator that builds ~300 `pdl.pattern`s from the primop table at
 start-up. Output identical, but **+627 net C++ lines** to replace a ~45-line pattern,
 **+1.0 to +3.4% run time** on the two workloads (interleaved), and **+23.8 ms start-up**
 per process (8.9 -> 32.7 ms CPU) to build and lower the patterns. From the helper's
@@ -267,10 +267,10 @@ MLIR mechanism I found removes the need to write a parser or the 105 primop bodi
 
 Two helper agents ran these on separate branches with an open-ended budget; I stopped
 them after 32 minutes. That was my mistake in setting them up: the experiments are small
-and every gate here runs in 26 seconds. The branches are kept.
+and every gate here runs in 26 seconds. The commits are kept: both are parents of a merge on master that took none of their lines.
 
-* `exp/pdl-devirt` (`638f015`): PDL devirtualizer. Measured by me, see F16. Not merged.
-* `exp/pipeline-as-data` (`5db8d05`): textual pipeline, a Transform-dialect driver
+* `638f015` (was `exp/pdl-devirt`): PDL devirtualizer. Measured by me, see F16. Not merged.
+* `5db8d05` (was `exp/pipeline-as-data`): textual pipeline, a Transform-dialect driver
   (`MLNIX_TRANSFORM`) and a micro-benchmark tool, +622 net lines. I did not use its code:
   the text pipeline is about 40 lines here, and a flat pass list needs no Transform
   script. Its second commit found F14, which I reproduced and ported.

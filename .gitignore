@@ -1,4 +1,5 @@
 build/
+.worktrees/
 *.o
 .cache/
 .idea/

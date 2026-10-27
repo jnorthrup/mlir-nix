@@ -33,7 +33,7 @@ What is in the tree because of PRELOAD and has no consumer in what `mlnix` runs:
 - `experiments/`: 6 files, 1,109 lines, built by nothing, cited by `docs/COLLECTIONS.md` and `docs/IO.md`. Cut from the tree; the sources are in
   history at `dd55950`.
 - The `join` dialect and its `join-densify` pass (`lib/Composite/Composite.cpp` 174 lines, `Composite.h` 29, `JoinOps.td` 89, two tests):
-  cut, their declarations folded into `TrikeShed.td`; the sources are in history before `exp/treeless`.
+  cut, their declarations folded into `TrikeShed.td`; the sources are in history before `799900b`.
 
 Where the algebra is the shape but not the type: `Value::list`, the strings and the attribute arrays are a size and cells in the
 arena, written by hand. `lib/` and `include/` (outside `Composite/`) still hold 98 `std::vector`, 50 `std::map`, 53 `std::set` and
