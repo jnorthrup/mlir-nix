@@ -21,11 +21,23 @@ WORKLOADS = {
 RSS_UNIT = 1024 * 1024 if sys.platform == "darwin" else 1024  # ru_maxrss: bytes on macOS, KiB on Linux
 
 
-def run_once(binary, args, extra=None):
+def run_once(binary, args, extra=None, cap=None):
+    """One run: (wall s, peak RSS MB, rc, sha256 prefix of stdout).  cap: dict(deadline=s, mem=bytes, diag=dir, tag=name), the
+    limits of scripts/runcap.py: a run past either is stopped, its state kept (the paths are printed), and its rc is 124 or 137."""
     env = dict(os.environ)
     env.setdefault("MLNIX_STORE_ROOT", "/tmp/mlnix-np-root")
     env.setdefault("MLNIX_STATE_DIR", "/tmp/mlnix-np-state")
     env.update(extra or {})
+    if cap:
+        import runcap, tempfile
+        with tempfile.NamedTemporaryFile() as f:
+            r = runcap.run([binary] + args, env=env, cwd=ROOT, stdout=f.name, **cap)
+            out = open(f.name, "rb").read()
+        if r["verdict"] in ("timeout", "memory"):
+            print(f"   {cap.get('tag', 'run')}: {r['verdict']} at {r['at']} s (deadline {cap.get('deadline') or 0:.2f} s, cap "
+                  f"{(cap.get('mem') or 0) / 2**20:.0f} MB), state kept: {' '.join(r['diag']) or 'none'}", flush=True)
+        rc = 124 if r["verdict"] == "timeout" else 137 if r["verdict"] == "memory" else r["rc"]
+        return r["wall"], r["maxrss"] / 2**20, rc, hashlib.sha256(out).hexdigest()[:12]
     t0 = time.perf_counter()
     p = subprocess.Popen([binary] + args, cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     assert p.stdout is not None

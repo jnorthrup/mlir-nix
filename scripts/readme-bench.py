@@ -19,7 +19,7 @@ BEGIN, END = "<!-- bench:begin -->", "<!-- bench:end -->"
 WORKLOADS = ["nixos-toplevel", "nixpkgs-73"]
 FILES = ["summary.txt"] + [w + ".txt" for w in WORKLOADS]
 
-TOOL = re.compile(r"^\s+(Nix [\d.]+|Lix [\d.]+|mlnix demand|mlnix)\s+min\s+([\d.]+)s\s+median\s+([\d.]+)s\s+peak RSS\s+(\d+) MB")
+TOOL = re.compile(r"^\s+(Nix [\d.]+|Lix [\d.]+|mlnix demand|mlnix)\s+min\s+([\d.]+)s\s+median\s+([\d.]+)s\s+peak RSS\s+(\d+) MB(.*)$")
 HEAD = re.compile(r"^== (\S+)\s+\((\d+) interleaved rounds, .*identical output from all: (yes|no)\)")
 MEDIAN = re.compile(r"^\s+(mlnix demand|mlnix) / (Nix|Lix) [\d.]+\s+median x([\d.]+)")
 STARTUP = re.compile(r"^start-up \(.*\), median of (\d+): (.*)$")
@@ -48,7 +48,7 @@ def fetch(sha):
 
 def parse_workload(path):
     lines = open(path).read().splitlines()
-    w = {"host": lines[0], "tools": {}, "startup": "", "median": {}}
+    w = {"host": lines[0], "tools": {}, "startup": "", "median": {}, "pinned": set()}
     for ln in lines[1:]:
         if m := HEAD.match(ln):
             w["name"], w["rounds"], w["identical"] = m[1], int(m[2]), m[3] == "yes"
@@ -56,6 +56,8 @@ def parse_workload(path):
             w["startup"] = m[2]
         elif m := TOOL.match(ln):
             w["tools"][m[1]] = (float(m[2]), float(m[3]), int(m[4]))
+            if "[pinned" in m[5]:
+                w["pinned"].add(m[1])
         elif m := MEDIAN.match(ln):
             w["median"][(m[1], m[2])] = "×" + m[3]  # the host's own, from unrounded medians
     if "name" not in w or len(w["tools"]) != 4:
@@ -112,7 +114,8 @@ def table(w):
     rows = [("Nix " + next(k for k in t if k.startswith("Nix"))[4:], nix), ("Lix " + next(k for k in t if k.startswith("Lix"))[4:], lix),
             ("mlnix, eager", eager), ("mlnix, demand", dem)]
     out = ["| %s | min | median | peak RSS |" % w["name"], "|---|---:|---:|---:|"]
-    out += ["| %s | %.2f s | %.2f s | %d MB |" % (n, v[0], v[1], v[2]) for n, v in rows]
+    pin = lambda n: " (pinned: its best, not timed again)" if any(n.startswith(p) for p in w["pinned"]) else ""
+    out += ["| %s%s | %.2f s | %.2f s | %d MB |" % (n, pin(n), v[0], v[1], v[2]) for n, v in rows]
     m = w["median"]
     out.append("| **demand / Nix** | **%s** | **%s** | %s |" % (ratio(dem[0], nix[0]), m[("mlnix demand", "Nix")], ratio(dem[2], nix[2])))
     out.append("| demand / Lix | %s | %s | %s |" % (ratio(dem[0], lix[0]), m[("mlnix demand", "Lix")], ratio(dem[2], lix[2])))

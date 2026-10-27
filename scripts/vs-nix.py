@@ -24,6 +24,7 @@ import argparse, os, platform, statistics, subprocess, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from bench import ROOT, run_once  # noqa: E402
+import benchref  # noqa: E402
 
 NP = "/tmp/np-bench"  # nixpkgs inside the container
 NATIVE = False
@@ -94,6 +95,11 @@ def main():
     ap.add_argument("--no-copy", action="store_true")
     ap.add_argument("--ref", action="append", default=[], help="reference evaluator NAME=/path/to/nix-instantiate (inside the container unless --native)")
     ap.add_argument("--gc-heap", default="", help="also time the first reference with GC_INITIAL_HEAP_SIZE=<size> (e.g. 4g)")
+    ap.add_argument("--auto-pin", action="store_true", help="do not time a competitor scripts/benchref.py pins; print its pin")
+    ap.add_argument("--cap", action="store_true", help="stop an mlnix run past (1 + over) times its record, in time and (Linux) memory")
+    ap.add_argument("--over", type=float, default=0.2)
+    ap.add_argument("--records", default=os.path.join(ROOT, "docs", "bench", "kali"), help="the stored generations: pins and records")
+    ap.add_argument("--diag", default="/tmp/vs-nix-diag", help="where the state of a stopped run is kept (scripts/runcap.py)")
     a = ap.parse_args()
     NATIVE = a.native
     work = ROOT if NATIVE else "/work"
@@ -104,7 +110,9 @@ def main():
     arms = [("mlnix", {})] + ([("mlnix demand", {"MLNIX_DEFER": "1"})] if a.demand else [])
     if not NATIVE and not a.no_copy:
         host(f"[ -d {NP} ] || cp -a /work/.cache/nixpkgs {NP}")
-    print(machine())
+    mline = machine()
+    print(mline)
+    store = benchref.Store(mline, a.records) if a.auto_pin or a.cap else None
     for n, binary in refs:
         print(f"  {n}: {host(binary + ' --version').splitlines()[0]}")
     # start-up floors: an empty evaluation
@@ -116,7 +124,17 @@ def main():
     for name, w in workloads(work, np).items():
         if a.workload and name not in a.workload:
             continue
-        who_all = [n for n, _ in refs] + [n for n, _ in arms]
+        # escaped competitors are not timed again: their pin stands in; each mlnix arm may take (1 + over) times its record
+        pinned = {n: store.pin(name, n) for n, _ in refs if store and a.auto_pin and store.escaped(name, n)}
+        timed = [(n, b) for n, b in refs if n not in pinned]
+        caps = {}
+        for n, _ in (arms if store and a.cap else []):
+            rec = [t[n] for _, t, _ in store.generations(name) if n in t and t[n][3]]
+            if rec:
+                linux = NATIVE and sys.platform.startswith("linux")
+                caps[n] = dict(deadline=min(r[0] for r in rec) * (1 + a.over), diag=a.diag, tag=f"{name}-{n.replace(' ', '-')}",
+                               mem=int(min(r[2] for r in rec) * (1 + a.over) * 2**20) if linux else None)
+        who_all = [n for n, _ in timed] + [n for n, _ in arms]
         times = {n: [] for n in who_all}
         hashes = {n: set() for n in who_all}
         peak = {n: 0.0 for n, _ in arms}
@@ -129,7 +147,7 @@ def main():
             rot = who_all[i % len(who_all):] + who_all[:i % len(who_all)]
             for who in rot:
                 if who in dict(arms):
-                    t, r, code, h = run_once(a.mlnix, w["mlnix"], dict(arms)[who])
+                    t, r, code, h = run_once(a.mlnix, w["mlnix"], dict(arms)[who], cap=caps.get(who))
                     times[who].append(t); hashes[who].add(h); peak[who] = max(peak[who], r)
                     if code: print(f"{name}: {who} failed rc={code}"); rc = 1
                 else:
@@ -141,15 +159,22 @@ def main():
             round_cost = max(round_cost, time.monotonic() - r0)
             rounds += 1
             if rounds == 1:  # the peak-RSS runs of the references cost about one run each
-                reserve = 1.3 * sum(times[n][0] for n, _ in refs)
-        same = len({frozenset(v) for v in hashes.values()}) == 1 and all(len(v) == 1 for v in hashes.values())
+                reserve = 1.3 * sum(times[n][0] for n, _ in timed)
+        golden = store.golden(name) if pinned else None  # what a pinned competitor printed, as the host recorded it
+        same = (len({frozenset(v) for v in hashes.values()}) == 1 and all(len(v) == 1 for v in hashes.values())
+                and (golden is None or hashes[arms[0][0]] == {golden}))
         if not same:
             rc = 1
         spent = time.monotonic() - t_start
-        h = f"output sha256 {next(iter(hashes[arms[0][0]]))}; " if same else ""
+        h = (f"pinned: {', '.join(pinned)}; " if pinned else "") + (f"output sha256 {next(iter(hashes[arms[0][0]]))}; " if same else "")
         print(f"== {name}  ({rounds} interleaved rounds, {spent:.0f} s{f' of a {a.budget:.0f} s budget' if a.budget else ''}; {h}"
               f"identical output from all: {'yes' if same else 'NO ' + str(hashes)})")
         for n, binary in refs:
+            if n in pinned:
+                p = pinned[n]
+                print(f"   {n:<14s} min {p['min']:5.2f}s  median {p['median']:5.2f}s   peak RSS {p['rss']:5.0f} MB   "
+                      f"[pinned: best of {len(p['gens'])} generations, drift {100 * p['drift']:.1f}%]")
+                continue
             if a.budget and (time.monotonic() - t_start) + 1.3 * times[n][0] > a.budget:
                 extra = "(peak RSS skipped: budget)"
             else:
@@ -165,7 +190,8 @@ def main():
             print(f"   {n:<14s} min {min(times[n]):5.2f}s  median {statistics.median(times[n]):5.2f}s   peak RSS {peak[n]:5.0f} MB")
         for n, _ in arms:
             for r, _ in refs:
-                print(f"   {n} / {r:<12s} median x{statistics.median(times[n])/statistics.median(times[r]):.2f}")
+                base = pinned[r]["median"] if r in pinned else statistics.median(times[r])
+                print(f"   {n} / {r:<12s} median x{statistics.median(times[n]) / base:.2f}")
         print()
     return rc
 

@@ -57,7 +57,9 @@ stage_bench() {
   local w
   for w in nixos-toplevel nixpkgs-73; do
     say "bench $w"
-    timeout 180 python3 scripts/vs-nix.py --native --demand --budget 165 --workload $w "${refs[@]}" > "$OUT/$w.txt" 2>&1
+    # a competitor left behind (scripts/benchref.py) is not timed again; an mlnix run past 1.2x its record is stopped, its state kept
+    timeout 180 python3 scripts/vs-nix.py --native --demand --budget 165 --auto-pin --cap --diag "$OUT/diag" --workload $w "${refs[@]}" \
+      > "$OUT/$w.txt" 2>&1
     say "$w rc=$?"
   done
 }
