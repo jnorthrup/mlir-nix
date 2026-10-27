@@ -1005,18 +1005,13 @@ void registerBuiltins(EvalState &state) {
       } catch (nixstore::Error &e) {
         throw EvalError(e.what(), pos);
       }
-      auto *arena = new nixfe::ExprArena();
-      st.arenas.push_back(arena);
       auto origin = std::make_shared<nixfe::Origin>();
       origin->name = real;
       origin->path = real;
       origin->baseDir = nixstore::dirOf(real);
       origin->text = nixfe::Source::fromString(text);
       st.origins.push_back(origin);
-      nixfe::ParseOptions po = st.parseOptions();
-      nixfe::Expr *e = nixfe::parse(*arena, origin, po);
-      auto op = st.lowerToMLIR(e, origin, &names);
-      fn = st.evalExprOp(op);
+      fn = st.evalExprOp(st.lowerToMLIR(origin, &names));
       st.scopedImportCache[key] = fn;
     }
     st.callFunction(*fn, *args[0], v, pos);

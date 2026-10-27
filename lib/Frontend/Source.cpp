@@ -1,6 +1,6 @@
 //===- Source.cpp - The immutable bytes of one input -------------------------===//
 
-#include "Nix/AST.h"
+#include "Nix/Source.h"
 #include <fcntl.h>
 #include <mutex>
 #include <vector>
@@ -43,6 +43,45 @@ std::shared_ptr<const Source> Source::mapFile(const std::string &path) {
   s->data_ = static_cast<const char *>(m);
   s->size_ = size_t(st.st_size);
   return retain(s);
+}
+
+void printLiteralString(std::ostream &str, std::string_view s) {
+  str << '"';
+  for (size_t i = 0; i < s.size(); i++) {
+    char c = s[i];
+    if (c == '"' || c == '\\') str << '\\' << c;
+    else if (c == '\n') str << "\\n";
+    else if (c == '\r') str << "\\r";
+    else if (c == '\t') str << "\\t";
+    else if (c == '$' && i + 1 < s.size() && s[i + 1] == '{') str << "\\$";
+    else str << c;
+  }
+  str << '"';
+}
+
+static bool isReservedKeyword(std::string_view s) {
+  static const char *kws[] = {"if", "then", "else", "assert", "with", "let", "in", "rec", "inherit"};
+  for (auto *k : kws)
+    if (s == k) return true;
+  return false;
+}
+
+bool isValidIdentifier(std::string_view s) {
+  if (s.empty() || isReservedKeyword(s)) return false;
+  char c = s[0];
+  if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_')) return false;
+  for (char c : s)
+    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+          c == '_' || c == '\'' || c == '-'))
+      return false;
+  return true;
+}
+
+void printIdentifier(std::ostream &str, std::string_view s) {
+  if (s.empty()) { str << "\"\""; return; }
+  if (isReservedKeyword(s)) { str << '"' << s << '"'; return; }
+  if (!isValidIdentifier(s)) { printLiteralString(str, s); return; }
+  str << s;
 }
 
 Source::~Source() {

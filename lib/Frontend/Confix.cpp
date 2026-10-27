@@ -32,7 +32,7 @@ constexpr StopTables kStop;
 
 class Scanner : Rules {
 public:
-  Scanner(std::string_view s, Bands &b) : Rules(s), bands(b) {}
+  Scanner(std::string_view s, Bands &b) : Rules(s), bands(b), layers(b) {}
 
   bool run() {
     if (src.size() >= UINT32_MAX) return false; // segments are 32-bit
@@ -40,6 +40,7 @@ public:
     const size_t n = src.size();
     bands.rows.col<0>().cells.reserve(n / 48 + 16); // about one band per 56 bytes of nixpkgs
     bands.rows.col<1>().cells.reserve(n / 48 + 16);
+    bands.rows.col<2>().cells.reserve(n / 48 + 16);
     for (;;) {
       if (p >= n) {
         // At the end of the input a path ends (the lexer emits its end token), and a path with a trailing slash is an error.
@@ -57,28 +58,40 @@ public:
       }
       if (!ok) return false;
     }
-    return st.size() == 1 && open.empty();
+    return st.size() == 1 && layers.balanced();
   }
 
 private:
   enum State : uint8_t { S_INITIAL, S_DEFAULT, S_STRING, S_IND_STRING, S_INPATH, S_INPATH_SLASH };
 
   Bands &bands;
+  Layers layers;              // the open bands, their statements
   std::vector<State> st;      // the lexer's state stack
-  std::vector<uint32_t> open; // rows of the bands not closed yet
   size_t p = 0;
 
-  void openBand(Kind k, size_t at) { open.push_back(bands.rows.append(join::TwInt(uint32_t(at), 0), uint8_t(k))); }
-  /// Close the innermost band at `at`; it must be of kind `a` or `b`.
-  bool closeBand(Kind a, Kind b, size_t at) {
-    if (open.empty()) return false;
-    uint32_t row = open.back();
-    Kind k = Kind(bands.rows.col<1>()[row]);
-    if (k != a && k != b) return false;
-    open.pop_back();
-    join::TwInt &sp = bands.rows.col<0>()[row];
-    sp = join::TwInt(sp.first(), uint32_t(at));
+  void openBand(Kind k, size_t at) { layers.open(k, at); }
+  bool closeBand(Kind a, Kind b, size_t at) { return layers.close(a, b, at); }
+  /// An identifier [i, i + len): `with` and `assert` are owed their band's next semicolon; `let` opens a band (unless a
+  /// `{` follows: the old `let { ... }`, whose braces are the band) that its `in` closes.
+  bool word(size_t i, size_t len) {
+    std::string_view w = src.substr(i, len);
+    if (w == "with" || w == "assert") layers.owe();
+    else if (w == "let" && !braceNext(i + 3)) openBand(K_LET, i);
+    else if (w == "in") return closeBand(K_LET, K_LET, i);
     return true;
+  }
+  /// Whether the next token after `j` (blanks and comments between) is `{`.
+  bool braceNext(size_t j) const {
+    for (;;) {
+      while (j < src.size() && (src[j] == ' ' || src[j] == '\t' || src[j] == '\r' || src[j] == '\n')) j++;
+      if (at(j) == '#') {
+        while (j < src.size() && src[j] != '\n' && src[j] != '\r') j++;
+      } else if (size_t l = mLongComment(j)) {
+        j += l;
+      } else {
+        return at(j) == '{';
+      }
+    }
   }
   bool inDefault() const { return st.back() <= S_DEFAULT; }
 
@@ -100,11 +113,20 @@ private:
         size_t j = i + 1;
         while (j < n && (isIdChar(s[j]) && s[j] != '\'')) j++;
         const char d = j < n ? s[j] : '\0';
-        if (d != '.' && d != '+' && d != '\'' && d != '/' && d != ':') { p = j; continue; } // the identifier, nothing follows it
+        if (d != '.' && d != '+' && d != '\'' && d != '/' && d != ':') { // the identifier, nothing follows it
+          if (j - i <= 6 && !word(i, j - i)) return false;
+          p = j;
+          continue;
+        }
         size_t k = j;
         while (k < n && isPathChar(s[k])) k++;
         const char after = k < n ? s[k] : '\0';
-        if (after != '/' && after != ':') { p = i + mId(i); continue; } // the lexer's own shortcut (see lexDefault)
+        if (after != '/' && after != ':') { // the lexer's own shortcut (see lexDefault)
+          const size_t l = mId(i);
+          if (l <= 6 && !word(i, l)) return false;
+          p = i + l;
+          continue;
+        }
         // a path or a URI may begin here
       } else {
         switch (c) {
@@ -136,7 +158,9 @@ private:
           if (at(i + 1) == '\'') break; // the opening of an indented string
           p = i + 1;
           continue;
-        case ';': case ',': case '@': case '?': case ':': case '*':
+        case ';': layers.semi(i); p = i + 1; continue;
+        case ',': layers.comma(i); p = i + 1; continue;
+        case '@': case '?': case ':': case '*':
         case '=': case '!': case '&': case '|': case '>': // operators: no character of them begins a path or hides a delimiter
           p = i + 1;
           continue;
@@ -175,6 +199,7 @@ private:
       // The general case: the lexer's own choice among the rules that can begin here.
       Match m = matchDefault(i, c);
       p = i + m.len;
+      if (m.rule >= R_KEYWORD && m.rule < R_OPERATOR && !word(i, m.len)) return false;
       switch (m.rule) {
       case R_DOLLAR_CURLY: st.push_back(S_DEFAULT); openBand(K_INTERP, i); break;
       case R_RBRACE:

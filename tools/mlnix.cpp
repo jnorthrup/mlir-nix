@@ -394,29 +394,26 @@ int runEvalCommandIn(Options &o, bool build, EvalState &st, std::shared_ptr<nixs
   if (o.attrPaths.empty()) o.attrPaths.push_back("");
 
   std::vector<std::pair<std::string, std::function<Value *()>>> exprs;
-  std::vector<std::pair<nixfe::Expr *, std::shared_ptr<nixfe::Origin>>> parsed;
 
   auto handleParsed = [&](const std::string &text, const std::string &baseDir, const std::string &name,
                           const std::string &path) -> Value * {
-    auto *arena = new nixfe::ExprArena();
-    st.arenas.push_back(arena);
     auto origin = std::make_shared<nixfe::Origin>();
     origin->name = name;
     origin->path = path;
     origin->baseDir = baseDir;
     origin->text = nixfe::Source::fromString(text);
     st.origins.push_back(origin);
-    nixfe::ParseOptions po = st.parseOptions();
-    nixfe::Expr *e = nixfe::parse(*arena, origin, po);
     if (o.parseOnly) {
-      st.lowerToMLIR(e, origin); // static checks (undefined variables), like bindVars
-      nixfe::showExpr(std::cout, e);
+      st.lowerToMLIR(origin); // static checks (undefined variables), like bindVars
+      nixfe::ParseOptions po = st.parseOptions();
+      po.lintAbsolutePaths = po.lintShortPaths = po.lintUrls = nixfe::Lint::Ignore; // warned once, above
+      nixfe::showSource(std::cout, origin, po);
       std::cout << "\n";
       return nullptr;
     }
     // The IR is printed whole: a deferred body would print as an empty shell, which is not the program.
     if (o.emitMLIR) st.settings.deferBodies = false;
-    auto op = st.lowerToMLIR(e, origin);
+    auto op = st.lowerToMLIR(origin);
     if (o.emitMLIR) {
       mlir::OpPrintingFlags flags;
       flags.enableDebugInfo(false);

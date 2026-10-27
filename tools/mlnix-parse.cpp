@@ -2,7 +2,6 @@
 // each as `nix-instantiate --parse` would, or the parse error with its position.  Unlike
 // `mlnix --parse` it does not stop at the first error, so two builds of the frontend can be
 // compared byte for byte over a whole corpus (scripts/parse-corpus.py) in a few seconds.
-#include "Nix/AST.h"
 #include "Nix/Confix.h"
 #include <chrono>
 #include <fstream>
@@ -11,7 +10,7 @@
 #include <vector>
 
 int main(int argc, char **argv) {
-  // -n: time the parse alone, no AST printing.  -m: map the files instead of reading them.
+  // -n: time the parse alone, nothing printed (a skim: it builds nothing).  -m: map the files instead of reading them.
   bool quiet = false, map = false, bandsMode = false, scanOnly = false;
   unsigned fuzzSeed = 0;
   bool verbose = false;
@@ -89,9 +88,7 @@ int main(int argc, char **argv) {
       lexS += std::chrono::duration<double>(t2 - t1).count();
       bool same = okScan == okLex;
       if (same && okScan) {
-        same = viaScan.size() == viaLex.size();
-        for (uint32_t i = 0; same && i < viaScan.size(); i++)
-          same = viaScan.span(i) == viaLex.span(i) && viaScan.kind(i) == viaLex.kind(i);
+        same = viaScan == viaLex; // bands and statements
         bandCount += viaScan.size();
       }
       if (verbose)
@@ -103,7 +100,8 @@ int main(int argc, char **argv) {
                     << " bands, lexer " << (okLex ? "accepts " : "rejects ") << viaLex.size() << "\n";
           if (okScan && okLex)
             for (uint32_t i = 0; i < std::min(viaScan.size(), viaLex.size()); i++)
-              if (!(viaScan.span(i) == viaLex.span(i)) || viaScan.kind(i) != viaLex.kind(i)) {
+              if (!(viaScan.span(i) == viaLex.span(i)) || viaScan.kind(i) != viaLex.kind(i) ||
+                  !std::equal(viaScan.stmts(i).begin(), viaScan.stmts(i).end(), viaLex.stmts(i).begin(), viaLex.stmts(i).end())) {
                 std::cout << "  first difference at band " << i << ": scan " << char(viaScan.kind(i)) << " ["
                           << viaScan.span(i).first() << "," << viaScan.span(i).second() << "] lexer "
                           << char(viaLex.kind(i)) << " [" << viaLex.span(i).first() << "," << viaLex.span(i).second() << "]\n";
@@ -150,9 +148,7 @@ int main(int argc, char **argv) {
           mutants++;
           bool same = okScan == okLex;
           if (same && okScan) {
-            same = viaScan.size() == viaLex.size();
-            for (uint32_t i = 0; same && i < viaScan.size(); i++)
-              same = viaScan.span(i) == viaLex.span(i) && viaScan.kind(i) == viaLex.kind(i);
+            same = viaScan == viaLex;
             mBands += viaScan.size();
           }
           if (same) {
@@ -181,15 +177,15 @@ int main(int argc, char **argv) {
     origin->name = origin->path = name;
     origin->baseDir = ".";
     origin->text = text;
-    nixfe::ExprArena arena;
     nixfe::ParseOptions opts;
     opts.pipeOperators = true;
     opts.home = "/home";
     if (!quiet) std::cout << "=== " << name << "\n";
     try {
-      nixfe::Expr *e = nixfe::parse(arena, origin, opts);
-      if (!quiet) {
-        nixfe::showExpr(std::cout, e);
+      if (quiet) {
+        nixfe::skim(origin, opts);
+      } else {
+        nixfe::showSource(std::cout, origin, opts);
         std::cout << "\n";
       }
     } catch (const nixfe::ParseError &e) {

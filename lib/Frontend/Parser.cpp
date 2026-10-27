@@ -3,19 +3,24 @@
 // The lexer is a faithful hand translation of upstream lexer.l: the same start
 // conditions (DEFAULT, STRING, IND_STRING, INPATH, INPATH_SLASH) with the same
 // state stack, and flex's longest-match / first-rule tie breaking for the
-// DEFAULT state.  Because the lexer's state never depends on the parser, the
-// whole input is tokenised up front.
+// DEFAULT state.  The lexer's state never depends on the parser, so a lexer can
+// start again at any token of the default state (Lexer::reposition).
 //
 // The parser is recursive descent + precedence climbing implementing the same
-// grammar, precedences and desugarings as upstream parser.y.
+// grammar, precedences and desugarings as upstream parser.y, and it builds no
+// tree (see "The parser" below).
 //
 //===----------------------------------------------------------------------===//
 
 #include "Composite/Pack.h"
-#include "Nix/AST.h"
 #include "Nix/Confix.h"
 #include "Nix/LexRules.h"
+#include "Nix/MLIRGen.h"
+#include "Nix/Pos.h"
+#include "mlir/IR/Builders.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/Support/xxhash.h"
 
 #include <algorithm>
@@ -24,9 +29,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
-#include <set>
-#include <variant>
+#include <map>
+#include <optional>
 #include <sstream>
+#include <variant>
 
 namespace nixfe {
 
@@ -76,6 +82,24 @@ public:
     return src.substr(t.span.first(), t.span.second() - t.span.first());
   }
 
+  bool wantPos = true; // false: no token gets a position (the heads, which go back and forth)
+  /// Lex again from `off`, a token's start in the default state, whose position is `at`.
+  void reposition(size_t off, Pos at) {
+    p = off;
+    stack.assign(1, S_INITIAL);
+    if (wantPos && at.valid()) {
+      line = at.line;
+      lineStart = off - (at.col - 1);
+      nextNl = newlineFrom(lineStart);
+    }
+  }
+  /// Every state on the stack is the default one: what follows is not inside a string or a path.
+  bool plain() const {
+    for (State s : stack)
+      if (s != S_INITIAL && s != S_DEFAULT) return false;
+    return true;
+  }
+
   /// Produce the next token (T_EOF at end, repeatedly).
   Token nextToken() {
     if (stack.empty()) stack.push_back(S_INITIAL);
@@ -93,6 +117,7 @@ public:
   /// order, so the line is found by going from newline to newline (one memchr a line, not a test of every byte), and a
   /// token on the line already reached costs one comparison.
   Pos posAt(size_t off) {
+    if (!wantPos) return Pos{};
     if (off < lineStart) { // earlier than the last ask: start again
       line = 1;
       lineStart = 0;
@@ -492,27 +517,206 @@ private:
 };
 
 //===----------------------------------------------------------------------===//
-// Parser
+// The parser: upstream's grammar in one pass that builds no tree
 //===----------------------------------------------------------------------===//
+//
+// A parse is one of three.  Gen lowers to the nix dialect as it goes, every name resolved where it is read.  Skip builds
+// nothing and learns what each lambda reads from outside itself: a body that waits for its first call is skipped so, and
+// parsed again from its first token when it is called.  Show prints what `nix-instantiate --parse` prints.  A `let`, a
+// `rec` set and a formals list know their names before their first value: the scan's statements give them (layers 1
+// and 2 of NixDialect/NixSyntax.td).  What a parse holds while it runs (sets being bound, scopes) is in storage reused
+// from set to set; nothing of it outlives the parse but the ops.
 
+namespace nd = mlir::nix;
+using mlir::Value;
+
+enum class Mode : uint8_t { Gen, Skip, Show };
+
+/// The syntax a node was, where a construct looks at its operand's: a call takes more arguments (`(f a) b` is `f a b`), a
+/// string is a static name (`${"s"}`), a `let` or `with` whose body is a variable shares its value, a set literal bound
+/// to an attribute is still open to the bindings after it, a lambda bound to one takes its name.
+enum Kind : uint8_t { K_EXPR, K_VAR, K_CALL, K_STR, K_SET, K_LAMBDA, K_SHARED };
+
+struct Node {
+  Value v;       // Gen
+  std::string s; // Show
+  Pos pos;
+  Kind k = K_EXPR;
+  uint32_t set = 0; // K_SET: the set, made when first used
+  Name text;        // K_STR
+};
+
+/// The free names of a lambda being skipped, each once.
+struct Free {
+  std::vector<FreeName> names;
+  llvm::DenseMap<llvm::StringRef, uint32_t> index;
+};
+
+/// A lexical scope.  Its names map to values (Gen) or to nothing (Skip, where only their presence counts).
+struct Scope {
+  Scope *parent = nullptr;
+  bool isWith = false;
+  Value with;
+  llvm::DenseMap<llvm::StringRef, Value> vars;
+  Free *free = nullptr; // Skip: the edge of a lambda: a name looked up through it is free in the lambda
+};
+
+struct Comp {
+  Name name; // the null name when the component is computed
+  Node expr;
+  bool computed() const { return name.isNull(); }
+};
+using Path = llvm::SmallVector<Comp, 4>;
+
+enum DefKind : uint8_t { D_PLAIN, D_INHERITED, D_FROM };
+struct Def {
+  Name name;
+  Pos pos;
+  DefKind kind = D_PLAIN;
+  uint32_t from = 0; // D_FROM: the source in Set::froms
+  Node val;
+};
+struct Dyn {
+  Node name, val;
+  Pos pos;
+};
+/// An attribute set while it is bound: a literal, a set a path makes, the bindings of a `let`.
+struct Set {
+  std::vector<Def> defs; // in the order written until the set is made, then ordered by name
+  std::vector<Dyn> dyns;
+  std::vector<Node> froms;     // the sources of `inherit (e) ...`
+  std::vector<uint32_t> index; // over a handful of defs: open addressing over positions in `defs`, plus one
+  bool rec = false, ordered = true;
+  Pos pos;
+  Scope *scope = nullptr;  // rec or let: its names, bound before its values are parsed
+  Scope *values = nullptr; // where its values are parsed (and the sources of `inherit (e)`)
+  Scope *outer = nullptr;  // where `inherit x;` reads x
+  Set *into = nullptr;     // a literal bound where a set already is: the set it merges into once it is read
+};
+
+struct Formal {
+  Pos pos;
+  Name name;
+  Node def;
+  bool hasDef = false;
+};
+struct Hdr {
+  Name arg;
+  bool formals = false, ellipsis = false;
+  llvm::SmallVector<Formal, 8> fs; // ordered by name once read
+};
 
 class Parser {
 public:
-  Parser(ExprArena &a, std::shared_ptr<Origin> o, const ParseOptions &opts,
-         Lexer &lx)
-      : arena(a), origin(std::move(o)), opts(opts), lx(lx) {}
+  Parser(Mode m, std::shared_ptr<Origin> o, const ParseOptions &po, const confix::Bands *bands,
+         mlir::ModuleOp module = {}, const GenOptions *go = nullptr)
+      : mode(m), origin(std::move(o)), opts(po), lx(origin, opts), bands(bands), module(module),
+        b(module ? module.getContext() : nullptr), go(go) {}
 
-  Expr *parseTop() {
-    Expr *e = parseExpr();
+  /// The whole source.
+  Node top() {
+    Node e = parseExpr();
     if (cur().t != T_EOF) unexpected("end of file");
+    done();
     return e;
+  }
+  std::string show() {
+    Node e = top();
+    return std::move(txt(e));
+  }
+
+  nd::ExprOp genTop(llvm::StringRef sym) {
+    b.setInsertionPointToEnd(module.getBody());
+    auto op = nd::ExprOp::create(b, noLoc(), b.getStringAttr(sym),
+                                 origin->path.empty() ? mlir::StringAttr() : b.getStringAttr(origin->path),
+                                 b.getStringAttr(origin->baseDir));
+    topBlock = new mlir::Block();
+    op.getBody().push_back(topBlock);
+    b.setInsertionPointToEnd(topBlock);
+    Value result;
+    if (go->scoped) { // scope: <expr>, with the scope's names bound lexically
+      auto lam = nd::LambdaOp::create(b, noLoc(), valTy(), mlir::ArrayAttr(), mlir::DenseBoolArrayAttr(), false,
+                                      b.getStringAttr("scope"), mlir::StringAttr(), mlir::DenseI64ArrayAttr(),
+                                      mlir::ValueRange{}, mlir::IntegerAttr(), 0);
+      mlir::Block *lb = new mlir::Block();
+      lam.getBody().push_back(lb);
+      Value arg = lb->addArgument(valTy(), noLoc());
+      b.setInsertionPointToEnd(lb);
+      Scope s;
+      for (auto &n : go->scopeNames) s.vars[n] = selectLiteral(Pos{}, arg, Name::persist(n));
+      sc = &s;
+      Node e = top();
+      nd::ReturnOp::create(b, noLoc(), val(e));
+      nd::setPos(lam, uint64_t(at(e.pos)));
+      sc = nullptr;
+      result = lam.getResult();
+    } else {
+      Node e = top();
+      result = val(e);
+    }
+    b.setInsertionPointToEnd(topBlock);
+    nd::ReturnOp::create(b, noLoc(), result);
+    return op;
+  }
+
+  /// The demand half of the schedule: the lexical scope of the lambda rebuilt from its captures, and its header and body
+  /// parsed again from its first token, into its block, by the same path as when nothing waits.
+  void mint(nd::LambdaOp lam, const Row &r) {
+    minting = true;
+    topBlock = &lam.getBody().front(); // anchored constants (builtins, true/false/null) head the body
+    mlir::OperandRange caps = lam.getCaptures();
+    Scope lex;
+    for (size_t i = 0; i < r.names.size(); i++) lex.vars[r.names[i]] = caps[r.withs + i];
+    // `with` never binds lexically and a lexical binding beats every `with`, so the flat map plus the with-chain
+    // (outermost pushed first, so the walk meets the innermost first) is the same scope extensionally.
+    std::deque<Scope> frames;
+    sc = &lex;
+    for (unsigned i = r.withs; i-- > 0;) {
+      Scope &f = frames.emplace_back();
+      f.parent = sc;
+      f.isWith = true;
+      f.with = caps[i];
+      sc = &f;
+    }
+    jump(r.at, r.pos);
+    b.setInsertionPointToEnd(topBlock);
+    Hdr h;
+    Node body = lambdaBody(h, lam.getArgument());
+    nd::ReturnOp::create(b, noLoc(), val(body));
+    done();
   }
 
 private:
-  ExprArena &arena;
+  Mode mode;
   std::shared_ptr<Origin> origin;
   const ParseOptions &opts;
-  Lexer &lx;
+  Lexer lx;
+  std::optional<Lexer> hl; // the heads': statement starts, read for the names they bind
+  const confix::Bands *bands;
+  mlir::ModuleOp module;
+  mlir::OpBuilder b;
+  const GenOptions *go;
+  mlir::Block *topBlock = nullptr;
+  llvm::StringMap<Value> builtinCache;
+  Scope *sc = nullptr;                    // where the parse is
+  std::optional<ParseError> undefinedErr; // the first undefined variable: upstream reports it once the source parses
+  uint32_t orphans = 0;                   // names a set was given ahead that nothing bound (a parse error must follow)
+  bool minting = false;
+  std::deque<Set> sets;
+  std::vector<uint32_t> freeSets;
+  std::deque<Scope> recScopes; // a rec set's scope lives until the set is made
+  /// The bindings band being parsed: the statement it is at, and that statement's static path.  A set literal that is a
+  /// binding's whole value links to the band it is bound in (`up`): what the bindings after it add can land in it.
+  struct Ctx {
+    uint32_t band, stmt;
+    llvm::SmallVector<Name, 4> path;
+    Ctx *up;
+  };
+  // The binding whose value is being parsed: a set literal that is all of the value can merge with what is bound there.
+  uint32_t valueAt = ~0u;
+  Set *mergeInto = nullptr;
+  Ctx *valueCtx = nullptr;
+
   /// The lookahead: the next `count` tokens, in a ring.  The deepest look is peek(3) (looksLikeFormals), so four slots hold
   /// it; a slot is written only when it is filled, so a reference from cur() or peek() lives until four more tokens are taken.
   static constexpr size_t kLook = 4;
@@ -532,12 +736,18 @@ private:
       count++;
     }
   }
-  std::string str(const Token &t) { return std::string(lx.text(t)); }
+  /// Parse on from `off` (a token's start, in the default state) at `pos`.
+  void jump(uint32_t off, Pos pos) {
+    lx.reposition(off, pos);
+    head = count = 0;
+    sawEof = false;
+  }
   /// The text of a token as a Name: a slice of the input (never freed) unless the text was derived from it.
-  Name nameOf(const Token &t) { return t.derived ? Name::persist(lx.text(t)) : Name::of(lx.text(t)); }
+  static Name nameOf(Lexer &l, const Token &t) { return t.derived ? Name::persist(l.text(t)) : Name::of(l.text(t)); }
+  Name nameOf(const Token &t) { return nameOf(lx, t); }
   const Token &cur() { if (count == 0) fill(0); return ring[head]; }
   const Token &peek(size_t n = 1) { fill(n); return ring[(head + n) % kLook]; }
-  bool isChar(const Token &t, char c) { return t.t == T_CHAR && t.ch == c; }
+  static bool isChar(const Token &t, char c) { return t.t == T_CHAR && t.ch == c; }
   bool atChar(char c) { return isChar(cur(), c); }
   Token take() {
     if (count == 0) fill(0);
@@ -551,9 +761,7 @@ private:
     if (!expecting.empty()) msg += ", expecting " + std::string(expecting);
     throw ParseError(msg, cur().pos, origin);
   }
-  [[noreturn]] void error(const std::string &msg, Pos p) {
-    throw ParseError(msg, p, origin);
-  }
+  [[noreturn]] void error(const std::string &msg, Pos p) { throw ParseError(msg, p, origin); }
   void expectChar(char c, std::string_view expecting = {}) {
     if (!atChar(c)) {
       if (expecting.empty()) unexpected(std::string("'") + c + "'");
@@ -565,101 +773,1072 @@ private:
     if (cur().t != t) unexpected(what);
     take();
   }
-
-  std::string fmtPos(Pos p) {
-    return origin->name + ":" + std::to_string(p.line) + ":" + std::to_string(p.col);
+  std::string fmtPos(Pos p) { return origin->name + ":" + std::to_string(p.line) + ":" + std::to_string(p.col); }
+  void done() {
+    if (orphans) error("internal error: a set was given names ahead that no binding gave it", Pos{});
+    if (undefinedErr) throw *undefinedErr;
   }
 
+  //===--------------------------------------------------------------------===//
+  // Ops (Gen)
+  //===--------------------------------------------------------------------===//
+
+  mlir::Type valTy() { return nd::ValueType::get(b.getContext()); }
+  mlir::Location noLoc() { return mlir::UnknownLoc::get(b.getContext()); }
+  /// The position word of `p` (Nix/Pos.h): what an op carries in its `pos` property.
+  int64_t at(Pos p) {
+    if (!p.valid()) return 0;
+    if (!origin->fileId) origin->fileId = FileTable::get().add(origin->name);
+    return static_cast<int64_t>(PackedPos::pack(origin->fileId, p.line, p.col));
+  }
+  /// A few consumers report errors at the position of an *operand* (a `with` scope, a computed attribute name, a part of
+  /// an interpolation): a literal operand gets its position back.
+  Value positioned(Value v, Pos p) {
+    if (mlir::Operation *d = v.getDefiningOp())
+      if (mlir::isa<nd::StringOp, nd::IntOp, nd::FloatOp, nd::PathOp, nd::ListOp>(d) && nd::getPos(d) == 0)
+        nd::setPos(d, static_cast<uint64_t>(at(p)));
+    return v;
+  }
+  Value placeholder() {
+    return mlir::UnrealizedConversionCastOp::create(b, noLoc(), mlir::TypeRange{valTy()}, mlir::ValueRange{}).getResult(0);
+  }
+  /// Replace the placeholders of a binding group by their final values.  A member that is an alias of another
+  /// (`let a = b; b = a;`) gets an identity node, so that a cycle is a real SSA cycle.
+  llvm::SmallVector<Value> finalizeGroup(llvm::ArrayRef<Value> phs, llvm::ArrayRef<Value> values, llvm::ArrayRef<Pos> poses,
+                                         llvm::ArrayRef<llvm::SmallVectorImpl<Value> *> remap = {}) {
+    llvm::SmallVector<Value> finals;
+    for (auto [v, p] : composite::joins(values, poses))
+      finals.push_back(v.getDefiningOp<mlir::UnrealizedConversionCastOp>() ? identity(v, p) : v);
+    for (auto *vec : remap) // other lists that may hold placeholders, before the placeholders are erased
+      for (Value &v : *vec)
+        for (size_t i = 0; i < phs.size(); i++)
+          if (v == phs[i]) v = finals[i];
+    for (auto [ph, fin] : composite::joins(phs, finals)) {
+      ph.replaceAllUsesWith(fin);
+      ph.getDefiningOp()->erase();
+    }
+    return finals;
+  }
+  Value identity(Value v, Pos p) { return nd::ApplyOp::create(b, noLoc(), valTy(), v, mlir::ValueRange{}, at(p)); }
+  Value builtin(llvm::StringRef name) {
+    auto it = builtinCache.find(name);
+    if (it != builtinCache.end()) return it->second;
+    mlir::OpBuilder::InsertionGuard g(b);
+    b.setInsertionPointToStart(topBlock);
+    Value v = nd::BuiltinOp::create(b, noLoc(), valTy(), Name::persist(name));
+    return builtinCache[name] = v;
+  }
+  /// A reference to the base environment.  `true`, `false` and `null` are constants (ConstantLike: they fold, and can be
+  /// operands of folded primops); everything else is a `nix.builtin`.
+  Value baseRef(llvm::StringRef name) {
+    if (name != "true" && name != "false" && name != "null") return builtin(name);
+    auto it = builtinCache.find(name);
+    if (it != builtinCache.end()) return it->second;
+    mlir::OpBuilder::InsertionGuard g(b);
+    b.setInsertionPointToStart(topBlock);
+    Value v = name == "null" ? nd::NullOp::create(b, noLoc(), valTy()).getResult()
+                             : nd::BoolOp::create(b, noLoc(), valTy(), b.getBoolAttr(name == "true")).getResult();
+    return builtinCache[name] = v;
+  }
+  Value str(Name n) { return nd::StringOp::create(b, noLoc(), valTy(), n); }
+  /// `base.key` with a literal key.
+  Value selectLiteral(Pos p, Value base, Name key, Value def = Value()) {
+    Name path[1] = {key};
+    return nd::SelectOp::create(b, noLoc(), valTy(), base, mlir::ValueRange{}, def, path, at(p));
+  }
+  /// Where `name` resolves without a `with`: a lexical binding, else the base environment.  Null when only a `with`, or
+  /// nothing, can supply it.
+  Value resolveStatic(llvm::StringRef name) {
+    for (Scope *c = sc; c; c = c->parent) {
+      if (c->isWith) continue;
+      auto it = c->vars.find(name);
+      if (it != c->vars.end()) return it->second;
+    }
+    if (go->isBaseName && go->isBaseName(name)) return baseRef(name);
+    return Value();
+  }
+  void undefined(Name n, Pos p) {
+    ParseError e("undefined variable '" + n.toString() + "'", p, origin);
+    if (minting) throw e;
+    if (!undefinedErr) undefinedErr = e;
+  }
+
+  //===--------------------------------------------------------------------===//
+  // Nodes
+  //===--------------------------------------------------------------------===//
+
+  static Node mk(Kind k, Pos p, Value v = {}) {
+    Node n;
+    n.k = k;
+    n.pos = p;
+    n.v = v;
+    return n;
+  }
+  static Node text(std::string s, Kind k, Pos p) {
+    Node n = mk(k, p);
+    n.s = std::move(s);
+    return n;
+  }
+  /// The value of a node (Gen): a set or a string is made when it is first used.
+  Value val(Node &n) {
+    if (n.k == K_SET) {
+      n.v = makeSet(n.set);
+      n.k = K_EXPR;
+    } else if (n.k == K_STR && !n.v) {
+      n.v = str(n.text);
+    }
+    return n.v;
+  }
+  std::string &txt(Node &n) {
+    if (n.k == K_SET) {
+      n.s = showSet(n.set);
+      n.k = K_EXPR;
+    }
+    return n.s;
+  }
+  static std::string ident(Name n) {
+    std::ostringstream os;
+    printIdentifier(os, n.str());
+    return os.str();
+  }
+  std::string showPath(llvm::ArrayRef<Comp> path) {
+    std::string s;
+    for (const Comp &c : path) {
+      if (!s.empty()) s += '.';
+      s += c.computed() ? "\"${" + c.expr.s + "}\"" : ident(c.name);
+    }
+    return s;
+  }
+
+  Node var(Name n, Pos p) {
+    if (mode == Mode::Show) return text(ident(n), K_VAR, p);
+    llvm::StringRef name = n.str();
+    llvm::SmallVector<Value, 2> withs;
+    unsigned nw = 0;
+    for (Scope *c = sc; c; c = c->parent) {
+      if (c->isWith) {
+        withs.push_back(c->with);
+        nw++;
+        continue;
+      }
+      if (c->free) note(*c->free, n, p, nw == 0);
+      auto it = c->vars.find(name);
+      if (it != c->vars.end()) return mk(K_VAR, p, it->second);
+    }
+    if (mode == Mode::Skip) return mk(K_VAR, p);
+    if (go->isBaseName && go->isBaseName(name)) return mk(K_VAR, p, baseRef(name));
+    if (withs.empty()) {
+      undefined(n, p);
+      return mk(K_VAR, p, baseRef("null"));
+    }
+    return mk(K_VAR, p, nd::WithVarOp::create(b, noLoc(), valTy(), n, withs, at(p)));
+  }
+  static void note(Free &f, Name n, Pos p, bool strict) {
+    auto [it, fresh] = f.index.try_emplace(n.str(), uint32_t(f.names.size()));
+    if (fresh) f.names.push_back({n, p, strict});
+    else if (strict && !f.names[it->second].strict) f.names[it->second] = {n, p, true};
+  }
+  Node call(Pos p, Node &f, llvm::MutableArrayRef<Node> args) {
+    if (mode == Mode::Show) {
+      std::string s = "(" + txt(f);
+      for (Node &a : args) s += " " + txt(a);
+      return text(s + ")", K_CALL, p);
+    }
+    if (mode == Mode::Skip) return mk(K_CALL, p);
+    Value fv = val(f);
+    llvm::SmallVector<Value> av;
+    for (Node &a : args) av.push_back(val(a));
+    return mk(K_CALL, p, nd::ApplyOp::create(b, noLoc(), valTy(), fv, av, at(p)));
+  }
+  /// `(f a) b` is `f a b` (upstream's makeCall): an argument after a call is one more argument of that call.
+  Node extend(Node f, llvm::MutableArrayRef<Node> args) {
+    if (mode == Mode::Show) {
+      f.s.pop_back();
+      for (Node &a : args) f.s += " " + txt(a);
+      f.s += ")";
+    } else if (mode == Mode::Gen) {
+      auto ap = f.v.getDefiningOp<nd::ApplyOp>();
+      llvm::SmallVector<Value> av(ap.getArgs().begin(), ap.getArgs().end());
+      for (Node &a : args) av.push_back(val(a));
+      f.v = nd::ApplyOp::create(b, noLoc(), valTy(), ap.getCallee(), av, int64_t(nd::getPos(ap)));
+      ap.erase();
+    }
+    return f;
+  }
+  Node select(Pos p, Node &e, Path &path, Node *def) {
+    if (mode == Mode::Show) {
+      for (Comp &c : path)
+        if (c.computed()) txt(c.expr);
+      std::string s = "(" + txt(e) + ")." + showPath(path);
+      if (def) s += " or (" + txt(*def) + ")";
+      return text(s, K_EXPR, p);
+    }
+    if (mode == Mode::Skip) return mk(K_EXPR, p);
+    Value base = val(e);
+    llvm::SmallVector<Name> comps;
+    llvm::SmallVector<Value> dyn;
+    for (Comp &c : path) {
+      comps.push_back(c.name);
+      if (c.computed()) dyn.push_back(val(c.expr));
+    }
+    Value dv = def ? val(*def) : Value();
+    return mk(K_EXPR, p, nd::SelectOp::create(b, noLoc(), valTy(), base, dyn, dv, comps, at(p)));
+  }
+  Node hasAttr(Pos p, Node &e, Path &path) {
+    if (mode == Mode::Show) {
+      for (Comp &c : path)
+        if (c.computed()) txt(c.expr);
+      return text("((" + txt(e) + ") ? " + showPath(path) + ")", K_EXPR, p);
+    }
+    if (mode == Mode::Skip) return mk(K_EXPR, p);
+    Value base = val(e);
+    llvm::SmallVector<Name> comps;
+    llvm::SmallVector<Value> dyn;
+    for (Comp &c : path) {
+      comps.push_back(c.name);
+      if (c.computed()) dyn.push_back(val(c.expr));
+    }
+    return mk(K_EXPR, p, nd::HasAttrOp::create(b, noLoc(), valTy(), base, dyn, comps, at(p)));
+  }
+  Node not_(Pos p, Node e) {
+    if (mode == Mode::Show) return text("(! " + txt(e) + ")", K_EXPR, p);
+    if (mode == Mode::Skip) return mk(K_EXPR, p);
+    return mk(K_EXPR, p, nd::NotOp::create(b, noLoc(), valTy(), val(e), at(p)));
+  }
+  enum Bin { B_EQ, B_NEQ, B_AND, B_OR, B_IMPL, B_UPDATE, B_CONCAT };
+  Node bin(Bin k, Pos p, Node &l, Node &r) {
+    static const char *const ops[] = {"==", "!=", "&&", "||", "->", "//", "++"};
+    if (mode == Mode::Show) return text("(" + txt(l) + " " + ops[k] + " " + txt(r) + ")", K_EXPR, p);
+    if (mode == Mode::Skip) return mk(K_EXPR, p);
+    Value a = val(l), c = val(r);
+    int64_t w = at(p);
+    Value v;
+    switch (k) {
+    case B_EQ: v = nd::EqOp::create(b, noLoc(), valTy(), a, c, w); break;
+    case B_NEQ: v = nd::NeqOp::create(b, noLoc(), valTy(), a, c, w); break;
+    case B_AND: v = nd::AndOp::create(b, noLoc(), valTy(), a, c, w); break;
+    case B_OR: v = nd::OrOp::create(b, noLoc(), valTy(), a, c, w); break;
+    case B_IMPL: v = nd::ImplOp::create(b, noLoc(), valTy(), a, c, w); break;
+    case B_UPDATE: v = nd::UpdateOp::create(b, noLoc(), valTy(), a, c, w); break;
+    case B_CONCAT: v = nd::ConcatListsOp::create(b, noLoc(), valTy(), a, c, w); break;
+    }
+    return mk(K_EXPR, p, v);
+  }
+  Node concat(Pos p, bool forceString, llvm::MutableArrayRef<Node> parts) {
+    if (mode == Mode::Show) {
+      std::string s = "(";
+      for (Node &x : parts) s += (s.size() > 1 ? " + " : "") + txt(x);
+      return text(s + ")", K_EXPR, p);
+    }
+    if (mode == Mode::Skip) return mk(K_EXPR, p);
+    llvm::SmallVector<Value> vs;
+    for (Node &x : parts) vs.push_back(positioned(val(x), x.pos));
+    return mk(K_EXPR, p, nd::ConcatStringsOp::create(b, noLoc(), valTy(), vs, forceString, at(p)));
+  }
+  Node intLit(int64_t v, Pos p) {
+    if (mode == Mode::Show) return text(std::to_string(v), K_EXPR, p);
+    return mk(K_EXPR, p, mode == Mode::Gen ? Value(nd::IntOp::create(b, noLoc(), valTy(), b.getI64IntegerAttr(v))) : Value());
+  }
+  Node strLit(Name t, Pos p) {
+    Node n = mk(K_STR, p);
+    n.text = t;
+    if (mode == Mode::Show) {
+      std::ostringstream os;
+      printLiteralString(os, t.str());
+      n.s = os.str();
+    }
+    return n;
+  }
+  /// A `let` or `with` gives a fresh value, a variable shares the bound one; a `let` or `with` whose body is a variable
+  /// (or another such) gets an identity node, so that value identity (`==` on functions, «repeated») matches upstream's.
+  Node shared(Node &body, Pos pos) {
+    Kind k = body.k == K_VAR || body.k == K_SHARED ? K_SHARED : K_EXPR;
+    if (mode != Mode::Gen) return mk(k, pos);
+    Value v = val(body);
+    return mk(k, pos, k == K_SHARED ? identity(v, pos) : v);
+  }
+
+  //===--------------------------------------------------------------------===//
+  // Heads: the names of a group, read where its statements start (layer 2)
+  //===--------------------------------------------------------------------===//
+
+  uint32_t bandAt(uint32_t off) const { return bands ? bands->at(off) : ~0u; }
+  bool hasBand(uint32_t r) const { return bands && r < bands->size(); }
+  Lexer &heads() {
+    if (!hl) {
+      hl.emplace(origin, opts);
+      hl->wantPos = false;
+    }
+    return *hl;
+  }
+  /// Where statement j of band r starts.
+  uint32_t stmtStart(uint32_t r, uint32_t j) {
+    if (j) return bands->stmts(r)[j - 1] + 1;
+    return bands->span(r).first() + (bands->kind(r) == confix::K_LET ? 3 : 1);
+  }
+  void bind(Scope &s, Name n) {
+    if (!s.vars.count(n.str())) s.vars[n.str()] = mode == Mode::Gen ? placeholder() : Value();
+  }
+  enum Got { G_NAME, G_DYN, G_NONE };
+  /// The component of an attribute path at t, read on: a static name (an identifier, `or`, "s", ${"s"}), a computed one
+  /// (stepped over), or none.
+  Got comp(Token &t, Name &n) {
+    Lexer &h = heads();
+    if (t.t == T_ID) { n = nameOf(h, t); return G_NAME; }
+    if (t.t == T_OR_KW) { n = Name::of("or"); return G_NAME; }
+    if (!isChar(t, '"') && t.t != T_DOLLAR_CURLY) return G_NONE;
+    uint32_t band = bandAt(t.offset);
+    if (!hasBand(band)) return G_NONE;
+    uint32_t close = bands->span(band).second();
+    bool interp = t.t == T_DOLLAR_CURLY;
+    Token u = h.nextToken();
+    if (interp && isChar(u, '"')) u = h.nextToken();
+    else if (interp) goto dynamic;
+    n = Name::of("");
+    if (u.t == T_STR) {
+      n = nameOf(h, u);
+      u = h.nextToken();
+    }
+    if (!isChar(u, '"')) goto dynamic;
+    if (interp) u = h.nextToken();
+    if (u.offset == close && (interp ? isChar(u, '}') : true)) return G_NAME;
+  dynamic:
+    h.reposition(close + 1, Pos{});
+    return interp && staticInterp(t.offset + 2, close, n) ? G_NAME : G_DYN;
+  }
+  /// Whether the interpolation whose expression starts at `from` and whose `}` is at `close` is a string literal, a
+  /// static name (NixOS/nix#14642), as the parser will find it: a parse of it that builds nothing.  An error is the
+  /// parser's to report, where it meets it.
+  bool staticInterp(uint32_t from, uint32_t close, Name &n) {
+    try {
+      Parser p(Mode::Skip, origin, opts, bands);
+      p.jump(from, Pos{});
+      Node e = p.parseExpr();
+      if (e.k != K_STR || !p.atChar('}') || p.cur().offset != close) return false;
+      n = e.text;
+      return true;
+    } catch (const ParseError &) {
+      return false;
+    }
+  }
+  struct Head {
+    llvm::SmallVector<Name, 4> path, names; // the static prefix of its path; the names it binds
+    uint32_t lit = ~0u;                     // the band of a set literal that is all of its value
+  };
+  /// The head of statement j of band r.  What the lexer refuses here, the parser reports when it gets there.
+  Head headOf(uint32_t r, uint32_t j) {
+    Head hd;
+    try {
+      readHead(hd, r, j);
+    } catch (const ParseError &) {
+    }
+    return hd;
+  }
+  void readHead(Head &hd, uint32_t r, uint32_t j) {
+    Lexer &h = heads();
+    h.reposition(stmtStart(r, j), Pos{});
+    Token t = h.nextToken();
+    Name n;
+    if (t.t == T_INHERIT) {
+      t = h.nextToken();
+      if (isChar(t, '(')) {
+        uint32_t p = bandAt(t.offset);
+        if (!hasBand(p)) return;
+        h.reposition(bands->span(p).second() + 1, Pos{});
+        t = h.nextToken();
+      }
+      for (; comp(t, n) == G_NAME; t = h.nextToken()) hd.names.push_back(n);
+      return;
+    }
+    bool all = true;
+    for (;;) {
+      Got g = comp(t, n);
+      if (g == G_NONE) return;
+      if (g == G_NAME && all) hd.path.push_back(n);
+      else all = false;
+      t = h.nextToken();
+      if (!isChar(t, '.')) break;
+      t = h.nextToken();
+    }
+    if (!hd.path.empty()) hd.names.push_back(hd.path[0]);
+    if (!all || !isChar(t, '=')) return;
+    llvm::SmallVector<uint32_t, 2> parens; // `a = ({ ... });`: parentheses keep a literal the whole value
+    for (t = h.nextToken(); isChar(t, '('); t = h.nextToken()) parens.push_back(bandAt(t.offset));
+    if (t.t == T_REC) t = h.nextToken();
+    uint32_t lit = isChar(t, '{') ? bandAt(t.offset) : ~0u;
+    if (!hasBand(lit)) return;
+    h.reposition(bands->span(lit).second() + 1, Pos{});
+    t = h.nextToken();
+    for (size_t k = parens.size(); k-- > 0; t = h.nextToken())
+      if (!hasBand(parens[k]) || !isChar(t, ')') || t.offset != bands->span(parens[k]).second()) return;
+    if (isChar(t, ';') && j < bands->stmts(r).size() && t.offset == bands->stmts(r)[j]) hd.lit = lit;
+  }
+  /// The first component of the path of each statement of band r, read once: what the bindings after a `rec` literal
+  /// give it is looked for among the statements whose path starts as its own.
+  llvm::DenseMap<uint32_t, std::vector<Name>> firsts;
+  Name firstOf(uint32_t r, uint32_t j) {
+    auto [it, fresh] = firsts.try_emplace(r);
+    if (fresh)
+      for (uint32_t k = 0, n = bands->stmts(r).size(); k < n; k++) {
+        Head hd = headOf(r, k);
+        it->second.push_back(hd.path.empty() ? Name() : hd.path[0]);
+      }
+    return it->second[j];
+  }
+  /// Bind in s the names that statements j0.. of band r give the set at `rel`, a path from the band's own set: with `rel`
+  /// empty, the names they bind; else the next component of a path that goes through the set, and what a set literal
+  /// bound on the way to it gives it (NixOS/nix#9020: a binding merged into a `rec` set is a member of its scope).
+  void adds(uint32_t r, uint32_t j0, llvm::ArrayRef<Name> rel, Scope &s) {
+    if (!hasBand(r)) return;
+    for (uint32_t j = j0, n = bands->stmts(r).size(); j < n; j++) {
+      if (!rel.empty() && firstOf(r, j) != rel[0]) continue;
+      Head hd = headOf(r, j);
+      if (rel.empty()) {
+        for (Name x : hd.names) bind(s, x);
+        continue;
+      }
+      size_t m = std::min(hd.path.size(), rel.size());
+      if (m == 0 || !std::equal(hd.path.begin(), hd.path.begin() + m, rel.begin())) continue;
+      if (hd.path.size() > rel.size()) bind(s, hd.path[rel.size()]);
+      else if (hd.lit != ~0u) adds(hd.lit, 0, rel.drop_front(hd.path.size()), s);
+    }
+  }
+  /// The formals of a formals band (the first token after its `{` and after each of its commas), bound in s; and the name
+  /// after `}@`, if any, which is the lambda's argument.
+  Name formalNames(uint32_t brace, Scope &s) {
+    uint32_t r = bandAt(brace);
+    if (!hasBand(r)) return Name();
+    try {
+      Lexer &h = heads();
+      auto ends = bands->stmts(r);
+      for (uint32_t j = 0; j <= ends.size(); j++) {
+        h.reposition(j ? ends[j - 1] + 1 : brace + 1, Pos{});
+        Token t = h.nextToken();
+        if (t.t == T_ID) bind(s, nameOf(h, t));
+      }
+      h.reposition(bands->span(r).second() + 1, Pos{});
+      Token t = h.nextToken();
+      if (!isChar(t, '@')) return Name();
+      t = h.nextToken();
+      return t.t == T_ID ? nameOf(h, t) : Name();
+    } catch (const ParseError &) {
+      return Name();
+    }
+  }
+  /// The statement ends where the scan said (layer 1): checked wherever a statement's semicolon is met.
+  void stmtEnd(const Ctx &c) {
+    if (!hasBand(c.band) || !atChar(';')) return;
+    auto ends = bands->stmts(c.band);
+    if (c.stmt >= ends.size() || ends[c.stmt] != cur().offset)
+      error("internal error: the scan ends this statement elsewhere", cur().pos);
+  }
+
+  //===--------------------------------------------------------------------===//
+  // Sets
+  //===--------------------------------------------------------------------===//
+
+  uint32_t newSet(Pos pos, Scope *values, Scope *outer) {
+    uint32_t si;
+    if (!freeSets.empty()) {
+      si = freeSets.back();
+      freeSets.pop_back();
+    } else {
+      si = uint32_t(sets.size());
+      sets.emplace_back();
+    }
+    Set &s = sets[si];
+    s.pos = pos;
+    s.values = values;
+    s.outer = outer;
+    return si;
+  }
+  void release(uint32_t si) {
+    Set &s = sets[si];
+    s.defs.clear();
+    s.dyns.clear();
+    s.froms.clear();
+    s.index.clear();
+    s.rec = false;
+    s.ordered = true;
+    s.scope = s.values = s.outer = nullptr;
+    s.into = nullptr;
+    freeSets.push_back(si);
+  }
+  static Node setNode(uint32_t si, Pos p) {
+    Node n = mk(K_SET, p);
+    n.set = si;
+    return n;
+  }
+  /// The defs ordered by name: the order of the set's ops and of `--parse`.
+  void order(Set &s) {
+    if (s.ordered) return;
+    std::sort(s.defs.begin(), s.defs.end(), [](const Def &a, const Def &b) { return a.name.str() < b.name.str(); });
+    s.index.clear();
+    s.ordered = true;
+  }
+  static bool sameName(const Name &a, const Name &b) {
+    return a.size == b.size && (a.size == 0 || std::memcmp(a.data, b.data, a.size) == 0);
+  }
+  static uint32_t hashOf(const Name &n) {
+    return static_cast<uint32_t>(llvm::xxh3_64bits(llvm::ArrayRef<uint8_t>(reinterpret_cast<const uint8_t *>(n.data), n.size)));
+  }
+  /// A set of a handful is searched by comparing; a larger one has an index, open addressing over positions in `defs`.
+  static constexpr uint32_t kScan = 8;
+  Def *findDef(Set &s, const Name &n) {
+    if (s.index.empty()) {
+      for (Def &d : s.defs)
+        if (sameName(d.name, n)) return &d;
+      return nullptr;
+    }
+    uint32_t mask = uint32_t(s.index.size() - 1);
+    for (uint32_t h = hashOf(n) & mask;; h = (h + 1) & mask) {
+      uint32_t k = s.index[h];
+      if (!k) return nullptr;
+      if (sameName(s.defs[k - 1].name, n)) return &s.defs[k - 1];
+    }
+  }
+  static void indexDef(Set &s, uint32_t k) { // k: the position in `defs`, plus one
+    uint32_t mask = uint32_t(s.index.size() - 1);
+    uint32_t h = hashOf(s.defs[k - 1].name) & mask;
+    while (s.index[h]) h = (h + 1) & mask;
+    s.index[h] = k;
+  }
+  void appendDef(Set &s, Def d) {
+    s.defs.push_back(std::move(d));
+    uint32_t n = uint32_t(s.defs.size());
+    s.ordered = n <= 1;
+    if (!s.index.empty() && n * 2 <= s.index.size()) {
+      indexDef(s, n);
+    } else if (n > kScan) { // at most a quarter full when built, a half before it is built again
+      uint32_t cap = 32;
+      while (cap < n * 4) cap *= 2;
+      s.index.assign(cap, 0);
+      for (uint32_t k = 1; k <= n; k++) indexDef(s, k);
+    }
+  }
+  [[noreturn]] void dupAttr(llvm::ArrayRef<Comp> path, Pos pos, Pos prev) {
+    error("attribute '" + showPath(path) + "' already defined at " + fmtPos(prev), pos);
+  }
+  /// Where the value of `path = ...;` in set si is parsed, and the set a literal there merges with (NixOS/nix#9020: a
+  /// binding that lands in a `rec` set is parsed in its scope).  A path goes through the sets that will be one when
+  /// the literals being read merge: at each component, those of si and of what it merges into; the last is the one
+  /// the others merge into.
+  std::pair<Scope *, Set *> target(uint32_t si, llvm::ArrayRef<Comp> path) {
+    llvm::SmallVector<Set *, 4> level, next;
+    for (Set *s = &sets[si]; s; s = s->into) level.push_back(s);
+    for (const Comp &c : path) {
+      next.clear();
+      for (Set *s : level)
+        if (Def *d = c.computed() ? nullptr : findDef(*s, c.name); d && d->kind == D_PLAIN && d->val.k == K_SET)
+          for (Set *t = &sets[d->val.set]; t; t = t->into) next.push_back(t);
+      if (next.empty()) return {level.back()->values, nullptr};
+      std::swap(level, next);
+    }
+    return {level.back()->values, level.back()};
+  }
+  void addAttr(uint32_t si, Path &path, Pos pos, Node e) {
+    size_t i = 0;
+    for (; i + 1 < path.size(); i++) {
+      uint32_t nested;
+      if (!path[i].computed()) {
+        if (Def *j = findDef(sets[si], path[i].name)) {
+          if (j->val.k != K_SET || j->kind != D_PLAIN) dupAttr(llvm::ArrayRef<Comp>(path.data(), i + 1), pos, j->pos);
+          nested = j->val.set;
+        } else { // a set a path makes is not rec: its values are its parent's
+          nested = newSet(Pos{}, sets[si].values, sets[si].values);
+          Def d;
+          d.name = path[i].name;
+          d.pos = pos;
+          d.val = setNode(nested, Pos{});
+          appendDef(sets[si], std::move(d));
+        }
+      } else {
+        nested = newSet(Pos{}, sets[si].values, sets[si].values);
+        sets[si].dyns.push_back(Dyn{std::move(path[i].expr), setNode(nested, Pos{}), pos});
+      }
+      si = nested;
+    }
+    if (path[i].computed()) {
+      sets[si].dyns.push_back(Dyn{std::move(path[i].expr), std::move(e), pos});
+      return;
+    }
+    Def d;
+    d.name = path[i].name;
+    d.pos = pos;
+    d.val = std::move(e);
+    addAttrSym(si, path, std::move(d));
+  }
+  void addAttrSym(uint32_t si, llvm::ArrayRef<Comp> path, Def d) {
+    if (Def *j = findDef(sets[si], d.name)) {
+      if (d.val.k != K_SET || j->val.k != K_SET || j->kind != D_PLAIN) dupAttr(path, d.pos, j->pos);
+      uint32_t into = j->val.set, from = d.val.set;
+      Set &ae = sets[from];
+      order(ae);
+      uint32_t base = uint32_t(sets[into].froms.size());
+      Path full(path.begin(), path.end()); // the path to the merged set, for the messages
+      for (Def &ad : ae.defs) { // by name, so the duplicate reported first is the least
+        if (ad.kind == D_FROM) ad.from += base;
+        full.push_back(Comp{ad.name, {}});
+        addAttrSym(into, full, std::move(ad));
+        full.pop_back();
+      }
+      for (Dyn &x : ae.dyns) sets[into].dyns.push_back(std::move(x));
+      for (Node &x : ae.froms) sets[into].froms.push_back(std::move(x));
+      release(from);
+      return;
+    }
+    if (d.val.k == K_LAMBDA && mode == Mode::Gen)
+      if (auto lam = d.val.v.getDefiningOp<nd::LambdaOp>(); lam && !lam.getNameAttr())
+        lam.setNameAttr(b.getStringAttr(d.name.str()));
+    appendDef(sets[si], std::move(d));
+  }
+  /// The value of a group member's placeholder (Gen); a name it was given ahead that nothing bound is an orphan.
+  Value member(Scope &s, const Name &n) {
+    auto it = s.vars.find(n.str());
+    if (it == s.vars.end()) error("internal error: the heads of a set missed '" + n.toString() + "'", Pos{});
+    return it->second;
+  }
+  /// Names a group was given ahead that no binding gave it: only a binding the parse refuses can leave one, so the parse
+  /// must fail; done() says so if it does not.
+  void orphansOf(Scope &s, Set &set) { orphans += uint32_t(s.vars.size() - set.defs.size()); }
+  /// Make a set (Gen): its members' values ordered by name, a rec set's placeholders replaced, the attrs op.
+  Value makeSet(uint32_t si) {
+    Set &s = sets[si];
+    order(s);
+    llvm::SmallVector<Name> names;
+    llvm::SmallVector<int64_t> positions;
+    llvm::SmallVector<Value> values, dynNames, dynValues;
+    for (Def &d : s.defs) {
+      names.push_back(d.name);
+      positions.push_back(at(d.pos));
+      values.push_back(val(d.val));
+    }
+    for (Dyn &d : s.dyns) {
+      dynNames.push_back(positioned(val(d.name), d.name.pos));
+      dynValues.push_back(val(d.val));
+    }
+    Value r;
+    if (!s.rec) {
+      r = nd::AttrsOp::create(b, noLoc(), valTy(), names, values, dynNames, dynValues, positions, at(s.pos));
+    } else {
+      llvm::SmallVector<Value> phv;
+      llvm::SmallVector<Pos> poses;
+      int ov = -1;
+      for (size_t i = 0; i < s.defs.size(); i++) {
+        phv.push_back(member(*s.scope, s.defs[i].name));
+        poses.push_back(s.defs[i].pos);
+        if (s.defs[i].name.str() == "__overrides") ov = int(i);
+      }
+      orphansOf(*s.scope, s);
+      // Legacy `__overrides`: attributes of the overrides set replace both the recursive bindings and the result.
+      if (ov >= 0)
+        for (size_t i = 0; i < s.defs.size(); i++)
+          if (int(i) != ov) values[i] = selectLiteral(s.defs[i].pos, values[ov], names[i], values[i]);
+      auto finals = finalizeGroup(phv, values, poses, {&dynNames, &dynValues});
+      r = nd::AttrsOp::create(b, noLoc(), valTy(), names, finals, dynNames, dynValues, positions, at(s.pos));
+      if (ov >= 0) r = nd::UpdateOp::create(b, noLoc(), valTy(), r, finals[ov], at(s.pos));
+    }
+    release(si);
+    return r;
+  }
+  std::string showSet(uint32_t si) {
+    std::string r = sets[si].rec ? "rec { " : "{ ";
+    return r + bindings(si) + "}";
+  }
+  /// The bindings as `--parse` prints them: the inherits, those of each source, the plain ones, the dynamic ones.
+  std::string bindings(uint32_t si) {
+    Set &s = sets[si];
+    order(s);
+    std::string r, inherits;
+    std::map<uint32_t, std::string> from;
+    for (Def &d : s.defs)
+      if (d.kind == D_INHERITED) inherits += " " + ident(d.name);
+      else if (d.kind == D_FROM) from[d.from] += " " + ident(d.name);
+    if (!inherits.empty()) r += "inherit" + inherits + "; ";
+    for (auto &[i, names] : from) r += "inherit (" + txt(s.froms[i]) + ")" + names + "; ";
+    for (Def &d : s.defs)
+      if (d.kind == D_PLAIN) r += ident(d.name) + " = " + txt(d.val) + "; ";
+    for (Dyn &d : s.dyns) r += "\"${" + txt(d.name) + "}\" = " + txt(d.val) + "; ";
+    release(si);
+    return r;
+  }
+
+  /// binds: a sequence of `attrpath = expr;` and `inherit ...;`, into set si, whose statements are band `band`.
+  void parseBinds(uint32_t si, uint32_t band, Ctx *up) {
+    Ctx c{band, 0, {}, up};
+    for (;; c.stmt++) {
+      if (cur().t == T_INHERIT) {
+        take();
+        int from = -1;
+        if (atChar('(')) {
+          take();
+          Scope *s0 = sc;
+          sc = sets[si].values;
+          Node f = parseExpr();
+          sc = s0;
+          expectChar(')');
+          sets[si].froms.push_back(std::move(f));
+          from = int(sets[si].froms.size()) - 1;
+        }
+        while (!atChar(';')) {
+          Pos apos = cur().pos;
+          Name name;
+          if (cur().t == T_ID) name = nameOf(take());
+          else if (cur().t == T_OR_KW) { take(); name = Name::of("or"); }
+          else if (atChar('"') || cur().t == T_DOLLAR_CURLY) {
+            Comp an = parseStringAttr();
+            if (an.computed()) error("dynamic attributes not allowed in inherit", apos);
+            name = an.name;
+          } else {
+            unexpected();
+          }
+          if (Def *prev = findDef(sets[si], name))
+            error("attribute '" + ident(name) + "' already defined at " + fmtPos(prev->pos), apos);
+          Def d;
+          d.name = name;
+          d.pos = apos;
+          if (from >= 0) {
+            d.kind = D_FROM;
+            d.from = uint32_t(from);
+            if (mode == Mode::Gen) d.val = mk(K_EXPR, apos, selectLiteral(apos, val(sets[si].froms[from]), name));
+          } else {
+            d.kind = D_INHERITED;
+            Scope *s0 = sc;
+            sc = sets[si].outer;
+            d.val = var(name, apos);
+            sc = s0;
+          }
+          appendDef(sets[si], std::move(d));
+        }
+        stmtEnd(c);
+        take();
+        continue;
+      }
+      if (cur().t == T_ID || cur().t == T_OR_KW || atChar('"') || cur().t == T_DOLLAR_CURLY) {
+        Pos apos = cur().pos;
+        Path path = parseAttrPath(si);
+        expectChar('=');
+        c.path.clear();
+        for (Comp &x : path) {
+          if (x.computed()) break;
+          c.path.push_back(x.name);
+        }
+        auto [scope, into] = target(si, path);
+        valueAt = cur().offset;
+        mergeInto = into;
+        valueCtx = c.path.size() == path.size() ? &c : nullptr;
+        Scope *s0 = sc;
+        sc = scope;
+        Node e = parseExpr();
+        sc = s0;
+        stmtEnd(c);
+        expectChar(';');
+        addAttr(si, path, apos, std::move(e));
+        continue;
+      }
+      break;
+    }
+  }
+
+  /// A set literal at `{` (after `rec`, if any; `first` is the offset of its first token).
+  Node literal(Pos pos, bool rec, uint32_t first) {
+    bool direct = first == valueAt; // the whole value of a binding: it can merge, and later bindings can land in it
+    Set *into = direct ? mergeInto : nullptr;
+    Ctx *up = direct ? valueCtx : nullptr;
+    valueAt = ~0u;
+    mergeInto = nullptr;
+    valueCtx = nullptr;
+    uint32_t band = bandAt(cur().offset);
+    expectChar('{');
+    uint32_t si;
+    if (into) { // it merges with the set bound there: its `rec` is lost, and that set's scope is its own (NixOS/nix#9020)
+      si = newSet(pos, into->values, into->outer);
+      sets[si].into = into;
+    } else if (rec) {
+      Scope &rs = recScopes.emplace_back();
+      rs.parent = sc;
+      if (mode != Mode::Show) {
+        adds(band, 0, {}, rs); // its names: its statements', then those that bindings after it give it
+        llvm::SmallVector<Name, 8> rel;
+        for (Ctx *k = up; k; k = k->up) {
+          rel.insert(rel.begin(), k->path.begin(), k->path.end());
+          adds(k->band, k->stmt + 1, rel, rs);
+        }
+      }
+      si = newSet(pos, &rs, sc);
+      sets[si].rec = true;
+      sets[si].scope = &rs;
+    } else {
+      si = newSet(pos, sc, sc);
+    }
+    parseBinds(si, band, up);
+    expectChar('}');
+    return setNode(si, pos);
+  }
+
+  //===--------------------------------------------------------------------===//
+  // The grammar
+  //===--------------------------------------------------------------------===//
+
   // expr: expr_function
-  Expr *parseExpr() { return parseFunction(); }
+  Node parseExpr() { return parseFunction(); }
 
   bool looksLikeFormals() {
     // Called with cur() == '{'.
     const Token &a = peek(1);
     if (a.t == T_ELLIPSIS) return true;
     if (isChar(a, '}')) {
-      const Token &b = peek(2);
-      return isChar(b, ':') || isChar(b, '@');
+      const Token &b2 = peek(2);
+      return isChar(b2, ':') || isChar(b2, '@');
     }
     if (a.t == T_ID) {
-      const Token &b = peek(2);
-      return isChar(b, ',') || isChar(b, '?') ||
-             (isChar(b, '}') && (isChar(peek(3), ':') || isChar(peek(3), '@')));
+      const Token &b2 = peek(2);
+      return isChar(b2, ',') || isChar(b2, '?') || (isChar(b2, '}') && (isChar(peek(3), ':') || isChar(peek(3), '@')));
     }
     return false;
   }
 
-  Expr *parseFunction() {
+  Node parseFunction() {
     const Token &t = cur();
+    if ((t.t == T_ID && (isChar(peek(), ':') || (isChar(peek(), '@') && isChar(peek(2), '{')))) ||
+        (atChar('{') && looksLikeFormals()))
+      return lambda();
     Pos pos = t.pos;
-    if (t.t == T_ID && isChar(peek(), ':')) {
-      Name arg = nameOf(take());
-      take();
-      auto *lam = arena.add<ExprLambda>(pos, nullptr);
-      lam->arg = arg;
-      lam->body = parseFunction();
-      return lam;
-    }
-    if (t.t == T_ID && isChar(peek(), '@') && isChar(peek(2), '{')) {
-      Name arg = nameOf(take());
-      take();
-      auto *lam = arena.add<ExprLambda>(pos, nullptr);
-      lam->arg = arg;
-      parseFormals(lam);
-      validateFormals(lam, pos);
-      expectChar(':');
-      lam->body = parseFunction();
-      return lam;
-    }
-    if (atChar('{') && looksLikeFormals()) {
-      auto *lam = arena.add<ExprLambda>(pos, nullptr);
-      parseFormals(lam);
-      if (atChar('@')) {
-        take();
-        if (cur().t != T_ID) unexpected("identifier");
-        lam->arg = nameOf(take());
-      }
-      validateFormals(lam, pos);
-      expectChar(':');
-      lam->body = parseFunction();
-      return lam;
-    }
     if (t.t == T_ASSERT) {
       take();
-      Expr *c = parseExpr();
+      uint32_t c0 = cur().offset;
+      Pos cp = cur().pos;
+      Node c = parseExpr();
       expectChar(';');
-      Expr *b = parseFunction();
-      return arena.add<ExprAssert>(pos, c, b);
+      Node body = parseFunction();
+      if (mode == Mode::Show) return text("assert " + txt(c) + "; " + txt(body), K_EXPR, pos);
+      if (mode == Mode::Skip) return mk(K_EXPR, pos);
+      Value cv = val(c), bv = val(body);
+      return mk(K_EXPR, pos, nd::AssertOp::create(b, noLoc(), valTy(), cv, bv, b.getStringAttr(shown(c0, cp)), at(pos)));
     }
     if (t.t == T_WITH) {
       take();
-      Expr *a = parseExpr();
+      Node a = parseExpr();
       expectChar(';');
-      Expr *b = parseFunction();
-      return arena.add<ExprWith>(pos, a, b);
+      Scope ns;
+      ns.parent = sc;
+      ns.isWith = true;
+      if (mode == Mode::Gen) ns.with = positioned(val(a), a.pos);
+      Scope *s0 = sc;
+      sc = &ns;
+      Node body = parseFunction();
+      sc = s0;
+      if (mode == Mode::Show) return text("(with " + txt(a) + "; " + txt(body) + ")", K_EXPR, pos);
+      return shared(body, pos);
     }
     if (t.t == T_LET && !isChar(peek(), '{')) {
+      uint32_t band = bandAt(t.offset);
       take();
-      ExprAttrs *binds = parseBinds(/*allowEmpty=*/true);
+      Scope ns;
+      ns.parent = sc;
+      if (mode != Mode::Show) adds(band, 0, {}, ns);
+      uint32_t si = newSet(pos, &ns, sc);
+      sets[si].scope = &ns;
+      parseBinds(si, band, nullptr);
       if (cur().t != T_IN) unexpected("'in'");
       take();
-      if (!binds->dynamicAttrs.empty())
-        error("dynamic attributes not allowed in let", pos);
-      Expr *b = parseFunction();
-      return arena.add<ExprLet>(pos, binds, b);
+      if (!sets[si].dyns.empty()) error("dynamic attributes not allowed in let", pos);
+      std::string head;
+      if (mode == Mode::Show) {
+        head = "(let " + bindings(si) + "in ";
+      } else {
+        Set &s = sets[si];
+        order(s);
+        llvm::SmallVector<Value> phv, values;
+        llvm::SmallVector<Pos> poses;
+        for (Def &d : s.defs) {
+          phv.push_back(member(ns, d.name));
+          if (mode == Mode::Gen) values.push_back(val(d.val));
+          poses.push_back(d.pos);
+        }
+        orphansOf(ns, s);
+        if (mode == Mode::Gen) {
+          auto finals = finalizeGroup(phv, values, poses);
+          for (size_t i = 0; i < s.defs.size(); i++) ns.vars[s.defs[i].name.str()] = finals[i];
+        }
+        release(si);
+      }
+      Scope *s0 = sc;
+      sc = &ns;
+      Node body = parseFunction();
+      sc = s0;
+      if (mode == Mode::Show) return text(head + txt(body) + ")", K_EXPR, pos);
+      return shared(body, pos);
     }
     return parseIf();
   }
 
-  void parseFormals(ExprLambda *lam) {
-    lam->hasFormals = true;
-    composite::Grow<Formal> formals;
+  /// The text `--parse` prints for the expression at `off` (the message of a failed assertion), parsed again.
+  std::string shown(uint32_t off, Pos pos) {
+    ParseOptions quiet;
+    quiet.pipeOperators = opts.pipeOperators;
+    quiet.home = opts.home;
+    Parser p(Mode::Show, origin, quiet, nullptr);
+    p.jump(off, pos);
+    Node e = p.parseExpr();
+    return std::move(p.txt(e));
+  }
+
+  //===--------------------------------------------------------------------===//
+  // Lambdas
+  //===--------------------------------------------------------------------===//
+
+  Node lambda() {
+    Pos pos = cur().pos;
+    uint32_t at0 = cur().offset;
+    if (mode == Mode::Gen && go->deferBodies) return defer(pos, at0);
+    Hdr h;
+    if (mode == Mode::Show) {
+      Node body = lambdaBody(h, Value());
+      std::string s = "(";
+      if (h.formals) {
+        s += "{ ";
+        bool first = true;
+        for (Formal &f : h.fs) {
+          if (!first) s += ", ";
+          first = false;
+          s += ident(f.name);
+          if (f.hasDef) s += " ? " + txt(f.def);
+        }
+        if (h.ellipsis) s += first ? "..." : ", ...";
+        s += " }";
+        if (!h.arg.isNull()) s += " @ ";
+      }
+      if (!h.arg.isNull()) s += ident(h.arg);
+      return text(s + ": " + txt(body) + ")", K_LAMBDA, pos);
+    }
+    if (mode == Mode::Skip) { // what reaches its edge is free in it: an enclosing skim keeps that for the lambda's own call
+      Free free;
+      Scope edge;
+      edge.parent = sc;
+      edge.free = &free;
+      Scope *s0 = sc;
+      sc = &edge;
+      lambdaBody(h, Value());
+      sc = s0;
+      if (go && go->pool) go->pool->see(at0, cur().offset, cur().pos, free.names);
+      return mk(K_LAMBDA, pos);
+    }
+    mlir::Block *blk = new mlir::Block();
+    Value arg = blk->addArgument(valTy(), noLoc());
+    mlir::OpBuilder::InsertPoint ip = b.saveInsertionPoint();
+    b.setInsertionPointToEnd(blk);
+    Node body = lambdaBody(h, arg);
+    nd::ReturnOp::create(b, noLoc(), val(body));
+    b.restoreInsertionPoint(ip);
+    nd::LambdaOp lam = shell(h, pos, {}, mlir::IntegerAttr());
+    lam.getBody().push_back(blk);
+    return mk(K_LAMBDA, pos, lam.getResult());
+  }
+
+  /// The defer half of the schedule: the lambda is skimmed (or stepped over, when an enclosing skim saw it), its free names
+  /// resolve against the live scope now and become capture operands, and the pool keeps where it starts.  A name no scope
+  /// supplies is a static error here, exactly when the eager schedule reports it, unless a `with` could supply it.
+  Node defer(Pos pos, uint32_t at0) {
+    FilePool &pl = *go->pool;
+    Hdr h;
+    Free free;
+    Scope edge;
+    edge.free = &free; // the skim stops here
+    Scope *s0 = sc;
+    Mode m0 = mode;
+    mode = Mode::Skip;
+    sc = &edge;
+    auto seen = lx.plain() ? pl.seen.find(at0) : pl.seen.end();
+    if (seen != pl.seen.end()) { // its header again (the formals), then past its body
+      Scope ns;
+      ns.parent = &edge;
+      header(h, ns, Value());
+      FilePool::Seen s = seen->second;
+      pl.seen.erase(seen);
+      free.names.assign(pl.freeCol.begin() + s.free.first(), pl.freeCol.begin() + s.free.first() + s.free.second());
+      jump(s.end, s.endPos);
+    } else {
+      lambdaBody(h, Value());
+    }
+    mode = m0;
+    sc = s0;
+    llvm::SmallVector<Value> caps;
+    for (Scope *c = sc; c; c = c->parent)
+      if (c->isWith) caps.push_back(c->with); // the lookup's order: innermost first
+    unsigned withs = caps.size();
+    llvm::SmallVector<llvm::StringRef> names;
+    for (FreeName &f : free.names) {
+      if (Value v = resolveStatic(f.name.str())) {
+        names.push_back(f.name.str());
+        caps.push_back(v);
+      } else if (f.strict && withs == 0) {
+        undefined(f.name, f.pos);
+      }
+    }
+    uint32_t row = pl.defer(at0, pos, withs, names);
+    nd::LambdaOp lam = shell(h, pos, caps, b.getI64IntegerAttr(static_cast<int64_t>(BodyIndex(pl.file, row).raw)));
+    mlir::Block *blk = new mlir::Block();
+    lam.getBody().push_back(blk);
+    blk->addArgument(valTy(), noLoc());
+    pl.attach(row, lam); // the node exists, its graph does not: the pool holds where it starts
+    return mk(K_LAMBDA, pos, lam.getResult());
+  }
+
+  nd::LambdaOp shell(Hdr &h, Pos pos, mlir::ValueRange caps, mlir::IntegerAttr bodyIndex) {
+    llvm::SmallVector<mlir::Attribute> names;
+    llvm::SmallVector<bool> hasDef;
+    llvm::SmallVector<int64_t> locs;
+    for (Formal &f : h.fs) {
+      names.push_back(b.getStringAttr(f.name.str()));
+      hasDef.push_back(f.hasDef);
+      locs.push_back(at(f.pos));
+    }
+    return nd::LambdaOp::create(b, noLoc(), valTy(), h.formals ? b.getArrayAttr(names) : mlir::ArrayAttr(),
+                                h.formals ? b.getDenseBoolArrayAttr(hasDef) : mlir::DenseBoolArrayAttr(), h.ellipsis,
+                                h.arg.isNull() ? mlir::StringAttr() : b.getStringAttr(h.arg.str()), mlir::StringAttr(),
+                                h.formals ? b.getDenseI64ArrayAttr(locs) : mlir::DenseI64ArrayAttr(), caps, bodyIndex,
+                                at(pos));
+  }
+
+  /// A lambda's header and body, into the current block (Gen), whose argument is `arg`.
+  Node lambdaBody(Hdr &h, Value arg) {
+    Scope ns;
+    ns.parent = sc;
+    header(h, ns, arg);
+    Scope *s0 = sc;
+    sc = &ns;
+    Node body = parseFunction();
+    sc = s0;
+    return body;
+  }
+
+  /// `x:`, `x@{...}:`, `{...}@x:` or `{...}:`, through the colon: the argument and the formals bound in ns (the formals
+  /// before their defaults are parsed, since a default may read any of them, and the argument).
+  void header(Hdr &h, Scope &ns, Value arg) {
+    Pos pos = cur().pos;
+    if (cur().t == T_ID) {
+      h.arg = nameOf(take());
+      ns.vars[h.arg.str()] = arg;
+      if (atChar(':')) {
+        take();
+        return;
+      }
+      take(); // '@'
+    }
+    h.formals = true;
+    if (mode != Mode::Show) {
+      Name after = formalNames(cur().offset, ns);
+      if (!after.isNull() && h.arg.isNull()) ns.vars[after.str()] = arg;
+    }
     expectChar('{');
+    Scope *s0 = sc;
+    sc = &ns;
     while (true) {
       if (atChar('}')) { take(); break; }
       if (cur().t == T_ELLIPSIS) {
         take();
-        lam->ellipsis = true;
+        h.ellipsis = true;
         expectChar('}');
         break;
       }
@@ -670,77 +1849,101 @@ private:
       if (atChar('?')) {
         take();
         f.def = parseExpr();
+        f.hasDef = true;
       }
-      formals.push(arena.region(), f);
+      h.fs.push_back(std::move(f));
       if (atChar(',')) { take(); continue; }
       if (atChar('}')) { take(); break; }
       unexpected();
     }
-    lam->formals = formals.done();
+    sc = s0;
+    if (h.arg.isNull() && atChar('@')) {
+      take();
+      if (cur().t != T_ID) unexpected("identifier");
+      h.arg = nameOf(take());
+    }
+    validate(h, pos);
+    if (mode == Mode::Gen) { // the formals' ops, ordered by name, then their placeholders replaced
+      llvm::SmallVector<Value> fvs;
+      for (Formal &f : h.fs)
+        fvs.push_back(nd::FormalOp::create(b, noLoc(), valTy(), arg, f.name, f.hasDef ? val(f.def) : Value(), at(f.pos)));
+      for (size_t i = 0; i < h.fs.size(); i++) {
+        Value ph = member(ns, h.fs[i].name);
+        ph.replaceAllUsesWith(fvs[i]);
+        ph.getDefiningOp()->erase();
+        ns.vars[h.fs[i].name.str()] = fvs[i];
+      }
+    }
+    if (mode != Mode::Show && ns.vars.size() != h.fs.size() + !h.arg.isNull())
+      error("internal error: the heads of a formals list are not its formals", pos);
+    expectChar(':');
   }
 
-  void validateFormals(ExprLambda *lam, Pos pos) {
-    const composite::Slice<Formal> &fs = lam->formals;
+  void validate(Hdr &h, Pos pos) {
+    auto &fs = h.fs;
     auto byName = [](const Formal &a, const Formal &b) { return a.name.str() < b.name.str(); };
     if (fs.size() > 24) {
       std::stable_sort(fs.begin(), fs.end(), byName);
     } else { // insertion: stable, and std::stable_sort allocates a buffer even for two
       for (size_t i = 1; i < fs.size(); i++) {
-        Formal f = fs[i];
+        Formal f = std::move(fs[i]);
         size_t j = i;
-        for (; j > 0 && byName(f, fs[j - 1]); j--) fs[j] = fs[j - 1];
-        fs[j] = f;
+        for (; j > 0 && byName(f, fs[j - 1]); j--) fs[j] = std::move(fs[j - 1]);
+        fs[j] = std::move(f);
       }
     }
     const Formal *dup = nullptr;
-    for (size_t i = 0; i + 1 < lam->formals.size(); i++)
-      if (lam->formals[i].name == lam->formals[i + 1].name) {
-        const Formal *d = &lam->formals[i + 1];
-        if (!dup || d->pos.line < dup->pos.line ||
-            (d->pos.line == dup->pos.line && d->pos.col < dup->pos.col))
-          dup = d;
+    for (size_t i = 0; i + 1 < fs.size(); i++)
+      if (fs[i].name == fs[i + 1].name) {
+        const Formal *d = &fs[i + 1];
+        if (!dup || d->pos.line < dup->pos.line || (d->pos.line == dup->pos.line && d->pos.col < dup->pos.col)) dup = d;
       }
-    if (dup)
-      error("duplicate formal function argument '" + dup->name.toString() + "'", dup->pos);
-    if (!lam->arg.isNull())
-      for (auto &f : lam->formals)
-        if (f.name == lam->arg)
-          error("duplicate formal function argument '" + lam->arg.toString() + "'", pos);
+    if (dup) error("duplicate formal function argument '" + dup->name.toString() + "'", dup->pos);
+    if (!h.arg.isNull())
+      for (auto &f : fs)
+        if (f.name == h.arg) error("duplicate formal function argument '" + h.arg.toString() + "'", pos);
   }
 
-  Expr *parseIf() {
+  //===--------------------------------------------------------------------===//
+  // Operators, application, selection
+  //===--------------------------------------------------------------------===//
+
+  Node parseIf() {
     if (cur().t == T_IF) {
       Pos pos = take().pos;
-      Expr *c = parseExpr();
+      Node c = parseExpr();
       expect(T_THEN, "'then'");
-      Expr *t = parseExpr();
+      Node t = parseExpr();
       expect(T_ELSE, "'else'");
-      Expr *e = parseExpr();
-      return arena.add<ExprIf>(pos, c, t, e);
+      Node e = parseExpr();
+      if (mode == Mode::Show) return text("(if " + txt(c) + " then " + txt(t) + " else " + txt(e) + ")", K_EXPR, pos);
+      if (mode == Mode::Skip) return mk(K_EXPR, pos);
+      Value cv = val(c), tv = val(t), ev = val(e);
+      return mk(K_EXPR, pos, nd::IfOp::create(b, noLoc(), valTy(), cv, tv, ev, at(pos)));
     }
-    Expr *lhs = parseOp(0);
+    Node lhs = parseOp(0);
     if (cur().t == T_PIPE_INTO) {
       while (cur().t == T_PIPE_INTO) {
         Pos p = take().pos;
-        Expr *rhs = parseOp(0);
-        lhs = arena.add<ExprCall>(p, rhs, arena.slice<Expr *>({lhs}));
+        Node rhs = parseOp(0);
+        lhs = call(p, rhs, llvm::MutableArrayRef<Node>(lhs));
       }
       if (cur().t == T_PIPE_FROM) unexpected();
       return lhs;
     }
     if (cur().t == T_PIPE_FROM) {
       Pos p = take().pos;
-      Expr *rhs = parseIfPipeFromRhs();
-      return arena.add<ExprCall>(p, lhs, arena.slice<Expr *>({rhs}));
+      Node rhs = parseIfPipeFromRhs();
+      return call(p, lhs, llvm::MutableArrayRef<Node>(rhs));
     }
     return lhs;
   }
-  Expr *parseIfPipeFromRhs() {
-    Expr *lhs = parseOp(0);
+  Node parseIfPipeFromRhs() {
+    Node lhs = parseOp(0);
     if (cur().t == T_PIPE_FROM) {
       Pos p = take().pos;
-      Expr *rhs = parseIfPipeFromRhs();
-      return arena.add<ExprCall>(p, lhs, arena.slice<Expr *>({rhs}));
+      Node rhs = parseIfPipeFromRhs();
+      return call(p, lhs, llvm::MutableArrayRef<Node>(rhs));
     }
     if (cur().t == T_PIPE_INTO) unexpected();
     return lhs;
@@ -771,18 +1974,24 @@ private:
     }
   }
 
-  Expr *var(const char *n) { return arena.add<ExprVar>(Pos{}, Name::of(n)); } // n is a literal: never freed
+  Node var(const char *n) { return var(Name::of(n), Pos{}); } // n is a literal: never freed
+  Node call2(Pos p, const char *f, Node &a, Node &c) {
+    Node fn = var(f);
+    Node args[2] = {std::move(a), std::move(c)};
+    return call(p, fn, args);
+  }
 
-  Expr *parseOp(int minPrec) {
-    Expr *lhs;
+  Node parseOp(int minPrec) {
+    Node lhs;
     Pos pos = cur().pos;
     if (atChar('!')) {
       take();
-      lhs = arena.add<ExprNot>(pos, parseOp(P_NOT));
+      lhs = not_(pos, parseOp(P_NOT));
     } else if (atChar('-')) {
       take();
-      Expr *e = parseOp(P_NEG);
-      lhs = arena.add<ExprCall>(pos, var("__sub"), arena.slice<Expr *>({arena.add<ExprInt>(0), e}));
+      Node zero = intLit(0, Pos{});
+      Node e = parseOp(P_NEG);
+      lhs = call2(pos, "__sub", zero, e);
     } else {
       lhs = parseApp();
     }
@@ -795,34 +2004,34 @@ private:
       Token op = take();
       Pos opPos = op.pos;
       if (prec == P_HAS) {
-        AttrPath path = parseAttrPath();
-        lhs = arena.add<ExprHasAttr>(opPos, lhs, path);
+        Path path = parseAttrPath();
+        lhs = hasAttr(opPos, lhs, path);
         lastNonAssoc = prec;
         continue;
       }
-      Expr *rhs = parseOp(ra ? prec : prec + 1);
+      Node rhs = parseOp(ra ? prec : prec + 1);
       switch (op.t) {
-      case T_IMPL: lhs = arena.add<ExprBin>(ExprKind::Impl, opPos, lhs, rhs); break;
-      case T_OR: lhs = arena.add<ExprBin>(ExprKind::Or, opPos, lhs, rhs); break;
-      case T_AND: lhs = arena.add<ExprBin>(ExprKind::And, opPos, lhs, rhs); break;
-      case T_EQ: lhs = arena.add<ExprBin>(ExprKind::Eq, opPos, lhs, rhs); break;
-      case T_NEQ: lhs = arena.add<ExprBin>(ExprKind::NEq, opPos, lhs, rhs); break;
-      case T_LEQ:
-        lhs = arena.add<ExprNot>(opPos, arena.add<ExprCall>(opPos, var("__lessThan"), arena.slice<Expr *>({rhs, lhs})));
-        break;
-      case T_GEQ:
-        lhs = arena.add<ExprNot>(opPos, arena.add<ExprCall>(opPos, var("__lessThan"), arena.slice<Expr *>({lhs, rhs})));
-        break;
-      case T_UPDATE: lhs = arena.add<ExprBin>(ExprKind::Update, opPos, lhs, rhs); break;
-      case T_CONCAT: lhs = arena.add<ExprBin>(ExprKind::ConcatLists, opPos, lhs, rhs); break;
+      case T_IMPL: lhs = bin(B_IMPL, opPos, lhs, rhs); break;
+      case T_OR: lhs = bin(B_OR, opPos, lhs, rhs); break;
+      case T_AND: lhs = bin(B_AND, opPos, lhs, rhs); break;
+      case T_EQ: lhs = bin(B_EQ, opPos, lhs, rhs); break;
+      case T_NEQ: lhs = bin(B_NEQ, opPos, lhs, rhs); break;
+      case T_LEQ: lhs = not_(opPos, call2(opPos, "__lessThan", rhs, lhs)); break;
+      case T_GEQ: lhs = not_(opPos, call2(opPos, "__lessThan", lhs, rhs)); break;
+      case T_UPDATE: lhs = bin(B_UPDATE, opPos, lhs, rhs); break;
+      case T_CONCAT: lhs = bin(B_CONCAT, opPos, lhs, rhs); break;
       default:
         switch (op.ch) {
-        case '<': lhs = arena.add<ExprCall>(opPos, var("__lessThan"), arena.slice<Expr *>({lhs, rhs})); break;
-        case '>': lhs = arena.add<ExprCall>(opPos, var("__lessThan"), arena.slice<Expr *>({rhs, lhs})); break;
-        case '+': lhs = arena.add<ExprConcatStrings>(opPos, false, arena.slice<StrPart>({{pos, lhs}, {rhs->pos, rhs}})); break;
-        case '-': lhs = arena.add<ExprCall>(opPos, var("__sub"), arena.slice<Expr *>({lhs, rhs})); break;
-        case '*': lhs = arena.add<ExprCall>(opPos, var("__mul"), arena.slice<Expr *>({lhs, rhs})); break;
-        case '/': lhs = arena.add<ExprCall>(opPos, var("__div"), arena.slice<Expr *>({lhs, rhs})); break;
+        case '<': lhs = call2(opPos, "__lessThan", lhs, rhs); break;
+        case '>': lhs = call2(opPos, "__lessThan", rhs, lhs); break;
+        case '+': {
+          Node parts[2] = {std::move(lhs), std::move(rhs)};
+          lhs = concat(opPos, false, parts);
+          break;
+        }
+        case '-': lhs = call2(opPos, "__sub", lhs, rhs); break;
+        case '*': lhs = call2(opPos, "__mul", lhs, rhs); break;
+        case '/': lhs = call2(opPos, "__div", lhs, rhs); break;
         }
       }
       lastNonAssoc = na ? prec : -1;
@@ -842,144 +2051,148 @@ private:
     }
   }
 
-  Expr *parseApp() {
+  Node parseApp() {
     Pos pos = cur().pos;
-    Expr *f = parseSelect();
+    Node f = parseSelect();
     if (!startsSelect()) return f;
+    llvm::SmallVector<Node, 4> args;
+    while (startsSelect()) args.push_back(parseSelect());
     // Upstream's makeCall: an argument after a call is another argument of that call, so `(f a) b` is `f a b`.
-    ExprCall *call = f->kind == ExprKind::Call ? static_cast<ExprCall *>(f) : nullptr;
-    composite::Grow<Expr *> args;
-    if (call) args = composite::Grow<Expr *>::from(arena.region(), call->args, 4);
-    while (startsSelect()) args.push(arena.region(), parseSelect());
-    if (call) {
-      call->args = args.done();
-      return call;
-    }
-    return arena.add<ExprCall>(pos, f, args.done());
+    if (f.k == K_CALL) return extend(std::move(f), args);
+    return call(pos, f, args);
   }
 
-  Expr *parseSelect() {
+  Node parseSelect() {
     Pos pos = cur().pos;
-    Expr *e = parseSimple();
+    Node e = parseSimple();
     if (atChar('.')) {
       take();
-      AttrPath path = parseAttrPath();
-      Expr *def = nullptr;
+      Path path = parseAttrPath();
       if (cur().t == T_OR_KW) {
         take();
-        def = parseSelect();
+        Node def = parseSelect();
+        return select(pos, e, path, &def);
       }
-      return arena.add<ExprSelect>(pos, e, path, def);
+      return select(pos, e, path, nullptr);
     }
-    if (cur().t == T_OR_KW) {
-      // "cursed or": `f or` is `f` applied to the variable `or`.
+    if (cur().t == T_OR_KW) { // "cursed or": `f or` is `f` applied to the variable `or`
       Pos op = take().pos;
-      return arena.add<ExprCall>(pos, e, arena.slice<Expr *>({arena.add<ExprVar>(op, Name::of("or"))}));
+      Node orv = var(Name::of("or"), op);
+      return call(pos, e, llvm::MutableArrayRef<Node>(orv));
     }
     return e;
   }
 
-  AttrPath parseAttrPath() {
-    composite::Grow<AttrName> path;
+  Path parseAttrPath(int64_t into = -1) {
+    Path path;
     while (true) {
-      if (cur().t == T_ID) path.push(arena.region(), AttrName(nameOf(take())));
-      else if (cur().t == T_OR_KW) { take(); path.push(arena.region(), AttrName(Name::of("or"))); }
-      else if (atChar('"') || cur().t == T_DOLLAR_CURLY) path.push(arena.region(), parseStringAttr());
-      else unexpected("identifier or 'or' or '${' or '\"'");
+      if (cur().t == T_ID) path.push_back(Comp{nameOf(take()), {}});
+      else if (cur().t == T_OR_KW) { take(); path.push_back(Comp{Name::of("or"), {}}); }
+      else if (atChar('"') || cur().t == T_DOLLAR_CURLY) {
+        // In a binding of set `into`, a computed component is parsed where the binding's value would be: in the set
+        // that the static components before it reach.
+        Scope *s0 = sc;
+        if (into >= 0) sc = target(uint32_t(into), path).first;
+        path.push_back(parseStringAttr());
+        sc = s0;
+      } else unexpected("identifier or 'or' or '${' or '\"'");
       if (atChar('.')) { take(); continue; }
       break;
     }
-    return path.done();
+    return path;
   }
 
-  AttrName parseStringAttr() {
+  Comp parseStringAttr() {
+    Node e;
     if (cur().t == T_DOLLAR_CURLY) {
       take();
-      Expr *e = parseExpr();
+      e = parseExpr();
       expectChar('}');
       // `${"string"}` is treated as a static attribute name (NixOS/nix#14642).
-      if (e->kind == ExprKind::String) return AttrName(static_cast<ExprString *>(e)->v);
-      return AttrName(e);
+    } else {
+      Pos pos = cur().pos;
+      take(); // '"'
+      e = parseStringParts(pos);
+      expectChar('"');
     }
-    Pos pos = cur().pos;
-    take(); // '"'
-    Expr *e = parseStringParts(pos);
-    expectChar('"');
-    if (e->kind == ExprKind::String)
-      return AttrName(static_cast<ExprString *>(e)->v);
-    return AttrName(e);
+    if (e.k == K_STR) return Comp{e.text, {}};
+    return Comp{Name(), std::move(e)};
   }
 
   /// string_parts after an opening '"'; stops before the closing '"'.
-  Expr *parseStringParts(Pos pos) {
-    composite::Grow<StrPart> parts;
+  Node parseStringParts(Pos pos) {
+    llvm::SmallVector<Node, 4> parts;
     bool interpolated = false;
     Name single;
     bool haveSingle = false;
     if (cur().t == T_STR) {
       // The common string: one run of text, then the closing quote.  No parts, and no node but the result.
       Token t = take();
-      Name text = nameOf(t);
-      if (atChar('"')) {
-        auto *s = arena.add<ExprString>(text);
-        s->pos = pos;
-        return s;
-      }
-      // Interpolation or more text follows (so the loop below runs, or the string is an error): this is its first part.
-      parts.push(arena.region(), StrPart{t.pos, arena.add<ExprString>(text)});
+      Name s = nameOf(t);
+      if (atChar('"')) return strLit(s, pos);
+      parts.push_back(strLit(s, Pos{})); // interpolation or more text follows: this is its first part
     } else if (atChar('"')) {
-      auto *s = arena.add<ExprString>(Name::of(""));
-      s->pos = pos;
-      return s;
+      return strLit(Name::of(""), pos);
     }
     while (true) {
       if (cur().t == T_STR) {
         Token t = take();
-        parts.push(arena.region(), StrPart{t.pos, arena.add<ExprString>(nameOf(t))});
         single = nameOf(t);
         haveSingle = true;
+        parts.push_back(strLit(single, Pos{}));
       } else if (cur().t == T_DOLLAR_CURLY) {
-        Pos p = take().pos;
-        Expr *e = parseExpr();
+        take();
+        parts.push_back(parseExpr());
         expectChar('}');
-        parts.push(arena.region(), StrPart{p, e});
         interpolated = true;
       } else {
         break;
       }
     }
     if (!atChar('"')) unexpected("'\"'");
-    if (!interpolated) {
-      auto *s = arena.add<ExprString>(haveSingle ? single : Name::of(""));
-      s->pos = pos;
-      return s;
-    }
-    return arena.add<ExprConcatStrings>(pos, true, parts.done());
+    if (!interpolated) return strLit(haveSingle ? single : Name::of(""), pos);
+    return concat(pos, true, parts);
   }
 
-  Expr *parseSimple() {
+  Node parseSimple() {
     const Token &t = cur();
     Pos pos = t.pos;
     switch (t.t) {
     case T_ID: {
       Name n = nameOf(take());
-      if (n.str() == "__curPos") return arena.add<ExprCurPos>(pos);
-      return arena.add<ExprVar>(pos, n);
+      if (n.str() != "__curPos") return var(n, pos);
+      if (mode == Mode::Show) return text("__curPos", K_EXPR, pos);
+      if (mode == Mode::Skip) return mk(K_EXPR, pos);
+      if (origin->path.empty()) return mk(K_EXPR, pos, baseRef("null"));
+      llvm::SmallVector<Name> names{Name::persist("column"), Name::persist("file"), Name::persist("line")};
+      llvm::SmallVector<Value> vals{nd::IntOp::create(b, noLoc(), valTy(), b.getI64IntegerAttr(pos.col)),
+                                    str(Name::persist(origin->path)),
+                                    nd::IntOp::create(b, noLoc(), valTy(), b.getI64IntegerAttr(pos.line))};
+      return mk(K_EXPR, pos, nd::AttrsOp::create(b, noLoc(), valTy(), names, vals, mlir::ValueRange{}, mlir::ValueRange{},
+                                                 llvm::ArrayRef<int64_t>{}, at(pos)));
     }
-    case T_INT: { auto *e = arena.add<ExprInt>(take().i); e->pos = pos; return e; }
-    case T_FLOAT: { auto *e = arena.add<ExprFloat>(take().f); e->pos = pos; return e; }
+    case T_INT: return intLit(take().i, pos);
+    case T_FLOAT: {
+      double f = take().f;
+      if (mode == Mode::Show) {
+        std::ostringstream os;
+        os << f;
+        return text(os.str(), K_EXPR, pos);
+      }
+      return mk(K_EXPR, pos, mode == Mode::Gen ? Value(nd::FloatOp::create(b, noLoc(), valTy(), b.getF64FloatAttr(f))) : Value());
+    }
     case T_IND_STRING_OPEN: {
       take();
-      std::vector<std::pair<Pos, std::variant<Expr *, Token>>> parts;
+      std::vector<std::pair<Pos, std::variant<Node, Token>>> parts;
       while (true) {
         if (cur().t == T_IND_STR) {
           Token tk = take();
           parts.emplace_back(tk.pos, tk);
         } else if (cur().t == T_DOLLAR_CURLY) {
           Pos p = take().pos;
-          Expr *e = parseExpr();
+          Node e = parseExpr();
           expectChar('}');
-          parts.emplace_back(p, e);
+          parts.emplace_back(p, std::move(e));
         } else {
           break;
         }
@@ -991,91 +2204,85 @@ private:
     case T_PATH:
     case T_HPATH: {
       Token pt = take();
-      Expr *start = makePath(pt);
+      Node start = makePath(pt);
       if (cur().t == T_PATH_END) { take(); return start; }
-      composite::Grow<StrPart> parts;
-      parts.push(arena.region(), StrPart{pos, start});
+      llvm::SmallVector<Node, 4> parts;
+      parts.push_back(std::move(start));
       while (true) {
         if (cur().t == T_STR) {
           Token s = take();
-          parts.push(arena.region(), StrPart{s.pos, arena.add<ExprString>(nameOf(s))});
+          parts.push_back(strLit(nameOf(s), Pos{}));
         } else if (cur().t == T_DOLLAR_CURLY) {
-          Pos p = take().pos;
-          Expr *e = parseExpr();
+          take();
+          parts.push_back(parseExpr());
           expectChar('}');
-          parts.push(arena.region(), StrPart{p, e});
         } else {
           break;
         }
       }
       if (cur().t != T_PATH_END) unexpected();
       take();
-      return arena.add<ExprConcatStrings>(pos, false, parts.done());
+      return concat(pos, false, parts);
     }
     case T_SPATH: {
       Name s = nameOf(take());
-      Name path = Name::of(s.str().substr(1, s.size - 2)); // the text between the angle brackets
-      return arena.add<ExprCall>(pos, var("__findFile"), arena.slice<Expr *>({var("__nixPath"), arena.add<ExprString>(path)}));
+      Node fn = var("__findFile");
+      Node args[2] = {var("__nixPath"), strLit(Name::of(s.str().substr(1, s.size - 2)), Pos{})}; // between the brackets
+      return call(pos, fn, args);
     }
     case T_URI: {
       if (opts.lintUrls != Lint::Ignore) // the message is built only when something will read it
         diagnose(opts.lintUrls, "lint-url-literals",
                  std::string("URL literals are ") + (opts.lintUrls == Lint::Fatal ? "disallowed" : "discouraged") +
-                     ". Consider using a string literal \"" + str(t) + "\" instead", pos);
-      auto *e = arena.add<ExprString>(nameOf(take()));
-      e->pos = pos;
-      return e;
+                     ". Consider using a string literal \"" + std::string(lx.text(t)) + "\" instead",
+                 pos);
+      return strLit(nameOf(take()), pos);
     }
-    case T_LET: {
+    case T_LET: { // `let { ... }`: the old syntax, a rec set's `body`
       if (!isChar(peek(), '{')) unexpected();
       take();
-      take();
-      ExprAttrs *a = parseBinds(true);
-      expectChar('}');
-      a->recursive = true;
-      a->pos = pos;
-      return arena.add<ExprSelect>(Pos{}, a, arena.slice<AttrName>({AttrName(Name::of("body"))}), nullptr);
+      Node a = literal(pos, true, ~0u);
+      Path path;
+      path.push_back(Comp{Name::of("body"), {}});
+      return select(Pos{}, a, path, nullptr);
     }
     case T_REC: {
+      uint32_t first = t.offset;
       take();
-      expectChar('{');
-      ExprAttrs *a = parseBinds(true);
-      expectChar('}');
-      a->recursive = true;
-      a->pos = pos;
-      return a;
+      return literal(pos, true, first);
     }
     case T_CHAR:
       if (t.ch == '"') {
         take();
-        Expr *e = parseStringParts(pos);
+        Node e = parseStringParts(pos);
         take();
         return e;
       }
       if (t.ch == '(') {
+        if (t.offset == valueAt) valueAt = peek().offset; // a set literal in parentheses is still the binding's value
         take();
-        Expr *e = parseExpr();
+        Node e = parseExpr();
         expectChar(')');
         return e;
       }
-      if (t.ch == '{') {
-        take();
-        ExprAttrs *a = parseBinds(true);
-        expectChar('}');
-        a->pos = pos;
-        return a;
-      }
+      if (t.ch == '{') return literal(pos, false, t.offset);
       if (t.ch == '[') {
         take();
-        auto *l = arena.add<ExprList>(pos);
-        composite::Grow<Expr *> elems;
+        llvm::SmallVector<Node, 8> elems;
         while (!atChar(']')) {
           if (!startsSelect()) unexpected();
-          elems.push(arena.region(), parseSelect());
+          elems.push_back(parseSelect());
         }
         take();
-        l->elems = elems.done();
-        return l;
+        if (mode == Mode::Show) {
+          std::string s = "[ ";
+          for (Node &e : elems) s += "(" + txt(e) + ") ";
+          return text(s + "]", K_EXPR, pos);
+        }
+        if (mode == Mode::Skip) return mk(K_EXPR, pos);
+        llvm::SmallVector<Value> vs;
+        for (Node &e : elems) vs.push_back(val(e));
+        return mk(K_EXPR, pos, nd::ListOp::create(b, noLoc(), valTy(), vs));
       }
       unexpected();
     default:
@@ -1091,39 +2298,42 @@ private:
     if (opts.onWarning) opts.onWarning(e);
   }
 
-  Expr *makePath(const Token &t) {
+  Node makePath(const Token &t) {
     std::string_view lit = lx.text(t); // a slice of the input; the messages below copy it, and are built only when linting
     if (t.t == T_HPATH) {
       if (opts.lintAbsolutePaths != Lint::Ignore)
         diagnose(opts.lintAbsolutePaths, "lint-absolute-path-literals",
                  "home path literals are not portable. Consider replacing path literal '" + std::string(lit) +
-                     "' by a string, relative path, or parameter", t.pos);
+                     "' by a string, relative path, or parameter",
+                 t.pos);
     } else if (lit[0] == '/') {
       if (opts.lintAbsolutePaths != Lint::Ignore)
         diagnose(opts.lintAbsolutePaths, "lint-absolute-path-literals",
                  "absolute path literals are not portable. Consider replacing path literal '" + std::string(lit) +
-                     "' by a string, relative path, or parameter", t.pos);
+                     "' by a string, relative path, or parameter",
+                 t.pos);
     } else if (lit[0] != '.') {
       if (opts.lintShortPaths != Lint::Ignore)
         diagnose(opts.lintShortPaths, "lint-short-path-literals",
                  "relative path literal '" + std::string(lit) + "' should be prefixed with '.' for clarity: './" +
-                     std::string(lit) + "'", t.pos);
-    }
-    if (t.t == T_HPATH) {
-      std::string path = opts.home + std::string(lit.substr(1));
-      return arena.add<ExprPath>(Name::persist(path));
+                     std::string(lit) + "'",
+                 t.pos);
     }
     std::string path;
-    if (lit[0] == '/') path = canonPath(lit);
-    else path = canonPath(origin->baseDir + "/" + std::string(lit));
-    if (lit.size() > 1 && lit.back() == '/') path += '/';
-    auto *e = arena.add<ExprPath>(Name::persist(path));
-    e->pos = t.pos;
-    return e;
+    Pos pos = t.pos;
+    if (t.t == T_HPATH) {
+      path = opts.home + std::string(lit.substr(1));
+      pos = Pos{};
+    } else {
+      path = canonPath(lit[0] == '/' ? std::string(lit) : origin->baseDir + "/" + std::string(lit));
+      if (lit.size() > 1 && lit.back() == '/') path += '/';
+    }
+    if (mode == Mode::Show) return text(path, K_EXPR, pos);
+    return mk(K_EXPR, pos, mode == Mode::Gen ? Value(nd::PathOp::create(b, noLoc(), valTy(), Name::persist(path))) : Value());
   }
 
-  Expr *stripIndentation(Pos pos, std::vector<std::pair<Pos, std::variant<Expr *, Token>>> &es) {
-    if (es.empty()) return arena.add<ExprString>(Name::of(""));
+  Node stripIndentation(Pos pos, std::vector<std::pair<Pos, std::variant<Node, Token>>> &es) {
+    if (es.empty()) return strLit(Name::of(""), Pos{});
     bool atStartOfLine = true;
     size_t minIndent = 1000000, curIndent = 0;
     for (auto &[p, i] : es) {
@@ -1149,15 +2359,15 @@ private:
         }
       }
     }
-    composite::Grow<StrPart> es2;
+    llvm::SmallVector<Node, 4> es2;
     atStartOfLine = true;
     size_t curDropped = 0;
     size_t n = es.size();
     for (auto it = es.begin(); it != es.end(); ++it, --n) {
-      if (auto *e = std::get_if<Expr *>(&it->second)) {
+      if (auto *e = std::get_if<Node>(&it->second)) {
         atStartOfLine = false;
         curDropped = 0;
-        es2.push(arena.region(), StrPart{it->first, *e});
+        es2.push_back(std::move(*e));
         continue;
       }
       const Token &t = std::get<Token>(it->second);
@@ -1181,209 +2391,13 @@ private:
       }
       if (n == 1) {
         auto p = s2.find_last_of('\n');
-        if (p != std::string::npos && s2.find_first_not_of(' ', p + 1) == std::string::npos)
-          s2 = s2.substr(0, p + 1);
+        if (p != std::string::npos && s2.find_first_not_of(' ', p + 1) == std::string::npos) s2 = s2.substr(0, p + 1);
       }
-      if (!s2.empty()) es2.push(arena.region(), StrPart{it->first, arena.add<ExprString>(Name::persist(s2))});
+      if (!s2.empty()) es2.push_back(strLit(Name::persist(s2), Pos{}));
     }
-    if (es2.empty()) return arena.add<ExprString>(Name::of(""));
-    if (es2.size() == 1 && es2[0].e->kind == ExprKind::String) return es2[0].e;
-    return arena.add<ExprConcatStrings>(pos, true, es2.done());
-  }
-
-  // binds: sequence of `attrpath = expr;` / `inherit ...;`
-  ExprAttrs *parseBinds(bool allowEmpty) {
-    auto *attrs = arena.add<ExprAttrs>();
-    while (true) {
-      if (cur().t == T_INHERIT) {
-        Pos ipos = take().pos;
-        (void)ipos;
-        Expr *from = nullptr;
-        ExprInheritFrom *fromRef = nullptr;
-        if (atChar('(')) {
-          take();
-          from = parseExpr();
-          expectChar(')');
-          attrs->inheritFromExprs.push(arena.region(), from);
-          fromRef = arena.add<ExprInheritFrom>(from->pos, attrs->inheritFromExprs.size() - 1);
-        }
-        while (!atChar(';')) {
-          Pos apos = cur().pos;
-          Name name;
-          if (cur().t == T_ID) name = nameOf(take());
-          else if (cur().t == T_OR_KW) { take(); name = Name::of("or"); }
-          else if (atChar('"') || cur().t == T_DOLLAR_CURLY) {
-            AttrName an = parseStringAttr();
-            if (an.computed()) error("dynamic attributes not allowed in inherit", apos);
-            name = an.symbol;
-          } else {
-            unexpected();
-          }
-          if (Entry *prev = findAttr(attrs, name))
-            error("attribute '" + displayName(name.str()) + "' already defined at " + fmtPos(prev->def.pos), apos);
-          ExprAttrs::AttrDef def;
-          def.pos = apos;
-          if (fromRef) {
-            def.e = arena.add<ExprSelect>(apos, fromRef, arena.slice<AttrName>({AttrName(name)}), nullptr);
-            def.kind = ExprAttrs::DefKind::InheritedFrom;
-          } else {
-            def.e = arena.add<ExprVar>(apos, name);
-            def.kind = ExprAttrs::DefKind::Inherited;
-          }
-          appendAttr(attrs, name, def);
-        }
-        take();
-        continue;
-      }
-      if (cur().t == T_ID || cur().t == T_OR_KW || atChar('"') || cur().t == T_DOLLAR_CURLY) {
-        Pos apos = cur().pos;
-        AttrPath path = parseAttrPath();
-        expectChar('=');
-        Expr *e = parseExpr();
-        expectChar(';');
-        addAttr(attrs, path, apos, e);
-        continue;
-      }
-      break;
-    }
-    (void)allowEmpty;
-    return attrs;
-  }
-
-  std::string displayName(std::string_view s) {
-    std::ostringstream os;
-    printIdentifier(os, s);
-    return os.str();
-  }
-
-  std::string showPath(llvm::ArrayRef<AttrName> path) {
-    std::ostringstream os;
-    bool first = true;
-    for (auto &a : path) {
-      if (!first) os << '.';
-      first = false;
-      if (!a.computed()) printIdentifier(os, a.symbol.str());
-      else { os << "\"${"; showExpr(os, a.expr); os << "}\""; }
-    }
-    return os.str();
-  }
-
-  void dupAttr(llvm::ArrayRef<AttrName> path, Pos pos, Pos prev) {
-    error("attribute '" + showPath(path) + "' already defined at " + fmtPos(prev), pos);
-  }
-
-  // The attributes of a set while it is being parsed (ExprAttrs::written).  A set of a handful is searched by comparing;
-  // a larger one has an index of its own, open addressing over the positions in `written`.
-  using Entry = ExprAttrs::Entry;
-  static constexpr uint32_t kScan = 8;
-
-  static bool sameName(const Name &a, const Name &b) {
-    return a.size == b.size && (a.size == 0 || std::memcmp(a.data, b.data, a.size) == 0);
-  }
-  static uint32_t hashOf(const Name &n) {
-    return static_cast<uint32_t>(llvm::xxh3_64bits(llvm::ArrayRef<uint8_t>(reinterpret_cast<const uint8_t *>(n.data), n.size)));
-  }
-
-  Entry *findAttr(ExprAttrs *a, const Name &n) {
-    if (!a->index) {
-      for (Entry &e : a->written)
-        if (sameName(e.name, n)) return &e;
-      return nullptr;
-    }
-    for (uint32_t h = hashOf(n) & a->indexMask;; h = (h + 1) & a->indexMask) {
-      uint32_t k = a->index[h];
-      if (!k) return nullptr;
-      Entry &e = a->written[k - 1];
-      if (sameName(e.name, n)) return &e;
-    }
-  }
-
-  void indexEntry(ExprAttrs *a, uint32_t k) { // k: the position in `written`, plus one
-    uint32_t h = hashOf(a->written[k - 1].name) & a->indexMask;
-    while (a->index[h]) h = (h + 1) & a->indexMask;
-    a->index[h] = k;
-  }
-
-  void buildIndex(ExprAttrs *a) {
-    uint32_t count = a->written.size(), cap = 32;
-    while (cap < count * 4) cap *= 2; // at most a quarter full when built, a half before it is built again
-    a->index = arena.region().Allocate<uint32_t>(cap);
-    std::memset(a->index, 0, cap * sizeof(uint32_t));
-    a->indexMask = cap - 1;
-    for (uint32_t k = 1; k <= count; k++) indexEntry(a, k);
-  }
-
-  /// Add an attribute that the set does not have.
-  void appendAttr(ExprAttrs *a, const Name &n, ExprAttrs::AttrDef def) {
-    a->written.push(arena.region(), Entry{n, def});
-    uint32_t count = a->written.size();
-    a->ordered = count <= 1;
-    if (a->index && count * 2 <= a->indexMask + 1) indexEntry(a, count);
-    else if (count > kScan) buildIndex(a);
-  }
-
-  void addAttr(ExprAttrs *attrs, AttrPath path, Pos pos, Expr *e) {
-    size_t i = 0;
-    for (; i + 1 < path.size(); i++) {
-      ExprAttrs *nested;
-      if (!path[i].computed()) {
-        Entry *j = findAttr(attrs, path[i].symbol);
-        if (j) {
-          nested = j->def.e->kind == ExprKind::Attrs ? static_cast<ExprAttrs *>(j->def.e) : nullptr;
-          if (!nested || j->def.kind != ExprAttrs::DefKind::Plain)
-            dupAttr(llvm::ArrayRef<AttrName>(path.data(), i + 1), pos, j->def.pos);
-        } else {
-          nested = arena.add<ExprAttrs>();
-          appendAttr(attrs, path[i].symbol, ExprAttrs::AttrDef{nested, pos});
-        }
-      } else {
-        nested = arena.add<ExprAttrs>();
-        attrs->dynamicAttrs.push(arena.region(), ExprAttrs::DynamicAttrDef{path[i].expr, nested, pos});
-      }
-      attrs = nested;
-    }
-    if (!path[i].computed()) {
-      addAttrSym(attrs, llvm::ArrayRef<AttrName>(path.data(), path.size()), path[i].symbol, ExprAttrs::AttrDef{e, pos});
-    } else {
-      attrs->dynamicAttrs.push(arena.region(), ExprAttrs::DynamicAttrDef{path[i].expr, e, pos});
-    }
-  }
-
-  void addAttrSym(ExprAttrs *attrs, llvm::ArrayRef<AttrName> path, const Name &sym, ExprAttrs::AttrDef def) {
-    Entry *j = findAttr(attrs, sym);
-    if (j) {
-      auto *ae = def.e->kind == ExprKind::Attrs ? static_cast<ExprAttrs *>(def.e) : nullptr;
-      auto *jAttrs = j->def.e->kind == ExprKind::Attrs && j->def.kind == ExprAttrs::DefKind::Plain
-                         ? static_cast<ExprAttrs *>(j->def.e) : nullptr;
-      if (jAttrs && ae) {
-        size_t base = jAttrs->inheritFromExprs.size();
-        std::vector<AttrName> full(path.begin(), path.end()); // the path to the merged set, for the messages
-        for (const Entry &ad : ae->entries()) { // by name, so the duplicate reported first is the least
-          if (ad.def.kind == ExprAttrs::DefKind::InheritedFrom) {
-            auto *sel = static_cast<ExprSelect *>(ad.def.e);
-            auto *from = static_cast<ExprInheritFrom *>(sel->e);
-            from->displ += base;
-          }
-          full.emplace_back(ad.name);
-          addAttrSym(jAttrs, full, ad.name, ad.def);
-          full.pop_back();
-        }
-        ae->written = composite::Grow<Entry>();
-        ae->index = nullptr;
-        for (auto &d : ae->dynamicAttrs) jAttrs->dynamicAttrs.push(arena.region(), d);
-        ae->dynamicAttrs = composite::Grow<ExprAttrs::DynamicAttrDef>();
-        for (auto *x : ae->inheritFromExprs) jAttrs->inheritFromExprs.push(arena.region(), x);
-        ae->inheritFromExprs = composite::Grow<Expr *>();
-      } else {
-        dupAttr(path, def.pos, j->def.pos);
-      }
-    } else {
-      if (def.e->kind == ExprKind::Lambda) {
-        auto *l = static_cast<ExprLambda *>(def.e);
-        if (l->name.isNull()) l->name = sym;
-      }
-      appendAttr(attrs, sym, def);
-    }
+    if (es2.empty()) return strLit(Name::of(""), Pos{});
+    if (es2.size() == 1 && es2[0].k == K_STR) return std::move(es2[0]);
+    return concat(pos, true, es2);
   }
 };
 
@@ -1408,59 +2422,87 @@ std::string canonPath(std::string_view path) {
   return out;
 }
 
-Expr *parse(ExprArena &arena, std::shared_ptr<Origin> origin, const ParseOptions &opts) {
-  Lexer lx(origin, opts);
-  Parser p(arena, origin, opts, lx);
-  return p.parseTop();
+/// The fixed buffer of bands and statements, reused from source to source (a pool keeps its own, for its bodies' calls).
+static confix::Bands &scratchBands() {
+  static thread_local confix::Bands b;
+  return b;
 }
 
-/// The band table from the lexer's tokens: the oracle of confix::scan (Nix/Confix.h).
+/// The bands and statements of a source.  A source the scan refuses has a syntax error, which a parse that needs no
+/// statements reports in the parser's own words.
+static const confix::Bands &scanned(const std::shared_ptr<Origin> &origin, const ParseOptions &po, confix::Bands &into) {
+  into.clear();
+  if (confix::scan(origin->text->view(), into)) return into;
+  Parser(Mode::Show, origin, po, nullptr).show();
+  throw ParseError("internal error: the scan refused a source the parser accepts", Pos{1, 1}, origin);
+}
+
+nd::ExprOp genExpr(mlir::ModuleOp module, std::shared_ptr<Origin> origin, const ParseOptions &po, llvm::StringRef symName,
+                   const GenOptions &opts) {
+  const confix::Bands &bands = scanned(origin, po, opts.pool ? opts.pool->bands : scratchBands());
+  return Parser(Mode::Gen, origin, po, &bands, module, &opts).genTop(symName);
+}
+
+void mintBody(nd::LambdaOp lam, FilePool &pool, const Row &r, const GenOptions &opts) {
+  Parser(Mode::Gen, pool.origin, pool.opts, &pool.bands, lam->getParentOfType<mlir::ModuleOp>(), &opts).mint(lam, r);
+}
+
+void showSource(std::ostream &os, std::shared_ptr<Origin> origin, const ParseOptions &po) {
+  confix::Bands &bands = scratchBands(); // the parse checks each statement's end against the scan's (layer 1)
+  bands.clear();
+  bool scannedOk = confix::scan(origin->text->view(), bands);
+  os << Parser(Mode::Show, origin, po, scannedOk ? &bands : nullptr).show();
+}
+
+void skim(std::shared_ptr<Origin> origin, const ParseOptions &po) {
+  const confix::Bands &bands = scanned(origin, po, scratchBands());
+  Parser(Mode::Skip, origin, po, &bands).top();
+}
+
 bool confix::lexBands(std::shared_ptr<Origin> origin, const ParseOptions &opts, confix::Bands &out) {
   try {
     Lexer lx(origin, opts);
-    std::vector<uint32_t> open;
-    for (;;) {
-      Token t = lx.nextToken();
-      auto openBand = [&](confix::Kind k) { open.push_back(out.rows.append(join::TwInt(uint32_t(t.offset), 0), uint8_t(k))); };
-      auto closeBand = [&](confix::Kind a, confix::Kind b) {
-        if (open.empty()) return false;
-        uint32_t row = open.back();
-        confix::Kind k = confix::Kind(out.rows.col<1>()[row]);
-        if (k != a && k != b) return false;
-        open.pop_back();
-        join::TwInt &sp = out.rows.col<0>()[row];
-        sp = join::TwInt(sp.first(), uint32_t(t.offset));
-        return true;
-      };
+    confix::Layers ls(out);
+    for (Token t = lx.nextToken(), n;; t = n) {
+      n = t.t == T_EOF ? t : lx.nextToken();
       switch (t.t) {
-      case T_EOF: return open.empty();
-      case T_DOLLAR_CURLY: openBand(confix::K_INTERP); break;
-      case T_IND_STRING_OPEN: openBand(confix::K_IND_STRING); break;
+      case T_EOF: return ls.balanced();
+      case T_DOLLAR_CURLY: ls.open(confix::K_INTERP, t.offset); break;
+      case T_IND_STRING_OPEN: ls.open(confix::K_IND_STRING, t.offset); break;
       case T_IND_STRING_CLOSE:
-        if (!closeBand(confix::K_IND_STRING, confix::K_IND_STRING)) return false;
+        if (!ls.close(confix::K_IND_STRING, confix::K_IND_STRING, t.offset)) return false;
         break;
+      case T_LET:
+        if (!(n.t == T_CHAR && n.ch == '{')) ls.open(confix::K_LET, t.offset);
+        break;
+      case T_IN:
+        if (!ls.close(confix::K_LET, confix::K_LET, t.offset)) return false;
+        break;
+      case T_WITH: case T_ASSERT: ls.owe(); break;
       case T_CHAR:
         switch (t.ch) {
-        case '{': openBand(confix::K_BRACE); break;
+        case '{': ls.open(confix::K_BRACE, t.offset); break;
         case '}':
-          if (!closeBand(confix::K_BRACE, confix::K_INTERP)) return false;
+          if (!ls.close(confix::K_BRACE, confix::K_INTERP, t.offset)) return false;
           break;
-        case '(': openBand(confix::K_PAREN); break;
+        case '(': ls.open(confix::K_PAREN, t.offset); break;
         case ')':
-          if (!closeBand(confix::K_PAREN, confix::K_PAREN)) return false;
+          if (!ls.close(confix::K_PAREN, confix::K_PAREN, t.offset)) return false;
           break;
-        case '[': openBand(confix::K_BRACKET); break;
+        case '[': ls.open(confix::K_BRACKET, t.offset); break;
         case ']':
-          if (!closeBand(confix::K_BRACKET, confix::K_BRACKET)) return false;
+          if (!ls.close(confix::K_BRACKET, confix::K_BRACKET, t.offset)) return false;
           break;
         case '"':
           // Inside a string the next quote closes it (an interpolation would have opened a band of its own).
-          if (!open.empty() && confix::Kind(out.rows.col<1>()[open.back()]) == confix::K_STRING) {
-            if (!closeBand(confix::K_STRING, confix::K_STRING)) return false;
+          if (ls.inside(confix::K_STRING)) {
+            if (!ls.close(confix::K_STRING, confix::K_STRING, t.offset)) return false;
           } else {
-            openBand(confix::K_STRING);
+            ls.open(confix::K_STRING, t.offset);
           }
           break;
+        case ';': ls.semi(t.offset); break;
+        case ',': ls.comma(t.offset); break;
         default: break;
         }
         break;
