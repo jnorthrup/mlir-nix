@@ -72,13 +72,13 @@ Tok keywordOf(std::string_view w) {
 class Lexer : public lex::Rules {
 public:
   Lexer(std::shared_ptr<Origin> o, const ParseOptions &opts)
-      : Rules(o->text->view()), origin(std::move(o)), opts(opts), derived{"$", "''", "'", "~/"} {
+      : Rules(o->text->view()), origin(std::move(o)), opts(opts) {
     if (src.size() >= UINT32_MAX) throw ParseError("input too large (segments are 32-bit)", Pos{1, 1}, origin);
   }
 
   /// The text of a token: a slice of the input, or an entry of the pool of derived texts.
   std::string_view text(const Token &t) const {
-    if (t.derived) return derived[t.span.first()];
+    if (t.derived) return t.span.second() ? kFixed[t.span.first()] : std::string_view(derived[t.span.first()]);
     return src.substr(t.span.first(), t.span.second() - t.span.first());
   }
 
@@ -146,11 +146,12 @@ private:
   std::shared_ptr<Origin> origin;
   const ParseOptions &opts;
   /// Texts that are not slices of the input (unescaped strings, `''$`, ...), appended and never
-  /// mutated; the first four are fixed.  Deque: entries do not move.
+  /// mutated.  Deque: entries do not move.  The four fixed ones are kFixed (a span of second() 1).
   std::deque<std::string> derived;
+  static constexpr std::string_view kFixed[] = {"$", "''", "'", "~/"};
   enum Fixed : uint32_t { F_DOLLAR, F_TWO_QUOTES, F_QUOTE, F_HOME };
   void setSlice(Token &t, size_t from, size_t to) { t.span = join::TwInt(uint32_t(from), uint32_t(to)); }
-  void setFixed(Token &t, Fixed f) { t.derived = true; t.span = join::TwInt(uint32_t(f), 0); }
+  void setFixed(Token &t, Fixed f) { t.derived = true; t.span = join::TwInt(uint32_t(f), 1); }
   void setDerived(Token &t, std::string s) {
     derived.push_back(std::move(s));
     t.derived = true;
@@ -537,28 +538,31 @@ enum class Mode : uint8_t { Gen, Skip, Show };
 /// to an attribute is still open to the bindings after it, a lambda bound to one takes its name.
 enum Kind : uint8_t { K_EXPR, K_VAR, K_CALL, K_STR, K_SET, K_LAMBDA, K_SHARED };
 
+/// A node is a value and what syntax made it, copied as it is passed up: no string, no vector.
 struct Node {
-  Value v;       // Gen
-  std::string s; // Show
+  Value v;              // Gen: a set's and a string's are made when they are first used
+  Name text;            // K_STR: the literal's text
   Pos pos;
+  uint32_t set = 0;     // K_SET: the set
+  uint32_t shownAt = 0; // Show: its text, a row of the parse's `texts`
   Kind k = K_EXPR;
-  uint32_t set = 0; // K_SET: the set, made when first used
-  Name text;        // K_STR
 };
 
-/// The free names of a lambda being skipped, each once.
+/// The free names of a lambda being skimmed, each once: compared by hash, found by an index past 32.
 struct Free {
-  std::vector<FreeName> names;
+  llvm::SmallVector<FreeName, 8> names;
+  llvm::SmallVector<uint32_t, 8> hashes;
   llvm::DenseMap<llvm::StringRef, uint32_t> index;
 };
 
-/// A lexical scope.  Its names map to values (Gen) or to nothing (Skip, where only their presence counts).
+/// A lexical scope: a run of rows of the parse's bindings (BindCol, TrikeShed.td), first j count, a view by position.
+/// Its names map to values (Gen) or to nothing (Skip, where only their presence counts).
 struct Scope {
   Scope *parent = nullptr;
   bool isWith = false;
   Value with;
-  llvm::DenseMap<llvm::StringRef, Value> vars;
   Free *free = nullptr; // Skip: the edge of a lambda: a name looked up through it is free in the lambda
+  ::join::TwInt rows;   // its bindings
 };
 
 struct Comp {
@@ -622,7 +626,7 @@ public:
   }
   std::string show() {
     Node e = top();
-    return std::move(txt(e));
+    return txt(e);
   }
 
   nd::ExprOp genTop(llvm::StringRef sym) {
@@ -643,7 +647,7 @@ public:
       Value arg = lb->addArgument(valTy(), noLoc());
       b.setInsertionPointToEnd(lb);
       Scope s;
-      for (auto &n : go->scopeNames) s.vars[n] = selectLiteral(Pos{}, arg, Name::persist(n));
+      for (auto &n : go->scopeNames) bindTo(s, Name::of(n), selectLiteral(Pos{}, arg, Name::persist(n)));
       sc = &s;
       Node e = top();
       nd::ReturnOp::create(b, noLoc(), val(e));
@@ -666,7 +670,7 @@ public:
     topBlock = &lam.getBody().front(); // anchored constants (builtins, true/false/null) head the body
     mlir::OperandRange caps = lam.getCaptures();
     Scope lex;
-    for (size_t i = 0; i < r.names.size(); i++) lex.vars[r.names[i]] = caps[r.withs + i];
+    for (size_t i = 0; i < r.names.size(); i++) bindTo(lex, Name::of(r.names[i]), caps[r.withs + i]);
     // `with` never binds lexically and a lexical binding beats every `with`, so the flat map plus the with-chain
     // (outermost pushed first, so the walk meets the innermost first) is the same scope extensionally.
     std::deque<Scope> frames;
@@ -705,6 +709,10 @@ private:
   std::deque<Set> sets;
   std::vector<uint32_t> freeSets;
   std::deque<Scope> recScopes; // a rec set's scope lives until the set is made
+  /// Every binding of the parse: the scopes' rows, a fixed buffer that only grows while the parse runs.
+  composite::Cursor<Name, uint32_t, Value> binds{BindCol{}};
+  /// Show: the text of each node printed, a row each.
+  composite::MutableSeries<std::string> texts;
   /// The bindings band being parsed: the statement it is at, and that statement's static path.  A set literal that is a
   /// binding's whole value links to the band it is bound in (`up`): what the bindings after it add can land in it.
   struct Ctx {
@@ -848,14 +856,33 @@ private:
   }
   /// Where `name` resolves without a `with`: a lexical binding, else the base environment.  Null when only a `with`, or
   /// nothing, can supply it.
-  Value resolveStatic(llvm::StringRef name) {
-    for (Scope *c = sc; c; c = c->parent) {
-      if (c->isWith) continue;
-      auto it = c->vars.find(name);
-      if (it != c->vars.end()) return it->second;
-    }
-    if (go->isBaseName && go->isBaseName(name)) return baseRef(name);
+  Value resolveStatic(const Name &n) {
+    uint32_t h = hashOf(n);
+    for (Scope *c = sc; c; c = c->parent)
+      if (Value *v = c->isWith ? nullptr : lookup(*c, n, h)) return *v;
+    if (go->isBaseName && go->isBaseName(n.str())) return baseRef(n.str());
     return Value();
+  }
+  /// The cell of `n` (hash h) in scope s, or null.
+  Value *lookup(Scope &s, const Name &n, uint32_t h) {
+    const auto &hs = binds.col<BindCol::Hash>().cells;
+    const auto &ks = binds.col<BindCol::Key>().cells;
+    for (uint32_t i = s.rows.first(), e = i + s.rows.second(); i < e; i++)
+      if (hs[i] == h && sameName(ks[i], n)) return &binds.col<BindCol::Val>().cells[i];
+    return nullptr;
+  }
+  /// Bind `n` in s to v, again if s binds it already.  The rows of a scope are one run: a scope is bound before the
+  /// scopes inside it are.
+  void bindTo(Scope &s, const Name &n, Value v) {
+    uint32_t h = hashOf(n);
+    if (Value *cell = lookup(s, n, h)) {
+      *cell = v;
+      return;
+    }
+    if (!s.rows.second()) s.rows = ::join::TwInt(binds.size(), 0);
+    else if (s.rows.first() + s.rows.second() != binds.size()) error("internal error: a scope bound after one inside it", Pos{});
+    binds.append(n, h, v);
+    s.rows = ::join::TwInt(s.rows.first(), s.rows.second() + 1);
   }
   void undefined(Name n, Pos p) {
     ParseError e("undefined variable '" + n.toString() + "'", p, origin);
@@ -874,9 +901,9 @@ private:
     n.v = v;
     return n;
   }
-  static Node text(std::string s, Kind k, Pos p) {
+  Node text(std::string s, Kind k, Pos p) {
     Node n = mk(k, p);
-    n.s = std::move(s);
+    n.shownAt = texts.append(std::move(s));
     return n;
   }
   /// The value of a node (Gen): a set or a string is made when it is first used.
@@ -889,12 +916,13 @@ private:
     }
     return n.v;
   }
-  std::string &txt(Node &n) {
+  std::string txt(Node &n) {
     if (n.k == K_SET) {
-      n.s = showSet(n.set);
+      std::string s = showSet(n.set);
+      n.shownAt = texts.append(std::move(s));
       n.k = K_EXPR;
     }
-    return n.s;
+    return texts[n.shownAt];
   }
   static std::string ident(Name n) {
     std::ostringstream os;
@@ -905,7 +933,7 @@ private:
     std::string s;
     for (const Comp &c : path) {
       if (!s.empty()) s += '.';
-      s += c.computed() ? "\"${" + c.expr.s + "}\"" : ident(c.name);
+      s += c.computed() ? "\"${" + (mode == Mode::Show ? texts[c.expr.shownAt] : std::string()) + "}\"" : ident(c.name);
     }
     return s;
   }
@@ -913,6 +941,7 @@ private:
   Node var(Name n, Pos p) {
     if (mode == Mode::Show) return text(ident(n), K_VAR, p);
     llvm::StringRef name = n.str();
+    uint32_t h = hashOf(n);
     llvm::SmallVector<Value, 2> withs;
     unsigned nw = 0;
     for (Scope *c = sc; c; c = c->parent) {
@@ -921,9 +950,8 @@ private:
         nw++;
         continue;
       }
-      if (c->free) note(*c->free, n, p, nw == 0);
-      auto it = c->vars.find(name);
-      if (it != c->vars.end()) return mk(K_VAR, p, it->second);
+      if (c->free) note(*c->free, n, h, p, nw == 0);
+      if (Value *v = lookup(*c, n, h)) return mk(K_VAR, p, *v);
     }
     if (mode == Mode::Skip) return mk(K_VAR, p);
     if (go->isBaseName && go->isBaseName(name)) return mk(K_VAR, p, baseRef(name));
@@ -933,10 +961,23 @@ private:
     }
     return mk(K_VAR, p, nd::WithVarOp::create(b, noLoc(), valTy(), n, withs, at(p)));
   }
-  static void note(Free &f, Name n, Pos p, bool strict) {
-    auto [it, fresh] = f.index.try_emplace(n.str(), uint32_t(f.names.size()));
-    if (fresh) f.names.push_back({n, p, strict});
-    else if (strict && !f.names[it->second].strict) f.names[it->second] = {n, p, true};
+  static void note(Free &f, const Name &n, uint32_t h, Pos p, bool strict) {
+    uint32_t k = ~0u;
+    if (f.index.empty()) {
+      for (uint32_t i = 0; i < f.names.size() && k == ~0u; i++)
+        if (f.hashes[i] == h && sameName(f.names[i].name, n)) k = i;
+    } else if (auto it = f.index.find(n.str()); it != f.index.end()) {
+      k = it->second;
+    }
+    if (k != ~0u) {
+      if (strict && !f.names[k].strict) f.names[k] = {n, p, true};
+      return;
+    }
+    f.names.push_back({n, p, strict});
+    f.hashes.push_back(h);
+    if (!f.index.empty()) f.index[n.str()] = f.names.size() - 1;
+    else if (f.names.size() > 32)
+      for (uint32_t i = 0; i < f.names.size(); i++) f.index[f.names[i].name.str()] = i;
   }
   Node call(Pos p, Node &f, llvm::MutableArrayRef<Node> args) {
     if (mode == Mode::Show) {
@@ -953,9 +994,10 @@ private:
   /// `(f a) b` is `f a b` (upstream's makeCall): an argument after a call is one more argument of that call.
   Node extend(Node f, llvm::MutableArrayRef<Node> args) {
     if (mode == Mode::Show) {
-      f.s.pop_back();
-      for (Node &a : args) f.s += " " + txt(a);
-      f.s += ")";
+      std::string s = texts[f.shownAt];
+      s.pop_back();
+      for (Node &a : args) s += " " + txt(a);
+      f.shownAt = texts.append(s + ")");
     } else if (mode == Mode::Gen) {
       auto ap = f.v.getDefiningOp<nd::ApplyOp>();
       llvm::SmallVector<Value> av(ap.getArgs().begin(), ap.getArgs().end());
@@ -1045,7 +1087,7 @@ private:
     if (mode == Mode::Show) {
       std::ostringstream os;
       printLiteralString(os, t.str());
-      n.s = os.str();
+      n.shownAt = texts.append(os.str());
     }
     return n;
   }
@@ -1077,7 +1119,7 @@ private:
     return bands->span(r).first() + (bands->kind(r) == confix::K_LET ? 3 : 1);
   }
   void bind(Scope &s, Name n) {
-    if (!s.vars.count(n.str())) s.vars[n.str()] = mode == Mode::Gen ? placeholder() : Value();
+    if (!lookup(s, n, hashOf(n))) bindTo(s, n, mode == Mode::Gen ? placeholder() : Value());
   }
   enum Got { G_NAME, G_DYN, G_NONE };
   /// The component of an attribute path at t, read on: a static name (an identifier, `or`, "s", ${"s"}), a computed one
@@ -1394,13 +1436,13 @@ private:
   }
   /// The value of a group member's placeholder (Gen); a name it was given ahead that nothing bound is an orphan.
   Value member(Scope &s, const Name &n) {
-    auto it = s.vars.find(n.str());
-    if (it == s.vars.end()) error("internal error: the heads of a set missed '" + n.toString() + "'", Pos{});
-    return it->second;
+    Value *v = lookup(s, n, hashOf(n));
+    if (!v) error("internal error: the heads of a set missed '" + n.toString() + "'", Pos{});
+    return *v;
   }
   /// Names a group was given ahead that no binding gave it: only a binding the parse refuses can leave one, so the parse
   /// must fail; done() says so if it does not.
-  void orphansOf(Scope &s, Set &set) { orphans += uint32_t(s.vars.size() - set.defs.size()); }
+  void orphansOf(Scope &s, Set &set) { orphans += uint32_t(s.rows.second() - set.defs.size()); }
   /// Make a set (Gen): its members' values ordered by name, a rec set's placeholders replaced, the attrs op.
   Value makeSet(uint32_t si) {
     Set &s = sets[si];
@@ -1659,7 +1701,7 @@ private:
         orphansOf(ns, s);
         if (mode == Mode::Gen) {
           auto finals = finalizeGroup(phv, values, poses);
-          for (size_t i = 0; i < s.defs.size(); i++) ns.vars[s.defs[i].name.str()] = finals[i];
+          for (size_t i = 0; i < s.defs.size(); i++) bindTo(ns, s.defs[i].name, finals[i]);
         }
         release(si);
       }
@@ -1681,7 +1723,7 @@ private:
     Parser p(Mode::Show, origin, quiet, nullptr);
     p.jump(off, pos);
     Node e = p.parseExpr();
-    return std::move(p.txt(e));
+    return p.txt(e);
   }
 
   //===--------------------------------------------------------------------===//
@@ -1769,7 +1811,7 @@ private:
     unsigned withs = caps.size();
     llvm::SmallVector<llvm::StringRef> names;
     for (FreeName &f : free.names) {
-      if (Value v = resolveStatic(f.name.str())) {
+      if (Value v = resolveStatic(f.name)) {
         names.push_back(f.name.str());
         caps.push_back(v);
       } else if (f.strict && withs == 0) {
@@ -1819,7 +1861,7 @@ private:
     Pos pos = cur().pos;
     if (cur().t == T_ID) {
       h.arg = nameOf(take());
-      ns.vars[h.arg.str()] = arg;
+      bindTo(ns, h.arg, arg);
       if (atChar(':')) {
         take();
         return;
@@ -1829,7 +1871,7 @@ private:
     h.formals = true;
     if (mode != Mode::Show) {
       Name after = formalNames(cur().offset, ns);
-      if (!after.isNull() && h.arg.isNull()) ns.vars[after.str()] = arg;
+      if (!after.isNull() && h.arg.isNull()) bindTo(ns, after, arg);
     }
     expectChar('{');
     Scope *s0 = sc;
@@ -1871,10 +1913,10 @@ private:
         Value ph = member(ns, h.fs[i].name);
         ph.replaceAllUsesWith(fvs[i]);
         ph.getDefiningOp()->erase();
-        ns.vars[h.fs[i].name.str()] = fvs[i];
+        bindTo(ns, h.fs[i].name, fvs[i]);
       }
     }
-    if (mode != Mode::Show && ns.vars.size() != h.fs.size() + !h.arg.isNull())
+    if (mode != Mode::Show && ns.rows.second() != h.fs.size() + !h.arg.isNull())
       error("internal error: the heads of a formals list are not its formals", pos);
     expectChar(':');
   }

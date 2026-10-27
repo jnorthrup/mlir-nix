@@ -1,10 +1,10 @@
 //===- Pack.h - Hard densification: a Join of scalars is one integer ---------===//
 //
-// What `join-densify` (JoinOps.td) does to !join.pair<A, B> in the IR, for C++: a Join of fixed-width
+// The layout of !trikeshed.join<A, B> (include/Composite/TrikeShed.td), for C++: a Join of fixed-width
 // scalars is ONE unsigned integer, the first component in the high bits, so that building it is
 // shifts and ors, taking it apart is shifts and masks, and comparing two of them is comparing two
 // integers, which orders them by their first component, then the second.  Joins nest, and a nest
-// is one integer too (<i32, <i32, i32>> is the i96 of the dialect's test).  The constructor is a
+// is one integer too (<i32, <i32, i32>> is an i96).  The constructor is a
 // combinator: `dense(a, b, c)` is `Dense<A, Dense<B, C>>(a, Dense<B, C>(b, c))`, built from the types
 // of its arguments, so no record of scalars needs hand-written packing.
 //
@@ -73,7 +73,7 @@ template <unsigned N> struct Field<Bits<N>> {
   template <class R> static constexpr R put(Bits<N> x) { return R(x.v); }
   template <class R> static constexpr Bits<N> get(R r) { return Bits<N>(uint64_t(r)); }
 };
-/// Floats travel as their bits, as in the pass (`asInt` / `fromInt` in Composite.cpp).
+/// Floats travel as their bits.
 template <> struct Field<float> {
   template <class R> static constexpr R put(float x) { return R(std::bit_cast<uint32_t>(x)); }
   template <class R> static constexpr float get(R r) { return std::bit_cast<float>(uint32_t(r)); }
@@ -117,16 +117,16 @@ template <class A, class B, class... Rest> constexpr auto dense(A a, B b, Rest..
 
 using TwInt = Dense<uint32_t, uint32_t>;
 
-// The constant test/mlir/join.mlir folds `join.make 7, 9 : !join.pair<i32, i32>` to.
-static_assert(TwInt(7, 9).raw == 30064771081ull, "TwInt and join-densify disagree on the layout");
+// The layout TrikeShed.td states: (7 j 9) : !trikeshed.join<i32, i32> is this i64.
+static_assert(TwInt(7, 9).raw == 30064771081ull, "TwInt and TrikeShed.td disagree on the layout");
 static_assert(TwInt(7, 9).first() == 7 && TwInt(7, 9).second() == 9);
-// test/mlir/join.mlir @segment: (3, (10, 17)) : !join.pair<i32, !join.pair<i32, i32>> folds to the i96 55340232264078327825
+// A segment: (3, (10, 17)) : !trikeshed.join<i32, !trikeshed.join<i32, i32>> is the i96 55340232264078327825
 // = 3 * 2^64 + 42949672977.  C++ has no 96-bit literal, so the two halves are compared.
 static_assert((dense(uint32_t(3), uint32_t(10), uint32_t(17)).raw >> 64) == 3 &&
               uint64_t(dense(uint32_t(3), uint32_t(10), uint32_t(17)).raw) == 42949672977ull);
-// @twin_of_longs: (1, 2) : !join.pair<i64, i64> is the i128 18446744073709551618 = 2^64 + 2.
+// Twin<i64>: (1, 2) : !trikeshed.join<i64, i64> is the i128 18446744073709551618 = 2^64 + 2.
 static_assert(dense(uint64_t(1), uint64_t(2)).raw == ((detail::u128(1) << 64) | 2));
-// @float_and_int: (1.0f, 5) : !join.pair<f32, i32> is the i64 4575657221408423941 (1.0f = 0x3F800000).
+// (1.0f, 5) : !trikeshed.join<f32, i32> is the i64 4575657221408423941 (1.0f = 0x3F800000).
 static_assert(dense(1.0f, uint32_t(5)).raw == 4575657221408423941ull);
 static_assert(dense(1.0f, uint32_t(5)).first() == 1.0f && dense(1.0f, uint32_t(5)).second() == 5);
 // A segment <i32, <i32, i32>> is the dialect's i96: the first component in the high 32 bits of 96.

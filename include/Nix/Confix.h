@@ -21,6 +21,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include "NixDialect/NixSyntaxEnums.h.inc"
+#include "Composite/TrikeShedEnums.h.inc"
 
 #include <algorithm>
 #include <string_view>
@@ -39,32 +40,32 @@ using Kind = BandKind;
 /// band's are together and in order.  The opening delimiter of a band is at `first`, its closing delimiter at `second`
 /// (a string's closing quote, an indented string's first closing quote, the `in` of a `let`).
 struct Bands {
-  composite::Cursor<join::TwInt, uint8_t, join::TwInt> rows{{"span", "kind", "stmts"}};
+  composite::Cursor<join::TwInt, uint8_t, join::TwInt> rows{BandCol{}};
   composite::MutableSeries<uint32_t> ends;
   uint32_t size() const { return rows.size(); }
   /// Empty the table and keep its storage, for a scan of the next source.
   void clear() {
-    rows.col<0>().cells.clear();
-    rows.col<1>().cells.clear();
-    rows.col<2>().cells.clear();
+    rows.col<BandCol::Span>().cells.clear();
+    rows.col<BandCol::Kind>().cells.clear();
+    rows.col<BandCol::Stmts>().cells.clear();
     ends.cells.clear();
   }
-  join::TwInt span(uint32_t i) const { return rows.col<0>()[i]; }
-  Kind kind(uint32_t i) const { return Kind(rows.col<1>()[i]); }
+  join::TwInt span(uint32_t i) const { return rows.col<BandCol::Span>()[i]; }
+  Kind kind(uint32_t i) const { return Kind(rows.col<BandCol::Kind>()[i]); }
   /// The ends of the statements of band i, in order: a view of `ends`.
   auto stmts(uint32_t i) const {
-    join::TwInt s = rows.col<2>()[i];
+    join::TwInt s = rows.col<BandCol::Stmts>()[i];
     return composite::series(ends.cells.data() + s.first(), s.second());
   }
   /// The band that opens at `off`, or size() when none does.
   uint32_t at(uint32_t off) const {
-    const auto &c = rows.col<0>().cells;
+    const auto &c = rows.col<BandCol::Span>().cells;
     auto it = std::lower_bound(c.begin(), c.end(), off, [](join::TwInt s, uint32_t o) { return s.first() < o; });
     return it != c.end() && it->first() == off ? uint32_t(it - c.begin()) : size();
   }
   bool operator==(const Bands &o) const {
-    return rows.col<0>().cells == o.rows.col<0>().cells && rows.col<1>().cells == o.rows.col<1>().cells &&
-           rows.col<2>().cells == o.rows.col<2>().cells && ends.cells == o.ends.cells;
+    return rows.col<BandCol::Span>().cells == o.rows.col<BandCol::Span>().cells && rows.col<BandCol::Kind>().cells == o.rows.col<BandCol::Kind>().cells &&
+           rows.col<BandCol::Stmts>().cells == o.rows.col<BandCol::Stmts>().cells && ends.cells == o.ends.cells;
   }
 };
 
@@ -81,8 +82,8 @@ public:
     if (stack.empty() || (out.kind(stack.back().row) != a && out.kind(stack.back().row) != b)) return false;
     Open o = stack.back();
     stack.pop_back();
-    out.rows.col<0>()[o.row] = join::TwInt(out.span(o.row).first(), uint32_t(at));
-    out.rows.col<2>()[o.row] = join::TwInt(out.ends.size(), uint32_t(pend.size() - o.from));
+    out.rows.col<BandCol::Span>()[o.row] = join::TwInt(out.span(o.row).first(), uint32_t(at));
+    out.rows.col<BandCol::Stmts>()[o.row] = join::TwInt(out.ends.size(), uint32_t(pend.size() - o.from));
     out.ends.cells.insert(out.ends.cells.end(), pend.begin() + o.from, pend.end());
     pend.resize(o.from);
     return true;

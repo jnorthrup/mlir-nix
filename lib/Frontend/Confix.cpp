@@ -38,9 +38,9 @@ public:
     if (src.size() >= UINT32_MAX) return false; // segments are 32-bit
     st.assign(1, S_INITIAL);
     const size_t n = src.size();
-    bands.rows.col<0>().cells.reserve(n / 48 + 16); // about one band per 56 bytes of nixpkgs
-    bands.rows.col<1>().cells.reserve(n / 48 + 16);
-    bands.rows.col<2>().cells.reserve(n / 48 + 16);
+    bands.rows.col<BandCol::Span>().cells.reserve(n / 48 + 16); // about one band per 56 bytes of nixpkgs
+    bands.rows.col<BandCol::Kind>().cells.reserve(n / 48 + 16);
+    bands.rows.col<BandCol::Stmts>().cells.reserve(n / 48 + 16);
     for (;;) {
       if (p >= n) {
         // At the end of the input a path ends (the lexer emits its end token), and a path with a trailing slash is an error.
@@ -339,6 +339,7 @@ bool scan(std::string_view src, Bands &out) { return Scanner(src, out).run(); }
 // The names and lookups of the kinds of tokens and bands, generated from NixDialect/NixSyntax.td.
 #include "llvm/ADT/StringSwitch.h"
 #include "NixDialect/NixSyntaxEnums.cpp.inc"
+#include "Composite/TrikeShedEnums.cpp.inc"
 
 namespace nixfe::confix {
 

@@ -1,8 +1,5 @@
-set(LLVM_TARGET_DEFINITIONS JoinOps.td)
-mlir_tablegen(JoinOps.h.inc -gen-op-decls)
-mlir_tablegen(JoinOps.cpp.inc -gen-op-defs)
-mlir_tablegen(JoinDialect.h.inc -gen-dialect-decls -dialect=join)
-mlir_tablegen(JoinDialect.cpp.inc -gen-dialect-defs -dialect=join)
-mlir_tablegen(JoinTypes.h.inc -gen-typedef-decls -typedefs-dialect=join)
-mlir_tablegen(JoinTypes.cpp.inc -gen-typedef-defs -typedefs-dialect=join)
-add_public_tablegen_target(MLIRJoinIncGen)
+# TrikeShed's kernel as a dialect (TrikeShed.td): the columns of the Cursors, generated for the C++
+set(LLVM_TARGET_DEFINITIONS TrikeShed.td)
+mlir_tablegen(TrikeShedEnums.h.inc -gen-enum-decls)
+mlir_tablegen(TrikeShedEnums.cpp.inc -gen-enum-defs)
+add_public_tablegen_target(TrikeShedIncGen)
