@@ -108,8 +108,9 @@ graph while it is built. Each mechanism of the talk, and what is here:
 - **A prepass over the global declarations, so that later work knows them**
   ([63:00](https://www.youtube.com/watch?v=NxiKlnUtyio&t=3780s)). Built and consumed: the Confix scan finds the bands and the
   statements that end in them (`NixSyntax.td`, layers 0 and 1), and the parser reads the names a `let`, a `rec` set or a formals list
-  binds from where its statements start (layer 2) before it reaches the first value. From 64 KiB up the scan runs on a thread of
-  its own ahead of the parse, which waits on a band only until the scan has closed it (9729014, 745f861).
+  binds from where its statements start (layer 2) before it reaches the first value. The scan runs where the parser asks, over one
+  band at a time; run ahead over a whole source on a thread (9729014, 745f861) it covered four times the bytes anything read
+  (24.3% of the toplevel's are inside a band whose heads are read).
 - **Treeless parsing and the sea of nodes are independent** ([92:31](https://www.youtube.com/watch?v=NxiKlnUtyio&t=5551s)); the talk
   calls the first the front end and the second the back end ([95:02](https://www.youtube.com/watch?v=NxiKlnUtyio&t=5702s)). Here the back
   end exists (graph regions of `nix` ops) with a tree front end.

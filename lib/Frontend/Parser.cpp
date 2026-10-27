@@ -610,7 +610,7 @@ struct Hdr {
 };
 
 struct Parser {
-  Parser(Mode m, std::shared_ptr<Origin> o, const ParseOptions &po, const confix::Bands *bands,
+  Parser(Mode m, std::shared_ptr<Origin> o, const ParseOptions &po, confix::Bands *bands,
          mlir::ModuleOp module = {}, const GenOptions *go = nullptr)
       : mode(m), origin(std::move(o)), opts(po), lx(origin, opts), bands(bands), module(module),
         b(module ? module.getContext() : nullptr), go(go) {}
@@ -695,7 +695,7 @@ struct Parser {
   const ParseOptions &opts;
   Lexer lx;
   std::optional<Lexer> hl; // the heads': statement starts, read for the names they bind
-  const confix::Bands *bands;
+  confix::Bands *bands; // written as the heads need it: a band is scanned when its names are first read
   mlir::ModuleOp module;
   mlir::OpBuilder b;
   const GenOptions *go;
@@ -722,6 +722,7 @@ struct Parser {
     uint32_t band, stmt;
     llvm::SmallVector<Name, 4> path;
     Ctx *up;
+    uint32_t open; // where the band opens: a band no head needed yet is scanned when a later one does (NixOS/nix#9020)
   };
   // The binding whose value is being parsed: a set literal that is all of the value can merge with what is bound there.
   uint32_t valueAt = ~0u;
@@ -1106,6 +1107,7 @@ struct Parser {
   //===--------------------------------------------------------------------===//
 
   uint32_t bandAt(uint32_t off) const { return bands ? bands->at(off) : ~0u; }
+  uint32_t bandNeed(uint32_t off) { return bands ? bands->need(off) : ~0u; } // scanned now if no scan has met it
   bool hasBand(uint32_t r) const { return bands && r < bands->size(); }
   Lexer &heads() {
     if (!hl) {
@@ -1249,7 +1251,7 @@ struct Parser {
   /// The formals of a formals band (the first token after its `{` and after each of its commas), bound in s; and the name
   /// after `}@`, if any, which is the lambda's argument.
   Name formalNames(uint32_t brace, Scope &s) {
-    uint32_t r = bandAt(brace);
+    uint32_t r = bandNeed(brace);
     if (!hasBand(r)) return Name();
     try {
       Lexer &h = heads();
@@ -1268,10 +1270,9 @@ struct Parser {
       return Name();
     }
   }
-  /// The statement ends where the scan said (layer 1): checked wherever a statement's semicolon is met, in a band the scan
-  /// has closed (a scan ahead of the parse closes the band of a large set only at its end: the parse does not wait for it).
+  /// The statement ends where the scan said (layer 1): checked wherever a statement's semicolon is met in a band scanned.
   void stmtEnd(const Ctx &c) {
-    if (!hasBand(c.band) || !atChar(';') || !bands->closed(c.band)) return;
+    if (!hasBand(c.band) || !atChar(';')) return;
     auto ends = bands->stmts(c.band);
     if (c.stmt >= ends.size() || ends[c.stmt] != cur().offset)
       error("internal error: the scan ends this statement elsewhere", cur().pos);
@@ -1508,8 +1509,8 @@ struct Parser {
   }
 
   /// binds: a sequence of `attrpath = expr;` and `inherit ...;`, into set si, whose statements are band `band`.
-  void parseBinds(uint32_t si, uint32_t band, Ctx *up) {
-    Ctx c{band, 0, {}, up};
+  void parseBinds(uint32_t si, uint32_t band, Ctx *up, uint32_t open) {
+    Ctx c{band, 0, {}, up, open};
     for (;; c.stmt++) {
       if (cur().t == T_INHERIT) {
         take();
@@ -1592,7 +1593,7 @@ struct Parser {
     valueAt = ~0u;
     mergeInto = nullptr;
     valueCtx = nullptr;
-    uint32_t band = bandAt(cur().offset);
+    uint32_t open = cur().offset, band = rec ? bandNeed(open) : bandAt(open);
     expectChar('{');
     uint32_t si;
     if (into) { // it merges with the set bound there: its `rec` is lost, and that set's scope is its own (NixOS/nix#9020)
@@ -1606,7 +1607,7 @@ struct Parser {
         llvm::SmallVector<Name, 8> rel;
         for (Ctx *k = up; k; k = k->up) {
           rel.insert(rel.begin(), k->path.begin(), k->path.end());
-          adds(k->band, k->stmt + 1, rel, rs);
+          adds(hasBand(k->band) ? k->band : bandNeed(k->open), k->stmt + 1, rel, rs);
         }
       }
       si = newSet(pos, &rs, sc);
@@ -1615,7 +1616,7 @@ struct Parser {
     } else {
       si = newSet(pos, sc, sc);
     }
-    parseBinds(si, band, up);
+    parseBinds(si, band, up, open);
     expectChar('}');
     return setNode(si, pos);
   }
@@ -1676,14 +1677,14 @@ struct Parser {
       return shared(body, pos);
     }
     if (t.t == T_LET && !isChar(peek(), '{')) {
-      uint32_t band = bandAt(t.offset);
+      uint32_t open = t.offset, band = bandNeed(open);
       take();
       Scope ns;
       ns.parent = sc;
       if (mode != Mode::Show) adds(band, 0, {}, ns);
       uint32_t si = newSet(pos, &ns, sc);
       sets[si].scope = &ns;
-      parseBinds(si, band, nullptr);
+      parseBinds(si, band, nullptr, open);
       if (cur().t != T_IN) unexpected("'in'");
       take();
       if (!sets[si].dyns.empty()) error("dynamic attributes not allowed in let", pos);
@@ -2472,44 +2473,11 @@ static confix::Bands &scratchBands() {
   return b;
 }
 
-/// A source the scan refuses has a syntax error, which a parse that needs no statements reports in the parser's own words.
-[[noreturn]] static void refused(const std::shared_ptr<Origin> &origin, const ParseOptions &po) {
-  Parser(Mode::Show, origin, po, nullptr).show();
-  throw ParseError("internal error: the scan refused a source the parser accepts", Pos{1, 1}, origin);
-}
-
-/// The bands and statements of a source.
-static const confix::Bands &scanned(const std::shared_ptr<Origin> &origin, const ParseOptions &po, confix::Bands &into) {
-  into.clear();
-  if (!confix::scan(origin->text->view(), into)) refused(origin, po);
-  return into;
-}
-
-/// From this size up, the scan runs on a thread of its own, ahead of the parse (which waits on a band only until the
-/// scan has closed it); a smaller source is scanned first, in less time than a thread takes to start.
-constexpr size_t kScanAhead = 64 * 1024;
-
 nd::ExprOp genExpr(mlir::ModuleOp module, std::shared_ptr<Origin> origin, const ParseOptions &po, llvm::StringRef symName,
                    const GenOptions &opts) {
-  std::string_view text = origin->text->view();
-  if (text.size() < kScanAhead) {
-    confix::Bands &into = opts.pool ? opts.pool->bands : scratchBands();
-    return Parser(Mode::Gen, origin, po, &scanned(origin, po, into), module, &opts).genTop(symName);
-  }
-  confix::Bands &into = scratchBands(); // reserved for the most bands the source can hold, and kept for the next
-  into.clear();
-  into.reserveFor(text.size());
-  std::jthread ahead([&] { confix::scan(text, into); });
-  try {
-    nd::ExprOp op = Parser(Mode::Gen, origin, po, &into, module, &opts).genTop(symName);
-    ahead.join();
-    if (opts.pool) opts.pool->bands.copyFrom(into); // a pool keeps the table at its size, for its bodies' calls
-    return op;
-  } catch (...) { // a source the scan refuses: the parser's own words for it, as when the scan runs first
-    ahead.join();
-    if (!into.balanced.load(std::memory_order_relaxed)) refused(origin, po);
-    throw;
-  }
+  confix::Bands &bands = opts.pool ? opts.pool->bands : scratchBands();
+  bands.clear(origin->text->view());
+  return Parser(Mode::Gen, origin, po, &bands, module, &opts).genTop(symName);
 }
 
 void mintBody(nd::LambdaOp lam, FilePool &pool, uint32_t row, const GenOptions &opts) {
@@ -2524,7 +2492,8 @@ void showSource(std::ostream &os, std::shared_ptr<Origin> origin, const ParseOpt
 }
 
 void skim(std::shared_ptr<Origin> origin, const ParseOptions &po) {
-  const confix::Bands &bands = scanned(origin, po, scratchBands());
+  confix::Bands &bands = scratchBands();
+  bands.clear(origin->text->view());
   Parser(Mode::Skip, origin, po, &bands).top();
 }
 
@@ -2535,37 +2504,37 @@ bool confix::lexBands(std::shared_ptr<Origin> origin, const ParseOptions &opts, 
     for (Token t = lx.nextToken(), n;; t = n) {
       n = t.t == T_EOF ? t : lx.nextToken();
       switch (t.t) {
-      case T_EOF: return out.done(ls.balanced());
+      case T_EOF: return ls.balanced();
       case T_DOLLAR_CURLY: ls.open(confix::K_INTERP, t.offset); break;
       case T_IND_STRING_OPEN: ls.open(confix::K_IND_STRING, t.offset); break;
       case T_IND_STRING_CLOSE:
-        if (!ls.close(confix::K_IND_STRING, confix::K_IND_STRING, t.offset)) return out.done(false);
+        if (!ls.close(confix::K_IND_STRING, confix::K_IND_STRING, t.offset)) return false;
         break;
       case T_LET:
         if (!(n.t == T_CHAR && n.ch == '{')) ls.open(confix::K_LET, t.offset);
         break;
       case T_IN:
-        if (!ls.close(confix::K_LET, confix::K_LET, t.offset)) return out.done(false);
+        if (!ls.close(confix::K_LET, confix::K_LET, t.offset)) return false;
         break;
       case T_WITH: case T_ASSERT: ls.owe(); break;
       case T_CHAR:
         switch (t.ch) {
         case '{': ls.open(confix::K_BRACE, t.offset); break;
         case '}':
-          if (!ls.close(confix::K_BRACE, confix::K_INTERP, t.offset)) return out.done(false);
+          if (!ls.close(confix::K_BRACE, confix::K_INTERP, t.offset)) return false;
           break;
         case '(': ls.open(confix::K_PAREN, t.offset); break;
         case ')':
-          if (!ls.close(confix::K_PAREN, confix::K_PAREN, t.offset)) return out.done(false);
+          if (!ls.close(confix::K_PAREN, confix::K_PAREN, t.offset)) return false;
           break;
         case '[': ls.open(confix::K_BRACKET, t.offset); break;
         case ']':
-          if (!ls.close(confix::K_BRACKET, confix::K_BRACKET, t.offset)) return out.done(false);
+          if (!ls.close(confix::K_BRACKET, confix::K_BRACKET, t.offset)) return false;
           break;
         case '"':
           // Inside a string the next quote closes it (an interpolation would have opened a band of its own).
           if (ls.inside(confix::K_STRING)) {
-            if (!ls.close(confix::K_STRING, confix::K_STRING, t.offset)) return out.done(false);
+            if (!ls.close(confix::K_STRING, confix::K_STRING, t.offset)) return false;
           } else {
             ls.open(confix::K_STRING, t.offset);
           }
@@ -2579,7 +2548,7 @@ bool confix::lexBands(std::shared_ptr<Origin> origin, const ParseOptions &opts, 
       }
     }
   } catch (const ParseError &) {
-    return out.done(false);
+    return false;
   }
 }
 

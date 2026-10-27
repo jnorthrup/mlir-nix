@@ -39,6 +39,7 @@ struct Scanner : Rules {
     const size_t n = src.size();
     bands.rows.reserve(n / 48 + 16); // about one band per 56 bytes of nixpkgs
     for (;;) {
+      if (p >= stop && stop < n) return true; // the band a scan from `need` opened has closed
       if (p >= n) {
         // At the end of the input a path ends (the lexer emits its end token), and a path with a trailing slash is an error.
         if (st.back() == S_INPATH) { st.pop_back(); continue; }
@@ -64,9 +65,15 @@ struct Scanner : Rules {
   Layers layers;              // the open bands, their statements
   std::vector<State> st;      // the lexer's state stack
   size_t p = 0;
+  size_t stop = src.size();   // where the scan ends: the source's end, or past the band a scan from `need` opened
+  bool rooted = false;        // a scan from `need`: it ends where its first band closes
 
   void openBand(Kind k, size_t at) { layers.open(k, at); }
-  bool closeBand(Kind a, Kind b, size_t at) { return layers.close(a, b, at); }
+  bool closeBand(Kind a, Kind b, size_t at) {
+    bool ok = layers.close(a, b, at);
+    if (ok && rooted && layers.balanced()) stop = at + 1;
+    return ok;
+  }
   /// An identifier [i, i + len): `with` and `assert` are owed their band's next semicolon; `let` opens a band (unless a
   /// `{` follows: the old `let { ... }`, whose braces are the band) that its `in` closes.
   bool word(size_t i, size_t len) {
@@ -101,7 +108,7 @@ struct Scanner : Rules {
   bool deflt() {
     const char *s = src.data();
     const size_t n = src.size();
-    while (p < n) {
+    while (p < stop) {
       const size_t i = p;
       const char c = s[i];
       if (isIdStart(c)) {
@@ -328,7 +335,18 @@ struct Scanner : Rules {
 
 } // namespace
 
-bool scan(std::string_view src, Bands &out) { return out.done(Scanner(src, out).run()); }
+bool scan(std::string_view src, Bands &out) {
+  out.src = src;
+  return Scanner(src, out).run();
+}
+
+uint32_t Bands::need(uint32_t off) {
+  if (uint32_t r = at(off); r != kNone) return r;
+  Scanner s(src, *this);
+  s.p = off;
+  s.rooted = true;
+  return s.run() ? at(off) : kNone;
+}
 
 } // namespace nixfe::confix
 
@@ -336,7 +354,3 @@ bool scan(std::string_view src, Bands &out) { return out.done(Scanner(src, out).
 #include "llvm/ADT/StringSwitch.h"
 #include "NixDialect/NixSyntaxEnums.cpp.inc"
 #include "Composite/TrikeShedEnums.cpp.inc"
-
-namespace nixfe::confix {
-
-} // namespace nixfe::confix

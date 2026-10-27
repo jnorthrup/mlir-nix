@@ -39,12 +39,12 @@ def Syn_Dialect : Dialect {
 
     0. The bands.  The lexer's state machine without tokens (Confix.cpp), checked against the lexer's own
        delimiters over every file of nixpkgs (`mlnix-parse -b`): about twice the lexer's speed.
-    1. The statements.  A task of its own runs ahead of the parser over the same characters and keeps the
-       semicolons that end statements, discarding the others; qualifying a semicolon costs no more than
-       lexing it.  A band's statements are ready as soon as its band closes.  From 64 KiB up the task is a
-       thread of its own (`genExpr`): its rows are reserved for the most bands the source can hold, so none
-       moves; `through` says how far it has read, a band's span is stored last when it closes, and the parser
-       waits on a band only until then.  A smaller source is scanned first, in less than a thread's start.
+    1. The statements.  The same scan keeps the semicolons that end statements, discarding the others;
+       qualifying a semicolon costs no more than lexing it.  It runs where the parser asks: a band is scanned
+       (`Bands::need`) when the names it binds are first read, from its opening delimiter to its closing one
+       and no further, and a band already met is found by where it opens.  A run ahead over the whole source
+       was tried (a thread from 64 KiB up, 745f861): 24.3% of the bytes the toplevel reads are inside a band
+       whose heads are read, so three quarters of what it scanned nothing used.
     2. The heads.  Where a statement starts, the names it binds are read from its first tokens, and only
        those: `a.b.c = e;` binds `a`, `inherit x y;` and `inherit (e) x y;` bind `x` and `y`,
        `"${e}" = v;` binds nothing a scope can see.  So a `let`, a `rec` set or a formals list knows all its
