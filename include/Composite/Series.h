@@ -18,7 +18,8 @@
 //   Grow<T>            the MutableSeries of a region: a Slice that is still being filled.  `done()` is the Slice.
 //   anchor             ↺, the constant anchor: the first force of a cell mints it, every read after is
 //                      the constant it produced.
-//   Cursor<T...>       the instance pool of one type: a MutableSeries per column, plus the column names.
+//   Cursor<T...>       the instance pool of one type: a MutableSeries per column, plus the column names, which are the
+//                      cases of its enum in TrikeShed.td (the dialect of this algebra).
 //                      PRELOAD's Cursor is Series<RowVec>, the row-shaped face of the same columns; no
 //                      caller reads a pool row as a RowVec, so that face is a known gap, not built.
 //
@@ -234,9 +235,13 @@ template <class... T> struct Cursor {
   std::tuple<MutableSeries<T>...> cols;
 
   explicit Cursor(std::array<const char *, width> names) : meta(names) {}
+  /// The columns are the cases of an enum generated from include/Composite/TrikeShed.td: stringifyEnum names them.
+  template <class E> requires std::is_enum_v<E> explicit Cursor(E) {
+    for (size_t i = 0; i < width; i++) meta[i] = stringifyEnum(E(i)).data();
+  }
   uint32_t size() const { return std::get<0>(cols).size(); }
-  template <size_t K> auto &col() { return std::get<K>(cols); }
-  template <size_t K> const auto &col() const { return std::get<K>(cols); }
+  template <auto K> auto &col() { return std::get<size_t(K)>(cols); }
+  template <auto K> const auto &col() const { return std::get<size_t(K)>(cols); }
   /// Accumulate one row; the result is its index.
   uint32_t append(T... cell) {
     uint32_t row = size();

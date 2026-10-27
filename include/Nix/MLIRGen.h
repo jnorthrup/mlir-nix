@@ -52,9 +52,6 @@ struct Row {
 /// starts, with the source's bands and statements (kept here) for its groups; what a skim of an enclosing body learned
 /// of a lambda in it (`seen`: where it ends, what it reads) spares it a second skim.
 struct FilePool {
-  struct Col {
-    enum : size_t { At, AtPos, Op, Withs, Names, Body };
-  };
   struct Seen {
     uint32_t end;
     Pos endPos;
@@ -64,8 +61,7 @@ struct FilePool {
   std::shared_ptr<Origin> origin; // one origin for every row
   ParseOptions opts;              // the source's, without lints: a body parsed again warns no second time
   confix::Bands bands;
-  composite::Cursor<uint32_t, Pos, mlir::Operation *, uint32_t, ::join::TwInt, nixev::RegionInfo *> rows{
-      {"at", "pos", "op", "withs", "names", "body"}};
+  composite::Cursor<uint32_t, Pos, mlir::Operation *, uint32_t, ::join::TwInt, nixev::RegionInfo *> rows{PoolCol{}};
   composite::MutableSeries<llvm::StringRef> nameCol; // the names of every row, one after another
   llvm::DenseMap<uint32_t, Seen> seen;
   std::vector<FreeName> freeCol;
@@ -82,19 +78,19 @@ struct FilePool {
     for (llvm::StringRef n : names) nameCol.append(n);
     return rows.append(at, pos, nullptr, withs, span, nullptr);
   }
-  void attach(uint32_t row, mlir::Operation *op) { rows.col<Col::Op>()[row] = op; }
+  void attach(uint32_t row, mlir::Operation *op) { rows.col<PoolCol::Op>()[row] = op; }
   Row read(uint32_t row) const {
     Row r;
-    r.at = rows.col<Col::At>()[row];
-    r.pos = rows.col<Col::AtPos>()[row];
-    r.op = rows.col<Col::Op>()[row];
-    r.withs = rows.col<Col::Withs>()[row];
-    ::join::TwInt span = rows.col<Col::Names>()[row];
+    r.at = rows.col<PoolCol::At>()[row];
+    r.pos = rows.col<PoolCol::AtPos>()[row];
+    r.op = rows.col<PoolCol::Op>()[row];
+    r.withs = rows.col<PoolCol::Withs>()[row];
+    ::join::TwInt span = rows.col<PoolCol::Names>()[row];
     for (uint32_t i = 0; i < span.second(); i++) r.names.push_back(nameCol[span.first() + i]);
     return r;
   }
   /// The body is minted: the op leaves the pool, the row keeps its anchor (Body).
-  void drain(uint32_t row) { rows.col<Col::Op>().drain(row); }
+  void drain(uint32_t row) { rows.col<PoolCol::Op>().drain(row); }
   void see(uint32_t at, uint32_t end, Pos endPos, llvm::ArrayRef<FreeName> free) {
     seen[at] = Seen{end, endPos, ::join::TwInt(uint32_t(freeCol.size()), uint32_t(free.size()))};
     freeCol.insert(freeCol.end(), free.begin(), free.end());

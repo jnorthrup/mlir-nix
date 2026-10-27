@@ -620,7 +620,7 @@ void EvalState::printStats() {
     size_t rows = 0, minted = 0;
     for (auto &p : pools) {
       rows += p->rows.size();
-      for (nixev::RegionInfo *ri : p->rows.col<nixfe::FilePool::Col::Body>().view()) minted += ri != nullptr;
+      for (nixev::RegionInfo *ri : p->rows.col<nixfe::PoolCol::Body>().view()) minted += ri != nullptr;
     }
     llvm::errs() << "== lambda pools: " << pools.size() << " files, (";
     for (size_t i = 0; i < pools[0]->rows.meta.size(); i++) llvm::errs() << (i ? ", " : "") << pools[0]->rows.meta[i];
@@ -1033,7 +1033,7 @@ RegionInfo *EvalState::mintLambda(nixfe::FilePool &p, uint32_t row) {
 
 RegionInfo *EvalState::bodyOf(nixfe::BodyIndex idx) {
   nixfe::FilePool &p = *pools[idx.first()]; // the index was issued by the generator: unchecked
-  return composite::anchor(p.rows.col<nixfe::FilePool::Col::Body>(), idx.second(),
+  return composite::anchor(p.rows.col<nixfe::PoolCol::Body>(), idx.second(),
                            [&](uint32_t row) { return mintLambda(p, row); });
 }
 
