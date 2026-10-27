@@ -27,16 +27,16 @@ class EvalState;
 namespace mlir::nix {
 // Effect resources for primops (see NixBase.td).
 struct NixTraceResource : public SideEffects::Resource::Base<NixTraceResource> {
-  StringRef getName() const final { return "NixTrace"; }
+  StringRef getName() final { return "NixTrace"; }
 };
 struct NixFSResource : public SideEffects::Resource::Base<NixFSResource> {
-  StringRef getName() const final { return "NixFS"; }
+  StringRef getName() final { return "NixFS"; }
 };
 struct NixEnvResource : public SideEffects::Resource::Base<NixEnvResource> {
-  StringRef getName() const final { return "NixEnv"; }
+  StringRef getName() final { return "NixEnv"; }
 };
 struct NixStoreResource : public SideEffects::Resource::Base<NixStoreResource> {
-  StringRef getName() const final { return "NixStore"; }
+  StringRef getName() final { return "NixStore"; }
 };
 
 // Helpers referenced by the generated primop classes.
