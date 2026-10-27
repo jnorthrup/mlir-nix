@@ -88,8 +88,8 @@ graph while it is built. Each mechanism of the talk, and what is here (the code 
 - **Parse straight into the graph; no tree.** Here the parser builds a tree (`AST.h`, a region of `Slice`s), `MLIRGen` walks it into ops
   (`FreeVars` is a second walk, for the free names of a lambda), and `Printer` prints it for `--parse`: 1,185 code lines (AST.h 227,
   MLIRGen.cpp 643, MLIRGen.h 74, Printer.cpp 241). The tree's weight, measured with `mlnix-parse -n` against `-s` over the 39,646 files
-  of the nixpkgs checkout (104.0 MB of source): 720 MB of footprint parsed against 161 MB scanned, **5.4 bytes of tree per byte of
-  source**, so about 180 MB of the toplevel's 1,505 MB (it touches 33.8 MB of source). This is the gap.
+  of the nixpkgs checkout (104.0 MB of source): 720 MB of footprint parsed against 161 MB scanned in one run and 730 MB against 154 MB in another, **5.4 to 5.5 bytes of tree per byte of
+  source**, so 180 to 190 MB of the toplevel's 1,505 MB (it touches 33.8 MB of source). This is the gap.
 - **Peepholes and value numbering when the node is made, while it is still in L1**
   ([35:01](https://www.youtube.com/watch?v=NxiKlnUtyio&t=2101s), [36:31](https://www.youtube.com/watch?v=NxiKlnUtyio&t=2191s),
   [41:32](https://www.youtube.com/watch?v=NxiKlnUtyio&t=2492s)). Here a base name resolves when its op is made (`baseRef`,
@@ -358,7 +358,7 @@ Fresh profile of the NixOS toplevel run (2 s main-thread sample, 1449 busy sampl
 9. Hashing (Linux; `docs/PERFORMANCE.md`, section Hashing): a toplevel run puts 53 MB through SHA-256, and Linux did it in LLVM's
    portable C. libcrypto now, where there is one. Not measured on kali yet.
 10. Parse into the IR with no tree (the section above). The front end writes the ops as it reads, through a sink that the printer also
-   implements, so `--parse` keeps a tree and the evaluator has none. Ceilings: about 180 MB of the toplevel's footprint (5.4 bytes of
+   implements, so `--parse` keeps a tree and the evaluator has none. Ceilings: 180 to 190 MB of the toplevel's footprint (5.4 to 5.5 bytes of
    tree per byte of source), which the demand schedule keeps alive today in its pool, so the memory only comes back with
    `file j [begin, end)` recipes; and the second walk (`FreeVars`, `MLIRGen`). The parse itself stays: lexing and parsing are 6.5% of
    the evaluator thread (rung 6) and a builder cannot remove them. Costs: a placeholder for a use that precedes its definition, the

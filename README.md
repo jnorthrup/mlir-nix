@@ -48,7 +48,7 @@ exists yet beyond the query and opt tools. The next steps the measurements suppo
 - Collapse the primop set into its declaration: it is declared once in IRDL and registered again in C++, and `scripts/check-prims.py` only
   checks that the two agree. And give the syntax a dialect of its own (Google's JSIR is the existence proof, [docs/MLIR.md](docs/MLIR.md)).
 - Parse into the IR with no syntax tree, as in [Sam H. Smith's talk](https://www.youtube.com/watch?v=NxiKlnUtyio). The front end builds a
-  tree (5.4 bytes per byte of source, about 180 MB of the NixOS toplevel's footprint) and walks it into ops; the tree, its printer and the
+  tree (5.4 to 5.5 bytes per byte of source, 180 to 190 MB of the NixOS toplevel's footprint) and walks it into ops; the tree, its printer and the
   walk are 1,185 lines of C++, the largest cut on the table now that the C++ total is ratcheted down (`scripts/cxx-lines.py`).
   [docs/FABRIC.md](docs/FABRIC.md) sets the talk's mechanisms against this tree one by one.
 
