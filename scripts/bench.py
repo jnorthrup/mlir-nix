@@ -18,10 +18,14 @@ WORKLOADS = {
 }
 
 
-def run_once(binary, args):
+RSS_UNIT = 1024 * 1024 if sys.platform == "darwin" else 1024  # ru_maxrss: bytes on macOS, KiB on Linux
+
+
+def run_once(binary, args, extra=None):
     env = dict(os.environ)
     env.setdefault("MLNIX_STORE_ROOT", "/tmp/mlnix-np-root")
     env.setdefault("MLNIX_STATE_DIR", "/tmp/mlnix-np-state")
+    env.update(extra or {})
     t0 = time.perf_counter()
     p = subprocess.Popen([binary] + args, cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     assert p.stdout is not None
@@ -29,7 +33,7 @@ def run_once(binary, args):
     _, status, ru = os.wait4(p.pid, 0)
     wall = time.perf_counter() - t0
     p.returncode = os.waitstatus_to_exitcode(status)
-    return wall, ru.ru_maxrss / (1024 * 1024), p.returncode, hashlib.sha256(out).hexdigest()[:12]
+    return wall, ru.ru_maxrss / RSS_UNIT, p.returncode, hashlib.sha256(out).hexdigest()[:12]
 
 
 def main():
