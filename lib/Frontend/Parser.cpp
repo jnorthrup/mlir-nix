@@ -1998,26 +1998,43 @@ struct Parser {
   // Precedence levels (higher binds tighter).
   enum { P_IMPL = 1, P_OR, P_AND, P_EQ, P_CMP, P_UPDATE, P_NOT, P_ADD, P_MUL, P_CONCAT, P_HAS, P_NEG };
 
-  int binPrec(const Token &t, bool &rightAssoc, bool &nonAssoc) {
-    rightAssoc = nonAssoc = false;
-    switch (t.t) {
-    case T_IMPL: rightAssoc = true; return P_IMPL;
-    case T_OR: return P_OR;
-    case T_AND: return P_AND;
-    case T_EQ: case T_NEQ: nonAssoc = true; return P_EQ;
-    case T_LEQ: case T_GEQ: nonAssoc = true; return P_CMP;
-    case T_UPDATE: rightAssoc = true; return P_UPDATE;
-    case T_CONCAT: rightAssoc = true; return P_CONCAT;
-    case T_CHAR:
-      switch (t.ch) {
-      case '<': case '>': nonAssoc = true; return P_CMP;
-      case '+': case '-': return P_ADD;
-      case '*': case '/': return P_MUL;
-      case '?': nonAssoc = true; return P_HAS;
-      }
-      return 0;
-    default: return 0;
+  /// The binary operators: the token, its level, its associativity, and what it lowers to: `bin` (a nix.* op of its own), a call of `fn`
+  /// (arguments swapped, result negated: `a <= b` is `!(b < a)`), or, with neither, a concatenation of strings or paths.
+  struct BinOp {
+    Tok t;
+    char ch;
+    int prec;
+    bool right, non;
+    int bin;
+    const char *fn;
+    bool swap, neg;
+  };
+  static constexpr int kCall = -1, kConcat = -2;
+  static constexpr BinOp kBinOps[] = {
+      {T_IMPL, 0, P_IMPL, true, false, B_IMPL, nullptr, false, false}, {T_OR, 0, P_OR, false, false, B_OR, nullptr, false, false},
+      {T_AND, 0, P_AND, false, false, B_AND, nullptr, false, false},   {T_EQ, 0, P_EQ, false, true, B_EQ, nullptr, false, false},
+      {T_NEQ, 0, P_EQ, false, true, B_NEQ, nullptr, false, false},     {T_UPDATE, 0, P_UPDATE, true, false, B_UPDATE, nullptr, false, false},
+      {T_CONCAT, 0, P_CONCAT, true, false, B_CONCAT, nullptr, false, false},
+      {T_LEQ, 0, P_CMP, false, true, kCall, "__lessThan", true, true}, {T_GEQ, 0, P_CMP, false, true, kCall, "__lessThan", false, true},
+      {T_CHAR, '<', P_CMP, false, true, kCall, "__lessThan", false, false}, {T_CHAR, '>', P_CMP, false, true, kCall, "__lessThan", true, false},
+      {T_CHAR, '+', P_ADD, false, false, kConcat, nullptr, false, false},  {T_CHAR, '-', P_ADD, false, false, kCall, "__sub", false, false},
+      {T_CHAR, '*', P_MUL, false, false, kCall, "__mul", false, false},    {T_CHAR, '/', P_MUL, false, false, kCall, "__div", false, false},
+      {T_CHAR, '?', P_HAS, false, true, kCall, nullptr, false, false}};
+
+  const BinOp *binOp(const Token &t) {
+    for (const BinOp &d : kBinOps)
+      if (d.t == t.t && (t.t != T_CHAR || d.ch == t.ch)) return &d;
+    return nullptr;
+  }
+
+  Node lowerBin(const BinOp &d, Pos p, Node &l, Node &r) {
+    if (d.bin == kConcat) {
+      Node parts[2] = {std::move(l), std::move(r)};
+      return concat(p, false, parts);
     }
+    if (d.bin != kCall) return bin(Bin(d.bin), p, l, r);
+    Node c = d.swap ? call2(p, d.fn, r, l) : call2(p, d.fn, l, r);
+    return d.neg ? not_(p, std::move(c)) : c;
   }
 
   Node var(const char *n) { return var(Name::of(n), Pos{}); } // n is a literal: never freed
@@ -2042,45 +2059,18 @@ struct Parser {
       lhs = parseApp();
     }
     int lastNonAssoc = -1;
-    while (true) {
-      bool ra, na;
-      int prec = binPrec(cur(), ra, na);
-      if (!prec || prec < minPrec) break;
-      if (na && prec == lastNonAssoc) unexpected();
-      Token op = take();
-      Pos opPos = op.pos;
-      if (prec == P_HAS) {
+    while (const BinOp *d = binOp(cur())) {
+      if (d->prec < minPrec) break;
+      if (d->non && d->prec == lastNonAssoc) unexpected();
+      Pos opPos = take().pos;
+      if (d->prec == P_HAS) {
         Path path = parseAttrPath();
         lhs = hasAttr(opPos, lhs, path);
-        lastNonAssoc = prec;
-        continue;
+      } else {
+        Node rhs = parseOp(d->right ? d->prec : d->prec + 1);
+        lhs = lowerBin(*d, opPos, lhs, rhs);
       }
-      Node rhs = parseOp(ra ? prec : prec + 1);
-      switch (op.t) {
-      case T_IMPL: lhs = bin(B_IMPL, opPos, lhs, rhs); break;
-      case T_OR: lhs = bin(B_OR, opPos, lhs, rhs); break;
-      case T_AND: lhs = bin(B_AND, opPos, lhs, rhs); break;
-      case T_EQ: lhs = bin(B_EQ, opPos, lhs, rhs); break;
-      case T_NEQ: lhs = bin(B_NEQ, opPos, lhs, rhs); break;
-      case T_LEQ: lhs = not_(opPos, call2(opPos, "__lessThan", rhs, lhs)); break;
-      case T_GEQ: lhs = not_(opPos, call2(opPos, "__lessThan", lhs, rhs)); break;
-      case T_UPDATE: lhs = bin(B_UPDATE, opPos, lhs, rhs); break;
-      case T_CONCAT: lhs = bin(B_CONCAT, opPos, lhs, rhs); break;
-      default:
-        switch (op.ch) {
-        case '<': lhs = call2(opPos, "__lessThan", lhs, rhs); break;
-        case '>': lhs = call2(opPos, "__lessThan", rhs, lhs); break;
-        case '+': {
-          Node parts[2] = {std::move(lhs), std::move(rhs)};
-          lhs = concat(opPos, false, parts);
-          break;
-        }
-        case '-': lhs = call2(opPos, "__sub", lhs, rhs); break;
-        case '*': lhs = call2(opPos, "__mul", lhs, rhs); break;
-        case '/': lhs = call2(opPos, "__div", lhs, rhs); break;
-        }
-      }
-      lastNonAssoc = na ? prec : -1;
+      lastNonAssoc = d->non ? d->prec : -1;
     }
     return lhs;
   }
