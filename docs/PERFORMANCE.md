@@ -10,6 +10,17 @@ shapes, frame slots, the resolution ladder) were read from counters that are no 
 before the commit that cut them (`git log -S statCall`), and the tool keeps the op histogram, the `//` layers, the lowering and
 minting times and the lambda pools.
 
+## Where the demand schedule loses to the tree (kali, 4e484eeae against aea88bf65, 9 interleaved runs, hashes identical)
+
+Eager: toplevel -9.5% wall / -12.4% cpu, nixpkgs-73 -3.9% / -5.1%. Demand: toplevel +3.5% / +0.8%, nixpkgs-73 +7.7% / +7.2%. Peak RSS
+is 6.7 to 10.3% lower in both. The self-time profile of nixpkgs-73 (demand) puts the gap in the front end: `Lexer::nextToken` +75 ms
+(102 -> 177), `Scanner::run` +23, `Parser::target` +19, `parseBinds` +12, against `newFrame` -42, `appendEscaped` -24, `FreeVars` and `Gen::gen`
+-42. What is counted (a counter in `Parser::fill`, not sampled): demand lexes 28.9 MB of nixpkgs-73's source (skim 17.0 MB in 1.94 M
+tokens, lowering 11.9 MB in 1.36 M), eager 26.8 MB in 3.08 M tokens, each byte once; the toplevel 35.5 MB against 33.8 MB. And what the
+skim is for: 22,154 lambdas deferred, 2,315 of them ever called (10.4%); toplevel 26,825 deferred, 2,476 called (9.2%). So 90% of
+what the skim lexes belongs to a body no call reaches, which is what a tree kept and a skim has to learn again; the lexer's cost per token
+also reads 30 to 50% higher than the tree's in the same profile on both schedules (not explained: its code is unchanged).
+
 ## What the time actually goes to (NixOS toplevel, hot, this branch)
 
     MLIR generation of ~1.1M ops (uniquing of locations/strings, ~20% of a cold profile;
