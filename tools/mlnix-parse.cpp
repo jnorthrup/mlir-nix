@@ -14,12 +14,14 @@ int main(int argc, char **argv) {
   // -n: time the parse alone, no AST printing.  -m: map the files instead of reading them.
   bool quiet = false, map = false, bandsMode = false, scanOnly = false;
   unsigned fuzzSeed = 0;
+  bool verbose = false;
   int a = 1;
   for (; a < argc && argv[a][0] == '-'; a++) {
     if (std::string(argv[a]) == "-n") quiet = true;
     else if (std::string(argv[a]) == "-m") map = true;
     else if (std::string(argv[a]) == "-b") bandsMode = true;
     else if (std::string(argv[a]) == "-s") scanOnly = true;
+    else if (std::string(argv[a]) == "-v") verbose = true;
     else if (std::string(argv[a]) == "-f" && a + 1 < argc - 1) fuzzSeed = unsigned(std::stoul(argv[++a]));
     else a = argc;
   }
@@ -27,6 +29,7 @@ int main(int argc, char **argv) {
     std::cerr << "usage: mlnix-parse [-n] [-m] [-b | -s] FILE-LIST\n"
                  "  -b: compare the Confix scan with the lexer's own delimiters over the list, and time both\n"
                  "  -s: time the Confix scan alone, ten passes over the list\n"
+                 "  -v: with -b, say what each file did (for a short list)\n"
                  "  -f SEED: with -b, also compare the scan with the lexer on random mutations of the first 4000 files\n";
     return 2;
   }
@@ -91,6 +94,9 @@ int main(int argc, char **argv) {
           same = viaScan.span(i) == viaLex.span(i) && viaScan.kind(i) == viaLex.kind(i);
         bandCount += viaScan.size();
       }
+      if (verbose)
+        std::cout << (same ? "ok       " : "DISAGREE ") << name << ": scan " << (okScan ? "accepts " : "rejects ") << viaScan.size()
+                  << " bands, lexer " << (okLex ? "accepts " : "rejects ") << viaLex.size() << "\n";
       if (!same) {
         if (++disagree <= 20) {
           std::cout << "DISAGREE " << name << ": scan " << (okScan ? "accepts " : "rejects ") << viaScan.size()
