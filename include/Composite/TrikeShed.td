@@ -272,6 +272,32 @@ def TS_SelectOp : TS_Op<"select", [Pure]> {
   }];
 }
 
+def TS_LayersType : TS_Type<"Layers", "layers"> {
+  let summary = "a chain of layers, each depending on the one before it: a read is the first layer that binds the key";
+  let parameters = (ins "::mlir::Type":$element);
+  let assemblyFormat = "`<` $element `>`";
+  let description = [{
+    The dependency form of a set.  `base // top` is not a merge: it is a layer that DEPENDS on `base`, and a `//` of a
+    `//` extends the chain instead of merging into a top.  Nix/Eval.h's `Bindings::Layer` is one node of it (`top` j the
+    layer it depends on), and `Bindings::get` walks the chain: the first layer that binds the key wins, and the walk is
+    bounded (`kMaxDepth`), past which the chain is materialised.
+
+    Laws: a chain is acyclic and ordered -- a layer depends only on layers already made; resolve(layers(l0, l1, ... lk), k)
+    is lk's row for k if it has one, else resolve of the chain before it; the rows of a chain are the rows of its layers
+    in name order, a later layer's row shadowing an earlier one's for the same name.
+  }];
+}
+
+def TS_ResolveOp : TS_Op<"resolve", [Pure]> {
+  let summary = "read a key through a chain of layers: the first layer that binds it";
+  let arguments = (ins TS_LayersType:$layers, AnyType:$key);
+  let results = (outs AnyType:$value);
+  let description = [{
+    Series.h/Nix: `Bindings::get` over a `Layer` chain.  Laws: resolve is left-to-right with the nearest layer winning,
+    and it never materialises the chain -- a layer that does not bind the key passes the read to the layer it depends on.
+  }];
+}
+
 def TS_CombineOp : TS_Op<"combine", [Pure]> {
   let summary = "the rows of a, then of b: one after the other";
   let arguments = (ins Variadic<TS_SeriesType>:$parts);

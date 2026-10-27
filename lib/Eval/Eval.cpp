@@ -37,22 +37,19 @@ namespace nixev {
 //===----------------------------------------------------------------------===//
 
 const Attr *Bindings::get(Symbol s) const {
-  const Bindings *b = this;
-  if (b->layered()) {
-    const Layer &L = b->layer();
-    if (L.flat) b = L.flat;
-    else {
-      if (const Attr *a = L.top->get(s)) return a; // top shadows base
-      b = L.base;
-    }
+  if (layered()) {
+    const Layer &L = layer();
+    if (L.flat) return L.flat->get(s);
+    if (const Attr *a = L.top->get(s)) return a; // top shadows base
+    return L.base->get(s);                       // and base may be a layer itself: the chain is walked, not flattened
   }
-  size_t lo = 0, hi = b->size_;
+  size_t lo = 0, hi = size_;
   while (lo < hi) {
     size_t mid = (lo + hi) / 2;
-    if (b->attrs[mid].name < s) lo = mid + 1;
+    if (attrs[mid].name < s) lo = mid + 1;
     else hi = mid;
   }
-  if (lo < b->size_ && b->attrs[lo].name == s) return &b->attrs[lo];
+  if (lo < size_ && attrs[lo].name == s) return &attrs[lo];
   return nullptr;
 }
 
@@ -88,7 +85,17 @@ static Bindings *mergeBindings(Arena &alloc, const Bindings *x, const Bindings *
 Bindings *Bindings::flat() const {
   if (!layered()) return const_cast<Bindings *>(this);
   Layer &L = layer();
-  if (!L.flat) { L.flat = mergeBindings(*L.alloc, L.base, L.top); flattened++; }
+  if (!L.flat) {
+    // The rows of the chain ARE the set, so materialising it is a copy of rows() -- no merge, no shadowing left to do.
+    size_t n = size();
+    void *mem = L.alloc->Allocate(sizeof(Bindings) + n * sizeof(Attr), alignof(Bindings));
+    auto *r = new (mem) Bindings();
+    auto rs = rows();
+    for (size_t i = 0; i < n; i++) r->attrs[i] = rs[uint32_t(i)];
+    r->size_ = uint32_t(n);
+    L.flat = r;
+    flattened++;
+  }
   return L.flat;
 }
 
@@ -100,44 +107,40 @@ std::vector<const Attr *> Bindings::lexicographicOrder(const SymbolTable &st) co
   return v;
 }
 
-/// `a // b`.  A small `b` next to a big `a` becomes a layer over `a` (nothing of `a` is copied);
-/// otherwise the two are merged into one flat set.  Layers stay two deep: a layer `//` more
-/// attributes merges them into its top, and is flattened once the top is no longer small.
+/// `a // b`.  A small `b` next to a big `a` becomes a layer that DEPENDS on `a` (nothing of `a` is copied, and `a` may
+/// itself be a layer, so a chain of `//` stays a chain); otherwise the two are merged into one flat set.  The chain is
+/// bounded (`kMaxDepth`): past it, and when `b` is no longer small, the chain is materialised and merged.
 Bindings *EvalState::updateAttrs(Bindings *a, Bindings *b) {
-  constexpr size_t kMinBase = 32, kRatio = 8; // layer when |top| * kRatio <= |base| and |base| >= kMinBase
+  constexpr size_t kMinBase = 32, kRatio = 8, kMaxDepth = 6;
   b = b->flat();
   if (a->layered() && a->layer().flat) a = a->layer().flat;
-  Bindings *base = a, *top = b;
-  if (a->layered()) {
-    Bindings::Layer &L = a->layer();
-    base = L.base;
-    top = mergeBindings(alloc, L.top, b);
-  }
-  if (base->layered()) base = base->flat();
+  size_t depth = a->layered() ? a->layer().depth : 0;
+  size_t baseSize = a->size();
   if (statsEnabled) {
-    if (base->size_ >= kMinBase && top->size_ * kRatio <= base->size_) { nUpdLayered++; nUpdBase += base->size_; nUpdTop += top->size_; }
-    else { nUpdMerged++; nUpdTop += base->size_ + top->size_; }
+    if (baseSize >= kMinBase && b->size_ * kRatio <= baseSize && depth < kMaxDepth) { nUpdLayered++; nUpdBase += baseSize; nUpdTop += b->size_; }
+    else { nUpdMerged++; nUpdTop += baseSize + b->size_; }
   }
-  if (base->size_ >= kMinBase && top->size_ * kRatio <= base->size_) {
+  if (baseSize >= kMinBase && b->size_ * kRatio <= baseSize && depth < kMaxDepth) {
     void *mem = alloc.Allocate(sizeof(Bindings) + sizeof(Bindings::Layer), alignof(Bindings));
     auto *r = new (mem) Bindings();
     r->size_ = Bindings::kLayered;
-    auto *L = new (static_cast<void *>(r->attrs)) Bindings::Layer{top, base, nullptr, &alloc, {}};
+    auto *L = new (static_cast<void *>(r->attrs)) Bindings::Layer{b, a, nullptr, &alloc, {}, uint32_t(depth + 1)};
     // The rows of the layer, in name order, as a selection (Series.h `select`, the dialect's `trikeshed.select`): word a
-    // row, `row j side` (TwInt), side 1 for `top`.  Both sides are sorted, so this is one walk over them and no row is
-    // copied; an equal name takes `top`'s row and shadows `base`'s.
-    L->sel.cells.reserve(size_t(base->size_) + top->size_);
-    size_t i = 0, j = 0;
-    while (i < base->size_ || j < top->size_) {
-      if (j == top->size_ || (i < base->size_ && base->attrs[i].name < top->attrs[j].name))
-        L->sel.append(join::TwInt(uint32_t(i++), 0));
-      else if (i == base->size_ || top->attrs[j].name < base->attrs[i].name)
-        L->sel.append(join::TwInt(uint32_t(j++), 1));
-      else { L->sel.append(join::TwInt(uint32_t(j++), 1)); i++; } // equal: top wins, base's row is shadowed
+    // row, `row j side` (TwInt), side 1 for the top.  Both sides are sorted and both are read as Series, so a `base` that
+    // is itself a layer is read through its own selection: one walk, no row copied, an equal name shadowed by the top.
+    auto rb = a->rows();
+    auto rt = b->rows();
+    uint32_t nb = uint32_t(baseSize), nt = uint32_t(b->size_);
+    L->sel.cells.reserve(size_t(nb) + nt);
+    uint32_t i = 0, j = 0;
+    while (i < nb || j < nt) {
+      if (j == nt || (i < nb && rb[i].name < rt[j].name)) L->sel.append(join::TwInt(i++, 0));
+      else if (i == nb || rt[j].name < rb[i].name) L->sel.append(join::TwInt(j++, 1));
+      else { L->sel.append(join::TwInt(j++, 1)); i++; } // equal: the top's row wins, the base's is shadowed
     }
     return r;
   }
-  return mergeBindings(alloc, base, top);
+  return mergeBindings(alloc, a->flat(), b);
 }
 
 Bindings *EvalState::allocBindings(size_t n) {

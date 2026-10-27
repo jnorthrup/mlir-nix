@@ -80,12 +80,14 @@ struct Bindings {
 
   /// `base // top`: the rows of both in name order, `top` shadowing `base`.  A Series, not a copy: `sel` holds one word a
   /// row — `(row << 1) | side`, side 1 for `top` — and a row is read where it lies (4 bytes a row of selection, against a
-  /// row apiece for a copy).  Built by `//` when `top` is small next to `base`; `flat` is the materialisation for the one
-  /// consumer that needs cells (a later merge of it), and nothing else asks for it.
+  /// row apiece for a copy).  `base` may itself be a layer: a `//` of a `//` DEPENDS on the layer before it instead of
+  /// merging into its top, so a chain of layers stays a chain and nothing is copied (`depth` bounds the walk; past it the
+  /// chain is materialised by flat()).
   struct Layer {
     Bindings *top, *base, *flat;
     Arena *alloc; // where flat() allocates
     cp::MutableSeries<join::TwInt> sel; // the rows of the layer, in name order: `row j side`, side 1 for top
+    uint32_t depth = 1;                 // how many layers the walk from here can pass through
   };
   static inline uint64_t flattened = 0; // MLNIX_STATS
   static inline uint64_t merged = 0, mergedCells = 0; // MLNIX_STATS: flat sets made by mergeBindings, and their cells
