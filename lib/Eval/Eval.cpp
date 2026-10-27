@@ -470,7 +470,9 @@ Frame *EvalState::newFrame(RegionInfo *ri, Frame *up) {
   auto *f = static_cast<Frame *>(alloc.Allocate(sz, alignof(Frame)));
   f->up = up;
   f->info = ri;
-  memset(f->slots, 0, ri->numSlots * sizeof(Value *));
+  // The arena hands out memory that is zero (fresh anonymous pages, never reused: Arena.h), and a slot that is null is a cell
+  // not made yet.  No memset: 1.3% of the evaluator thread's samples were that call.
+  assert(std::all_of(f->slots, f->slots + ri->numSlots, [](Value *p) { return !p; }) && "the arena gave non-zero memory");
   if (statsEnabled) statFrames.push_back(f);
   return f;
 }

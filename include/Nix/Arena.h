@@ -90,6 +90,8 @@ private:
 } // namespace arena_detail
 
 /// The slab source of the arena.  Slabs are page multiples, carved from reserved ranges of address space in order.
+/// Every byte it returns is zero: the slabs are fresh anonymous pages (the prefault touches them without changing them),
+/// never returned or reused.  EvalState::newFrame relies on it.
 class PrefaultSlabs {
 public:
   static constexpr size_t kSlab = 4u << 20;         // the size of an ordinary slab, and how far ahead pages are touched
