@@ -536,16 +536,33 @@ bool Derivation::isFixed() const {
          outputs.begin()->second.kind == DerivationOutput::CAFixed;
 }
 
-std::string escapeATermString(std::string_view s) {
-  std::string r = "\"";
-  for (char c : s) {
-    if (c == '"' || c == '\\') { r += '\\'; r += c; }
-    else if (c == '\n') r += "\\n";
-    else if (c == '\r') r += "\\r";
-    else if (c == '\t') r += "\\t";
-    else r += c;
+/// Appends `s` in quotes with ATerm escapes.  The bytes between two escapes are copied whole: the values of an
+/// environment are scripts of kilobytes, and a byte-at-a-time push_back was a fiftieth of a NixOS evaluation.
+static void appendEscaped(std::string &out, std::string_view s) {
+  out += '"';
+  size_t run = 0;
+  for (size_t i = 0; i < s.size(); i++) {
+    const char *escape;
+    switch (s[i]) {
+    case '"': escape = "\\\""; break;
+    case '\\': escape = "\\\\"; break;
+    case '\n': escape = "\\n"; break;
+    case '\r': escape = "\\r"; break;
+    case '\t': escape = "\\t"; break;
+    default: continue;
+    }
+    out.append(s.data() + run, i - run);
+    out += escape;
+    run = i + 1;
   }
-  r += '"';
+  out.append(s.data() + run, s.size() - run);
+  out += '"';
+}
+
+std::string escapeATermString(std::string_view s) {
+  std::string r;
+  r.reserve(s.size() + 2);
+  appendEscaped(r, s);
   return r;
 }
 
@@ -621,25 +638,35 @@ std::string Derivation::unparse(bool maskOutputs,
   s += "],";
   unquoted(s, platform);
   s += ',';
-  s += escapeATermString(builder);
+  appendEscaped(s, builder);
   s += ",[";
   first = true;
   for (auto &a : args) {
     if (!first) s += ',';
     first = false;
-    s += escapeATermString(a);
+    appendEscaped(s, a);
   }
   s += "],[";
   first = true;
-  std::map<std::string, std::string> envAll = env;
-  if (structuredAttrs) envAll["__json"] = *structuredAttrs;
+  // The environment in key order, plus `__json` when there are structured attributes: views, not a copy of every value.
+  std::map<std::string_view, std::string_view> envAll;
+  size_t envBytes = 0;
+  for (auto &[k, v] : env) {
+    envAll.emplace_hint(envAll.end(), k, v);
+    envBytes += k.size() + v.size() + 8;
+  }
+  if (structuredAttrs) {
+    envAll["__json"] = *structuredAttrs;
+    envBytes += structuredAttrs->size() + 16;
+  }
+  s.reserve(s.size() + envBytes);
   for (auto &[k, v] : envAll) {
     if (!first) s += ',';
     first = false;
     s += '(';
-    s += escapeATermString(k);
+    appendEscaped(s, k);
     s += ',';
-    s += escapeATermString(maskOutputs && outputs.count(k) ? std::string_view() : std::string_view(v));
+    appendEscaped(s, maskOutputs && outputs.count(std::string(k)) ? std::string_view() : v);
     s += ')';
   }
   s += "])";
