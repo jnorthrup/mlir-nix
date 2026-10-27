@@ -21,6 +21,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <fstream>
+#include <unordered_map>
 #include <set>
 #include <variant>
 #include <sstream>
@@ -48,6 +50,7 @@ struct Token {
   double f = 0;
   Pos pos;
   size_t offset = 0;
+  uint32_t depth = 0; // the lexer's state stack before this token
 };
 
 std::string tokName(const Token &t) {
@@ -132,6 +135,12 @@ public:
   std::string_view text(const Token &t) const {
     if (t.derived) return derived[t.span.first()];
     return src.substr(t.span.first(), t.span.second() - t.span.first());
+  }
+
+  /// Scratch: continue at `offset` with the state stack cut back to `depth` (past a band the parser did not enter).
+  void skipTo(size_t offset, uint32_t depth) {
+    p = offset;
+    if (stack.size() > depth) stack.resize(depth);
   }
 
   /// Produce the next token (T_EOF at end, repeatedly).
@@ -232,6 +241,7 @@ private:
       }
       t = Token();
       t.offset = p;
+      t.depth = uint32_t(stack.size());
       t.pos = posAt(p);
       switch (top()) {
       case S_STRING:
@@ -497,11 +507,36 @@ private:
 
 using StrPart = std::pair<Pos, std::variant<Expr *, Token>>;
 
+/// Scratch: bands of a file the parser is told not to enter, from the file named by MLNIX_SKIP_BANDS (lines `name TAB open TAB close`).
+using SkipMap = std::unordered_map<uint32_t, uint32_t>;
+const std::unordered_map<std::string, SkipMap> *skipSet() {
+  static const auto *set = []() -> const std::unordered_map<std::string, SkipMap> * {
+    const char *path = getenv("MLNIX_SKIP_BANDS");
+    if (!path) return nullptr;
+    auto *m = new std::unordered_map<std::string, SkipMap>;
+    std::ifstream in(path);
+    std::string line;
+    while (std::getline(in, line)) {
+      size_t a = line.find('\t'), b = line.find('\t', a + 1);
+      if (a == std::string::npos || b == std::string::npos) continue;
+      (*m)[line.substr(0, a)][uint32_t(std::stoul(line.substr(a + 1, b - a - 1)))] = uint32_t(std::stoul(line.substr(b + 1)));
+    }
+    return m;
+  }();
+  return set;
+}
+
+
 class Parser {
 public:
   Parser(ExprArena &a, std::shared_ptr<Origin> o, const ParseOptions &opts,
          Lexer &lx)
-      : arena(a), origin(std::move(o)), opts(opts), lx(lx) {}
+      : arena(a), origin(std::move(o)), opts(opts), lx(lx) {
+    if (auto *set = skipSet()) {
+      auto it = set->find(origin->name);
+      if (it != set->end()) skip = &it->second;
+    }
+  }
 
   Expr *parseTop() {
     Expr *e = parseExpr();
@@ -516,6 +551,7 @@ private:
   Lexer &lx;
   std::deque<Token> toks; // lookahead buffer
   bool sawEof = false;
+  const SkipMap *skip = nullptr; // scratch: bands not to enter
 
   void fill(size_t n) {
     while (toks.size() <= n) {
@@ -1015,6 +1051,21 @@ private:
       return a;
     }
     case T_CHAR:
+      if (skip && (t.ch == '(' || t.ch == '{' || t.ch == '[')) {
+        auto it = skip->find(uint32_t(t.offset));
+        if (it != skip->end()) {
+          lx.skipTo(size_t(it->second) + 1, t.depth);
+          toks.clear();
+          sawEof = false;
+          // A skipped { is an empty attribute set: it merges with the other definitions of its path as the original did.
+          if (t.ch == '{') {
+            auto *a = arena.add<ExprAttrs>();
+            a->pos = pos;
+            return a;
+          }
+          return arena.add<ExprCall>(pos, var("throw"), std::vector<Expr *>{arena.add<ExprString>(Name::persist("mlnix: a skipped band was entered at " + origin->name + ":" + std::to_string(pos.line) + ":" + std::to_string(pos.col)))});
+        }
+      }
       if (t.ch == '"') {
         take();
         Expr *e = parseStringParts(pos);

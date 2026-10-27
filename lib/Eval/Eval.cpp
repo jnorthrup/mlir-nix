@@ -16,6 +16,7 @@
 #include "llvm/Support/SourceMgr.h"
 
 #include <algorithm>
+#include <fstream>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -288,6 +289,17 @@ void EvalState::printStats() {
     for (size_t i = 0; i < rows.size() && i < 12; i++)
       llvm::errs() << "  " << llvm::format("%-22s", rows[i].first.c_str()) << llvm::format("%9zu", rows[i].second)
                    << llvm::format("%9zu", ev[rows[i].first]) << llvm::format("%7.1f%%", 100.0 * ev[rows[i].first] / std::max<size_t>(rows[i].second, 1)) << "\n";
+  }
+  if (const char *tp = getenv("MLNIX_TRACE_POS")) {
+    // Scratch: the file table and the position of every op that was evaluated, to learn which bands of a source were ever entered.
+    std::ofstream out(tp);
+    for (uint32_t id = 1;; id++) {
+      std::string n = nixfe::FileTable::get().name(id);
+      if (n.empty()) break;
+      out << "F\t" << n << "\n";
+    }
+    for (mlir::Operation *op : evaluated)
+      if (auto f = nd::decodePos(nd::posOfOp(op))) out << "P\t" << f->file << "\t" << f->line << "\t" << f->col << "\n";
   }
   llvm::errs() << "== operands evaluated in place: " << nInPlace << ", thunks created by lookup(): " << nThunks << "\n";
   llvm::errs() << "== ops ever evaluated (distinct): " << evaluated.size() << " of " << total << " lowered ("

@@ -661,7 +661,7 @@ private:
     case ExprKind::List: {
       SmallVector<Value> elems;
       for (auto *x : static_cast<const ExprList *>(e)->elems) elems.push_back(gen(x, s));
-      return nd::ListOp::create(b, noLoc(), valTy(), elems);
+      return nd::ListOp::create(b, noLoc(), valTy(), elems, at(e->pos)); // scratch: a list says where it is, for the trace
     }
     case ExprKind::Lambda:
       return genLambda(static_cast<const ExprLambda *>(e), s);

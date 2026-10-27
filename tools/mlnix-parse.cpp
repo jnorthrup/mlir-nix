@@ -4,7 +4,9 @@
 // compared byte for byte over a whole corpus (scripts/parse-corpus.py) in a few seconds.
 #include "Nix/AST.h"
 #include "Nix/Confix.h"
+#include <algorithm>
 #include <chrono>
+#include <map>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -15,6 +17,9 @@ int main(int argc, char **argv) {
   bool quiet = false, map = false, bandsMode = false, scanOnly = false;
   unsigned fuzzSeed = 0;
   bool verbose = false;
+  bool deadMode = false;
+  size_t skipThreshold = 0;
+  bool skipMode = false;
   int a = 1;
   for (; a < argc && argv[a][0] == '-'; a++) {
     if (std::string(argv[a]) == "-n") quiet = true;
@@ -22,6 +27,8 @@ int main(int argc, char **argv) {
     else if (std::string(argv[a]) == "-b") bandsMode = true;
     else if (std::string(argv[a]) == "-s") scanOnly = true;
     else if (std::string(argv[a]) == "-v") verbose = true;
+    else if (std::string(argv[a]) == "-d") deadMode = true;
+    else if (std::string(argv[a]) == "-k" && a + 1 < argc - 1) { skipMode = true; deadMode = true; skipThreshold = std::stoul(argv[++a]); }
     else if (std::string(argv[a]) == "-f" && a + 1 < argc - 1) fuzzSeed = unsigned(std::stoul(argv[++a]));
     else a = argc;
   }
@@ -32,6 +39,68 @@ int main(int argc, char **argv) {
                  "  -v: with -b, say what each file did (for a short list)\n"
                  "  -f SEED: with -b, also compare the scan with the lexer on random mutations of the first 4000 files\n";
     return 2;
+  }
+  if (deadMode) {
+    // Scratch: argv is a MLNIX_TRACE_POS dump.  Which bands of the files an evaluation touched were never entered?
+    std::ifstream dump(argv[a]);
+    std::vector<std::string> files;
+    std::map<std::string, std::vector<std::pair<uint32_t, uint32_t>>> points;
+    std::string line;
+    std::vector<std::string> byId;
+    while (std::getline(dump, line)) {
+      if (line.size() > 2 && line[0] == 'F') { byId.push_back(line.substr(2)); continue; }
+      if (line.size() > 2 && line[0] == 'P') {
+        std::istringstream is(line.substr(2));
+        std::string f; uint32_t l, c;
+        std::getline(is, f, '\t');
+        is >> l >> c;
+        points[f].push_back({l, c});
+      }
+    }
+    const size_t thresholds[] = {0, 64, 128, 256, 512, 1024, 4096};
+    size_t totalBytes = 0, filesRead = 0, filesNoPoints = 0, bytesNoPoints = 0;
+    size_t deadBytes[7] = {}, deadCount[7] = {}, candBytes = 0;
+    for (auto &name : byId) {
+      std::ifstream f(name, std::ios::binary);
+      if (!f) continue;
+      std::stringstream ss;
+      ss << f.rdbuf();
+      std::string text = ss.str();
+      nixfe::confix::Bands b;
+      if (!nixfe::confix::scan(text, b)) continue;
+      filesRead++;
+      totalBytes += text.size();
+      std::vector<uint32_t> lineStart{0};
+      for (uint32_t i = 0; i < text.size(); i++)
+        if (text[i] == '\n') lineStart.push_back(i + 1);
+      std::vector<uint32_t> pts;
+      for (auto &[l, c] : points[name])
+        if (l >= 1 && l <= lineStart.size()) pts.push_back(lineStart[l - 1] + c - 1);
+      std::sort(pts.begin(), pts.end());
+      if (pts.empty()) { filesNoPoints++; bytesNoPoints += text.size(); }
+      int64_t deadUntil = -1;
+      for (uint32_t i = 0; i < b.size(); i++) {
+        auto kind = b.kind(i);
+        if (kind != nixfe::confix::K_BRACE && kind != nixfe::confix::K_BRACKET && kind != nixfe::confix::K_PAREN) continue;
+        uint32_t open = b.span(i).first(), close = b.span(i).second();
+        if (int64_t(open) <= deadUntil) continue; // inside a dead band already counted
+        auto it = std::lower_bound(pts.begin(), pts.end(), open);
+        bool live = it != pts.end() && *it <= close;
+        if (live) continue;
+        deadUntil = close;
+        size_t size = close - open + 1;
+        if (skipMode && size >= skipThreshold) std::cout << name << '\t' << open << '\t' << close << '\n';
+        for (int t = 0; t < 7; t++)
+          if (size >= thresholds[t]) { deadBytes[t] += size; deadCount[t]++; }
+      }
+    }
+    if (skipMode) return 0;
+    std::cout << byId.size() << " files in the table, " << filesRead << " read and scanned, " << totalBytes << " bytes; " << filesNoPoints
+              << " files (" << bytesNoPoints << " bytes) had no evaluated op with a position\n";
+    for (int t = 0; t < 7; t++)
+      std::cout << "maximal dead { [ ( bands of at least " << thresholds[t] << " bytes: " << deadCount[t] << " bands, " << deadBytes[t] << " bytes = "
+                << 100.0 * deadBytes[t] / std::max<size_t>(totalBytes, 1) << "% of the bytes\n";
+    return 0;
   }
   std::ifstream list(argv[a]);
   // Read everything first: the time reported is the parser's, not the file system's.
