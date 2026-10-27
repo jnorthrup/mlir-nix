@@ -70,6 +70,8 @@ Tok keywordOf(std::string_view w) {
   return k ? Tok(uint8_t(*k)) : T_ID;
 }
 
+static uint64_t gLexBytes[4], gLexTokens[4], gSrcBytes, gParsers[4];
+static bool gLexInit = [] { atexit([] { if (getenv("MLNIX_LEXCOUNT")) fprintf(stderr, "LEXCOUNT gen: %llu parsers %llu tokens %llu bytes; skip: %llu parsers %llu tokens %llu bytes; show %llu; source bytes of gen parsers %llu\n", (unsigned long long)gParsers[0], (unsigned long long)gLexTokens[0], (unsigned long long)gLexBytes[0], (unsigned long long)gParsers[1], (unsigned long long)gLexTokens[1], (unsigned long long)gLexBytes[1], (unsigned long long)gLexBytes[2], (unsigned long long)gSrcBytes); }); return true; }();
 struct Lexer : public lex::Rules {
   Lexer(std::shared_ptr<Origin> o, const ParseOptions &opts)
       : Rules(o->text->view()), origin(std::move(o)), opts(opts) {
@@ -613,7 +615,7 @@ struct Parser {
   Parser(Mode m, std::shared_ptr<Origin> o, const ParseOptions &po, confix::Bands *bands,
          mlir::ModuleOp module = {}, const GenOptions *go = nullptr)
       : mode(m), origin(std::move(o)), opts(po), lx(origin, opts), bands(bands), module(module),
-        b(module ? module.getContext() : nullptr), go(go) {}
+        b(module ? module.getContext() : nullptr), go(go) { gParsers[int(m)]++; if (m == Mode::Gen) gSrcBytes += lx.src.size(); }
 
   /// The whole source.
   Node top() {
@@ -742,7 +744,9 @@ struct Parser {
       Token &slot = ring[(head + count) % kLook];
       if (sawEof) slot = ring[(head + count + kLook - 1) % kLook]; // end of file repeats
       else {
+        size_t before = lx.p;
         slot = lx.nextToken();
+        gLexBytes[int(mode)] += lx.p - before; gLexTokens[int(mode)]++;
         if (slot.t == T_EOF) sawEof = true;
       }
       count++;
