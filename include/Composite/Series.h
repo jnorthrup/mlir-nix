@@ -48,11 +48,12 @@ template <class A, class B> struct Join {
   A a;
   B b;
 
-  // A Join<uint32_t, F> is a Series (PRELOAD: typealias Series<T> = Join<Int, (Int) -> T>).
+  // A Join<uint32_t, F> is a Series (PRELOAD: typealias Series<T> = Join<Int, (Int) -> T>).  The domain is `a` and the
+  // oracle `b`, for ANY domain: a count, a span (TwInt), a line and column, an enum case -- Join.kt's MetaSeries<I, T>.
   constexpr uint32_t size() const requires std::same_as<A, uint32_t> { return a; }
-  constexpr decltype(auto) operator[](uint32_t i) const
-    requires std::same_as<A, uint32_t> && std::invocable<const B &, uint32_t> {
-    return b(i);
+  constexpr const A &domain() const { return a; }
+  constexpr decltype(auto) operator[](const A &k) const requires std::invocable<const B &, const A &> {
+    return b(k);
   }
 
   // The `.view` bridge: range-for, and every loop op of the STL (std::ranges::copy, any_of, find_if, ...) over a Series.

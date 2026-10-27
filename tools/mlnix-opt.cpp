@@ -1,3 +1,4 @@
+#include "Composite/TrikeShed.h"
 #include "NixDialect/NixDialect.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
@@ -6,6 +7,7 @@
 int main(int argc, char **argv) {
   mlir::DialectRegistry registry;
   mlir::nix::registerNixDialects(registry);
+  composite::registerTrikeShedDialect(registry);
   mlir::registerTransformsPasses();
   mlir::nix::registerNixPasses();
   return mlir::asMainReturnCode(

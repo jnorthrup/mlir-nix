@@ -5,6 +5,14 @@ add_mlir_dialect_library(MLIRNix
   DEPENDS MLIRNixOpsIncGen
   LINK_LIBS PUBLIC MLIRIR MLIRPass MLIRTransforms MLIRTransformUtils MLIRRewrite MLIRSideEffectInterfaces MLIRIRDL MLIRParser)
 
+# TrikeShed's kernel as a dialect: Join, MetaSeries, Series, Series2, split, Cursor, α, ↺ and the combinators of
+# borg.trikeshed.lib, generated from include/Composite/TrikeShed.td.
+add_mlir_dialect_library(MLIRTrikeShed
+  Composite/TrikeShedDialect.cpp
+  PARTIAL_SOURCES_INTENDED
+  DEPENDS TrikeShedIncGen
+  LINK_LIBS PUBLIC MLIRIR MLIRSideEffectInterfaces)
+
 add_library(NixStore STATIC Store/Hash.cpp Store/StorePaths.cpp Store/LocalStore.cpp Store/StructuredAttrs.cpp Store/Prefetch.cpp)
 target_link_libraries(NixStore PUBLIC LLVMSupport)
 # SHA-256: CommonCrypto on macOS; elsewhere libcrypto when there is one (it picks the CPU's SHA extensions or AVX2, the code Nix hashes
