@@ -24,7 +24,7 @@ if(URING_INCLUDE_DIR AND URING_LIBRARY)
 endif()
 llvm_update_compile_flags(NixStore)
 
-add_library(NixFrontend STATIC Frontend/Parser.cpp Frontend/Printer.cpp Frontend/MLIRGen.cpp Frontend/Source.cpp)
+add_library(NixFrontend STATIC Frontend/Parser.cpp Frontend/Printer.cpp Frontend/MLIRGen.cpp Frontend/Source.cpp Frontend/Confix.cpp)
 add_dependencies(NixFrontend MLIRNixOpsIncGen)
 target_link_libraries(NixFrontend PUBLIC MLIRNix MLIRIR)
 llvm_update_compile_flags(NixFrontend)

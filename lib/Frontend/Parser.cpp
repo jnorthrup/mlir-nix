@@ -13,6 +13,8 @@
 
 #include "Composite/Pack.h"
 #include "Nix/AST.h"
+#include "Nix/Confix.h"
+#include "Nix/LexRules.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -93,21 +95,7 @@ std::string tokName(const Token &t) {
   return "?";
 }
 
-bool isPathChar(char c) {
-  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-         (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' || c == '+';
-}
-bool isIdStart(char c) {
-  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
-}
-bool isIdChar(char c) {
-  return isIdStart(c) || (c >= '0' && c <= '9') || c == '\'' || c == '-';
-}
-bool isDigit(char c) { return c >= '0' && c <= '9'; }
-bool isAlpha(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
-bool isUriChar(char c) {
-  return isAlpha(c) || isDigit(c) || strchr("%/?:@&=+$,-_.!~*'", c) != nullptr;
-}
+using namespace lex; // the character classes and matchers shared with the Confix scan
 
 /// The keyword with exactly this text, else T_ID.  The identifier rule matches every keyword's text, so a keyword is
 /// an identifier of the same length (the earlier rule wins the tie) and loses to a longer identifier (`iffy`).
@@ -133,10 +121,10 @@ Tok keywordOf(std::string_view w) {
   }
 }
 
-class Lexer {
+class Lexer : public lex::Rules {
 public:
   Lexer(std::shared_ptr<Origin> o, const ParseOptions &opts)
-      : origin(std::move(o)), src(origin->text->view()), opts(opts), derived{"$", "''", "'", "~/"} {
+      : Rules(o->text->view()), origin(std::move(o)), opts(opts), derived{"$", "''", "'", "~/"} {
     if (src.size() >= UINT32_MAX) throw ParseError("input too large (segments are 32-bit)", Pos{1, 1}, origin);
   }
 
@@ -175,7 +163,6 @@ public:
 private:
   enum State { S_INITIAL, S_DEFAULT, S_STRING, S_IND_STRING, S_INPATH, S_INPATH_SLASH };
   std::shared_ptr<Origin> origin;
-  std::string_view src; // the input, immutable: tokens are segments of it
   const ParseOptions &opts;
   /// Texts that are not slices of the input (unescaped strings, `''$`, ...), appended and never
   /// mutated; the first four are fixed.  Deque: entries do not move.
@@ -202,132 +189,6 @@ private:
   State top() { return stack.back(); }
   void push(State s) { stack.push_back(s); }
   void pop() { if (stack.size() > 1) stack.pop_back(); }
-  char at(size_t i) { return i < src.size() ? src[i] : '\0'; }
-  bool eof(size_t i) { return i >= src.size(); }
-
-  // -- Matchers returning the match length at position i (0 = no match) ----
-  size_t mId(size_t i) {
-    if (!isIdStart(at(i)) || eof(i)) return 0;
-    size_t j = i + 1;
-    while (!eof(j) && isIdChar(src[j])) j++;
-    return j - i;
-  }
-  size_t mInt(size_t i) {
-    size_t j = i;
-    while (!eof(j) && isDigit(src[j])) j++;
-    return j - i;
-  }
-  size_t mFloat(size_t i) {
-    // (([1-9][0-9]*\.[0-9]*)|(0?\.[0-9]+))([Ee][+-]?[0-9]+)?
-    size_t best = 0;
-    auto exp = [&](size_t j) {
-      if (at(j) == 'e' || at(j) == 'E') {
-        size_t k = j + 1;
-        if (at(k) == '+' || at(k) == '-') k++;
-        size_t d = k;
-        while (!eof(k) && isDigit(src[k])) k++;
-        if (k > d) return k;
-      }
-      return j;
-    };
-    if (at(i) >= '1' && at(i) <= '9') {
-      size_t j = i + 1;
-      while (!eof(j) && isDigit(src[j])) j++;
-      if (at(j) == '.') {
-        j++;
-        while (!eof(j) && isDigit(src[j])) j++;
-        best = std::max(best, exp(j) - i);
-      }
-    }
-    {
-      size_t j = i;
-      if (at(j) == '0') j++;
-      if (at(j) == '.' && isDigit(at(j + 1))) {
-        j++;
-        while (!eof(j) && isDigit(src[j])) j++;
-        best = std::max(best, exp(j) - i);
-      }
-    }
-    return best;
-  }
-  // {PATH_CHAR}*(\/{PATH_CHAR}+)+\/?
-  size_t mPath(size_t i) {
-    size_t j = i;
-    while (!eof(j) && isPathChar(src[j])) j++;
-    size_t segs = 0, end = 0;
-    while (at(j) == '/' && isPathChar(at(j + 1))) {
-      j++;
-      while (!eof(j) && isPathChar(src[j])) j++;
-      segs++;
-      end = j;
-    }
-    if (!segs) return 0;
-    if (at(end) == '/') end++;
-    return end - i;
-  }
-  // {PATH_CHAR}*\/
-  size_t mPathSeg(size_t i) {
-    size_t j = i;
-    while (!eof(j) && isPathChar(src[j])) j++;
-    return at(j) == '/' ? j + 1 - i : 0;
-  }
-  // \~(\/{PATH_CHAR}+)+\/?
-  size_t mHPath(size_t i) {
-    if (at(i) != '~') return 0;
-    size_t j = i + 1, segs = 0, end = 0;
-    while (at(j) == '/' && isPathChar(at(j + 1))) {
-      j++;
-      while (!eof(j) && isPathChar(src[j])) j++;
-      segs++;
-      end = j;
-    }
-    if (!segs) return 0;
-    if (at(end) == '/') end++;
-    return end - i;
-  }
-  // \<{PATH_CHAR}+(\/{PATH_CHAR}+)*\>
-  size_t mSPath(size_t i) {
-    if (at(i) != '<') return 0;
-    size_t j = i + 1;
-    if (!isPathChar(at(j))) return 0;
-    while (!eof(j) && isPathChar(src[j])) j++;
-    while (at(j) == '/' && isPathChar(at(j + 1))) {
-      j++;
-      while (!eof(j) && isPathChar(src[j])) j++;
-    }
-    return at(j) == '>' ? j + 1 - i : 0;
-  }
-  // [a-zA-Z][a-zA-Z0-9\+\-\.]*\:[uri chars]+
-  size_t mUri(size_t i) {
-    if (!isAlpha(at(i))) return 0;
-    size_t j = i + 1;
-    while (!eof(j) && (isAlpha(src[j]) || isDigit(src[j]) || src[j] == '+' ||
-                       src[j] == '-' || src[j] == '.'))
-      j++;
-    if (at(j) != ':') return 0;
-    j++;
-    size_t s = j;
-    while (!eof(j) && isUriChar(src[j])) j++;
-    return j > s ? j - i : 0;
-  }
-  // \/\*([^*]|\*+[^*/])*\*+\/
-  size_t mLongComment(size_t i) {
-    if (at(i) != '/' || at(i + 1) != '*') return 0;
-    size_t j = i + 2;
-    while (!eof(j)) {
-      if (src[j] == '*') {
-        size_t k = j;
-        while (at(k) == '*') k++;
-        if (at(k) == '/') return k + 1 - i;
-        if (eof(k)) return 0;
-        j = k + 1;
-      } else {
-        j++;
-      }
-    }
-    return 0;
-  }
-
   static std::string unescapeStr(std::string_view s) {
     std::string t;
     t.reserve(s.size());
@@ -561,64 +422,24 @@ private:
       }
     }
 
-    // Candidates: (length, rule index).  Earlier rule wins ties.  Every matcher returns 0
-    // unless the current character can start it, so only those run.
-    struct Cand { size_t len; int rule; };
-    Cand best{0, 1000};
-    auto consider = [&](size_t len, int rule) {
-      if (len > best.len || (len == best.len && len > 0 && rule < best.rule))
-        best = {len, rule};
-    };
-    static constexpr std::string_view kw[] = {"if", "then", "else", "assert", "with", "let", "in", "rec", "inherit", "or"};
     static constexpr Tok kwTok[] = {T_IF, T_THEN, T_ELSE, T_ASSERT, T_WITH, T_LET, T_IN, T_REC, T_INHERIT, T_OR_KW};
-    static constexpr std::string_view ops[] = {"...", "==", "!=", "<=", ">=", "&&", "||", "->", "//", "++", "<|", "|>"};
     static constexpr Tok opTok[] = {T_ELLIPSIS, T_EQ, T_NEQ, T_LEQ, T_GEQ, T_AND, T_OR, T_IMPL, T_UPDATE, T_CONCAT, T_PIPE_FROM, T_PIPE_INTO};
-    const bool idStart = isIdStart(c), digit = isDigit(c), pathStart = isPathChar(c) || c == '/';
-    if (idStart)
-      for (int k = 0; k < 10; k++)
-        if (kw[k][0] == c && src.compare(i, kw[k].size(), kw[k]) == 0) consider(kw[k].size(), k);
-    for (int k = 0; k < 12; k++)
-      if (ops[k][0] == c && src.compare(i, ops[k].size(), ops[k]) == 0) consider(ops[k].size(), 10 + k);
-    if (idStart) consider(mId(i), 30);
-    if (digit) consider(mInt(i), 31);
-    if (digit || c == '.') consider(mFloat(i), 32);
-    if (c == '$' && at(i + 1) == '{') consider(2, 33);
-    if (c == '}') consider(1, 34);
-    if (c == '{') consider(1, 35);
-    if (c == '"') consider(1, 36);
-    if (c == '\'' && at(i + 1) == '\'') {
-      size_t j = i + 2;
-      while (at(j) == ' ') j++;
-      consider(at(j) == '\n' ? j + 1 - i : 2, 37);
-    }
-    if (pathStart) {
-      size_t l = mPathSeg(i);
-      if (l && at(i + l) == '$' && at(i + l + 1) == '{') consider(l + 2, 38);
-      consider(mPath(i), 39);
-    }
-    if (c == '~') {
-      if (at(i + 1) == '/' && at(i + 2) == '$' && at(i + 3) == '{') consider(4, 38);
-      consider(mHPath(i), 40);
-    }
-    if (c == '<') consider(mSPath(i), 41);
-    if (isAlpha(c)) consider(mUri(i), 42);
-    if (c == '/') consider(mLongComment(i), 43); // doc comments and long comments
-    if (best.len == 0) consider(1, 99);
+    lex::Match best = matchDefault(i, c); // the longest rule, the earlier winning a tie (LexRules.h)
 
     size_t len = best.len;
     auto number = [&] { return std::string(src.substr(i, len)); }; // strtoull/strtod need a NUL
     int r = best.rule;
     p = i + len;
-    if (r < 10) { t.t = kwTok[r]; return true; }
-    if (r < 22) {
-      t.t = opTok[r - 10];
+    if (r < lex::R_OPERATOR) { t.t = kwTok[r]; return true; }
+    if (r < lex::R_OPERATOR + 12) {
+      t.t = opTok[r - lex::R_OPERATOR];
       if ((t.t == T_PIPE_FROM || t.t == T_PIPE_INTO) && !opts.pipeOperators)
         error("experimental Nix feature 'pipe-operators' is disabled; add '--extra-experimental-features pipe-operators' to enable it", i);
       return true;
     }
     switch (r) {
-    case 30: t.t = T_ID; setSlice(t, i, i + len); return true;
-    case 31: {
+    case lex::R_ID: t.t = T_ID; setSlice(t, i, i + len); return true;
+    case lex::R_INT: {
       errno = 0;
       char *end;
       std::string txt = number();
@@ -629,7 +450,7 @@ private:
       t.i = (int64_t)v;
       return true;
     }
-    case 32:
+    case lex::R_FLOAT:
       errno = 0;
       {
         std::string txt = number();
@@ -638,30 +459,30 @@ private:
       }
       t.t = T_FLOAT;
       return true;
-    case 33: push(S_DEFAULT); t.t = T_DOLLAR_CURLY; return true;
-    case 34:
+    case lex::R_DOLLAR_CURLY: push(S_DEFAULT); t.t = T_DOLLAR_CURLY; return true;
+    case lex::R_RBRACE:
       if (top() != S_INITIAL) pop();
       t.t = T_CHAR; t.ch = '}';
       return true;
-    case 35: push(S_DEFAULT); t.t = T_CHAR; t.ch = '{'; return true;
-    case 36: push(S_STRING); t.t = T_CHAR; t.ch = '"'; return true;
-    case 37: push(S_IND_STRING); t.t = T_IND_STRING_OPEN; return true;
-    case 38: {
+    case lex::R_LBRACE: push(S_DEFAULT); t.t = T_CHAR; t.ch = '{'; return true;
+    case lex::R_DQUOTE: push(S_STRING); t.t = T_CHAR; t.ch = '"'; return true;
+    case lex::R_IND_OPEN: push(S_IND_STRING); t.t = T_IND_STRING_OPEN; return true;
+    case lex::R_PATH_START: {
       // PATH_START: re-lex as PATH_SEG / HPATH_START, then INPATH_SLASH.
       if (c == '~') { t.t = T_HPATH; setFixed(t, F_HOME); p = i + 2; }
       else { size_t l = mPathSeg(i); t.t = T_PATH; setSlice(t, i, i + l); p = i + l; }
       push(S_INPATH_SLASH);
       return true;
     }
-    case 39:
-    case 40:
+    case lex::R_PATH:
+    case lex::R_HPATH:
       setSlice(t, i, i + len);
       push(src[i + len - 1] == '/' ? S_INPATH_SLASH : S_INPATH);
-      t.t = r == 39 ? T_PATH : T_HPATH;
+      t.t = r == lex::R_PATH ? T_PATH : T_HPATH;
       return true;
-    case 41: t.t = T_SPATH; setSlice(t, i, i + len); return true;
-    case 42: t.t = T_URI; setSlice(t, i, i + len); return true;
-    case 43: return false;
+    case lex::R_SPATH: t.t = T_SPATH; setSlice(t, i, i + len); return true;
+    case lex::R_URI: t.t = T_URI; setSlice(t, i, i + len); return true;
+    case lex::R_COMMENT: return false;
     default:
       t.t = T_CHAR;
       t.ch = c;
@@ -1504,6 +1325,64 @@ Expr *parse(ExprArena &arena, std::shared_ptr<Origin> origin, const ParseOptions
   Lexer lx(origin, opts);
   Parser p(arena, origin, opts, lx);
   return p.parseTop();
+}
+
+/// The band table from the lexer's tokens: the oracle of confix::scan (Nix/Confix.h).
+bool confix::lexBands(std::shared_ptr<Origin> origin, const ParseOptions &opts, confix::Bands &out) {
+  try {
+    Lexer lx(origin, opts);
+    std::vector<uint32_t> open;
+    for (;;) {
+      Token t = lx.nextToken();
+      auto openBand = [&](confix::Kind k) { open.push_back(out.rows.append(join::TwInt(uint32_t(t.offset), 0), k)); };
+      auto closeBand = [&](confix::Kind a, confix::Kind b) {
+        if (open.empty()) return false;
+        uint32_t row = open.back();
+        uint8_t k = out.rows.col<1>()[row];
+        if (k != a && k != b) return false;
+        open.pop_back();
+        join::TwInt &sp = out.rows.col<0>()[row];
+        sp = join::TwInt(sp.first(), uint32_t(t.offset));
+        return true;
+      };
+      switch (t.t) {
+      case T_EOF: return open.empty();
+      case T_DOLLAR_CURLY: openBand(confix::K_INTERP); break;
+      case T_IND_STRING_OPEN: openBand(confix::K_IND_STRING); break;
+      case T_IND_STRING_CLOSE:
+        if (!closeBand(confix::K_IND_STRING, confix::K_IND_STRING)) return false;
+        break;
+      case T_CHAR:
+        switch (t.ch) {
+        case '{': openBand(confix::K_BRACE); break;
+        case '}':
+          if (!closeBand(confix::K_BRACE, confix::K_INTERP)) return false;
+          break;
+        case '(': openBand(confix::K_PAREN); break;
+        case ')':
+          if (!closeBand(confix::K_PAREN, confix::K_PAREN)) return false;
+          break;
+        case '[': openBand(confix::K_BRACKET); break;
+        case ']':
+          if (!closeBand(confix::K_BRACKET, confix::K_BRACKET)) return false;
+          break;
+        case '"':
+          // Inside a string the next quote closes it (an interpolation would have opened a band of its own).
+          if (!open.empty() && out.rows.col<1>()[open.back()] == confix::K_STRING) {
+            if (!closeBand(confix::K_STRING, confix::K_STRING)) return false;
+          } else {
+            openBand(confix::K_STRING);
+          }
+          break;
+        default: break;
+        }
+        break;
+      default: break;
+      }
+    }
+  } catch (const ParseError &) {
+    return false;
+  }
 }
 
 } // namespace nixfe
