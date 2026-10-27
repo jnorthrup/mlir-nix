@@ -19,6 +19,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <exception>
 #include <iostream>
 #include <pthread.h>
 #include <sstream>
