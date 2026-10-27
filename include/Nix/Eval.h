@@ -330,7 +330,11 @@ public:
   };
 
   // -- Forcing -------------------------------------------------------------
-  void forceValue(Value &v, PosPtr pos = nullptr);
+  /// Force `v` to weak head normal form.  The check is inline in every caller; forceThunk does the work.
+  void forceValue(Value &v, PosPtr pos = nullptr) {
+    if (v.isThunk()) forceThunk(v, pos);
+  }
+  void forceThunk(Value &v, PosPtr pos);
   void forceValueDeep(Value &v);
   int64_t forceInt(Value &v, PosPtr pos, std::string_view errorCtx = "");
   double forceFloat(Value &v, PosPtr pos, std::string_view errorCtx = "");
@@ -483,8 +487,6 @@ private:
   llvm::DenseMap<mlir::Region *, RegionInfo *> regionInfos;
   llvm::DenseMap<mlir::Operation *, Value *> constCache;
   void indexRegion(mlir::Region &r);
-  void evalConcatStrings(mlir::nix::ConcatStringsOp op, Frame *env, Value &out);
-  void evalAttrs(mlir::nix::AttrsOp op, Frame *env, Value &out);
   RegionInfo *mintLambda(nixfe::FilePool &p, uint32_t row);
   RegionInfo *bodyOf(nixfe::BodyIndex idx);
   void callLambda(Value &fun, Value *arg, Value &out, PosPtr pos);
