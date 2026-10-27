@@ -126,8 +126,8 @@ exact); FileCheck 13 passed, 4 run lines skipped (`cse-dynamic-ops`); primops 10
 schedules and 71/72 to Lix 2.91.3 (the one case where Lix exits 1 with no output).
 
 Hashing is the part of the change that is measured on kali: the same commit linked with LLVM's portable SHA-256 and with libcrypto
-(`-DMLNIX_SHA256=llvm|auto`), 9 interleaved runs, demand, identical hashes: libcrypto is -5.6% (toplevel) and -9.8% (nixpkgs-73) wall,
--6.3% / -7.9% cpu. The CPU has no SHA instructions (an i7-6820HK), so that is libcrypto's AVX2 code against compiled C. The other changes
+(`-DMLNIX_SHA256=llvm|auto`), 9 interleaved runs, demand, identical hashes: libcrypto is -5.6% (toplevel) and -9.8% (nixpkgs-73) wall by the
+median, -6.1% / -7.1% by the min, -6.3% / -7.9% cpu. The CPU has no SHA instructions (an i7-6820HK), so that is libcrypto's AVX2 code against compiled C. The other changes
 were measured on the Mac only (-14.1% / -12.9% demand over the window above, with CommonCrypto already in use there); how they split on
 kali is not measured.
 
