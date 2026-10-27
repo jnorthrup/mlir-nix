@@ -61,6 +61,7 @@ private:
 
 struct Value;
 struct Frame;
+inline uint64_t g_hops[16], g_nLookupCalls, g_nFirst;
 struct RegionInfo;
 class EvalState;
 

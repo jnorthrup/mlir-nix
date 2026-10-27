@@ -280,6 +280,12 @@ void EvalState::printStats() {
     }
     llvm::errs() << "== frames: " << statFrames.size() << ", " << bytes / 1000000 << " MB, slots " << slots << ", ever filled " << filled
                  << " (" << llvm::format("%.1f", 100.0 * filled / std::max<uint64_t>(slots, 1)) << "%)\n";
+    {
+      llvm::errs() << "== lookup hops: calls " << g_nLookupCalls << ", first touch " << g_nFirst << "; hops ";
+      uint64_t total = 0, sum = 0;
+      for (unsigned k = 0; k < 16; k++) { llvm::errs() << k << ":" << g_hops[k] << " "; total += g_hops[k]; sum += g_hops[k] * k; }
+      llvm::errs() << " mean " << (double)sum / (double)(total ? total : 1) << "\n";
+    }
     // Lowered against evaluated, per kind.  Literals and closures are served by lookup() without evalOp, so
     // their rows (nix.str, nix.int, nix.path, nix.lambda, nix.bool) read low; the rest is the dead code.
     llvm::StringMap<size_t> ev;
@@ -480,11 +486,15 @@ Value *EvalState::lookup(Frame *f, mlir::Value v) {
   if (it == slotMap.end()) throw EvalError("internal error: unindexed SSA value");
   RegionInfo *ri = it->second.ri;
   unsigned idx = it->second.idx;
-  while (f && f->info != ri) f = f->up;
+  unsigned hops = 0;
+  while (f && f->info != ri) { f = f->up; hops++; }
+  g_hops[hops < 15 ? hops : 15]++;
+  g_nLookupCalls++;
   if (!f) throw EvalError("internal error: SSA value used outside its scope");
   Value *noCell = nullptr; // an in-place value reached through lookup(): its one use gets its own thunk
   Value *&slot = idx == kNoSlot ? noCell : f->slots[idx];
   if (slot) return slot;
+  g_nFirst++;
   Operation *op = v.getDefiningOp();
   if (!op) throw EvalError("internal error: unbound block argument");
   if (isa<nd::IntOp, nd::FloatOp, nd::StringOp, nd::PathOp, nd::BoolOp, nd::NullOp>(op)) {
