@@ -32,14 +32,7 @@ namespace nixfe {
 
 namespace {
 
-enum Tok : uint8_t {
-  T_EOF, T_ID, T_INT, T_FLOAT, T_STR, T_IND_STR, T_PATH, T_HPATH, T_SPATH,
-  T_URI, T_PATH_END, T_DOLLAR_CURLY, T_IND_STRING_OPEN, T_IND_STRING_CLOSE,
-  T_IF, T_THEN, T_ELSE, T_ASSERT, T_WITH, T_LET, T_IN, T_REC, T_INHERIT,
-  T_OR_KW, T_ELLIPSIS, T_EQ, T_NEQ, T_LEQ, T_GEQ, T_AND, T_OR, T_IMPL,
-  T_UPDATE, T_CONCAT, T_PIPE_FROM, T_PIPE_INTO,
-  T_CHAR, // single character token, value in `ch`
-};
+using enum Tok; // the kinds of tokens are generated from NixDialect/NixSyntax.td (Confix.h includes them)
 
 struct Token {
   Tok t;
@@ -56,48 +49,9 @@ struct Token {
 };
 
 std::string tokName(const Token &t) {
-  switch (t.t) {
-  case T_EOF: return "end of file";
-  case T_ID: return "identifier";
-  case T_INT: return "integer";
-  case T_FLOAT: return "floating-point literal";
-  case T_STR: return "string";
-  case T_IND_STR: return "string";
-  case T_PATH: return "path";
-  case T_HPATH: return "'~/…' path";
-  case T_SPATH: return "'<…>' path";
-  case T_URI: return "URI";
-  case T_PATH_END: return "end of path";
-  case T_DOLLAR_CURLY: return "'${'";
-  case T_IND_STRING_OPEN: return "start of an indented string";
-  case T_IND_STRING_CLOSE: return "end of an indented string";
-  case T_IF: return "'if'";
-  case T_THEN: return "'then'";
-  case T_ELSE: return "'else'";
-  case T_ASSERT: return "'assert'";
-  case T_WITH: return "'with'";
-  case T_LET: return "'let'";
-  case T_IN: return "'in'";
-  case T_REC: return "'rec'";
-  case T_INHERIT: return "'inherit'";
-  case T_OR_KW: return "'or'";
-  case T_ELLIPSIS: return "'...'";
-  case T_EQ: return "'=='";
-  case T_NEQ: return "'!='";
-  case T_LEQ: return "'<='";
-  case T_GEQ: return "'>='";
-  case T_AND: return "'&&'";
-  case T_OR: return "'||'";
-  case T_IMPL: return "'->'";
-  case T_UPDATE: return "'//'";
-  case T_CONCAT: return "'++'";
-  case T_PIPE_FROM: return "'<|'";
-  case T_PIPE_INTO: return "'|>'";
-  case T_CHAR:
-    if ((unsigned char)t.ch >= 0x80) return "invalid token";
-    return std::string("'") + t.ch + "'";
-  }
-  return "?";
+  if (t.t != T_CHAR) return stringifyTok(t.t).str();
+  if ((unsigned char)t.ch >= 0x80) return "invalid token";
+  return std::string("'") + t.ch + "'";
 }
 
 using namespace lex; // the character classes and matchers shared with the Confix scan
@@ -105,25 +59,8 @@ using namespace lex; // the character classes and matchers shared with the Confi
 /// The keyword with exactly this text, else T_ID.  The identifier rule matches every keyword's text, so a keyword is
 /// an identifier of the same length (the earlier rule wins the tie) and loses to a longer identifier (`iffy`).
 Tok keywordOf(std::string_view w) {
-  switch (w.size()) {
-  case 2:
-    if (w == "if") return T_IF;
-    if (w == "in") return T_IN;
-    if (w == "or") return T_OR_KW;
-    return T_ID;
-  case 3:
-    if (w == "let") return T_LET;
-    if (w == "rec") return T_REC;
-    return T_ID;
-  case 4:
-    if (w == "then") return T_THEN;
-    if (w == "else") return T_ELSE;
-    if (w == "with") return T_WITH;
-    return T_ID;
-  case 6: return w == "assert" ? T_ASSERT : T_ID;
-  case 7: return w == "inherit" ? T_INHERIT : T_ID;
-  default: return T_ID;
-  }
+  std::optional<Keyword> k = w.size() < 2 || w.size() > 7 ? std::nullopt : symbolizeKeyword(llvm::StringRef(w.data(), w.size()));
+  return k ? Tok(uint8_t(*k)) : T_ID;
 }
 
 class Lexer : public lex::Rules {
@@ -1484,11 +1421,11 @@ bool confix::lexBands(std::shared_ptr<Origin> origin, const ParseOptions &opts, 
     std::vector<uint32_t> open;
     for (;;) {
       Token t = lx.nextToken();
-      auto openBand = [&](confix::Kind k) { open.push_back(out.rows.append(join::TwInt(uint32_t(t.offset), 0), k)); };
+      auto openBand = [&](confix::Kind k) { open.push_back(out.rows.append(join::TwInt(uint32_t(t.offset), 0), uint8_t(k))); };
       auto closeBand = [&](confix::Kind a, confix::Kind b) {
         if (open.empty()) return false;
         uint32_t row = open.back();
-        uint8_t k = out.rows.col<1>()[row];
+        confix::Kind k = confix::Kind(out.rows.col<1>()[row]);
         if (k != a && k != b) return false;
         open.pop_back();
         join::TwInt &sp = out.rows.col<0>()[row];
@@ -1518,7 +1455,7 @@ bool confix::lexBands(std::shared_ptr<Origin> origin, const ParseOptions &opts, 
           break;
         case '"':
           // Inside a string the next quote closes it (an interpolation would have opened a band of its own).
-          if (!open.empty() && out.rows.col<1>()[open.back()] == confix::K_STRING) {
+          if (!open.empty() && confix::Kind(out.rows.col<1>()[open.back()]) == confix::K_STRING) {
             if (!closeBand(confix::K_STRING, confix::K_STRING)) return false;
           } else {
             openBand(confix::K_STRING);

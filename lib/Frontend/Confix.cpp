@@ -68,12 +68,12 @@ private:
   std::vector<uint32_t> open; // rows of the bands not closed yet
   size_t p = 0;
 
-  void openBand(Kind k, size_t at) { open.push_back(bands.rows.append(join::TwInt(uint32_t(at), 0), k)); }
+  void openBand(Kind k, size_t at) { open.push_back(bands.rows.append(join::TwInt(uint32_t(at), 0), uint8_t(k))); }
   /// Close the innermost band at `at`; it must be of kind `a` or `b`.
   bool closeBand(Kind a, Kind b, size_t at) {
     if (open.empty()) return false;
     uint32_t row = open.back();
-    uint8_t k = bands.rows.col<1>()[row];
+    Kind k = Kind(bands.rows.col<1>()[row]);
     if (k != a && k != b) return false;
     open.pop_back();
     join::TwInt &sp = bands.rows.col<0>()[row];
@@ -308,5 +308,13 @@ private:
 } // namespace
 
 bool scan(std::string_view src, Bands &out) { return Scanner(src, out).run(); }
+
+} // namespace nixfe::confix
+
+// The names and lookups of the kinds of tokens and bands, generated from NixDialect/NixSyntax.td.
+#include "llvm/ADT/StringSwitch.h"
+#include "NixDialect/NixSyntaxEnums.cpp.inc"
+
+namespace nixfe::confix {
 
 } // namespace nixfe::confix

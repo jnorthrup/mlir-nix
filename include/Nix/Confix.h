@@ -17,15 +17,19 @@
 #include "Composite/Pack.h"
 #include "Composite/Series.h"
 #include "Nix/AST.h"
+#include "mlir/Support/LLVM.h"
+#include "llvm/Support/raw_ostream.h"
+
+#include "NixDialect/NixSyntaxEnums.h.inc"
 
 #include <string_view>
 
 namespace nixfe::confix {
 
-/// The kind of a band is the character that opens it, `$` for an interpolation and `'` for an indented string.
-enum Kind : uint8_t {
-  K_BRACE = '{', K_BRACKET = '[', K_PAREN = '(', K_STRING = '"', K_IND_STRING = '\'', K_INTERP = '$',
-};
+/// The kind of a band is the character that opens it, `$` for an interpolation and `'` for an indented string
+/// (BandKind, generated from NixDialect/NixSyntax.td with the token kinds).
+using enum BandKind;
+using Kind = BandKind;
 
 /// The bands of one source in the order they open (an outer band before the bands inside it): a column of
 /// spans (opening offset j closing offset) and a column of kinds.  The opening delimiter of a band is at

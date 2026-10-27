@@ -12,6 +12,11 @@ mlir_tablegen(NixDialect.cpp.inc -gen-dialect-defs -dialect=nix)
 mlir_tablegen(NixTypes.h.inc -gen-typedef-decls -typedefs-dialect=nix)
 mlir_tablegen(NixTypes.cpp.inc -gen-typedef-defs -typedefs-dialect=nix)
 
+# The concentric layers of a source (NixSyntax.td): the kinds of tokens and bands the lexer and the scan use
+set(LLVM_TARGET_DEFINITIONS NixSyntax.td)
+mlir_tablegen(NixSyntaxEnums.h.inc -gen-enum-decls)
+mlir_tablegen(NixSyntaxEnums.cpp.inc -gen-enum-defs)
+
 add_public_tablegen_target(MLIRNixOpsIncGen)
 
 # The continents' IRDL declaration, embedded in the binary as a raw string
