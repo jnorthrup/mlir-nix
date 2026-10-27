@@ -47,20 +47,22 @@ void printIdentifier(std::ostream &str, std::string_view s) {
   str << s;
 }
 
+static std::string_view sv(const Name &n) { return {n.data, n.size}; }
+
 static void showAttrPath(std::ostream &os, const AttrPath &path) {
   bool first = true;
   for (auto &a : path) {
     if (!first) os << '.';
     first = false;
-    if (a.symbol) printIdentifier(os, *a.symbol);
+    if (!a.computed()) printIdentifier(os, sv(a.symbol));
     else { os << "\"${"; showExpr(os, a.expr); os << "}\""; }
   }
 }
 
 static void showBindings(std::ostream &str, const ExprAttrs *a) {
   // a->attrs is a std::map keyed by name: already lexicographic.
-  std::vector<std::string> inherits;
-  std::map<size_t, std::vector<std::string>> inheritsFrom;
+  std::vector<Name> inherits;
+  std::map<size_t, std::vector<Name>> inheritsFrom;
   for (auto &[name, def] : a->attrs) {
     if (def.kind == ExprAttrs::DefKind::Inherited) inherits.push_back(name);
     else if (def.kind == ExprAttrs::DefKind::InheritedFrom) {
@@ -71,19 +73,19 @@ static void showBindings(std::ostream &str, const ExprAttrs *a) {
   }
   if (!inherits.empty()) {
     str << "inherit";
-    for (auto &s : inherits) { str << ' '; printIdentifier(str, s); }
+    for (auto &s : inherits) { str << ' '; printIdentifier(str, sv(s)); }
     str << "; ";
   }
   for (auto &[from, syms] : inheritsFrom) {
     str << "inherit (";
     showExpr(str, a->inheritFromExprs[from]);
     str << ")";
-    for (auto &s : syms) { str << ' '; printIdentifier(str, s); }
+    for (auto &s : syms) { str << ' '; printIdentifier(str, sv(s)); }
     str << "; ";
   }
   for (auto &[name, def] : a->attrs) {
     if (def.kind != ExprAttrs::DefKind::Plain) continue;
-    printIdentifier(str, name);
+    printIdentifier(str, sv(name));
     str << " = ";
     showExpr(str, def.e);
     str << "; ";
@@ -106,9 +108,9 @@ void showExpr(std::ostream &str, const Expr *e) {
     str << os.str();
     break;
   }
-  case ExprKind::String: printLiteralString(str, static_cast<const ExprString *>(e)->v); break;
-  case ExprKind::Path: str << static_cast<const ExprPath *>(e)->v; break;
-  case ExprKind::Var: printIdentifier(str, static_cast<const ExprVar *>(e)->name); break;
+  case ExprKind::String: printLiteralString(str, sv(static_cast<const ExprString *>(e)->v)); break;
+  case ExprKind::Path: str << sv(static_cast<const ExprPath *>(e)->v); break;
+  case ExprKind::Var: printIdentifier(str, sv(static_cast<const ExprVar *>(e)->name)); break;
   case ExprKind::CurPos: str << "__curPos"; break;
   case ExprKind::InheritFrom: str << "<inherit-from>"; break;
   case ExprKind::Select: {
@@ -156,7 +158,7 @@ void showExpr(std::ostream &str, const Expr *e) {
       for (auto &f : l->formals) {
         if (first) first = false;
         else str << ", ";
-        printIdentifier(str, f.name);
+        printIdentifier(str, sv(f.name));
         if (f.def) { str << " ? "; showExpr(str, f.def); }
       }
       if (l->ellipsis) {
@@ -164,9 +166,9 @@ void showExpr(std::ostream &str, const Expr *e) {
         str << "...";
       }
       str << " }";
-      if (!l->arg.empty()) str << " @ ";
+      if (!l->arg.isNull()) str << " @ ";
     }
-    if (!l->arg.empty()) printIdentifier(str, l->arg);
+    if (!l->arg.isNull()) printIdentifier(str, sv(l->arg));
     str << ": ";
     showExpr(str, l->body);
     str << ")";

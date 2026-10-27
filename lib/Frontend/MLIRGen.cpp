@@ -30,7 +30,7 @@ struct Scope {
   Scope *parent = nullptr;
   bool isWith = false;
   Value withValue;
-  llvm::StringMap<Value> vars;
+  llvm::DenseMap<llvm::StringRef, Value> vars; // the keys are names of the retained tree: viewed, not copied
 };
 
 /// Free names of lambdas (see FreeName / FreeMemo).  The binder discipline mirrors Gen: lambda
@@ -45,8 +45,8 @@ public:
     auto it = memo.find(l);
     if (it != memo.end()) return it->second;
     Walk w(*this);
-    if (!l->arg.empty()) w.enter(l->arg);
-    for (auto &f : l->formals) w.enter(f.name);
+    if (!l->arg.isNull()) w.enter(l->arg.str());
+    for (auto &f : l->formals) w.enter(f.name.str());
     for (auto &f : l->formals)
       if (f.def) w.walk(f.def);
     w.walk(l->body);
@@ -62,7 +62,7 @@ private:
       int bound = 0; // binders of this name between here and the lambda
       int out = -1;  // index in `out`, once seen free
     };
-    llvm::StringMap<Slot> slots;
+    llvm::DenseMap<llvm::StringRef, Slot> slots; // keyed by names of the retained tree
     unsigned withs = 0; // `with` scopes between here and the lambda
     std::vector<FreeName> out;
 
@@ -90,7 +90,7 @@ void FreeVars::Walk::walk(const Expr *e) {
     return;
   case ExprKind::Var: {
     auto *v = static_cast<const ExprVar *>(e);
-    ref(v->name, v->pos, withs == 0);
+    ref(v->name.str(), v->pos, withs == 0);
     return;
   }
   case ExprKind::Lambda:
@@ -105,7 +105,7 @@ void FreeVars::Walk::walk(const Expr *e) {
     for (auto &[name, def] : a->attrs) // `inherit x;` reads outside the group it defines
       if (def.kind == ExprAttrs::DefKind::Inherited) walk(def.e);
     if (binds)
-      for (auto &[name, def] : a->attrs) enter(name);
+      for (auto &[name, def] : a->attrs) enter(name.str());
     for (auto *fe : a->inheritFromExprs) walk(fe);
     for (auto &[name, def] : a->attrs)
       if (def.kind == ExprAttrs::DefKind::Plain) walk(def.e);
@@ -115,7 +115,7 @@ void FreeVars::Walk::walk(const Expr *e) {
     }
     if (isLet) walk(static_cast<const ExprLet *>(e)->body);
     if (binds)
-      for (auto &[name, def] : a->attrs) leave(name);
+      for (auto &[name, def] : a->attrs) leave(name.str());
     return;
   }
   case ExprKind::Select: {
@@ -352,11 +352,10 @@ private:
     return v;
   }
 
-  Value str(StringRef s, Pos p = {}) {
-    return nd::StringOp::create(b, noLoc(), valTy(), nixfe::Name::persist(s));
-  }
+  Value str(StringRef s, Pos p = {}) { return str(nixfe::Name::persist(s)); } // text that may not live on
+  Value str(const nixfe::Name &n) { return nd::StringOp::create(b, noLoc(), valTy(), n); }
 
-  Value lookupVar(const std::string &name, Pos p, Scope *s) {
+  Value lookupVar(StringRef name, Pos p, Scope *s) { // `name` is a name of the retained tree, or a literal
     SmallVector<Value> withs;
     for (Scope *c = s; c; c = c->parent) {
       if (c->isWith) {
@@ -367,8 +366,8 @@ private:
       if (it != c->vars.end()) return it->second;
     }
     if (opts.isBaseName && opts.isBaseName(name)) return baseRef(name);
-    if (withs.empty()) error("undefined variable '" + name + "'", p);
-    return nd::WithVarOp::create(b, noLoc(), valTy(), nixfe::Name::persist(name), withs, at(p));
+    if (withs.empty()) error("undefined variable '" + name.str() + "'", p);
+    return nd::WithVarOp::create(b, noLoc(), valTy(), nixfe::Name::of(name), withs, at(p));
   }
 
   /// A select/has_attr path: literal components become names, computed ones (`${e}`) the null name plus an
@@ -380,8 +379,8 @@ private:
   GenPath genPath(const AttrPath &path, Scope *s) {
     GenPath r;
     for (auto &a : path) {
-      if (a.symbol) {
-        r.comps.push_back(nixfe::Name::persist(*a.symbol));
+      if (!a.computed()) {
+        r.comps.push_back(a.symbol);
       } else {
         r.comps.push_back(nixfe::Name());
         r.dyn.push_back(gen(a.expr, s));
@@ -412,11 +411,11 @@ private:
       case ExprAttrs::DefKind::InheritedFrom: {
         auto *sel = static_cast<const ExprSelect *>(def.e);
         auto *from = static_cast<const ExprInheritFrom *>(sel->e);
-        v = selectLiteral(def.pos, fromVals[from->displ], name);
+        v = selectLiteral(def.pos, fromVals[from->displ], name.str());
         break;
       }
       }
-      names.push_back(nixfe::Name::persist(name));
+      names.push_back(name);
       values.push_back(v);
       positions.push_back(at(def.pos));
     }
@@ -435,11 +434,11 @@ private:
     } else {
       Scope ns;
       ns.parent = s;
-      llvm::StringMap<Value> phs;
+      llvm::DenseMap<StringRef, Value> phs;
       for (auto &[name, def] : a->attrs) {
         Value ph = placeholder(def.pos);
-        phs[name] = ph;
-        ns.vars[name] = ph;
+        phs[name.str()] = ph;
+        ns.vars[name.str()] = ph;
       }
       genBindings(a, &ns, s, &ns, names, values, positions);
       for (auto &d : a->dynamicAttrs) {
@@ -450,9 +449,9 @@ private:
       SmallVector<Pos> poses;
       int ovIdx = -1, idx = 0;
       for (auto &[name, def] : a->attrs) {
-        phv.push_back(phs[name]);
+        phv.push_back(phs[name.str()]);
         poses.push_back(def.pos);
-        if (name == "__overrides") ovIdx = idx;
+        if (name.str() == "__overrides") ovIdx = idx;
         idx++;
       }
       // Legacy `__overrides`: attributes of the overrides set replace both the
@@ -462,7 +461,7 @@ private:
         idx = 0;
         for (auto &[name, def] : a->attrs) {
           if (idx != ovIdx)
-            values[idx] = selectLiteral(def.pos, ov, name, values[idx]);
+            values[idx] = selectLiteral(def.pos, ov, name.str(), values[idx]);
           idx++;
         }
       }
@@ -480,11 +479,11 @@ private:
   Value genLet(const ExprLet *l, Scope *s) {
     Scope ns;
     ns.parent = s;
-    llvm::StringMap<Value> phs;
+    llvm::DenseMap<StringRef, Value> phs;
     for (auto &[name, def] : l->attrs->attrs) {
       Value ph = placeholder(def.pos);
-      phs[name] = ph;
-      ns.vars[name] = ph;
+      phs[name.str()] = ph;
+      ns.vars[name.str()] = ph;
     }
     SmallVector<nixfe::Name> names;
     SmallVector<int64_t> positions;
@@ -493,14 +492,14 @@ private:
     SmallVector<Value> phv;
     SmallVector<Pos> poses;
     for (auto &[name, def] : l->attrs->attrs) {
-      phv.push_back(phs[name]);
+      phv.push_back(phs[name.str()]);
       poses.push_back(def.pos);
     }
     auto finals = finalizeGroup(phv, values, poses);
     size_t i = 0;
     for (auto &[name, def] : l->attrs->attrs) {
       (void)def;
-      ns.vars[name] = finals[i++];
+      ns.vars[name.str()] = finals[i++];
     }
     return gen(l->body, &ns);
   }
@@ -547,7 +546,7 @@ private:
     SmallVector<Attribute> formalNames;
     SmallVector<bool> hasDef;
     for (auto &f : l->formals) {
-      formalNames.push_back(b.getStringAttr(f.name));
+      formalNames.push_back(b.getStringAttr(f.name.str()));
       hasDef.push_back(f.def != nullptr);
     }
     bool deferred = opts.deferBodies && opts.pool && opts.freeMemo;
@@ -565,8 +564,8 @@ private:
         l->hasFormals ? b.getArrayAttr(formalNames) : ArrayAttr(),
         l->hasFormals ? b.getDenseBoolArrayAttr(hasDef) : DenseBoolArrayAttr(),
         l->ellipsis,
-        l->arg.empty() ? StringAttr() : b.getStringAttr(l->arg),
-        l->name.empty() ? StringAttr() : b.getStringAttr(l->name),
+        l->arg.isNull() ? StringAttr() : b.getStringAttr(l->arg.str()),
+        l->name.isNull() ? StringAttr() : b.getStringAttr(l->name.str()),
         l->hasFormals ? b.getDenseI64ArrayAttr(formalLocs) : DenseI64ArrayAttr(), caps, bodyIndex, at(l->pos));
     Block *blk = new Block();
     lam.getBody().push_back(blk);
@@ -587,13 +586,13 @@ private:
     Value arg = lam.getArgument();
     Scope ns;
     ns.parent = s;
-    if (!l->arg.empty()) ns.vars[l->arg] = arg;
+    if (!l->arg.isNull()) ns.vars[l->arg.str()] = arg;
     if (l->hasFormals) {
       SmallVector<Value> phs;
       for (auto &f : l->formals) {
         Value ph = placeholder(f.pos);
         phs.push_back(ph);
-        ns.vars[f.name] = ph;
+        ns.vars[f.name.str()] = ph;
       }
       SmallVector<Value> defs;
       for (auto &f : l->formals) defs.push_back(f.def ? gen(f.def, &ns) : Value());
@@ -603,12 +602,12 @@ private:
       for (size_t i = 0; i < l->formals.size(); i++) {
         auto &f = l->formals[i];
         fvs.push_back(nd::FormalOp::create(b, noLoc(), valTy(), arg,
-                                           nixfe::Name::persist(f.name), defs[i], at(f.pos)));
+                                           f.name, defs[i], at(f.pos)));
       }
       for (size_t i = 0; i < l->formals.size(); i++) {
         phs[i].replaceAllUsesWith(fvs[i]);
         phs[i].getDefiningOp()->erase();
-        ns.vars[l->formals[i].name] = fvs[i];
+        ns.vars[l->formals[i].name.str()] = fvs[i];
       }
     }
     Value body = gen(l->body, &ns);
@@ -624,12 +623,12 @@ private:
       return nd::FloatOp::create(b, noLoc(), valTy(),
                                  b.getF64FloatAttr(static_cast<const ExprFloat *>(e)->v));
     case ExprKind::String:
-      return str(static_cast<const ExprString *>(e)->v, e->pos);
+      return str(static_cast<const ExprString *>(e)->v);
     case ExprKind::Path:
-      return nd::PathOp::create(b, noLoc(), valTy(), nixfe::Name::persist(static_cast<const ExprPath *>(e)->v));
+      return nd::PathOp::create(b, noLoc(), valTy(), static_cast<const ExprPath *>(e)->v);
     case ExprKind::Var: {
       auto *v = static_cast<const ExprVar *>(e);
-      return lookupVar(v->name, v->pos, s);
+      return lookupVar(v->name.str(), v->pos, s);
     }
     case ExprKind::CurPos: {
       if (origin->path.empty()) return lookupVar("null", e->pos, nullptr);

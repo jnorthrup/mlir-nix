@@ -33,7 +33,7 @@ struct Name {
 
   Name() = default;
   /// Text that is already alive for the whole run (a slice of an input that stays mapped).
-  static Name of(llvm::StringRef s) { return Name(s.data(), s.size()); }
+  static Name of(llvm::StringRef s) { return s.empty() ? Name("", 0) : Name(s.data(), s.size()); }
   /// A copy of `s` that is.  One memcpy into a bump arena of the calling thread, which is never freed.
   static Name persist(llvm::StringRef s) {
     if (s.empty()) return Name("", 0);

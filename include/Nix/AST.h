@@ -18,6 +18,8 @@
 #include <string>
 #include <vector>
 
+#include "Nix/Name.h"
+
 namespace nixfe {
 
 struct Pos {
@@ -77,17 +79,19 @@ struct Expr {
 
 struct ExprInt : Expr { int64_t v; ExprInt(int64_t v) : Expr(ExprKind::Int), v(v) {} };
 struct ExprFloat : Expr { double v; ExprFloat(double v) : Expr(ExprKind::Float), v(v) {} };
+/// Every name and literal text of the tree is a Name (Nix/Name.h): a slice of the input, which is never freed, or a copy
+/// in an arena that is not either.  The tree owns no string.
 struct ExprString : Expr {
-  std::string v;
-  ExprString(std::string v) : Expr(ExprKind::String), v(std::move(v)) {}
+  Name v;
+  ExprString(Name v) : Expr(ExprKind::String), v(v) {}
 };
 struct ExprPath : Expr {
-  std::string v;
-  ExprPath(std::string v) : Expr(ExprKind::Path), v(std::move(v)) {}
+  Name v;
+  ExprPath(Name v) : Expr(ExprKind::Path), v(v) {}
 };
 struct ExprVar : Expr {
-  std::string name;
-  ExprVar(Pos p, std::string n) : Expr(ExprKind::Var, p), name(std::move(n)) {}
+  Name name;
+  ExprVar(Pos p, Name n) : Expr(ExprKind::Var, p), name(n) {}
 };
 struct ExprCurPos : Expr { ExprCurPos(Pos p) : Expr(ExprKind::CurPos, p) {} };
 
@@ -98,10 +102,15 @@ struct ExprInheritFrom : Expr {
 };
 
 struct AttrName {
-  std::optional<std::string> symbol;
+  Name symbol; // the null name when the component is computed: `expr`
   Expr *expr = nullptr;
-  AttrName(std::string s) : symbol(std::move(s)) {}
+  AttrName(Name s) : symbol(s) {}
   AttrName(Expr *e) : expr(e) {}
+  bool computed() const { return symbol.isNull(); }
+};
+/// Orders names by their text, as the attribute sets of the tree and of its printing are ordered.
+struct NameLess {
+  bool operator()(const Name &a, const Name &b) const { return a.str() < b.str(); }
 };
 using AttrPath = std::vector<AttrName>;
 
@@ -131,7 +140,7 @@ struct ExprAttrs : Expr {
     Pos pos;
   };
   bool recursive = false;
-  std::map<std::string, AttrDef> attrs; // ordered by name (deterministic)
+  std::map<Name, AttrDef, NameLess> attrs; // ordered by name (deterministic)
   std::vector<DynamicAttrDef> dynamicAttrs;
   std::vector<Expr *> inheritFromExprs;
   ExprAttrs(Pos p = {}) : Expr(ExprKind::Attrs, p) {}
@@ -144,17 +153,17 @@ struct ExprList : Expr {
 
 struct Formal {
   Pos pos;
-  std::string name;
+  Name name;
   Expr *def = nullptr;
 };
 
 struct ExprLambda : Expr {
-  std::string arg;                // may be empty
+  Name arg;                       // the null name when there is none
   bool hasFormals = false;
   std::vector<Formal> formals;    // sorted by name
   bool ellipsis = false;
   Expr *body;
-  std::string name;               // set when bound to an attribute
+  Name name;                      // set when bound to an attribute (else the null name)
   ExprLambda(Pos p, Expr *body) : Expr(ExprKind::Lambda, p), body(body) {}
 };
 

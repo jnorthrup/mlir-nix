@@ -2,18 +2,29 @@
 
 #include "Nix/AST.h"
 #include <fcntl.h>
+#include <mutex>
+#include <vector>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 namespace nixfe {
 
+/// A Source is never freed: a Name, and so the IR, may be a slice of it.
+static std::shared_ptr<const Source> retain(std::shared_ptr<const Source> s) {
+  static std::mutex m;
+  static auto *all = new std::vector<std::shared_ptr<const Source>>();
+  std::lock_guard<std::mutex> g(m);
+  all->push_back(s);
+  return s;
+}
+
 std::shared_ptr<const Source> Source::fromString(std::string text) {
   std::shared_ptr<Source> s(new Source());
   s->owned_ = std::move(text);
   s->data_ = s->owned_.data();
   s->size_ = s->owned_.size();
-  return s;
+  return retain(s);
 }
 
 std::shared_ptr<const Source> Source::mapFile(const std::string &path) {
@@ -31,7 +42,7 @@ std::shared_ptr<const Source> Source::mapFile(const std::string &path) {
   s->map_ = m;
   s->data_ = static_cast<const char *>(m);
   s->size_ = size_t(st.st_size);
-  return s;
+  return retain(s);
 }
 
 Source::~Source() {

@@ -704,6 +704,8 @@ private:
     }
   }
   std::string str(const Token &t) { return std::string(lx.text(t)); }
+  /// The text of a token as a Name: a slice of the input (never freed) unless the text was derived from it.
+  Name nameOf(const Token &t) { return t.derived ? Name::persist(lx.text(t)) : Name::of(lx.text(t)); }
   const Token &cur() { fill(0); return toks[0]; }
   const Token &peek(size_t n = 1) { fill(n); return toks[n]; }
   bool isChar(const Token &t, char c) { return t.t == T_CHAR && t.ch == c; }
@@ -759,7 +761,7 @@ private:
     const Token &t = cur();
     Pos pos = t.pos;
     if (t.t == T_ID && isChar(peek(), ':')) {
-      std::string arg = str(take());
+      Name arg = nameOf(take());
       take();
       auto *lam = arena.add<ExprLambda>(pos, nullptr);
       lam->arg = arg;
@@ -767,7 +769,7 @@ private:
       return lam;
     }
     if (t.t == T_ID && isChar(peek(), '@') && isChar(peek(2), '{')) {
-      std::string arg = str(take());
+      Name arg = nameOf(take());
       take();
       auto *lam = arena.add<ExprLambda>(pos, nullptr);
       lam->arg = arg;
@@ -783,7 +785,7 @@ private:
       if (atChar('@')) {
         take();
         if (cur().t != T_ID) unexpected("identifier");
-        lam->arg = str(take());
+        lam->arg = nameOf(take());
       }
       validateFormals(lam, pos);
       expectChar(':');
@@ -831,7 +833,7 @@ private:
       if (cur().t != T_ID) unexpected();
       Formal f;
       f.pos = cur().pos;
-      f.name = str(take());
+      f.name = nameOf(take());
       if (atChar('?')) {
         take();
         f.def = parseExpr();
@@ -845,7 +847,7 @@ private:
 
   void validateFormals(ExprLambda *lam, Pos pos) {
     std::stable_sort(lam->formals.begin(), lam->formals.end(),
-                     [](const Formal &a, const Formal &b) { return a.name < b.name; });
+                     [](const Formal &a, const Formal &b) { return a.name.str() < b.name.str(); });
     const Formal *dup = nullptr;
     for (size_t i = 0; i + 1 < lam->formals.size(); i++)
       if (lam->formals[i].name == lam->formals[i + 1].name) {
@@ -855,11 +857,11 @@ private:
           dup = d;
       }
     if (dup)
-      error("duplicate formal function argument '" + dup->name + "'", dup->pos);
-    if (!lam->arg.empty())
+      error("duplicate formal function argument '" + dup->name.toString() + "'", dup->pos);
+    if (!lam->arg.isNull())
       for (auto &f : lam->formals)
         if (f.name == lam->arg)
-          error("duplicate formal function argument '" + lam->arg + "'", pos);
+          error("duplicate formal function argument '" + lam->arg.toString() + "'", pos);
   }
 
   Expr *makeCall(Pos p, Expr *fn, Expr *arg) {
@@ -934,7 +936,7 @@ private:
     }
   }
 
-  Expr *var(const char *n) { return arena.add<ExprVar>(Pos{}, n); }
+  Expr *var(const char *n) { return arena.add<ExprVar>(Pos{}, Name::of(n)); } // n is a literal: never freed
 
   Expr *parseOp(int minPrec) {
     Expr *lhs;
@@ -1036,7 +1038,7 @@ private:
     if (cur().t == T_OR_KW) {
       // "cursed or": `f or` is `f` applied to the variable `or`.
       Pos op = take().pos;
-      return arena.add<ExprCall>(pos, e, std::vector<Expr *>{arena.add<ExprVar>(op, "or")});
+      return arena.add<ExprCall>(pos, e, std::vector<Expr *>{arena.add<ExprVar>(op, Name::of("or"))});
     }
     return e;
   }
@@ -1045,8 +1047,8 @@ private:
     AttrPath path;
     while (true) {
       const std::string expecting = "identifier or 'or' or '${' or '\"'";
-      if (cur().t == T_ID) path.emplace_back(str(take()));
-      else if (cur().t == T_OR_KW) { take(); path.emplace_back(std::string("or")); }
+      if (cur().t == T_ID) path.emplace_back(nameOf(take()));
+      else if (cur().t == T_OR_KW) { take(); path.emplace_back(Name::of("or")); }
       else if (atChar('"') || cur().t == T_DOLLAR_CURLY) path.push_back(parseStringAttr());
       else unexpected(expecting);
       if (atChar('.')) { take(); continue; }
@@ -1077,13 +1079,13 @@ private:
   Expr *parseStringParts(Pos pos) {
     std::vector<std::pair<Pos, Expr *>> parts;
     bool interpolated = false;
-    std::string single;
+    Name single;
     bool haveSingle = false;
     while (true) {
       if (cur().t == T_STR) {
         Token t = take();
-        parts.emplace_back(t.pos, arena.add<ExprString>(str(t)));
-        single = str(t);
+        parts.emplace_back(t.pos, arena.add<ExprString>(nameOf(t)));
+        single = nameOf(t);
         haveSingle = true;
       } else if (cur().t == T_DOLLAR_CURLY) {
         Pos p = take().pos;
@@ -1097,7 +1099,7 @@ private:
     }
     if (!atChar('"')) unexpected("'\"'");
     if (!interpolated) {
-      auto *s = arena.add<ExprString>(haveSingle ? single : std::string());
+      auto *s = arena.add<ExprString>(haveSingle ? single : Name::of(""));
       s->pos = pos;
       return s;
     }
@@ -1109,8 +1111,8 @@ private:
     Pos pos = t.pos;
     switch (t.t) {
     case T_ID: {
-      std::string n = str(take());
-      if (n == "__curPos") return arena.add<ExprCurPos>(pos);
+      Name n = nameOf(take());
+      if (n.str() == "__curPos") return arena.add<ExprCurPos>(pos);
       return arena.add<ExprVar>(pos, n);
     }
     case T_INT: { auto *e = arena.add<ExprInt>(take().i); e->pos = pos; return e; }
@@ -1144,7 +1146,7 @@ private:
       while (true) {
         if (cur().t == T_STR) {
           Token s = take();
-          parts.emplace_back(s.pos, arena.add<ExprString>(str(s)));
+          parts.emplace_back(s.pos, arena.add<ExprString>(nameOf(s)));
         } else if (cur().t == T_DOLLAR_CURLY) {
           Pos p = take().pos;
           Expr *e = parseExpr();
@@ -1159,8 +1161,8 @@ private:
       return arena.add<ExprConcatStrings>(pos, false, std::move(parts));
     }
     case T_SPATH: {
-      std::string s = str(take());
-      std::string path = s.substr(1, s.size() - 2);
+      Name s = nameOf(take());
+      Name path = Name::of(s.str().substr(1, s.size - 2)); // the text between the angle brackets
       return arena.add<ExprCall>(pos, var("__findFile"),
                                  std::vector<Expr *>{var("__nixPath"), arena.add<ExprString>(path)});
     }
@@ -1168,7 +1170,7 @@ private:
       diagnose(opts.lintUrls, "lint-url-literals",
                std::string("URL literals are ") + (opts.lintUrls == Lint::Fatal ? "disallowed" : "discouraged") +
                    ". Consider using a string literal \"" + str(t) + "\" instead", pos);
-      auto *e = arena.add<ExprString>(str(take()));
+      auto *e = arena.add<ExprString>(nameOf(take()));
       e->pos = pos;
       return e;
     }
@@ -1180,7 +1182,7 @@ private:
       expectChar('}');
       a->recursive = true;
       a->pos = pos;
-      return arena.add<ExprSelect>(Pos{}, a, AttrPath{AttrName(std::string("body"))}, nullptr);
+      return arena.add<ExprSelect>(Pos{}, a, AttrPath{AttrName(Name::of("body"))}, nullptr);
     }
     case T_REC: {
       take();
@@ -1250,19 +1252,19 @@ private:
                "relative path literal '" + lit + "' should be prefixed with '.' for clarity: './" + lit + "'", t.pos);
     if (t.t == T_HPATH) {
       std::string path = opts.home + lit.substr(1);
-      return arena.add<ExprPath>(path);
+      return arena.add<ExprPath>(Name::persist(path));
     }
     std::string path;
     if (lit[0] == '/') path = canonPath(lit);
     else path = canonPath(origin->baseDir + "/" + lit);
     if (lit.size() > 1 && lit.back() == '/') path += '/';
-    auto *e = arena.add<ExprPath>(path);
+    auto *e = arena.add<ExprPath>(Name::persist(path));
     e->pos = t.pos;
     return e;
   }
 
   Expr *stripIndentation(Pos pos, std::vector<std::pair<Pos, std::variant<Expr *, Token>>> &es) {
-    if (es.empty()) return arena.add<ExprString>("");
+    if (es.empty()) return arena.add<ExprString>(Name::of(""));
     bool atStartOfLine = true;
     size_t minIndent = 1000000, curIndent = 0;
     for (auto &[p, i] : es) {
@@ -1323,9 +1325,9 @@ private:
         if (p != std::string::npos && s2.find_first_not_of(' ', p + 1) == std::string::npos)
           s2 = s2.substr(0, p + 1);
       }
-      if (!s2.empty()) es2.emplace_back(it->first, arena.add<ExprString>(s2));
+      if (!s2.empty()) es2.emplace_back(it->first, arena.add<ExprString>(Name::persist(s2)));
     }
-    if (es2.empty()) return arena.add<ExprString>("");
+    if (es2.empty()) return arena.add<ExprString>(Name::of(""));
     if (es2.size() == 1 && es2[0].second->kind == ExprKind::String) return es2[0].second;
     return arena.add<ExprConcatStrings>(pos, true, std::move(es2));
   }
@@ -1348,19 +1350,19 @@ private:
         }
         while (!atChar(';')) {
           Pos apos = cur().pos;
-          std::string name;
-          if (cur().t == T_ID) name = str(take());
-          else if (cur().t == T_OR_KW) { take(); name = "or"; }
+          Name name;
+          if (cur().t == T_ID) name = nameOf(take());
+          else if (cur().t == T_OR_KW) { take(); name = Name::of("or"); }
           else if (atChar('"') || cur().t == T_DOLLAR_CURLY) {
             AttrName an = parseStringAttr();
-            if (!an.symbol) error("dynamic attributes not allowed in inherit", apos);
-            name = *an.symbol;
+            if (an.computed()) error("dynamic attributes not allowed in inherit", apos);
+            name = an.symbol;
           } else {
             unexpected();
           }
           auto it = attrs->attrs.find(name);
           if (it != attrs->attrs.end())
-            error("attribute '" + displayName(name) + "' already defined at " + fmtPos(it->second.pos), apos);
+            error("attribute '" + displayName(name.str()) + "' already defined at " + fmtPos(it->second.pos), apos);
           ExprAttrs::AttrDef def;
           def.pos = apos;
           if (fromRef) {
@@ -1390,7 +1392,7 @@ private:
     return attrs;
   }
 
-  std::string displayName(const std::string &s) {
+  std::string displayName(std::string_view s) {
     std::ostringstream os;
     printIdentifier(os, s);
     return os.str();
@@ -1402,7 +1404,7 @@ private:
     for (auto &a : path) {
       if (!first) os << '.';
       first = false;
-      if (a.symbol) printIdentifier(os, *a.symbol);
+      if (!a.computed()) printIdentifier(os, a.symbol.str());
       else { os << "\"${"; showExpr(os, a.expr); os << "}\""; }
     }
     return os.str();
@@ -1416,8 +1418,8 @@ private:
     size_t i = 0;
     for (; i + 1 < path.size(); i++) {
       ExprAttrs *nested;
-      if (path[i].symbol) {
-        auto j = attrs->attrs.find(*path[i].symbol);
+      if (!path[i].computed()) {
+        auto j = attrs->attrs.find(path[i].symbol);
         if (j != attrs->attrs.end()) {
           nested = j->second.e->kind == ExprKind::Attrs ? static_cast<ExprAttrs *>(j->second.e) : nullptr;
           if (!nested || j->second.kind != ExprAttrs::DefKind::Plain) {
@@ -1426,7 +1428,7 @@ private:
           }
         } else {
           nested = arena.add<ExprAttrs>();
-          attrs->attrs[*path[i].symbol] = ExprAttrs::AttrDef{nested, pos};
+          attrs->attrs[path[i].symbol] = ExprAttrs::AttrDef{nested, pos};
         }
       } else {
         nested = arena.add<ExprAttrs>();
@@ -1434,14 +1436,14 @@ private:
       }
       attrs = nested;
     }
-    if (path[i].symbol) {
-      addAttrSym(attrs, path, *path[i].symbol, ExprAttrs::AttrDef{e, pos});
+    if (!path[i].computed()) {
+      addAttrSym(attrs, path, path[i].symbol, ExprAttrs::AttrDef{e, pos});
     } else {
       attrs->dynamicAttrs.push_back({path[i].expr, e, pos});
     }
   }
 
-  void addAttrSym(ExprAttrs *attrs, AttrPath &path, const std::string &sym, ExprAttrs::AttrDef def) {
+  void addAttrSym(ExprAttrs *attrs, AttrPath &path, const Name &sym, ExprAttrs::AttrDef def) {
     auto j = attrs->attrs.find(sym);
     if (j != attrs->attrs.end()) {
       auto *ae = def.e->kind == ExprKind::Attrs ? static_cast<ExprAttrs *>(def.e) : nullptr;
@@ -1470,7 +1472,7 @@ private:
     } else {
       if (def.e->kind == ExprKind::Lambda) {
         auto *l = static_cast<ExprLambda *>(def.e);
-        if (l->name.empty()) l->name = sym;
+        if (l->name.isNull()) l->name = sym;
       }
       attrs->attrs.emplace(sym, def);
     }
