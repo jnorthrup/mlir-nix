@@ -109,6 +109,30 @@ bool isUriChar(char c) {
   return isAlpha(c) || isDigit(c) || strchr("%/?:@&=+$,-_.!~*'", c) != nullptr;
 }
 
+/// The keyword with exactly this text, else T_ID.  The identifier rule matches every keyword's text, so a keyword is
+/// an identifier of the same length (the earlier rule wins the tie) and loses to a longer identifier (`iffy`).
+Tok keywordOf(std::string_view w) {
+  switch (w.size()) {
+  case 2:
+    if (w == "if") return T_IF;
+    if (w == "in") return T_IN;
+    if (w == "or") return T_OR_KW;
+    return T_ID;
+  case 3:
+    if (w == "let") return T_LET;
+    if (w == "rec") return T_REC;
+    return T_ID;
+  case 4:
+    if (w == "then") return T_THEN;
+    if (w == "else") return T_ELSE;
+    if (w == "with") return T_WITH;
+    return T_ID;
+  case 6: return w == "assert" ? T_ASSERT : T_ID;
+  case 7: return w == "inherit" ? T_INHERIT : T_ID;
+  default: return T_ID;
+  }
+}
+
 class Lexer {
 public:
   Lexer(std::shared_ptr<Origin> o, const ParseOptions &opts)
@@ -519,6 +543,22 @@ private:
       return true;
     default:
       break;
+    }
+
+    // An identifier or keyword is the commonest token.  Of the rules that can start with an identifier character only
+    // a path (a '/' straight after the run of path characters) and a URI (a ':' after the scheme, which is that run)
+    // can be longer than the identifier rule's match; when neither follows, no other matcher can fire, so none runs.
+    if (isIdStart(c)) {
+      size_t j = i + 1;
+      while (!eof(j) && isPathChar(src[j])) j++;
+      char after = at(j);
+      if (after != '/' && after != ':') {
+        size_t len = mId(i);
+        t.t = keywordOf(src.substr(i, len));
+        if (t.t == T_ID) setSlice(t, i, i + len);
+        p = i + len;
+        return true;
+      }
     }
 
     // Candidates: (length, rule index).  Earlier rule wins ties.  Every matcher returns 0
