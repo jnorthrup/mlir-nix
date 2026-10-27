@@ -100,9 +100,21 @@ public:
     size = (size + page - 1) & ~(page - 1);
     if (static_cast<size_t>(end - cur) < size) {
       size_t chunk = std::max(kChunk, size);
-      void *p = mmap(nullptr, chunk, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
+#ifdef __linux__
+      // Transparent huge pages back a 2 MiB aligned range with 2 MiB pages: 512 times fewer faults, which the helper
+      // takes for the evaluator anyway, but also one TLB entry for 2 MiB of values.  Most kernels ship THP as "madvise".
+      constexpr size_t kHuge = size_t(2) << 20;
+      size_t reserve = chunk + kHuge;
+#else
+      size_t reserve = chunk;
+#endif
+      void *p = mmap(nullptr, reserve, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
       if (p == MAP_FAILED) llvm::report_fatal_error("cannot reserve memory for the evaluator");
       cur = static_cast<char *>(p);
+#ifdef __linux__
+      cur = reinterpret_cast<char *>((reinterpret_cast<uintptr_t>(cur) + kHuge - 1) & ~(kHuge - 1));
+      madvise(cur, chunk, MADV_HUGEPAGE); // advice only: failure changes nothing
+#endif
       end = cur + chunk;
     }
     char *slab = cur;
