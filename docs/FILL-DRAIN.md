@@ -79,6 +79,9 @@ Reading it:
   leave their buffer for malloc.  L1 is not the constraint on these; the number of times each runs is.
 - The hand-drained `vector<Value *>` -> `mkList` builtins that the PRELOAD sweep found are cold: the seven counted here (of the 10 sites
   the scan classes that way) fill 144k times in a run with 3.2M apply argument lists.  They are a discipline fix, not a speed one, and are not first.
+- A fill buffer with inline storage that stays on the stack is free.  Taking three of them out of the call path (rows 2, 3, 4) read
+  as -1.3% to -1.6% over 11 runs and as -0.5% | -0.1% over 25: neutral, and the ceilings written for them (fills times an assumed 10 ns)
+  were wrong.  What costs is bytes that reach the arena: attribute cells and lists.
 - Lists are tiny: mean 1.5 | 2.0 cells over 1.2M | 0.8M lists.  A list of at most two cells fits in the two payload words of a Value.
 - Strings are tiny (mean 15 | 19 B) except the interpolations: 58% | 74% of `evalConcatStrings` results do not fit a `std::string`'s
   inline 15 bytes, so each is a malloc, then a copy into `str`, then a copy into the arena.
@@ -88,9 +91,9 @@ Reading it:
 | # | pair | translation | evidence | status |
 |---|---|---|---|---|
 |  1 | `Attr` cell 24 -> 16 B | the pos in a cell is a 32-bit handle into an append-only table (the WAL of positions); AttrsOp carries a base, not an array | spike: max RSS -6.3%, peak footprint -6.7%, wall -0.7 / -1.2 (demand) -1.7 / -1.0 (eager); hashes identical | spike `exp/dense-attr` f6a8d0b; real change `exp/attr-pos-table`  |
-|  2 | `callFunction all` | no fill when `applied` is empty: pass `args + i` | 1.14M / 0.47M copies of mean 1.7 cells | not started; ceiling about 1% at 10 ns a copy (an estimate)  |
-|  3 | `evalOp` apply args | a fixed array for up to 4 operands, the SmallVector only past that | 3.2M / 2.1M fills, 0.1% over | not started; ceiling about 0.5% (estimate)  |
-|  4 | `mkString` | an overload without a context: the default argument builds a `std::set` per string | 2.26M / 2.25M calls | not started; ceiling about 0.5% (estimate)  |
+|  2 | `callFunction all` | no fill when `applied` is empty: pass `args + i` | 1.14M / 0.47M copies of mean 1.7 cells | tried with 3 and 4: neutral (`exp/fd-calls`): demand toplevel -0.5%, nixpkgs-73 -0.1%, 25 runs |
+|  3 | `evalOp` apply args | a fixed array for up to 4 operands, the SmallVector only past that | 3.2M / 2.1M fills, 0.1% over | tried with 2 and 4: neutral  |
+|  4 | `mkString` | an overload without a context: the default argument builds a `std::set` per string | 2.26M / 2.25M calls | tried with 2 and 3: neutral  |
 |  5 | lists of at most 2 cells | stored in the Value, behind `std::span<Value *> Value::list()`; the 72 `list.elems` and 54 `listSize()` sites go through the span first | 1.2M / 0.8M lists, mean 1.5 / 2.0 cells | not started; about 0.9% of memory (estimate)  |
 |  6 | `evalConcatStrings` | a `SmallString<256>` scratch that string parts append to from `sv()`, drained once into the arena | 67k / 76k fills, 11 / 20 MB | not started; under 0.5% (estimate)  |
 |  7 | the derivation path | flat records filled in order, one sorted drain into the ATerm; a `Derivation` moved, not copied | 3.4% of the thread in map/set frames, 1.5% copying a `Derivation` (profile, inlined frames missing, so a lower bound) | not counted dynamically yet  |
