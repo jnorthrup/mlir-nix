@@ -437,7 +437,7 @@ void EvalState::indexRegion(Region &r) {
   Block &blk = r.front();
   unsigned slot = 0;
   auto *core = ctx.getLoadedDialect<nd::NixDialect>();
-  for (BlockArgument a : blk.getArguments()) slotMap[a.getAsOpaquePointer()] = {ri, slot++, false};
+  for (BlockArgument a : blk.getArguments()) slotMap[a.getAsOpaquePointer()] = {ri, nullptr, slot++, Slot::Unknown, false};
   for (Operation &op : blk) {
     if (auto ret = dyn_cast<nd::ReturnOp>(op)) {
       ri->result = ret.getValue();
@@ -446,7 +446,7 @@ void EvalState::indexRegion(Region &r) {
     for (mlir::Value res : op.getResults()) {
       // A value evaluated in place has exactly one use, strict or tail: it needs no cell that outlives that use.
       bool inPlace = inPlaceEnabled && core->evaluatesInPlace(res);
-      slotMap[res.getAsOpaquePointer()] = {ri, inPlace ? kNoSlot : slot++, inPlace};
+      slotMap[res.getAsOpaquePointer()] = {ri, &op, inPlace ? kNoSlot : slot++, Slot::Unknown, inPlace};
     }
     // A deferred lambda's region is a shell until its first call; it is indexed when it is minted.
     auto lam = dyn_cast<nd::LambdaOp>(op);
@@ -475,19 +475,28 @@ Frame *EvalState::newFrame(RegionInfo *ri, Frame *up) {
   return f;
 }
 
+static Slot::How howOf(Operation *op) {
+  if (isa<nd::IntOp, nd::FloatOp, nd::StringOp, nd::PathOp, nd::BoolOp, nd::NullOp>(op)) return Slot::Const;
+  if (isa<nd::BuiltinOp>(op)) return Slot::Builtin;
+  if (isa<nd::LambdaOp>(op)) return Slot::Lambda;
+  return Slot::Thunk;
+}
+
 Value *EvalState::lookup(Frame *f, mlir::Value v) {
   auto it = slotMap.find(v.getAsOpaquePointer());
   if (it == slotMap.end()) throw EvalError("internal error: unindexed SSA value");
-  RegionInfo *ri = it->second.ri;
-  unsigned idx = it->second.idx;
+  Slot &s = it->second;
+  RegionInfo *ri = s.ri;
+  unsigned idx = s.idx;
   while (f && f->info != ri) f = f->up;
   if (!f) throw EvalError("internal error: SSA value used outside its scope");
   Value *noCell = nullptr; // an in-place value reached through lookup(): its one use gets its own thunk
   Value *&slot = idx == kNoSlot ? noCell : f->slots[idx];
   if (slot) return slot;
-  Operation *op = v.getDefiningOp();
+  Operation *op = s.def;
   if (!op) throw EvalError("internal error: unbound block argument");
-  if (isa<nd::IntOp, nd::FloatOp, nd::StringOp, nd::PathOp, nd::BoolOp, nd::NullOp>(op)) {
+  if (s.how == Slot::Unknown) s.how = howOf(op);
+  if (s.how == Slot::Const) {
     auto c = constCache.find(op);
     if (c != constCache.end()) return slot = c->second;
     Value *cv = allocValue();
@@ -500,18 +509,15 @@ Value *EvalState::lookup(Frame *f, mlir::Value v) {
     constCache[op] = cv;
     return slot = cv;
   }
-  if (auto b = dyn_cast<nd::BuiltinOp>(op)) {
+  if (s.how == Slot::Builtin) {
+    auto b = cast<nd::BuiltinOp>(op);
     Value *bv = baseEnvValue(b.getName().str());
     if (!bv) throw EvalError("undefined variable '" + b.getName().toString() + "'", nd::posOfOp(op));
     return slot = bv;
   }
   Value *nv = allocValue();
   if (statsEnabled) nThunks++;
-  if (isa<nd::LambdaOp>(op)) {
-    nv->type = VType::Lambda;
-  } else {
-    nv->type = VType::Thunk;
-  }
+  nv->type = s.how == Slot::Lambda ? VType::Lambda : VType::Thunk;
   nv->thunk.op = op;
   nv->thunk.env = f;
   return slot = nv;
@@ -533,7 +539,7 @@ Value &EvalState::operand(Frame *f, mlir::Value v, Value &tmp) {
   auto it = slotMap.find(v.getAsOpaquePointer());
   if (it != slotMap.end() && it->second.inPlace && f && f->info == it->second.ri) {
     if (statsEnabled) nInPlace++;
-    evalDefinition(v.getDefiningOp(), f, tmp);
+    evalDefinition(it->second.def, f, tmp);
     return tmp;
   }
   return *lookup(f, v);
@@ -543,7 +549,7 @@ void EvalState::evalTail(Frame *f, mlir::Value v, Value &out, PosPtr pos) {
   auto it = slotMap.find(v.getAsOpaquePointer());
   if (it != slotMap.end() && it->second.inPlace && f && f->info == it->second.ri) {
     if (statsEnabled) nInPlace++;
-    evalDefinition(v.getDefiningOp(), f, out);
+    evalDefinition(it->second.def, f, out);
     return;
   }
   Value *p = lookup(f, v);

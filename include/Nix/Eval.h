@@ -198,8 +198,13 @@ struct Frame {
 /// strict/tail consumer evaluates it in place (NixDialect::evaluatesInPlace).
 inline constexpr unsigned kNoSlot = ~0u;
 struct Slot {
+  /// What the first touch of a value's cell makes; worked out from the defining op once, at the first touch of the value in any
+  /// frame, and kept here.
+  enum How : uint8_t { Unknown, Thunk, Lambda, Const, Builtin };
   RegionInfo *ri;
-  unsigned idx; // kNoSlot: the value is evaluated in place and has no cell
+  mlir::Operation *def; // the op that defines the value, null for a block argument (Value::getDefiningOp() is a call into MLIR)
+  unsigned idx;         // kNoSlot: the value is evaluated in place and has no cell
+  How how;
   bool inPlace;
 };
 
