@@ -67,19 +67,37 @@ struct Attr {
   PosPtr pos;
 };
 
+/// An attrset's representation. `size_ >= 0`: an ordinary flat, sorted
+/// array of `size_` Attrs in `attrs[]` (the only case before unions existed,
+/// and still the only case for anything not built by `EvalState::updateAttrs`).
+/// `size_ < 0`: a lazy `//` union. `-size_` is a *leaf count*, not an
+/// attribute count; the leaves (flat or union Bindings, lowest-priority
+/// first) live where `attrs[]` would, reinterpreted -- see unionTailOf() in
+/// Eval.cpp, the only place that needs to know the union layout. Everything
+/// else goes through get()/size()/begin()/end()/ensureFlat(), which stay
+/// correct (and, for get(), cheap) without knowing a union is involved.
 struct Bindings {
-  uint32_t size_ = 0;
+  int32_t size_ = 0;
   PosPtr pos = nullptr;
   Attr attrs[0];
-  size_t size() const { return size_; }
-  bool empty() const { return size_ == 0; }
-  Attr *begin() { return attrs; }
-  Attr *end() { return attrs + size_; }
-  const Attr *begin() const { return attrs; }
-  const Attr *end() const { return attrs + size_; }
+  bool isUnion() const { return size_ < 0; }
+  size_t leafCount() const { return size_t(-size_); }
+  size_t size() const { return isUnion() ? ensureFlat()->size() : size_t(size_); }
+  bool empty() const { return !isUnion() && size_ == 0; }
+  Attr *begin() { return isUnion() ? ensureFlat()->attrs : attrs; }
+  Attr *end() { return begin() + size(); }
+  const Attr *begin() const { return isUnion() ? ensureFlat()->attrs : attrs; }
+  const Attr *end() const { return begin() + size(); }
+  /// Looks up `s` without flattening a union: probes leaves highest-priority
+  /// (most recently `//`'d on top) first.
   const Attr *get(Symbol s) const;
   /// Attributes sorted by name (string order).
   std::vector<const Attr *> lexicographicOrder(const SymbolTable &st) const;
+  /// A flat Bindings equivalent to this one: itself if already flat, else
+  /// the cached or freshly merged flattening of a union (memoized on the
+  /// union; same cost paid at most once no matter how many times this is
+  /// called on it).
+  Bindings *ensureFlat() const;
 };
 
 /// String context: sorted set of encoded elements
@@ -247,6 +265,9 @@ public:
   // -- Allocation --------------------------------------------------------
   Value *allocValue() { return new (alloc.Allocate<Value>()) Value(); }
   Bindings *allocBindings(size_t n);
+  /// `lhs // rhs`. May build a lazy union instead of copying `lhs` -- see
+  /// the Bindings union comment and the threshold constants in Eval.cpp.
+  Bindings *updateAttrs(Bindings *lhs, Bindings *rhs);
   Value **allocList(size_t n);
   const char *copyString(std::string_view s);
   const StringContext *makeContext(const NixStringContext &c);
@@ -397,7 +418,13 @@ public:
   /// Symbol of one select/has_attr path component: literal (attribute) or the
   /// next computed key (operand), forced to a string.
   Symbol pathSymbol(mlir::Attribute comp, mlir::OperandRange dyn, unsigned &nextDyn, Frame *env, PosPtr pos);
-  Value *lookup(Frame *f, mlir::Value v);
+  /// Resolve `v` in `f`'s slot chain, materializing it on first reference.
+  /// If `forceNow` is set, the caller is about to force the result anyway
+  /// (e.g. it feeds a strict operand): skip wrapping a fresh reference in a
+  /// Thunk only to immediately re-enter through forceValue, and evaluate it
+  /// in place instead (still under a Blackhole guard, so cycles are caught
+  /// exactly as they are when forcing a Thunk).
+  Value *lookup(Frame *f, mlir::Value v, bool forceNow = false, PosPtr pos = nullptr);
   void evalOp(mlir::Operation *op, Frame *env, Value &out);
   RegionInfo *regionInfo(mlir::Region *r);
   Frame *newFrame(RegionInfo *ri, Frame *up);
