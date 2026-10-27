@@ -56,16 +56,28 @@ def Nix_LambdaOp : Nix_Op<"lambda", [SingleBlock,
     `formals`/`formal_defaults`/`ellipsis` describe the pattern; the body binds
     each formal with `nix.formal`.  `arg_name` is the simple argument name or the
     `@`-binding, kept for printing and diagnostics.
+
+    The deferred form (the sea-of-nodes schedule, MLNIX_DEFER) carries no body
+    graph at lowering time.  `body_index` is `file j row` (a TwInt) into the
+    frontend's pool of deferred lambdas, and `captures` are the values the body
+    reads from the enclosing scopes: the `with` chain, innermost first, then the
+    free names the pool row lists.  The body is minted on the first call, from
+    the retained AST, by the same generator that mints it eagerly.  The captures
+    are real operands so that the uses the waiting body will make exist already;
+    a lowered `.mlir` file cannot re-mint a deferred body, the expression lives
+    in the arena.
   }];
   let arguments = (ins OptionalAttr<StrArrayAttr>:$formals,
                        OptionalAttr<DenseBoolArrayAttr>:$formal_defaults,
                        UnitAttr:$ellipsis,
                        OptionalAttr<StrAttr>:$arg_name,
                        OptionalAttr<StrAttr>:$name,
-                       OptionalAttr<ArrayAttr>:$formal_locs);
+                       OptionalAttr<ArrayAttr>:$formal_locs,
+                       Variadic<NixVal>:$captures,
+                       OptionalAttr<I64Attr>:$body_index);
   let results = (outs NixFreshVal:$result);
   let regions = (region SizedRegion<1>:$body);
-  let assemblyFormat = "attr-dict-with-keyword $body";
+  let assemblyFormat = "(`(`$captures^`)`)? attr-dict-with-keyword $body";
   let hasVerifier = 1;
   let extraClassDeclaration = [{
     bool hasFormals() { return getFormals().has_value(); }

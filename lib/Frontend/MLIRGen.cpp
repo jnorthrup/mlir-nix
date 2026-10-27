@@ -15,10 +15,12 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/StringMap.h"
 
+#include <deque>
 #include <sstream>
 
 using namespace mlir;
 namespace nd = mlir::nix;
+namespace cp = composite;
 
 namespace nixfe {
 namespace {
@@ -29,6 +31,150 @@ struct Scope {
   Value withValue;
   llvm::StringMap<Value> vars;
 };
+
+/// Free names of lambdas (see FreeName / FreeMemo).  The binder discipline mirrors Gen: lambda
+/// arguments and formals, `let` and `rec` groups bind; `inherit x;` reads outside the group it
+/// defines; `with` binds nothing statically.  Over-approximating is free (an unused capture is one
+/// operand); masking a name Gen would resolve outside the body would be a bug.
+class FreeVars {
+public:
+  explicit FreeVars(FreeMemo &memo) : memo(memo) {}
+
+  const std::vector<FreeName> &of(const ExprLambda *l) {
+    auto it = memo.find(l);
+    if (it != memo.end()) return it->second;
+    Walk w(*this);
+    if (!l->arg.empty()) w.enter(l->arg);
+    for (auto &f : l->formals) w.enter(f.name);
+    for (auto &f : l->formals)
+      if (f.def) w.walk(f.def);
+    w.walk(l->body);
+    return memo.emplace(l, std::move(w.out)).first->second;
+  }
+
+private:
+  FreeMemo &memo;
+
+  struct Walk {
+    FreeVars &fv;
+    struct Slot {
+      int bound = 0; // binders of this name between here and the lambda
+      int out = -1;  // index in `out`, once seen free
+    };
+    llvm::StringMap<Slot> slots;
+    unsigned withs = 0; // `with` scopes between here and the lambda
+    std::vector<FreeName> out;
+
+    explicit Walk(FreeVars &fv) : fv(fv) {}
+    void enter(llvm::StringRef n) { ++slots[n].bound; }
+    void leave(llvm::StringRef n) { --slots[n].bound; }
+    void ref(llvm::StringRef n, Pos pos, bool strict) {
+      Slot &s = slots[n];
+      if (s.bound > 0) return;
+      if (s.out < 0) {
+        s.out = static_cast<int>(out.size());
+        out.push_back({n, pos, strict});
+      } else if (strict && !out[s.out].strict) {
+        out[s.out] = {n, pos, true};
+      }
+    }
+    void walk(const Expr *e);
+  };
+};
+
+void FreeVars::Walk::walk(const Expr *e) {
+  switch (e->kind) {
+  case ExprKind::Int: case ExprKind::Float: case ExprKind::String: case ExprKind::Path:
+  case ExprKind::CurPos: case ExprKind::InheritFrom:
+    return;
+  case ExprKind::Var: {
+    auto *v = static_cast<const ExprVar *>(e);
+    ref(v->name, v->pos, withs == 0);
+    return;
+  }
+  case ExprKind::Lambda:
+    return;
+  case ExprKind::Let:
+  case ExprKind::Attrs: {
+    bool isLet = e->kind == ExprKind::Let;
+    const ExprAttrs *a = isLet ? static_cast<const ExprLet *>(e)->attrs : static_cast<const ExprAttrs *>(e);
+    bool binds = isLet || a->recursive;
+    for (auto &[name, def] : a->attrs) // `inherit x;` reads outside the group it defines
+      if (def.kind == ExprAttrs::DefKind::Inherited) walk(def.e);
+    if (binds)
+      for (auto &[name, def] : a->attrs) enter(name);
+    for (auto *fe : a->inheritFromExprs) walk(fe);
+    for (auto &[name, def] : a->attrs)
+      if (def.kind == ExprAttrs::DefKind::Plain) walk(def.e);
+    for (auto &d : a->dynamicAttrs) {
+      walk(d.nameExpr);
+      walk(d.valueExpr);
+    }
+    if (isLet) walk(static_cast<const ExprLet *>(e)->body);
+    if (binds)
+      for (auto &[name, def] : a->attrs) leave(name);
+    return;
+  }
+  case ExprKind::Select: {
+    auto *x = static_cast<const ExprSelect *>(e);
+    walk(x->e);
+    for (auto &c : x->path)
+      if (c.expr) walk(c.expr);
+    if (x->def) walk(x->def);
+    return;
+  }
+  case ExprKind::HasAttr: {
+    auto *x = static_cast<const ExprHasAttr *>(e);
+    walk(x->e);
+    for (auto &c : x->path)
+      if (c.expr) walk(c.expr);
+    return;
+  }
+  case ExprKind::List:
+    for (auto *x : static_cast<const ExprList *>(e)->elems) walk(x);
+    return;
+  case ExprKind::Call: {
+    auto *c = static_cast<const ExprCall *>(e);
+    walk(c->fun);
+    for (auto *x : c->args) walk(x);
+    return;
+  }
+  case ExprKind::With: {
+    auto *x = static_cast<const ExprWith *>(e);
+    walk(x->attrs);
+    ++withs;
+    walk(x->body);
+    --withs;
+    return;
+  }
+  case ExprKind::If: {
+    auto *i = static_cast<const ExprIf *>(e);
+    walk(i->cond);
+    walk(i->then);
+    walk(i->else_);
+    return;
+  }
+  case ExprKind::Assert: {
+    auto *x = static_cast<const ExprAssert *>(e);
+    walk(x->cond);
+    walk(x->body);
+    return;
+  }
+  case ExprKind::Not:
+    walk(static_cast<const ExprNot *>(e)->e);
+    return;
+  case ExprKind::Eq: case ExprKind::NEq: case ExprKind::And: case ExprKind::Or:
+  case ExprKind::Impl: case ExprKind::Update: case ExprKind::ConcatLists: {
+    auto *bn = static_cast<const ExprBin *>(e);
+    walk(bn->e1);
+    walk(bn->e2);
+    return;
+  }
+  case ExprKind::ConcatStrings:
+    for (auto &[p, x] : static_cast<const ExprConcatStrings *>(e)->es) walk(x);
+    return;
+  }
+}
 
 class Gen {
 public:
@@ -50,7 +196,8 @@ public:
       // scope: <expr>, with the scope's names bound lexically.
       auto lam = nd::LambdaOp::create(b, loc(e->pos), valTy(), ArrayAttr(),
                                       DenseBoolArrayAttr(), false,
-                                      b.getStringAttr("scope"), StringAttr(), ArrayAttr());
+                                      b.getStringAttr("scope"), StringAttr(), ArrayAttr(),
+                                      ValueRange{}, IntegerAttr());
       Block *lb = new Block();
       lam.getBody().push_back(lb);
       Value arg = lb->addArgument(valTy(), loc(e->pos));
@@ -69,6 +216,28 @@ public:
     b.setInsertionPointToEnd(blk);
     nd::ReturnOp::create(b, noLoc(), result);
     return exprOp;
+  }
+
+  /// The demand half of the mint (nixfe::mintBody): rebuild the lexical scope of the lambda from its
+  /// pool row and generate the body, through the same path as at lowering time.
+  void mint(nd::LambdaOp lam, const Row &r) {
+    topBlock = &lam.getBody().front(); // anchored constants (builtins, true/false/null) head the body
+    OperandRange caps = lam.getCaptures();
+    Scope lex;
+    for (size_t i = 0; i < r.names.size(); i++) lex.vars[r.names[i]] = caps[r.withs + i];
+    // `with` never binds lexically and a lexical binding beats every `with`, so the flat map plus
+    // the with-chain (outermost pushed first, so the walk meets the innermost first) is the same
+    // scope extensionally.
+    std::deque<Scope> frames; // stable addresses: the chain is walked by pointer
+    Scope *cur = &lex;
+    for (unsigned i = r.withs; i-- > 0;) {
+      frames.emplace_back();
+      frames.back().parent = cur;
+      frames.back().isWith = true;
+      frames.back().withValue = caps[i];
+      cur = &frames.back();
+    }
+    genLambdaBody(lam, r.expr, cur);
   }
 
 private:
@@ -334,6 +503,44 @@ private:
     return gen(l->body, &ns);
   }
 
+  /// Where `name` resolves without a `with`: a lexical binding, else the base environment (an
+  /// anchored constant at the head of the region).  Null when only a `with`, or nothing, can supply it.
+  Value resolveStatic(StringRef name, Scope *s) {
+    for (Scope *c = s; c; c = c->parent) {
+      if (c->isWith) continue;
+      auto it = c->vars.find(name);
+      if (it != c->vars.end()) return it->second;
+    }
+    if (opts.isBaseName && opts.isBaseName(name)) return baseRef(name);
+    return Value();
+  }
+
+  /// The defer half of the schedule.  The free names of the lambda resolve against the live scope NOW and
+  /// become capture operands: real uses, so the placeholder RAUW of a let/rec group keeps them honest
+  /// and the cleanup of unused builtins/selects cannot erase what a waiting body will read.  A name no
+  /// scope supplies is a static error here, exactly when the eager schedule reports it, unless a `with`
+  /// could supply it at run time.  Fills `caps` (the with-chain innermost first, then the resolved
+  /// names) and returns the pool row.
+  uint32_t defer(const ExprLambda *l, Scope *s, SmallVectorImpl<Value> &caps) {
+    FreeVars fv(*opts.freeMemo);
+    const std::vector<FreeName> &fs = fv.of(l);
+    for (Scope *c = s; c; c = c->parent)
+      if (c->isWith) caps.push_back(c->withValue); // lookupVar's order
+    unsigned withs = caps.size();
+    // α: each free name joined with where the live scope puts it; nothing resolves until its element is read.
+    auto resolved = cp::series(fs.data(), fs.size()) |cp::α| [&](const FreeName &f) { return f |cp::j| resolveStatic(f.name, s); };
+    SmallVector<StringRef> names;
+    for (auto [f, v] : resolved) {
+      if (v) {
+        names.push_back(f.name);
+        caps.push_back(v);
+      } else if (f.strict && withs == 0) {
+        error("undefined variable '" + f.name.str() + "'", f.pos);
+      }
+    }
+    return opts.pool->defer(l, withs, names);
+  }
+
   Value genLambda(const ExprLambda *l, Scope *s) {
     SmallVector<Attribute> formalNames;
     SmallVector<bool> hasDef;
@@ -341,13 +548,21 @@ private:
       formalNames.push_back(b.getStringAttr(f.name));
       hasDef.push_back(f.def != nullptr);
     }
+    bool deferred = opts.deferBodies && opts.pool && opts.freeMemo;
+    SmallVector<Value> caps;
+    IntegerAttr bodyIndex;
+    uint32_t row = 0;
+    if (deferred) {
+      row = defer(l, s, caps);
+      bodyIndex = b.getI64IntegerAttr(static_cast<int64_t>(BodyIndex(opts.pool->file, row).raw));
+    }
     auto lam = nd::LambdaOp::create(
         b, loc(l->pos), valTy(),
         l->hasFormals ? b.getArrayAttr(formalNames) : ArrayAttr(),
         l->hasFormals ? b.getDenseBoolArrayAttr(hasDef) : DenseBoolArrayAttr(),
         l->ellipsis,
         l->arg.empty() ? StringAttr() : b.getStringAttr(l->arg),
-        l->name.empty() ? StringAttr() : b.getStringAttr(l->name), ArrayAttr());
+        l->name.empty() ? StringAttr() : b.getStringAttr(l->name), ArrayAttr(), caps, bodyIndex);
     if (l->hasFormals) {
       SmallVector<Attribute> locs;
       for (auto &f : l->formals) locs.push_back(loc(f.pos));
@@ -355,9 +570,21 @@ private:
     }
     Block *blk = new Block();
     lam.getBody().push_back(blk);
-    Value arg = blk->addArgument(valTy(), loc(l->pos));
+    blk->addArgument(valTy(), loc(l->pos));
+    if (deferred) { // the node exists, its graph does not: the pool holds the rest
+      opts.pool->attach(row, lam);
+      return lam.getResult();
+    }
+    genLambdaBody(lam, l, s);
+    return lam.getResult();
+  }
+
+  /// The body mint, shared by the eager schedule (at lowering time) and the demand schedule (first
+  /// call): the same ops either way.
+  void genLambdaBody(nd::LambdaOp lam, const ExprLambda *l, Scope *s) {
     OpBuilder::InsertionGuard g(b);
-    b.setInsertionPointToEnd(blk);
+    b.setInsertionPointToEnd(&lam.getBody().front());
+    Value arg = lam.getArgument();
     Scope ns;
     ns.parent = s;
     if (!l->arg.empty()) ns.vars[l->arg] = arg;
@@ -386,7 +613,6 @@ private:
     }
     Value body = gen(l->body, &ns);
     nd::ReturnOp::create(b, noLoc(), body);
-    return lam.getResult();
   }
 
   Value gen(const Expr *e, Scope *s) {
@@ -509,6 +735,11 @@ nd::ExprOp genExpr(ModuleOp module, const Expr *e, std::shared_ptr<Origin> origi
                    StringRef symName, const GenOptions &opts) {
   Gen g(module, std::move(origin), opts);
   return g.run(e, symName);
+}
+
+void mintBody(nd::LambdaOp lam, std::shared_ptr<Origin> origin, const Row &r, const GenOptions &opts) {
+  Gen g(lam->getParentOfType<ModuleOp>(), std::move(origin), opts);
+  g.mint(lam, r);
 }
 
 } // namespace nixfe

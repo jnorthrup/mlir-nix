@@ -16,6 +16,7 @@
 #include "llvm/Support/SourceMgr.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <iostream>
@@ -196,6 +197,7 @@ EvalState::EvalState(EvalSettings st, std::shared_ptr<nixstore::Store> store)
   statsEnabled = getenv("MLNIX_STATS") != nullptr;
   settings.mapSources = !getenv("MLNIX_NOMMAP"); // ablation switch: read and copy every file, as before
   inPlaceEnabled = !getenv("MLNIX_NOINPLACE"); // ablation switch: every operand gets a thunk, as before
+  settings.deferBodies = getenv("MLNIX_DEFER") != nullptr; // sea-of-nodes schedule: mint bodies on first call
   // The evaluator is single-threaded.  With threading enabled every attribute
   // and location is uniqued through sharded, locked, thread-cached tables --
   // a quarter of the run time (measured) for no benefit.
@@ -265,6 +267,30 @@ void EvalState::printStats() {
   llvm::errs() << "== mlnix ops lowered: " << total << "\n";
   llvm::errs() << "== `//`: " << nUpdLayered << " layered (" << nUpdBase << " entries not copied, " << nUpdTop << " top entries incl. merges), " << nUpdMerged << " flat merges, " << Bindings::flattened << " layers flattened later\n";
   llvm::errs() << "== operands evaluated in place: " << nInPlace << ", thunks created by lookup(): " << nThunks << "\n";
+  llvm::errs() << "== ops ever evaluated (distinct): " << evaluated.size() << " of " << total << " lowered ("
+               << llvm::format("%.1f", 100.0 * evaluated.size() / std::max<size_t>(total, 1)) << "%)\n";
+  llvm::errs() << "== lowering " << llvm::format("%.0f", nsLower / 1e6) << " ms (the analysis of deferred lambdas included), minted on demand "
+               << llvm::format("%.0f", nsMint / 1e6) << " ms\n";
+  if (!pools.empty()) {
+    size_t names = 0, memoNames = 0;
+    for (auto &p : pools) names += p->nameCol.size();
+    for (auto &[l, fs] : freeMemo) memoNames += fs.size();
+    llvm::errs() << "== read plan: " << freeMemo.size() << " lambdas analyzed (" << memoNames << " free names), " << names
+                 << " names pooled\n";
+  }
+  if (!pools.empty()) {
+    // The pools are Cursors: print them by their own column names.  A row is deferred when lowering
+    // meets the lambda and drained when its first call mints the body; the rest is what never ran.
+    size_t rows = 0, minted = 0;
+    for (auto &p : pools) {
+      rows += p->rows.size();
+      for (nixev::RegionInfo *ri : p->rows.col<nixfe::FilePool::Col::Body>().view()) minted += ri != nullptr;
+    }
+    llvm::errs() << "== lambda pools: " << pools.size() << " files, (";
+    for (size_t i = 0; i < pools[0]->rows.meta.size(); i++) llvm::errs() << (i ? ", " : "") << pools[0]->rows.meta[i];
+    llvm::errs() << "), " << rows << " rows deferred, " << minted << " drained (body minted on a first call), "
+                 << rows - minted << " never called\n";
+  }
   section("scopes", perScope);
   section("continents", perContinent);
   section("dialects", perDialect);
@@ -390,6 +416,9 @@ void EvalState::indexRegion(Region &r) {
       continue;
     }
     for (mlir::Value res : op.getResults()) slotMap[res.getAsOpaquePointer()] = {ri, slot++, inPlaceEnabled && core->evaluatesInPlace(res)};
+    // A deferred lambda's region is a shell until its first call; it is indexed when it is minted.
+    auto lam = dyn_cast<nd::LambdaOp>(op);
+    if (lam && lam.getBodyIndex()) continue;
     for (Region &nested : op.getRegions())
       if (!nested.empty()) indexRegion(nested);
   }
@@ -615,9 +644,52 @@ std::string_view EvalState::forceStringNoCtx(Value &v, PosPtr pos, std::string_v
 // Function calls
 //===----------------------------------------------------------------------===//
 
+/// The demand half of the sea-of-nodes schedule (MLNIX_DEFER).  Rows of a FilePool accumulate as
+/// lowering defers lambdas; the first call of a lambda drains its row: the body is generated from the
+/// retained AST through the same path as at lowering time, optimized, and indexed, and the row keeps
+/// only its anchor, the indexed region.  Every later call reads the anchor.
+static std::unique_ptr<mlir::PassManager> makeOptimizer(mlir::MLIRContext &,
+                                                        const EvalSettings &);
+
+/// The pass pipeline as text: MLNIX_PIPELINE over the setting.
+static std::string pipelineText(const EvalSettings &settings) {
+  const char *e = getenv("MLNIX_PIPELINE");
+  return e ? e : settings.pipeline;
+}
+
+RegionInfo *EvalState::mintLambda(nixfe::FilePool &p, uint32_t row) {
+  auto t0 = std::chrono::steady_clock::now();
+  nixfe::Row r = p.read(row); // a copy: the pool grows while the body mints
+  auto lam = cast<nd::LambdaOp>(r.op);
+  nixfe::GenOptions go;
+  go.isBaseName = [this](llvm::StringRef n) { return isBaseName(n); };
+  go.deferBodies = true; // lambdas nested in this body wait for their own first call
+  go.pool = &p;
+  go.freeMemo = &freeMemo;
+  nixfe::mintBody(lam, p.origin, r, go);
+  if (settings.optimize) {
+    if (!devirt) devirt = std::make_unique<mlir::FrozenRewritePatternSet>(mlir::nix::makeDevirtualizePatterns(&ctx));
+    mlir::nix::devirtualizePrims(lam, *devirt);
+  }
+  if (statsEnabled) {
+    lam.getBody().walk([&](mlir::Operation *o) { ++opStats[o->getName().getStringRef()]; });
+    ++nDemandMinted;
+    nsMint += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+  }
+  p.drain(row);
+  return regionInfo(&lam.getBody());
+}
+
+RegionInfo *EvalState::bodyOf(nixfe::BodyIndex idx) {
+  nixfe::FilePool &p = *pools[idx.first()]; // the index was issued by the generator: unchecked
+  return composite::anchor(p.rows.col<nixfe::FilePool::Col::Body>(), idx.second(),
+                           [&](uint32_t row) { return mintLambda(p, row); });
+}
+
 void EvalState::callLambda(Value &fun, Value *arg, Value &out, PosPtr pos) {
   auto lam = cast<nd::LambdaOp>(fun.thunk.op);
-  RegionInfo *ri = regionInfo(&lam.getBody());
+  std::optional<uint64_t> deferred = lam.getBodyIndex();
+  RegionInfo *ri = deferred ? bodyOf(nixfe::BodyIndex(*deferred)) : regionInfo(&lam.getBody());
   Frame *f = newFrame(ri, fun.thunk.env);
   f->slots[0] = arg;
   auto fnName = [&]() -> std::string {
@@ -904,6 +976,7 @@ Symbol EvalState::pathSymbol(mlir::Attribute comp, mlir::OperandRange dyn, unsig
 }
 
 void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
+  if (statsEnabled) evaluated.insert(op);
   PosPtr pos = op->getLoc().getAsOpaquePointer();
   auto copyFrom = [&](Value *v) {
     forceValue(*v, pos);
@@ -1491,8 +1564,7 @@ static std::unique_ptr<mlir::PassManager> makeOptimizer(mlir::MLIRContext &ctx, 
     mlir::registerTransformsPasses();
     nd::registerNixPasses();
   });
-  std::string text = settings.pipeline;
-  if (const char *e = getenv("MLNIX_PIPELINE")) text = e;
+  std::string text = pipelineText(settings);
   auto pm = std::make_unique<mlir::PassManager>(&ctx); // anchored on any op
   pm->enableVerifier(false);
   std::string err;
@@ -1506,11 +1578,23 @@ nd::ExprOp EvalState::lowerToMLIR(nixfe::Expr *e, std::shared_ptr<nixfe::Origin>
                                   const std::vector<std::string> *scopeNames) {
   nixfe::GenOptions go;
   go.isBaseName = [this](llvm::StringRef n) { return isBaseName(n); };
+  if (settings.deferBodies) {
+    // A lambda body is not IsolatedFromAbove, so no PassManager can run on it when it is minted: the
+    // demand schedule devirtualizes it directly, which is the whole default pipeline.  Any other
+    // pipeline would be skipped silently on every minted body, so refuse it.
+    if (settings.optimize && pipelineText(settings) != "nix-prims")
+      throw EvalError("MLNIX_DEFER runs only the default pipeline 'nix-prims', not '" + pipelineText(settings) + "'");
+    pools.push_back(std::make_unique<nixfe::FilePool>(static_cast<uint32_t>(pools.size()), origin));
+    go.deferBodies = true;
+    go.pool = pools.back().get();
+    go.freeMemo = &freeMemo;
+  }
   if (scopeNames) {
     go.scoped = true;
     go.scopeNames = *scopeNames;
   }
   std::string sym = "expr" + std::to_string(exprCounter++);
+  auto t0 = std::chrono::steady_clock::now();
   nd::ExprOp op = nixfe::genExpr(*module, e, std::move(origin), sym, go);
   // The expression is IsolatedFromAbove and not yet referenced by any frame,
   // so it can be rewritten freely before evaluation starts.
@@ -1518,8 +1602,10 @@ nd::ExprOp EvalState::lowerToMLIR(nixfe::Expr *e, std::shared_ptr<nixfe::Origin>
     if (!optimizer) optimizer = makeOptimizer(ctx, settings);
     if (mlir::failed(optimizer->run(op))) throw EvalError("the optimization pipeline failed");
   }
-  if (statsEnabled)
+  if (statsEnabled) {
     op->walk([&](mlir::Operation *o) { ++opStats[o->getName().getStringRef()]; });
+    nsLower += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+  }
   return op;
 }
 

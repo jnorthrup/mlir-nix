@@ -151,7 +151,7 @@ LogicalResult LambdaOp::verify() {
   Block &b = getBody().front();
   if (b.getNumArguments() != 1)
     return emitOpError("body must have exactly one block argument");
-  if (!isa<ReturnOp>(b.back()))
+  if (!getBodyIndex() && !isa<ReturnOp>(b.back()))
     return emitOpError("body must end in nix.return");
   if (getFormals()) {
     if (!getFormalDefaults() ||
@@ -341,11 +341,16 @@ void eliminateDeadBindings(Operation *root) {
 
 } // namespace
 
-void mlir::nix::devirtualizePrims(Operation *root) {
-  MLIRContext *ctx = root->getContext();
+FrozenRewritePatternSet mlir::nix::makeDevirtualizePatterns(MLIRContext *ctx) {
   RewritePatternSet patterns(ctx);
   patterns.add<DevirtualizePrimCall>(ctx);
-  walkAndApplyPatterns(root, FrozenRewritePatternSet(std::move(patterns)));
+  return FrozenRewritePatternSet(std::move(patterns));
+}
+
+/// One walk of the single devirtualization pattern, then the cleanup of the callee computations it
+/// orphaned.
+void mlir::nix::devirtualizePrims(Operation *root, const FrozenRewritePatternSet &patterns) {
+  walkAndApplyPatterns(root, patterns);
   // The callee computations of rewritten calls are now unreferenced; erase
   // them, and whatever only they kept alive.
   llvm::SmallVector<Operation *> work;
@@ -366,6 +371,10 @@ void mlir::nix::devirtualizePrims(Operation *root) {
   }
 }
 
+void mlir::nix::devirtualizePrims(Operation *root) {
+  devirtualizePrims(root, makeDevirtualizePatterns(root->getContext()));
+}
+
 namespace {
 
 // The passes run on any op, so the same ones serve the evaluator (a `nix.expr`)
@@ -379,7 +388,12 @@ struct NixPrimsPass : public PassWrapper<NixPrimsPass, OperationPass<>> {
     return "Rewrite calls of known primops into continent-dialect ops";
   }
   void getDependentDialects(DialectRegistry &registry) const override { registerNixDialects(registry); }
-  void runOnOperation() override { devirtualizePrims(getOperation()); }
+  LogicalResult initialize(MLIRContext *ctx) override {
+    frozen = makeDevirtualizePatterns(ctx);
+    return success();
+  }
+  void runOnOperation() override { devirtualizePrims(getOperation(), frozen); }
+  FrozenRewritePatternSet frozen;
 };
 
 struct NixFoldPass : public PassWrapper<NixFoldPass, OperationPass<>> {

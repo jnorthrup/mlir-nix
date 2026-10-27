@@ -12,6 +12,7 @@
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/Pass.h"
+#include "mlir/Rewrite/FrozenRewritePatternSet.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/ADT/StringMap.h"
@@ -85,6 +86,12 @@ void registerNixPasses();
 
 /// `nix.apply (builtin|builtins.X) args` -> continent op (single walk).
 void devirtualizePrims(Operation *root);
+
+/// The same walk with the pattern set built by the caller.  Building it is most of the cost of a
+/// small walk, and the demand schedule devirtualizes one lambda body per first call: a lambda is not
+/// IsolatedFromAbove (it reads the values it captures), so no PassManager can run on it.
+FrozenRewritePatternSet makeDevirtualizePatterns(MLIRContext *ctx);
+void devirtualizePrims(Operation *root, const FrozenRewritePatternSet &patterns);
 } // namespace mlir::nix
 
 #endif

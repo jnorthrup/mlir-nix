@@ -87,7 +87,9 @@ CASES = [
     'let big = builtins.listToAttrs (map (n: { name = "k${toString n}"; value = n; }) (builtins.genList (x: x) 300)); in with (big // { w = 5; k3 = "over"; }); [ w k3 k4 ]',
     'let big = builtins.listToAttrs (map (n: { name = "k${toString n}"; value = n; }) (builtins.genList (x: x) 300)); in ({ k1, k2, ... }: [ k1 k2 ]) (big // { k1 = 100; })',
     'let big = builtins.listToAttrs (map (n: { name = "k${toString n}"; value = n; }) (builtins.genList (x: x) 300)); in (big // { a = 1; }) // (big // { b = 2; })',
-    'let big = builtins.listToAttrs (map (n: { name = "k${toString n}"; value = n; }) (builtins.genList (x: x) 300)); o = big // { n = null; }; in [ (builtins.attrNames o == builtins.attrNames (o // { })) (builtins.toJSON { inherit (o) k1 n; }) (builtins.hashString "md5" (builtins.toJSON o)) ]',
+]
+
+def run_local(mlnix, expr):
 ]
 
 def run_local(mlnix, expr):

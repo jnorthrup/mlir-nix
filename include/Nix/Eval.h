@@ -14,6 +14,7 @@
 #define NIX_EVAL_H
 
 #include "Nix/AST.h"
+#include "Nix/MLIRGen.h"
 #include "Nix/Store.h"
 #include "NixDialect/NixDialect.h"
 
@@ -21,6 +22,7 @@
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/OwningOpRef.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/Support/Allocator.h"
 
@@ -232,6 +234,9 @@ struct EvalSettings {
   /// `nix-dce` cost more than they save on real workloads (measured), so only
   /// devirtualization is on by default.
   std::string pipeline = "nix-prims";
+  /// Sea-of-nodes schedule (MLNIX_DEFER): mint no lambda body at lowering
+  /// time; the op carries a pool row and the body is generated on first call.
+  bool deferBodies = false;
   /// Imported files are mapped read-only (nixfe::Source::mapFile) instead of read and copied.
   bool mapSources = true;
   unsigned maxCallDepth = 10000;
@@ -256,6 +261,9 @@ public:
   mlir::OwningOpRef<mlir::ModuleOp> module;
   /// The optimization pipeline (text: settings.pipeline / MLNIX_PIPELINE), built on first use.
   std::unique_ptr<mlir::PassManager> optimizer;
+  /// The demand schedule's optimizer: devirtualization (the default pipeline's one stage) with its
+  /// pattern set frozen once.  A lambda body is not IsolatedFromAbove, so no PassManager runs on it.
+  std::unique_ptr<mlir::FrozenRewritePatternSet> devirt;
   llvm::BumpPtrAllocator alloc;
 
   // Frequently used symbols.
@@ -458,6 +466,10 @@ public:
   std::map<std::string, Value *> scopedImportCache;
   std::vector<nixfe::ExprArena *> arenas;
   std::vector<std::shared_ptr<nixfe::Origin>> origins;
+  /// MLNIX_DEFER: one pool of deferred lambdas per lowered file.  The `body_index` of a nix.lambda is a
+  /// nixfe::BodyIndex (`file j row`) into these; freeMemo holds the free names of every lambda walked so far.
+  std::vector<std::unique_ptr<nixfe::FilePool>> pools;
+  nixfe::FreeMemo freeMemo;
   unsigned exprCounter = 0;
   std::function<void(const std::string &)> printTrace;
 
@@ -465,11 +477,16 @@ private:
   llvm::DenseMap<void *, Slot> slotMap;
   uint64_t nUpdLayered = 0, nUpdMerged = 0, nUpdBase = 0, nUpdTop = 0; // MLNIX_STATS: `//` as a layer / a flat merge, entries not copied / copied
   uint64_t nInPlace = 0, nThunks = 0; // MLNIX_STATS: operands evaluated in place / thunks created by lookup()
+  uint64_t nDemandMinted = 0; // MLNIX_STATS: lambda bodies minted on first call
+  uint64_t nsLower = 0, nsMint = 0; // MLNIX_STATS: time lowering files (analysis of deferred lambdas included) / minting bodies on demand
+  llvm::DenseSet<mlir::Operation *> evaluated; // MLNIX_STATS: the ops evalOp ever ran
   llvm::DenseMap<mlir::Region *, RegionInfo *> regionInfos;
   llvm::DenseMap<mlir::Operation *, Value *> constCache;
   void indexRegion(mlir::Region &r);
   void evalConcatStrings(mlir::nix::ConcatStringsOp op, Frame *env, Value &out);
   void evalAttrs(mlir::nix::AttrsOp op, Frame *env, Value &out);
+  RegionInfo *mintLambda(nixfe::FilePool &p, uint32_t row);
+  RegionInfo *bodyOf(nixfe::BodyIndex idx);
   void callLambda(Value &fun, Value *arg, Value &out, PosPtr pos);
 };
 
