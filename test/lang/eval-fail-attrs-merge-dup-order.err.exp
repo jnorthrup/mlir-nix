@@ -1,0 +1,6 @@
+error: attribute 'a.x' already defined at /pwd/lang/eval-fail-attrs-merge-dup-order.nix:2:16
+       at /pwd/lang/eval-fail-attrs-merge-dup-order.nix:2:39:
+            1| # Merging two attribute sets that collide twice reports the least name, not the first written.
+            2| { a = { y = 1; x = 2; }; a = { y = 3; x = 4; }; }
+             |                                       ^
+            3|

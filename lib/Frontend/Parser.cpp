@@ -950,14 +950,14 @@ private:
     if (cur().t == T_STR) {
       // The common string: one run of text, then the closing quote.  No parts, and no node but the result.
       Token t = take();
+      Name text = nameOf(t);
       if (atChar('"')) {
-        auto *s = arena.add<ExprString>(nameOf(t));
+        auto *s = arena.add<ExprString>(text);
         s->pos = pos;
         return s;
       }
-      parts.push(arena.region(), StrPart{t.pos, arena.add<ExprString>(nameOf(t))});
-      single = nameOf(t);
-      haveSingle = true;
+      // Interpolation or more text follows (so the loop below runs, or the string is an error): this is its first part.
+      parts.push(arena.region(), StrPart{t.pos, arena.add<ExprString>(text)});
     } else if (atChar('"')) {
       auto *s = arena.add<ExprString>(Name::of(""));
       s->pos = pos;
