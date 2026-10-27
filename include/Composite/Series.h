@@ -10,6 +10,8 @@
 //                      bounds-checked: the index came from the builder that issued it, never from the user.
 //   xs |α| f           lazy projection, still a Series: size j { i -> f(xs[i]) }.  Over a named xs (a vector, a range of
 //                      operands) it reads xs in place, as a view, so xs must outlive it; over a temporary it keeps it.
+//   joins(a, b)        row i is a[i] j b[i]: two series side by side, across the rows (TrikeShed's `joins`).
+//   a + b, combine     the rows of a, then of b: along the rows (TrikeShed's combine).  drain() copies one part by part.
 //   Slice<T>           a Series over cells in memory that is never freed: size j (i -> p[i]) with a name, so it can be
 //                      a member.  16 bytes, trivially destructible; what the syntax tree holds in place of a vector.
 //   MutableSeries<T>   a list that is mutated says so in its type.  It accumulates (append), then drains.
@@ -25,12 +27,14 @@
 #ifndef COMPOSITE_SERIES_H
 #define COMPOSITE_SERIES_H
 
+#include <algorithm>
 #include <array>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <new>
+#include <ranges>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -117,13 +121,41 @@ template <class T> struct Slice : Join<uint32_t, At<T>> {
 
 struct AlphaTag {};
 inline constexpr AlphaTag α{};
-template <class S> struct AlphaLeft {
+/// A series as it was given: a reference to a named one, the value of a temporary.  α and joins keep their sides in one.
+template <class S> struct Held {
   S s;
 };
-template <class S> constexpr AlphaLeft<S> operator|(S &&s, AlphaTag) { return {std::forward<S>(s)}; }
-template <class S, class G> constexpr auto operator|(AlphaLeft<S> l, G g) {
+template <class S> constexpr Held<S> operator|(S &&s, AlphaTag) { return {std::forward<S>(s)}; }
+template <class S, class G> constexpr auto operator|(Held<S> l, G g) {
   uint32_t n = uint32_t(l.s.size());
-  return n |j| [l = std::move(l), g = std::move(g)](uint32_t i) { return g(l.s[i]); };
+  return n |j| [l = std::move(l), g = std::move(g)](uint32_t i) -> decltype(auto) { return g(l.s[i]); };
+}
+
+//===----------------------------------------------------------------------===//
+// joins and combine: across the rows and along them (TrikeShed lib/Join.kt, lib/Combine.kt, cursor/CursorOps.kt)
+//===----------------------------------------------------------------------===//
+
+/// a joins b: row i is a[i] j b[i], as many rows as a has; that b has as many is the caller's word (TrikeShed's zip).
+template <class A, class B> constexpr auto joins(A &&a, B &&b) {
+  uint32_t n = uint32_t(a.size());
+  return n |j| [l = Held<A>{std::forward<A>(a)}, r = Held<B>{std::forward<B>(b)}](uint32_t i) { return l.s[i] |j| r.s[i]; };
+}
+
+/// combine(parts): the rows of each series of `parts`, one part after another, and a + b is the combine of two.  The size is
+/// counted once, when it is made, in 64 bits.  Nothing indexes a combine: it is drained, part by part (TrikeShed materializes).
+template <class Parts> struct Combine {
+  Parts parts;
+  size_t n = 0;
+  constexpr explicit Combine(Parts p) : parts(std::move(p)) { for (auto &&s : parts) n += s.size(); }
+  constexpr size_t size() const { return n; }
+};
+template <class F> constexpr auto operator+(Series<F> a, Series<F> b) { return Combine(std::array{std::move(a), std::move(b)}); }
+
+/// Copy a series into cells; the end of what was written.  A combine is copied part by part, each part in one loop.
+template <std::ranges::input_range S, class T> constexpr T *drain(const S &s, T *out) { return std::ranges::copy(s, out).out; }
+template <class Parts, class T> constexpr T *drain(const Combine<Parts> &c, T *out) {
+  for (auto &&s : c.parts) out = drain(s, out);
+  return out;
 }
 
 //===----------------------------------------------------------------------===//
