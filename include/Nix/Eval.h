@@ -88,6 +88,7 @@ struct Bindings {
     Arena *alloc; // where flat() allocates
   };
   static inline uint64_t flattened = 0; // MLNIX_STATS
+  static inline uint64_t merged = 0, mergedCells = 0; // MLNIX_STATS: flat sets made by mergeBindings, and their cells
   bool layered() const { return size_ == kLayered; }
   Layer &layer() const { return *reinterpret_cast<Layer *>(const_cast<Attr *>(attrs)); }
   /// The set as one sorted array: itself, or the union of its layers, built once.
@@ -513,8 +514,31 @@ private:
   llvm::DenseMap<void *, Slot> slotMap;
   uint64_t nUpdLayered = 0, nUpdMerged = 0, nUpdBase = 0, nUpdTop = 0; // MLNIX_STATS: `//` as a layer / a flat merge, entries not copied / copied
   uint64_t nInPlace = 0, nThunks = 0; // MLNIX_STATS: operands evaluated in place / thunks created by lookup()
+  // MLNIX_STATS, the dynamic mix: evalOp runs per kind of op, thunks made by lookup() and thunks forced per kind of op of the thunk,
+  // calls per lambda, and how attribute sets came to be (`allocBindings`, literal `nix.attrs` and which op made them).
+  llvm::DenseMap<mlir::OperationName, uint64_t> dynOps, thunksMade, thunksForced;
+  llvm::DenseMap<mlir::Operation *, uint64_t> lambdaCalls, literalSets;
+  /// MLNIX_STATS, the call sites: the last lambda a `nix.apply` called, how often it called anything, how often the callee was not the one
+  /// before it, and how often it was not a lambda at all.  And a one-entry cache of where a static key was found in a set, per select.
+  struct SiteInfo { mlir::Operation *last = nullptr; uint64_t calls = 0, changes = 0, other = 0; };
+  struct HintInfo { uint32_t last = ~0u; uint64_t total = 0, hits = 0; };
+  llvm::DenseMap<mlir::Operation *, SiteInfo> siteCallee;
+  llvm::DenseMap<std::pair<mlir::Operation *, unsigned>, HintInfo> selectHint;
+  void noteCallee(mlir::Operation *site, const Value &callee);
+  void noteHint(mlir::Operation *sel, unsigned component, uint32_t index);
+  // The hooks of MLNIX_STATS, out of line and cold so that the hot functions stay the size they were.
+  void statOp(mlir::Operation *op);
+  void statThunk(mlir::Operation *op, Frame *env);
+  void statForced(mlir::Operation *op);
+  void statCall(mlir::Operation *lambda);
+  void statLiteral(mlir::Operation *attrs, size_t cells, bool dynamicNames);
+  void statEscaped(Frame *f);
+  void statBindings(size_t cells);
+  void statFinish(llvm::ArrayRef<Attr> attrs);
+  uint64_t nBindings = 0, nBindingCells = 0, nLiteralSets = 0, nLiteralCells = 0, nDynKeySets = 0, nFinish = 0, nFinishSorted = 0;
   uint64_t nDemandMinted = 0; // MLNIX_STATS: lambda bodies minted on first call
   std::vector<Frame *> statFrames; // MLNIX_STATS: every frame, to count the slots that were ever filled
+  llvm::DenseSet<Frame *> escaped;  // MLNIX_STATS: frames that a thunk or a closure holds (they outlive the call that made them)
   uint64_t nsLower = 0, nsMint = 0; // MLNIX_STATS: time lowering files (analysis of deferred lambdas included) / minting bodies on demand
   llvm::DenseSet<mlir::Operation *> evaluated; // MLNIX_STATS: the ops evalOp ever ran
   llvm::DenseMap<mlir::Region *, RegionInfo *> regionInfos;

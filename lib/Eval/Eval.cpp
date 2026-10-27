@@ -65,6 +65,8 @@ static Bindings *mergeBindings(Arena &alloc, const Bindings *x, const Bindings *
     n++;
   }
   n += (x->size_ - i) + (y->size_ - j);
+  Bindings::merged++;
+  Bindings::mergedCells += n;
   void *mem = alloc.Allocate(sizeof(Bindings) + n * sizeof(Attr), alignof(Bindings));
   auto *r = new (mem) Bindings();
   i = j = 0;
@@ -124,6 +126,7 @@ Bindings *EvalState::updateAttrs(Bindings *a, Bindings *b) {
 }
 
 Bindings *EvalState::allocBindings(size_t n) {
+  if (statsEnabled) statBindings(n);
   void *mem = alloc.Allocate(sizeof(Bindings) + n * sizeof(Attr), alignof(Bindings));
   auto *b = new (mem) Bindings();
   b->size_ = 0;
@@ -131,6 +134,7 @@ Bindings *EvalState::allocBindings(size_t n) {
 }
 
 Bindings *EvalState::BindingsBuilder::finish() {
+  if (st.statsEnabled) st.statFinish(attrs);
   std::stable_sort(attrs.begin(), attrs.end(), [](const Attr &a, const Attr &b) { return a.name < b.name; });
   Bindings *b = st.allocBindings(attrs.size());
   size_t n = 0;
@@ -243,6 +247,48 @@ EvalState::EvalState(EvalSettings st, std::shared_ptr<nixstore::Store> store)
   createBaseEnv();
 }
 
+[[gnu::noinline, gnu::cold]] void EvalState::noteCallee(Operation *site, const Value &callee) {
+  SiteInfo &s = siteCallee[site];
+  s.calls++;
+  if (callee.type != VType::Lambda) { s.other++; return; }
+  if (s.last && s.last != callee.thunk.op) s.changes++;
+  s.last = callee.thunk.op;
+}
+
+[[gnu::noinline, gnu::cold]] void EvalState::noteHint(Operation *sel, unsigned component, uint32_t index) {
+  HintInfo &h = selectHint[{sel, component}];
+  h.total++;
+  if (h.last == index) h.hits++;
+  h.last = index;
+}
+
+[[gnu::noinline, gnu::cold]] void EvalState::statOp(Operation *op) {
+  evaluated.insert(op);
+  ++dynOps[op->getName()];
+}
+[[gnu::noinline, gnu::cold]] void EvalState::statThunk(Operation *op, Frame *env) {
+  nThunks++;
+  ++thunksMade[op->getName()];
+  escaped.insert(env);
+}
+[[gnu::noinline, gnu::cold]] void EvalState::statForced(Operation *op) { ++thunksForced[op->getName()]; }
+[[gnu::noinline, gnu::cold]] void EvalState::statCall(Operation *lambda) { ++lambdaCalls[lambda]; }
+[[gnu::noinline, gnu::cold]] void EvalState::statLiteral(Operation *attrs, size_t cells, bool dynamicNames) {
+  if (dynamicNames) { nDynKeySets++; return; }
+  nLiteralSets++;
+  nLiteralCells += cells;
+  ++literalSets[attrs];
+}
+[[gnu::noinline, gnu::cold]] void EvalState::statEscaped(Frame *f) { escaped.insert(f); }
+[[gnu::noinline, gnu::cold]] void EvalState::statBindings(size_t cells) {
+  nBindings++;
+  nBindingCells += cells;
+}
+[[gnu::noinline, gnu::cold]] void EvalState::statFinish(llvm::ArrayRef<Attr> attrs) {
+  nFinish++;
+  nFinishSorted += std::is_sorted(attrs.begin(), attrs.end(), [](const Attr &a, const Attr &b) { return a.name < b.name; });
+}
+
 void EvalState::printStats() {
   // How many ops of real programs live where: per tier of the dialect hierarchy
   // (scope > continent > dialect), read from the IRDL declaration.
@@ -272,14 +318,17 @@ void EvalState::printStats() {
   {
     // Frame slots allocated against slots ever filled: a slot is made for every value of a body, whether or not
     // anything demands it.
-    uint64_t slots = 0, filled = 0, bytes = 0;
+    uint64_t slots = 0, filled = 0, bytes = 0, kept = 0, keptBytes = 0;
     for (Frame *f : statFrames) {
       slots += f->info->numSlots;
       bytes += sizeof(Frame) + f->info->numSlots * sizeof(Value *);
       for (unsigned i = 0; i < f->info->numSlots; i++) filled += f->slots[i] != nullptr;
+      if (escaped.count(f)) { kept++; keptBytes += sizeof(Frame) + f->info->numSlots * sizeof(Value *); }
     }
     llvm::errs() << "== frames: " << statFrames.size() << ", " << bytes / 1000000 << " MB, slots " << slots << ", ever filled " << filled
-                 << " (" << llvm::format("%.1f", 100.0 * filled / std::max<uint64_t>(slots, 1)) << "%)\n";
+                 << " (" << llvm::format("%.1f", 100.0 * filled / std::max<uint64_t>(slots, 1)) << "%); held by a thunk or a closure when the run ended: " << kept << " ("
+                 << llvm::format("%.1f", 100.0 * kept / std::max<uint64_t>(statFrames.size(), 1)) << "%, " << keptBytes / 1000000 << " MB), so "
+                 << statFrames.size() - kept << " frames, " << (bytes - keptBytes) / 1000000 << " MB, were dead when their call returned\n";
     // Lowered against evaluated, per kind.  Literals and closures are served by lookup() without evalOp, so
     // their rows (nix.str, nix.int, nix.path, nix.lambda, nix.bool) read low; the rest is the dead code.
     llvm::StringMap<size_t> ev;
@@ -293,6 +342,136 @@ void EvalState::printStats() {
                    << llvm::format("%9zu", ev[rows[i].first]) << llvm::format("%7.1f%%", 100.0 * ev[rows[i].first] / std::max<size_t>(rows[i].second, 1)) << "\n";
   }
   llvm::errs() << "== operands evaluated in place: " << nInPlace << ", thunks created by lookup(): " << nThunks << "\n";
+  {
+    // The dynamic mix: what evalOp ran, what the thunks were made of and how many were forced, how the calls are spread over the
+    // lambdas, and how the attribute sets came to be.
+    auto byCount = [](llvm::DenseMap<mlir::OperationName, uint64_t> &m) {
+      std::vector<std::pair<mlir::OperationName, uint64_t>> v(m.begin(), m.end());
+      std::sort(v.begin(), v.end(), [](auto &a, auto &b) { return a.second > b.second; });
+      return v;
+    };
+    auto pct = [](uint64_t a, uint64_t b) { return 100.0 * double(a) / double(std::max<uint64_t>(b, 1)); };
+    uint64_t runs = 0, made = 0, forced = 0;
+    for (auto &kv : dynOps) runs += kv.second;
+    for (auto &kv : thunksMade) made += kv.second;
+    for (auto &kv : thunksForced) forced += kv.second;
+    llvm::errs() << "== evalOp runs per kind of op (" << runs << " in all)\n";
+    size_t row = 0;
+    for (auto &[k, c] : byCount(dynOps)) {
+      if (row++ >= 14) break;
+      llvm::errs() << "  " << llvm::format("%-22s", k.getStringRef().str().c_str()) << llvm::format("%11llu", (unsigned long long)c)
+                   << llvm::format("%7.1f%%", pct(c, runs)) << "\n";
+    }
+    llvm::errs() << "== thunks made by lookup() per kind of op (" << made << " in all; thunks forced, all kinds: " << forced << ")\n";
+    row = 0;
+    for (auto &[k, c] : byCount(thunksMade)) {
+      if (row++ >= 10) break;
+      llvm::errs() << "  " << llvm::format("%-22s", k.getStringRef().str().c_str()) << llvm::format("%11llu", (unsigned long long)c)
+                   << llvm::format("%7.1f%% of the thunks", pct(c, made)) << llvm::format("%8.1f%% forced", pct(thunksForced.lookup(k), c)) << "\n";
+    }
+    std::vector<uint64_t> calls;
+    uint64_t totalCalls = 0, once = 0, hot = 0;
+    for (auto &kv : lambdaCalls) { calls.push_back(kv.second); totalCalls += kv.second; once += kv.second == 1; hot += kv.second >= 1000; }
+    std::sort(calls.rbegin(), calls.rend());
+    llvm::errs() << "== lambda calls: " << totalCalls << " calls on " << calls.size() << " distinct lambdas (" << once << " called once, " << hot
+                 << " called 1000 times or more); share of the calls that the busiest N lambdas take:";
+    {
+      static const size_t marks[] = {1, 10, 50, 100, 500, 1000, 2000};
+      uint64_t acc = 0;
+      size_t next = 0;
+      for (size_t i = 0; i < calls.size() && next < std::size(marks); i++) {
+        acc += calls[i];
+        if (i + 1 == marks[next]) { llvm::errs() << " " << marks[next] << ": " << llvm::format("%.1f%%", pct(acc, totalCalls)); next++; }
+      }
+      llvm::errs() << "\n";
+    }
+    llvm::errs() << "== attribute sets: " << nBindings << " allocated by builders and primops (" << nBindingCells << " cells), " << Bindings::merged
+                 << " flat sets made by merging (" << Bindings::mergedCells << " cells), " << nUpdLayered << " layers; literal `nix.attrs` with static names: "
+                 << nLiteralSets << " sets, " << nLiteralCells
+                 << " cells; with dynamic names: " << nDynKeySets << "; builder finish() calls: " << nFinish << " (" << nFinishSorted
+                 << " already in order)\n";
+    // Shapes: the literal ops grouped by their sorted names.  Instances per shape say what a pool per shape would hold.
+    std::map<std::string, std::pair<uint64_t, uint64_t>> shapes; // sorted names -> (instances made, ops)
+    for (auto &[o, c] : literalSets) {
+      std::vector<std::string> ns;
+      for (const nixfe::Name &n : cast<nd::AttrsOp>(o).getNames()) ns.push_back(std::string(n.str()));
+      std::sort(ns.begin(), ns.end());
+      std::string key;
+      for (auto &s : ns) { key += s; key += '\0'; }
+      auto &e = shapes[key];
+      e.first += c;
+      e.second++;
+    }
+    std::vector<uint64_t> inst;
+    for (auto &kv : shapes) inst.push_back(kv.second.first);
+    std::sort(inst.rbegin(), inst.rend());
+    llvm::errs() << "== literal attribute sets: " << literalSets.size() << " ops evaluated, " << shapes.size() << " distinct shapes; share of the sets made"
+                 << " that the commonest N shapes cover:";
+    {
+      static const size_t marks[] = {1, 10, 100, 500, 1000, 5000};
+      uint64_t acc = 0;
+      size_t next = 0;
+      for (size_t i = 0; i < inst.size() && next < std::size(marks); i++) {
+        acc += inst[i];
+        if (i + 1 == marks[next]) { llvm::errs() << " " << marks[next] << ": " << llvm::format("%.1f%%", pct(acc, nLiteralSets)); next++; }
+      }
+      llvm::errs() << "\n";
+    }
+    // The ladder: for each threshold of calls, how many lambdas reach it and how many calls are made after it.  A rung that costs C to
+    // enter and saves s per call later pays when s * (calls after) > C * (lambdas reaching).
+    {
+      llvm::errs() << "== resolution ladder by calls (lambdas reaching, share of the lambdas called; calls after the threshold, share of all calls)\n";
+      for (uint64_t t : {1u, 2u, 4u, 16u, 64u, 256u, 1024u, 4096u, 16384u}) {
+        uint64_t reach = 0, after = 0;
+        for (uint64_t c : calls) { reach += c >= t; after += c > t ? c - t : 0; }
+        llvm::errs() << "  after " << llvm::format("%5llu", (unsigned long long)t) << " calls: " << llvm::format("%6llu", (unsigned long long)reach)
+                     << " lambdas (" << llvm::format("%5.1f%%", pct(reach, calls.size())) << "), " << llvm::format("%9llu", (unsigned long long)after)
+                     << " calls (" << llvm::format("%5.1f%%", pct(after, totalCalls)) << ")\n";
+      }
+      // What the lambdas are made of, weighted by calls: ops in the body, slots in the frame.
+      static const unsigned cuts[] = {2, 4, 8, 16, 32, 64};
+      uint64_t byOps[std::size(cuts) + 1] = {}, slotCalls = 0, opCalls = 0;
+      for (auto &[l, c] : lambdaCalls) {
+        auto lam = cast<nd::LambdaOp>(l);
+        std::optional<uint64_t> deferred = lam.getBodyIndex();
+        RegionInfo *ri = deferred ? bodyOf(nixfe::BodyIndex(*deferred)) : regionInfo(&lam.getBody());
+        unsigned ops = 0;
+        ri->region->walk([&](mlir::Operation *) { ops++; });
+        size_t k = 0;
+        while (k < std::size(cuts) && ops > cuts[k]) k++;
+        byOps[k] += c;
+        slotCalls += c * ri->numSlots;
+        opCalls += c * ops;
+      }
+      llvm::errs() << "== lambda bodies, by the calls they take: ops in the body";
+      for (size_t k = 0; k <= std::size(cuts); k++) {
+        if (k < std::size(cuts)) llvm::errs() << " <=" << cuts[k] << ": ";
+        else llvm::errs() << " more: ";
+        llvm::errs() << llvm::format("%.1f%%", pct(byOps[k], totalCalls));
+      }
+      llvm::errs() << "; per call " << llvm::format("%.1f", double(opCalls) / std::max<uint64_t>(totalCalls, 1)) << " ops, "
+                   << llvm::format("%.1f", double(slotCalls) / std::max<uint64_t>(totalCalls, 1)) << " frame slots\n";
+    }
+    {
+      uint64_t sites = 0, applyRuns = 0, mono = 0, monoRuns = 0, other = 0, changes = 0, lamRuns = 0;
+      for (auto &[s, si] : siteCallee) {
+        sites++;
+        applyRuns += si.calls;
+        other += si.other;
+        changes += si.changes;
+        lamRuns += si.calls - si.other;
+        if (si.changes == 0 && si.calls != si.other) { mono++; monoRuns += si.calls - si.other; }
+      }
+      llvm::errs() << "== call sites: " << sites << " nix.apply ops ran, " << applyRuns << " times; callee not a lambda (primop, partial application, functor) "
+                   << other << " (" << llvm::format("%.1f%%", pct(other, applyRuns)) << "); of the " << lamRuns << " lambda calls, "
+                   << llvm::format("%.1f%%", pct(monoRuns, lamRuns)) << " are at sites that never changed callee (" << mono << " sites); a one-entry cache of the callee misses "
+                   << llvm::format("%.1f%%", pct(changes, lamRuns)) << "\n";
+      uint64_t selRuns = 0, selHits = 0;
+      for (auto &[k, h] : selectHint) { selRuns += h.total; selHits += h.hits; }
+      llvm::errs() << "== select: a one-entry cache of the index where a static key was found (per op and path component, flat sets only) hits "
+                   << llvm::format("%.1f%%", pct(selHits, selRuns)) << " of " << selRuns << " lookups\n";
+    }
+  }
   llvm::errs() << "== ops ever evaluated (distinct): " << evaluated.size() << " of " << total << " lowered ("
                << llvm::format("%.1f", 100.0 * evaluated.size() / std::max<size_t>(total, 1)) << "%)\n";
   llvm::errs() << "== lowering " << llvm::format("%.0f", nsLower / 1e6) << " ms (the analysis of deferred lambdas included), minted on demand "
@@ -516,10 +695,10 @@ Value *EvalState::lookup(Frame *f, mlir::Value v) {
     return slot = bv;
   }
   Value *nv = allocValue();
-  if (statsEnabled) nThunks++;
   nv->type = s.how == Slot::Lambda ? VType::Lambda : VType::Thunk;
   nv->thunk.op = op;
   nv->thunk.env = f;
+  if (statsEnabled) statThunk(op, f);
   return slot = nv;
 }
 
@@ -530,6 +709,7 @@ void EvalState::evalDefinition(mlir::Operation *def, Frame *f, Value &dest) {
     dest.type = VType::Lambda;
     dest.thunk.op = def;
     dest.thunk.env = f;
+    if (statsEnabled) statEscaped(f);
   } else {
     evalOp(def, f, dest);
   }
@@ -573,6 +753,7 @@ void EvalState::forceValue(Value &v, PosPtr pos) {
   if (v.type == VType::Thunk) {
     Operation *op = v.thunk.op;
     Frame *env = v.thunk.env;
+    if (statsEnabled) statForced(op);
     v.type = VType::Blackhole;
     try {
       evalOp(op, env, v);
@@ -728,6 +909,7 @@ RegionInfo *EvalState::bodyOf(nixfe::BodyIndex idx) {
 
 void EvalState::callLambda(Value &fun, Value *arg, Value &out, PosPtr pos) {
   auto lam = cast<nd::LambdaOp>(fun.thunk.op);
+  if (statsEnabled) statCall(lam.getOperation());
   std::optional<uint64_t> deferred = lam.getBodyIndex();
   RegionInfo *ri = deferred ? bodyOf(nixfe::BodyIndex(*deferred)) : regionInfo(&lam.getBody());
   Frame *f = newFrame(ri, fun.thunk.env);
@@ -937,6 +1119,7 @@ void EvalState::evalAttrs(nd::AttrsOp op, Frame *env, Value &out) {
   auto values = op.getValues();
   auto dynNames = op.getDynNames();
   auto positions = op.getPositions(); // one position word per name, or none
+  if (statsEnabled) statLiteral(op.getOperation(), names.size(), !dynNames.empty());
   BindingsBuilder bb(*this);
   for (size_t i = 0; i < names.size(); i++) {
     PosPtr p = i < positions.size() ? nd::posOfWord(uint64_t(positions[i])) : nullptr;
@@ -1022,7 +1205,7 @@ Symbol EvalState::pathSymbol(const nixfe::Name &comp, mlir::OperandRange dyn, un
 }
 
 void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
-  if (statsEnabled) evaluated.insert(op);
+  if (statsEnabled) statOp(op);
   PosPtr pos = nd::posOfOp(op);
   auto copyFrom = [&](Value *v) {
     forceValue(*v, pos);
@@ -1040,7 +1223,7 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
         Value tb;
         Value *cur = dyn.empty() ? &operand(env, sel.getBase(), tb) : lookup(env, sel.getBase());
         mlir::Value def = sel.getDefaultValue();
-        unsigned nextDyn = 0;
+        unsigned nextDyn = 0, component = 0;
         for (const nixfe::Name &comp : sel.getPath()) {
           Symbol sym = pathSymbol(comp, dyn, nextDyn, env, pos);
           forceValue(*cur, pos);
@@ -1054,6 +1237,8 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
             if (def) return copyFrom(lookup(env, def));
             throw EvalError("attribute '" + std::string(symbols[sym].str()) + "' missing", pos);
           }
+          if (statsEnabled && !cur->attrs->layered()) noteHint(op, component, uint32_t(a - cur->attrs->attrs));
+          component++;
           cur = a->value;
         }
         copyFrom(cur);
@@ -1079,6 +1264,7 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
         llvm::SmallVector<Value *, 4> args;
         for (mlir::Value a : as) args.push_back(lookup(env, a));
         callFunction(*f, args.size(), args.data(), out, pos);
+        if (statsEnabled) noteCallee(ap.getOperation(), *f);
       })
       .Case<nd::IfOp>([&](nd::IfOp i) {
         Value tc;
