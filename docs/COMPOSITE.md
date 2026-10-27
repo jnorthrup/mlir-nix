@@ -40,6 +40,27 @@ Where the algebra is the shape but not the type: `Value::list`, the strings and 
 arena, written by hand. `lib/` and `include/` (outside `Composite/`) still hold 98 `std::vector`, 50 `std::map`, 53 `std::set` and
 17 `std::function`; the vectors are mostly in `Builtins.cpp` (17), `LocalStore.cpp` (14), `Formats.cpp` (9) and `Eval.h` (9).
 
+## Span census (2026-10-27)
+
+TrikeShed code is span code: a pointer and a count, indexed by whoever built it. `scripts/span-census.py` counts, by regex, the
+mentions of the non-owning types (`std::string_view`, `llvm::StringRef`, `ArrayRef`, `Slice`, `nixfe::Name`) against the owning ones
+(`std::string`, `std::vector`, `std::map`, `std::set`, `std::function`, `SmallVector`), and the signatures that take or return each.
+
+    front end   3,722 lines   spans: string_view 32, StringRef 28, ArrayRef 12, Slice 10, Name 50;  std::string 55, vector 17
+                              parameters view 39 / owning 12, returns view 4 / owning 11
+    evaluator   5,690 lines   spans: string_view 75, StringRef 20, ArrayRef 3, Slice 0, Name 5;      std::string 398, vector 48, map 18, set 16
+                              parameters view 54 / owning 64, returns view 9 / owning 57
+    store       2,704 lines   spans: string_view 100;                                                 std::string 452, vector 33, map 32, set 39
+                              parameters view 73 / owning 99, returns view 1 / owning 80
+    dialects      907 lines   spans: StringRef 17, ArrayRef 2, Name 10;                                std::string 6
+
+So the front end is span code (the tree is a region of `Slice`s, a token is a span, a name is a pointer and a length) and the
+evaluator and the store are not: `Slice` appears nowhere in them, a list is a `Value **` read with `listSize()` in 72 + 54 places,
+the primops take `Value **args` without a count, and strings are built and returned as `std::string`. None of the
+(pointer, count) pairs in the arena (`Bindings`, `StringContext`, a list, a `Frame`) is a `Slice`; `Name` and `Source` are pairs of
+their own that hand out a `string_view`. What the run spends on `std::string` machinery is small (`memmove` leaves are 0.8% under `mkString`, 0.3% each under
+`SymbolTable::create` and `coerceToString` in the Mac profile), so this is a discipline measure, not a speed one.
+
 ## Measured and left alone
 
 - **A segment attribute for `nix.str`.** The toplevel evaluation creates 223,587 string literals,

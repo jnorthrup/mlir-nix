@@ -102,7 +102,34 @@ generation 09896c336 (the arena faulted in ahead of use, names in the tree). The
 Start-up (`--eval -E 1`, median of 5): Nix 31 ms, Lix 27-28 ms, mlnix 30-31 ms. So the evaluator is level with Nix on the
 toplevel by the median and 10 to 14% behind by the min, 8 to 14% ahead of Lix, and holds 2.5x Nix's memory. Nix's CPU time on
 nixpkgs-73 (4.86 s) exceeds its wall time (3.62 s): its collector marks on other threads, which this evaluator does not have.
-Not a win over Nix yet.
+Not a win over Nix yet (the generation after it is the next section).
+
+## Head to head (kali, x86_64), generation ef7f3d606
+
+The same host and script (`scripts/vs-nix.py --native --demand`, 5 interleaved rounds, every tool's output identical) on the commit with the
+parser as a region, the 32-byte token, the 24-byte Value, primops as function pointers, the call path, the slot's defining op and libcrypto's
+SHA-256 (`launch.sh ef7f3d606 build gates bench`, after an apt upgrade of the host: glibc 2.43-7, OpenSSL 3.6.5).
+
+                      nixos-toplevel                          nixpkgs-73
+                      min      median   peak RSS              min      median   peak RSS
+    Nix 2.35.4        3.80 s   4.32 s    596 MB               3.52 s   4.08 s    593 MB
+    Lix 2.91.3        4.46 s   4.68 s    755 MB               4.23 s   4.75 s    757 MB
+    mlnix eager       3.72 s   3.79 s   1630 MB               3.33 s   3.36 s   1549 MB
+    mlnix demand      3.59 s   3.68 s   1505 MB               3.10 s   3.20 s   1432 MB
+    demand / Nix      x0.94    x0.85                          x0.88    x0.78
+    demand / Lix      x0.80    x0.79                          x0.73    x0.67
+
+Start-up (`--eval -E 1`, median of 5): Nix 30 ms, Lix 28 ms, mlnix 31 ms. Against the generation before, the ratio to Nix by the min went
+from x1.14 to x0.94 (toplevel) and from x1.10 to x0.88 (nixpkgs-73). The min is the figure to read: Nix's own median sits 14% above its min
+on the toplevel. The memory is still 2.5x Nix's. Parity on kali: lang 473/473 semantic, exact 215/473 (209/467 before; the six added tests are
+exact); FileCheck 13 passed, 4 run lines skipped (`cse-dynamic-ops`); primops 105/105; difftest 72/72 identical to Nix 2.35.4 on both
+schedules and 71/72 to Lix 2.91.3 (the one case where Lix exits 1 with no output).
+
+Hashing is the part of the change that is measured on kali: the same commit linked with LLVM's portable SHA-256 and with libcrypto
+(`-DMLNIX_SHA256=llvm|auto`), 9 interleaved runs, demand, identical hashes: libcrypto is -5.6% (toplevel) and -9.8% (nixpkgs-73) wall,
+-6.3% / -7.9% cpu. The CPU has no SHA instructions (an i7-6820HK), so that is libcrypto's AVX2 code against compiled C. The other changes
+were measured on the Mac only (-14.1% / -12.9% demand over the window above, with CommonCrypto already in use there); how they split on
+kali is not measured.
 
 ## Family by family
 
