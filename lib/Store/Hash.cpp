@@ -6,11 +6,13 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/Support/MD5.h"
 #include "llvm/Support/SHA1.h"
-#include "llvm/Support/SHA256.h"
-#ifdef __APPLE__
+#if defined(__APPLE__) && !defined(MLNIX_PORTABLE_SHA256) // the macro: to test the code of the other platforms here
 // Hardware-accelerated SHA-256 (ARMv8 crypto extensions) instead of LLVM's portable C.
 #include <CommonCrypto/CommonDigest.h>
 #define NIX_CC_SHA256 1
+#else
+// Elsewhere: Nix/Sha256.h, the x86 SHA instructions when the CPU has them.
+#include "Nix/Sha256.h"
 #endif
 
 #include <cstring>
@@ -144,7 +146,7 @@ HashSink::HashSink(HashAlgo a) : algo(a) {
     impl = new CC_SHA256_CTX;
     CC_SHA256_Init(static_cast<CC_SHA256_CTX *>(impl));
 #else
-    impl = new llvm::SHA256();
+    impl = new Sha256();
 #endif
     break;
   case HashAlgo::SHA512: impl = new SHA512Ctx(); break;
@@ -159,7 +161,7 @@ HashSink::~HashSink() {
 #ifdef NIX_CC_SHA256
     delete static_cast<CC_SHA256_CTX *>(impl);
 #else
-    delete static_cast<llvm::SHA256 *>(impl);
+    delete static_cast<Sha256 *>(impl);
 #endif
     break;
   case HashAlgo::SHA512: delete static_cast<SHA512Ctx *>(impl); break;
@@ -178,7 +180,7 @@ void HashSink::update(std::string_view data) {
       CC_SHA256_Update(static_cast<CC_SHA256_CTX *>(impl), data.data() + off,
                        (CC_LONG)std::min<size_t>(1u << 30, data.size() - off));
 #else
-    static_cast<llvm::SHA256 *>(impl)->update(a);
+    static_cast<Sha256 *>(impl)->update(a.data(), a.size());
 #endif
     break;
   case HashAlgo::SHA512: static_cast<SHA512Ctx *>(impl)->update(a.data(), a.size()); break;
@@ -204,8 +206,7 @@ Hash HashSink::finish() {
 #ifdef NIX_CC_SHA256
     CC_SHA256_Final(h.bytes, static_cast<CC_SHA256_CTX *>(impl));
 #else
-    auto r = static_cast<llvm::SHA256 *>(impl)->final();
-    memcpy(h.bytes, r.data(), 32);
+    static_cast<Sha256 *>(impl)->final(h.bytes);
 #endif
     break;
   }

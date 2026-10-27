@@ -12,7 +12,7 @@ add_mlir_dialect_library(MLIRNix
   DEPENDS MLIRNixOpsIncGen
   LINK_LIBS PUBLIC MLIRIR MLIRPass MLIRTransforms MLIRTransformUtils MLIRRewrite MLIRSideEffectInterfaces MLIRIRDL MLIRParser)
 
-add_library(NixStore STATIC Store/Hash.cpp Store/StorePaths.cpp Store/LocalStore.cpp Store/StructuredAttrs.cpp Store/Prefetch.cpp)
+add_library(NixStore STATIC Store/Hash.cpp Store/Sha256.cpp Store/StorePaths.cpp Store/LocalStore.cpp Store/StructuredAttrs.cpp Store/Prefetch.cpp)
 target_link_libraries(NixStore PUBLIC LLVMSupport)
 # io_uring replay of recorded file accesses (Linux, liburing); elsewhere Prefetch.cpp only records.
 find_path(URING_INCLUDE_DIR liburing.h)
