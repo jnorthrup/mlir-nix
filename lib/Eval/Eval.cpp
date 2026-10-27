@@ -135,7 +135,6 @@ Bindings *EvalState::allocBindings(size_t n) {
 }
 
 Bindings *EvalState::BindingsBuilder::finish() {
-  MLNIX_FILL(st, EvalState::FillAttrs, attrs.size());
   std::stable_sort(attrs.begin(), attrs.end(), [](const Attr &a, const Attr &b) { return a.name < b.name; });
   Bindings *b = st.allocBindings(attrs.size());
   size_t n = 0;
@@ -170,7 +169,6 @@ const StringContext *EvalState::makeContext(const NixStringContext &c) {
 }
 
 void EvalState::mkString(Value &v, std::string_view s, const NixStringContext &ctx) {
-  MLNIX_FILL(*this, EvalState::FillMkString, s.size());
   if (s.size() > UINT32_MAX) throw EvalError("string of 4 GiB or more");
   v.type = VType::String;
   v.str.s = copyString(s);
@@ -186,7 +184,6 @@ void EvalState::mkPath(Value &v, std::string_view p) {
 }
 
 void EvalState::mkList(Value &v, size_t n) {
-  MLNIX_FILL(*this, EvalState::FillMkList, n);
   if (n > UINT32_MAX) throw EvalError("list of 4 Gi or more cells");
   v.type = VType::List;
   v.aux = static_cast<uint32_t>(n);
@@ -250,52 +247,6 @@ EvalState::EvalState(EvalSettings st, std::shared_ptr<nixstore::Store> store)
   createBaseEnv();
 }
 
-namespace {
-struct FillName { const char *what, *fill, *drain; uint32_t cap; };
-// cap: the inline capacity of the fill buffer (SmallVector N, SSO for a string); 0: none, the fill is a std::vector or the
-// drain itself.
-const FillName kFill[EvalState::FillCount] = {
-    {"BindingsBuilder", "SmallVector<Attr, 12>", "finish(): sort, copy into the arena", 12},
-    {"callFunction applied", "SmallVector<Value *, 6>", "PrimOpApp chain walked into an array", 6},
-    {"callFunction all", "SmallVector<Value *, 6>", "copy of applied + the new arguments", 6},
-    {"evalOp apply args", "SmallVector<Value *, 4>", "operands looked up, passed on", 4},
-    {"evalConcatStrings", "std::string", "mkString: copy into the arena", 15},
-    {"mkList (every list)", "-", "arena cells", 0},
-    {"mkString (every string)", "-", "arena bytes", 0},
-    {"callPrimOp (calls)", "-", "-", 0},
-    {"builtins.concatLists", "std::vector<Value *>", "mkList + copy loop", 0},
-    {"builtins.concatMap", "std::vector<Value *>", "mkList + copy loop", 0},
-    {"builtins.filter", "std::vector<Value *>", "mkList + copy loop", 0},
-    {"builtins.catAttrs", "std::vector<Value *>", "mkList + copy loop", 0},
-    {"builtins.sort", "std::vector<Value *>", "mkList + copy loop", 0},
-    {"builtins.genericClosure", "std::vector<Value *>", "mkList + copy loop", 0},
-    {"builtins.split", "std::vector<Value *>", "mkList + copy loop", 0},
-};
-} // namespace
-
-[[gnu::noinline, gnu::cold]] void EvalState::statFill(Fill f, size_t n) {
-  FillStat &s = fillStats[f];
-  s.fills++;
-  s.cells += n;
-  s.max = std::max<uint64_t>(s.max, n);
-  s.over += kFill[f].cap && n > kFill[f].cap;
-}
-
-void EvalState::printFillStats() {
-  bool any = false;
-  for (const FillStat &s : fillStats) any |= s.fills != 0;
-  if (!any) return; // not a build with -DMLNIX_FILL_STATS=ON
-  llvm::errs() << "== fill/drain sites (cells = elements, or bytes for strings)\n";
-  llvm::errs() << llvm::format("  %-26s %12s %14s %8s %9s %6s %8s  %s\n", "site", "fills", "cells", "mean", "max", "cap", "over cap", "fill -> drain");
-  for (unsigned i = 0; i < FillCount; i++) {
-    const FillStat &s = fillStats[i];
-    if (!s.fills) continue;
-    llvm::errs() << llvm::format("  %-26s %12llu %14llu %8.1f %9llu %6u %7.1f%%  %s -> %s\n", kFill[i].what, (unsigned long long)s.fills,
-                                 (unsigned long long)s.cells, double(s.cells) / double(s.fills), (unsigned long long)s.max, kFill[i].cap,
-                                 kFill[i].cap ? 100.0 * double(s.over) / double(s.fills) : 0.0, kFill[i].fill, kFill[i].drain);
-  }
-}
-
 void EvalState::printStats() {
   // How many ops of real programs live where: per tier of the dialect hierarchy
   // (scope > continent > dialect), read from the IRDL declaration.
@@ -354,7 +305,6 @@ void EvalState::printStats() {
   llvm::errs() << "== top ops\n";
   for (size_t i = 0; i < o.size() && i < 14; i++)
     llvm::errs() << "  " << llvm::format("%-22s", o[i].first.c_str()) << llvm::format("%9zu", o[i].second) << "\n";
-  printFillStats();
 }
 
 EvalState::~EvalState() {
@@ -799,7 +749,6 @@ void EvalState::callLambda(Value &fun, Value *arg, Value &out, PosPtr pos) {
 }
 
 void EvalState::callPrimOp(const PrimOp &op, Value **args, Value &out, PosPtr pos) {
-  MLNIX_FILL(*this, EvalState::FillPrimCalls, op.arity);
   try {
     op.call(*this, args, out, pos);
   } catch (EvalError &e) {
@@ -872,7 +821,6 @@ void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out,
         p = p->app.left;
       }
       std::reverse(applied.begin(), applied.end());
-      MLNIX_FILL(*this, EvalState::FillApplied, applied.size());
       const PrimOp *op = p->primOp;
       size_t need = op->arity - applied.size();
       size_t avail = nargs - i;
@@ -892,7 +840,6 @@ void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out,
       }
       llvm::SmallVector<Value *, 6> all(applied);
       for (size_t k = 0; k < need; k++) all.push_back(args[i + k]);
-      MLNIX_FILL(*this, EvalState::FillAll, all.size());
       i += need;
       res = (i == nargs) ? &out : allocValue();
       callPrimOp(*op, all.data(), *res, pos);
@@ -1036,7 +983,6 @@ void EvalState::evalConcatStrings(nd::ConcatStringsOp op, Frame *env, Value &out
       throw EvalError("a string that refers to a store path cannot be appended to a path", pos);
     mkPath(out, nixfe::canonPath(str));
   } else {
-    MLNIX_FILL(*this, EvalState::FillConcatStr, str.size());
     mkString(out, str, context);
   }
 }
@@ -1063,7 +1009,7 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
         Value tb;
         Value *cur = dyn.empty() ? &operand(env, sel.getBase(), tb) : lookup(env, sel.getBase());
         mlir::Value def = sel.getDefaultValue();
-        unsigned nextDyn = 0, component = 0;
+        unsigned nextDyn = 0;
         for (const nixfe::Name &comp : sel.getPath()) {
           Symbol sym = pathSymbol(comp, dyn, nextDyn, env, pos);
           forceValue(*cur, pos);
@@ -1077,7 +1023,6 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
             if (def) return copyFrom(lookup(env, def));
             throw EvalError("attribute '" + std::string(symbols[sym].str()) + "' missing", pos);
           }
-          component++;
           cur = a->value;
         }
         copyFrom(cur);
@@ -1101,7 +1046,6 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
         Value *f = lookup(env, ap.getCallee());
         auto as = ap.getArgs();
         auto args = llvm::to_vector<4>(llvm::map_range(as, [&](mlir::Value a) { return lookup(env, a); }));
-        MLNIX_FILL(*this, EvalState::FillApplyArgs, args.size());
         callFunction(*f, args.size(), args.data(), out, pos);
       })
       .Case<nd::IfOp>([&](nd::IfOp i) {

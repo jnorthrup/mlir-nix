@@ -467,7 +467,6 @@ void registerBuiltins(EvalState &state) {
     }
     Value *rest = st.newString(any ? s.substr(lastEnd) : s);
     out.push_back(rest);
-    MLNIX_FILL(st, EvalState::FillSplit, out.size());
     st.mkList(v, out);
   });
   S.addPrimOp("__compareVersions", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
@@ -705,7 +704,6 @@ void registerBuiltins(EvalState &state) {
       st.forceAttrs(e, pos, "while evaluating an element in the list passed as second argument to builtins.catAttrs");
       if (const Attr *a = e.attrs->get(name)) res.push_back(a->value);
     }
-    MLNIX_FILL(st, EvalState::FillCatAttrs, res.size());
     st.mkList(v, res);
   });
   S.addPrimOp("__functionArgs", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
@@ -804,7 +802,6 @@ void registerBuiltins(EvalState &state) {
       st.forceList(*l, pos, "while evaluating a value of the list passed to builtins.concatLists");
       return l->items();
     });
-    MLNIX_FILL(st, EvalState::FillConcatLists, all.size());
     st.mkList(v, all);
   });
   S.addPrimOp("__concatMap", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
@@ -817,7 +814,6 @@ void registerBuiltins(EvalState &state) {
       rs.push_back(r);
     }
     cp::Combine all(rs |cp::α| [](Value *r) { return r->items(); });
-    MLNIX_FILL(st, EvalState::FillConcatMap, all.size());
     st.mkList(v, all);
   });
   S.addPrimOp("__filter", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
@@ -832,7 +828,6 @@ void registerBuiltins(EvalState &state) {
       else same = false;
     }
     if (same) { v = *args[1]; return; }
-    MLNIX_FILL(st, EvalState::FillFilter, res.size());
     st.mkList(v, res);
   });
   S.addPrimOp("__any", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
@@ -898,7 +893,6 @@ void registerBuiltins(EvalState &state) {
       return st.forceBool(r, pos, "while evaluating the return value of the sorting function passed to builtins.sort");
     };
     std::stable_sort(elems.begin(), elems.end(), cmp);
-    MLNIX_FILL(st, EvalState::FillSort, n);
     st.mkList(v, elems);
   });
   S.addPrimOp("__partition", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
@@ -963,7 +957,6 @@ void registerBuiltins(EvalState &state) {
       st.forceList(r, pos, "while evaluating the return value of the `operator` passed to builtins.genericClosure");
       for (size_t i = 0; i < r.listSize(); i++) queue.push_back(r.list.elems[i]);
     }
-    MLNIX_FILL(st, EvalState::FillGenericClosure, res.size());
     st.mkList(v, res);
   });
 

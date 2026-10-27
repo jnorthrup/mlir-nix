@@ -7,6 +7,9 @@ the translation is.  Static part: `scripts/fill-drain-map.py [--sites|--md]`.  D
 `-DMLNIX_FILL_STATS=ON` (the hooks sit in hot functions, so the default build has none) prints "== fill/drain sites" under
 `MLNIX_STATS=1` (Eval.cpp, `kFill`).  Numbers below are the demand schedule on the Mac, toplevel | nixpkgs-73.
 
+> The counters this document's tables came from (`-DMLNIX_FILL_STATS=ON`, `statFill`, `MLNIX_FILL`) were cut once the rows were decided;
+> they are in history (`git log -S MLNIX_FILL`).
+
 ## 1. The vocabulary, and what is built
 
 | TrikeShed (`src/commonMain/.../collections`) | what it is | C++ here |
