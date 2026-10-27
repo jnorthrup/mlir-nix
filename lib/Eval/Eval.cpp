@@ -569,7 +569,7 @@ struct DepthGuard {
 };
 } // namespace
 
-void EvalState::forceValue(Value &v, PosPtr pos) {
+void EvalState::forceValueSlow(Value &v, PosPtr pos) {
   if (v.type == VType::Thunk) {
     Operation *op = v.thunk.op;
     Frame *env = v.thunk.env;

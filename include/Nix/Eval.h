@@ -116,6 +116,7 @@ struct StringContext {
 
 struct PrimOp;
 
+/// Thunk, App and Blackhole first: they are the values forceValue() has work for (`type <= Blackhole`).
 enum class VType : uint8_t {
   Thunk, App, Blackhole, Int, Float, Bool, Null, String, Path, Attrs, List,
   Lambda, PrimOp, PrimOpApp
@@ -356,7 +357,11 @@ public:
   };
 
   // -- Forcing -------------------------------------------------------------
-  void forceValue(Value &v, PosPtr pos = nullptr);
+  /// A value that is already evaluated costs one compare, not a call (Thunk, App and Blackhole are the first three of VType).
+  void forceValue(Value &v, PosPtr pos = nullptr) {
+    if (LLVM_UNLIKELY(v.type <= VType::Blackhole)) forceValueSlow(v, pos);
+  }
+  void forceValueSlow(Value &v, PosPtr pos);
   void forceValueDeep(Value &v);
   int64_t forceInt(Value &v, PosPtr pos, std::string_view errorCtx = "");
   double forceFloat(Value &v, PosPtr pos, std::string_view errorCtx = "");
