@@ -1,10 +1,123 @@
 # The dialect fabric
 
-mlnix started as a hand-written evaluator that happened to print MLIR. This file
-tracks the move of its logic into dialects, passes, interfaces and declarations,
-what that bought (measured), and what is next. Numbers are from
-`scripts/bench.py` on the NixOS toplevel and 73-package evaluations; nothing here
-is aspirational unless it says so.
+mlnix evaluates Nix by interpreting MLIR. A Nix file is lowered into ops of the `nix` dialect, the evaluator walks those ops, and the ops,
+their effects and their strictness are declared in ODS and IRDL, with a pass pipeline and FileCheck tests around them. What is not MLIR
+is the interpreter itself, the values it makes, the front end and the store: they are C++. Nothing is compiled (no LLVM lowering, no
+ExecutionEngine): the sea of nodes here is a schedule for *minting* IR (`docs/SEA-OF-NODES.md`), and the interpreter is the only
+executor. This file tracks the move of logic from that C++ into dialects, passes, interfaces and declarations, what that bought
+(measured), and what is next. Numbers are from `scripts/bench.py` on the NixOS toplevel and 73-package evaluations; nothing here is
+aspirational unless it says so.
+
+## What is MLIR here, and what is C++
+
+The IR of a small function, as `mlnix emit-mlir -E 'let f = x: { a = x + 1; b = [ x 2 ]; }; in (f 2).a'` prints it (`+` is
+`nix.concat_strings`, the op that adds numbers and joins strings alike):
+
+    nix.expr @expr1 attributes {base_dir = "..."} {
+      %0 = nix.lambda attributes {arg_name = "x", name = "f"} {
+      ^bb0(%arg0: !nix.value):
+        %4 = nix.int 1
+        %5 = nix.concat_strings %arg0, %4
+        %6 = nix.int 2
+        %7 = nix.list[%arg0, %6]
+        %8 = nix.attrs ["a", "b"](%5, %7)
+        nix.return %8
+      }
+      %1 = nix.int 2
+      %2 = nix.apply %0(%1)
+      %3 = nix.select %2 ["a"]
+      nix.return %3
+    }
+
+Piped into `mlnix-opt` (that is `MlirOptMain`: parse, verify, print) it round-trips. The NixOS toplevel lowers to 1,095,819 such ops
+on the eager schedule and 619,842 on the demand schedule; 121,687 and 121,680 of them are ever evaluated. What the running program does
+with MLIR, checked against the code at 415872c:
+
+    declares in ODS/IRDL   28 ops, 1 type (`!nix.value`) and 1 interface (`NixEvalOpInterface`) in NixBase.td and NixOps.td; 105 primops
+                           in 24 dialects in NixPrims.irdl.mlir, defined at load time and compared with the runtime registry by
+                           check-prims.py (105 registered, 105 declared)
+    evaluates the IR       `EvalState::evalOp` is a `llvm::TypeSwitch<Operation *>` of 25 cases (lib/Eval/Eval.cpp:1347); `nix.expr`,
+                           `nix.return` and `nix.lambda` are handled around it. Every other op, that is every primop op, goes to
+                           `NixEvalOpInterface`, attached from outside as one fallback model (Eval.cpp:1508, lib/Eval/EvalModels.cpp).
+                           Primop ops are 0.9% of the ops a demand run lowers (5,324 of 619,842)
+    optimizes the IR       `mlir::PassManager` from pass-pipeline text (`MLNIX_PIPELINE`, default `nix-prims`), run on each file's
+                           `nix.expr`, which is IsolatedFromAbove; `nix.expr` and `nix.lambda` are graph regions (RegionKindInterface)
+    tests the IR           14 FileCheck tests on the Mac; on kali 13, with the 4 run lines of `cse-dynamic-ops` skipped (LLVM 22's `cse`
+                           cannot merge IRDL ops)
+    does not verify it     the evaluator turns the verifier off (`pm->enableVerifier(false)`, Eval.cpp:1935) and calls `verify` nowhere,
+                           so on the evaluation path the IR is trusted; `mlnix-opt` and the FileCheck tests do verify. A deferred
+                           lambda is an empty shell that `SingleBlock` would refuse (NixOps.td)
+    does not use           ExecutionEngine, ORC, the LLVM dialect, the transform dialect, PDL, the dataflow framework, Liveness, the
+                           inliner and call interfaces: 0 references in lib/, include/, tools/. Bytecode: the property hooks exist
+                           (NixBase.td); nothing reads or writes a bytecode file
+    avoids on purpose      MLIR locations and uniqued attributes on the hot path: a position is a word in a property (`nixfe::Pos`), a
+                           name a `nixfe::Name` property (rung 3 below); uniquing was 26% of the first profile
+
+Where the code is (code lines, comments and blanks not counted: `python3 scripts/cxx-lines.py --rev 415872c`):
+
+    include/NixDialect, lib/Dialect      C++    682     declarations (ODS, IRDL)            923
+    include/Composite, lib/Composite     C++    419     declarations (join, not run)         61
+    include/Nix (headers)                C++  1,329
+    lib/Eval                             C++  4,911
+    lib/Frontend                         C++  2,601
+    lib/Store                            C++  2,197
+    tools                                C++  1,084
+    total                                C++ 13,223                                          984
+
+Declarations are 6.9% of the lines that define the system. "Move most code into dialects" has barely started, and from this commit the
+C++ total only goes down (`scripts/cxx-lines.py --base REV --ratchet` exits 1 unless it fell).
+
+The demand schedule (`MLNIX_DEFER=1`) changes when ops exist, not what the IR is: a deferred `nix.lambda` is lowered as a shell with
+`captures` operands and a `body_index` (`file j row`, a row of a per-file pool that retains the syntax tree); its body region is minted on
+the first call by the same generator that lowers eagerly. The pool is C++ beside the IR: it is not in the module, so it cannot be
+printed, verified or serialized. That is the one place where the IR is incomplete by design.
+
+## The treeless design, against this tree
+
+Sam H. Smith, [*Parsing without ASTs and Optimizing with Sea of Nodes*](https://www.youtube.com/watch?v=NxiKlnUtyio) (Better Software
+Conference 2025; the questions start at [1:00:16](https://www.youtube.com/watch?v=NxiKlnUtyio&t=3616s)), is the design this tree is
+measured against. Its claim: a compiler can parse straight into the graph with no tree between the text and the nodes, and optimize the
+graph while it is built. Each mechanism of the talk, and what is here (the code was read for this list):
+
+- **Group characters, keep no token array** ([3:30](https://www.youtube.com/watch?v=NxiKlnUtyio&t=210s)): `peek` gives an enum and a
+  slice of the file, `consume` moves on. Here: `Parser::peek` over a ring of four 32-byte tokens, none kept (Parser.cpp:579-602). Have it.
+- **Rewind to a save point when a later token changes what an earlier one meant**
+  ([12:31](https://www.youtube.com/watch?v=NxiKlnUtyio&t=751s)). Here there is no rewind: Nix tells `{ a, b }: x` from `{ a = 1; }`
+  within three tokens (`looksLikeFormals`, Parser.cpp:641-650). The talk prices it: the tokenizer runs more
+  ([69:01](https://www.youtube.com/watch?v=NxiKlnUtyio&t=4141s)). Not needed.
+- **Parse straight into the graph; no tree.** Here the parser builds a tree (`AST.h`, a region of `Slice`s), `MLIRGen` walks it into ops
+  (`FreeVars` is a second walk, for the free names of a lambda), and `Printer` prints it for `--parse`: 1,185 code lines (AST.h 227,
+  MLIRGen.cpp 643, MLIRGen.h 74, Printer.cpp 241). The tree's weight, measured with `mlnix-parse -n` against `-s` over the 39,646 files
+  of the nixpkgs checkout (104.0 MB of source): 720 MB of footprint parsed against 161 MB scanned, **5.4 bytes of tree per byte of
+  source**, so about 180 MB of the toplevel's 1,505 MB (it touches 33.8 MB of source). This is the gap.
+- **Peepholes and value numbering when the node is made, while it is still in L1**
+  ([35:01](https://www.youtube.com/watch?v=NxiKlnUtyio&t=2101s), [36:31](https://www.youtube.com/watch?v=NxiKlnUtyio&t=2191s),
+  [41:32](https://www.youtube.com/watch?v=NxiKlnUtyio&t=2492s)). Here a base name resolves when its op is made (`baseRef`,
+  MLIRGen.cpp:368, 515), but devirtualization (`nix-prims`) is a second walk over the lowered file; on the demand schedule it runs
+  directly on a minted body (Eval.cpp:1948). There is no value numbering: stock `cse` as a pass costs +7.1% / +5.4% (below), because a
+  file is lowered once; made at creation, where the table is hot and there is no second pass, it has not been measured. Partly.
+- **A variable is a name bound to a node, and the scope is a stack** ([44:00](https://www.youtube.com/watch?v=NxiKlnUtyio&t=2640s)).
+  Here `Gen` resolves names to SSA values, and the free names of a lambda come from the `FreeVars` walk over the tree (memoized). When
+  the parse makes the ops, a free name is found as the body reads it and the walk goes. The scope is here; the walk is the tree's price.
+- **Inline or defer by jumping into the source and parsing it again** ([28:31](https://www.youtube.com/watch?v=NxiKlnUtyio&t=1711s)).
+  Here the deferred lambda is `file j row` into a pool that keeps the tree, and is minted from it. With no tree the recipe is
+  `file j [begin, end)` and the mint is a parse: the same idea with the tree out of the way.
+- **A prepass over the global declarations, so that later work knows them**
+  ([63:00](https://www.youtube.com/watch?v=NxiKlnUtyio&t=3780s)). Here the Confix scan (293 code lines) finds balanced bands without a
+  lexer. It has no consumer yet (`docs/COMPOSITE.md`).
+- **Treeless parsing and the sea of nodes are independent** ([92:31](https://www.youtube.com/watch?v=NxiKlnUtyio&t=5551s)); the talk
+  calls the first the front end and the second the back end ([95:02](https://www.youtube.com/watch?v=NxiKlnUtyio&t=5702s)). Here the back
+  end exists (graph regions of `nix` ops) with a tree front end.
+
+Not applicable: global code motion, phi nodes, the dominator tree. Nix has no control-flow graph to schedule; `if` is a lazy expression
+and the schedule is demand.
+
+What building it asks of Nix, beyond the three obstacles of rung 4 below (a band is not opaque, a deferred body needs its scope, an error
+in a body nobody enters must still be reported): a recursive binding (`let`, `rec`) uses a name before it is defined, which is this
+language's forward-knowledge problem. A graph region allows the use before the definition, but the builder needs a value to make the use
+with, so it makes a placeholder and replaces it when the definition appears (the talk does that for loops, [56:02](https://www.youtube.com/watch?v=NxiKlnUtyio&t=3362s)),
+or it skims the binding heads first. `--parse` and `mlnix-parse` need a tree-shaped consumer: a parser written against a sink serves both,
+the printer one sink and the IR builder the other.
 
 ## What exists
 
@@ -24,8 +137,8 @@ They are **not TableGen**. They are declared once, as data, in
 generic loader `lib/Dialect/NixPrimDialects.cpp`, which names no op. How, what failed
 and what it cost: `docs/COMBINATORS.md`. What follows from the declaration:
 
-- **Verification**: the stock IRDL verifier checks arity. `mlnix primops` (the runtime
-  registry) is compared with the declaration by `scripts/check-prims.py`.
+- **Verification**: the stock IRDL verifier checks arity, in `mlnix-opt` and the FileCheck tests; the evaluator never runs it (above).
+  `mlnix primops` (the runtime registry) is compared with the declaration by `scripts/check-prims.py`.
 - **Effects**: `nix.fx` per op becomes a `MemoryEffectOpInterface` model
   (`Pure`, `MemRead<NixFS|NixEnv>`, `MemWrite<NixTrace|NixStore>`). The stock `-cse`
   pass is therefore sound on Nix IR: pure primops merge, ops that may run user code
@@ -52,9 +165,9 @@ and what it cost: `docs/COMBINATORS.md`. What follows from the declaration:
 
 ## Tests (each layer can fail)
 
-    python3 scripts/run-lang-tests.py   upstream lang suite: 466/466 semantic
-    python3 scripts/difftest.py         53 expressions identical to Nix 2.35.4
-    python3 scripts/run-mlir-tests.py   FileCheck tests of the dialects/passes
+    python3 scripts/run-lang-tests.py   upstream lang suite: 473/473 semantic, 215 exact (kali, 6344b5c82)
+    python3 scripts/difftest.py         72 expressions identical to Nix 2.35.4 (71 to Lix 2.91.3)
+    python3 scripts/run-mlir-tests.py   FileCheck tests of the dialects/passes: 14 on the Mac
     python3 scripts/check-prims.py      declarations == runtime registry
     python3 scripts/ab.py A B           interleaved A/B (two envs or two binaries)
     python3 scripts/startup-bench.py    process start-up cost of two binaries
@@ -244,5 +357,12 @@ Fresh profile of the NixOS toplevel run (2 s main-thread sample, 1449 busy sampl
    the same lines.
 9. Hashing (Linux; `docs/PERFORMANCE.md`, section Hashing): a toplevel run puts 53 MB through SHA-256, and Linux did it in LLVM's
    portable C. libcrypto now, where there is one. Not measured on kali yet.
-8. Only then: closure conversion to `func` + the stock inliner, strictness
+10. Parse into the IR with no tree (the section above). The front end writes the ops as it reads, through a sink that the printer also
+   implements, so `--parse` keeps a tree and the evaluator has none. Ceilings: about 180 MB of the toplevel's footprint (5.4 bytes of
+   tree per byte of source), which the demand schedule keeps alive today in its pool, so the memory only comes back with
+   `file j [begin, end)` recipes; and the second walk (`FreeVars`, `MLIRGen`). The parse itself stays: lexing and parsing are 6.5% of
+   the evaluator thread (rung 6) and a builder cannot remove them. Costs: a placeholder for a use that precedes its definition, the
+   scope at a deferred site, and rung 4's (a)-(c). Under the C++ ratchet it is the largest cut on the table, 1,185 lines of tree,
+   printer and walk, against whatever the builder calls add to the parser.
+11. Only then: closure conversion to `func` + the stock inliner, strictness
    analysis (needs a lattice type instead of the single `!nix.value`).

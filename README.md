@@ -11,7 +11,8 @@ parked, not merged ([docs/FABRIC.md](docs/FABRIC.md), [docs/PERFORMANCE.md](docs
 ## How it is built
 
 **A sea of nodes, minted on demand.** The IR is a graph of mostly pure ops with explicit use-def edges and no fixed order (Cliff Click's
-sea of nodes), plus a schedule that decides when a node exists. Of the ops that lowering a file creates, 89-90% are never evaluated (NixOS
+sea of nodes; [Sam H. Smith's talk](https://www.youtube.com/watch?v=NxiKlnUtyio) is the clearest hour on building one while parsing, with
+no syntax tree), plus a schedule that decides when a node exists. Of the ops that lowering a file creates, 89-90% are never evaluated (NixOS
 toplevel: 121,687 of 1,095,819 are). So with `MLNIX_DEFER=1` a lambda body is lowered on its first call, not when its file is read. The
 eager schedule is the default and stays the oracle. See [docs/SEA-OF-NODES.md](docs/SEA-OF-NODES.md).
 
@@ -46,6 +47,10 @@ exists yet beyond the query and opt tools. The next steps the measurements suppo
   containers of the evaluator are mapped in [docs/FILL-DRAIN.md](docs/FILL-DRAIN.md).
 - Collapse the primop set into its declaration: it is declared once in IRDL and registered again in C++, and `scripts/check-prims.py` only
   checks that the two agree. And give the syntax a dialect of its own (Google's JSIR is the existence proof, [docs/MLIR.md](docs/MLIR.md)).
+- Parse into the IR with no syntax tree, as in [Sam H. Smith's talk](https://www.youtube.com/watch?v=NxiKlnUtyio). The front end builds a
+  tree (5.4 bytes per byte of source, about 180 MB of the NixOS toplevel's footprint) and walks it into ops; the tree, its printer and the
+  walk are 1,185 lines of C++, the largest cut on the table now that the C++ total is ratcheted down (`scripts/cxx-lines.py`).
+  [docs/FABRIC.md](docs/FABRIC.md) sets the talk's mechanisms against this tree one by one.
 
 ## Benchmarks (kali)
 

@@ -9,6 +9,9 @@ minted on its first call, not when its file is lowered. It is opt-in (`MLNIX_DEF
 default stays the oracle. Value numbering is not part of it: stock `cse` costs +7.1% / +5.4% on the
 same workloads, because a file is lowered once and evaluated once (F17 in COMBINATORS.md).
 
+The graph is built from a syntax tree here. Sam H. Smith's [talk](https://www.youtube.com/watch?v=NxiKlnUtyio) builds it while parsing
+instead, with no tree, and applies the rewrites as each node is made; [FABRIC.md](FABRIC.md) sets its mechanisms against this tree one by one.
+
 ## What was built, in PRELOAD's terms
 
 `include/Composite/Series.h` is the kernel algebra of `../TrikeShed/PRELOAD.md` in C++. Header-only, no
