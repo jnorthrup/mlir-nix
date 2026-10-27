@@ -11,7 +11,7 @@ a virtual disk), NixOS toplevel, `scripts/iocost.py`:
 It is serialized latency, not bandwidth: 4,906 files, 21 MB. One evaluation makes 31k `newfstatat`,
 7.4k `openat`, 3.5k `read`, 2k `getdents64`, each waiting for the previous one.
 
-## What the storage can do (experiments/uring/prefetch-bench.cpp)
+## What the storage can do (prefetch-bench.cpp, cut from the tree: `git show dd55950:experiments/uring/prefetch-bench.cpp`)
 
 The 4,906 files the toplevel evaluation opens, page cache dropped before every run:
 

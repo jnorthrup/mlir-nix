@@ -227,10 +227,12 @@ calls have a base too small to layer, and what they copy is small.
 
 ## 7. Reproduce
 
-    c++ -std=c++20 -O2 -isysroot $(xcrun --show-sdk-path) -o /tmp/test_krapivin experiments/attrs/test_krapivin.cpp && /tmp/test_krapivin
-    git apply experiments/attrs/trace.patch      # counters + MLNIX_ATTRTRACE=file + MLNIX_ATTRSTATS=1
-    MLNIX_ATTRSTATS=1 MLNIX_ATTRTRACE=/tmp/t.trace build/bin/mlnix instantiate --readonly-mode --eval --strict test/nixos-toplevel.nix --arg nixpkgs ./.cache/nixpkgs
-    c++ -std=c++20 -O2 -isysroot $(xcrun --show-sdk-path) -o /tmp/replay experiments/attrs/replay.cpp && /tmp/replay /tmp/t.trace
-    git apply experiments/attrs/arena-stats.patch    # MLNIX_ARENASTATS=1: arena bytes by kind
+The experiment sources (`experiments/attrs/`, 6 files) were cut from the tree when the C++ of the repository was bound to go down; they are
+in history at `dd55950`, and every path below is a path in that commit (`git show dd55950:experiments/attrs/replay.cpp`). A patch is against
+the tree of the commit that added it (`git log --diff-filter=A -- experiments/attrs/trace.patch`), not against today's.
 
-The patch is against the tree before the experiment (`git checkout` the two files after).
+    git show dd55950:experiments/attrs/test_krapivin.cpp > /tmp/test_krapivin.cpp
+    c++ -std=c++20 -O2 -isysroot $(xcrun --show-sdk-path) -o /tmp/test_krapivin /tmp/test_krapivin.cpp && /tmp/test_krapivin
+    git show dd55950:experiments/attrs/trace.patch      # counters + MLNIX_ATTRTRACE=file + MLNIX_ATTRSTATS=1
+    git show dd55950:experiments/attrs/replay.cpp > /tmp/replay.cpp   # then the same c++ line on it, run on the recorded trace
+    git show dd55950:experiments/attrs/arena-stats.patch    # MLNIX_ARENASTATS=1: arena bytes by kind

@@ -33,7 +33,8 @@ What is in the tree because of PRELOAD and has no consumer in what `mlnix` runs:
   `mlnix-opt` links it. `Pack.h` (`TwInt`), which the lexer, the pool and the scan use, does not depend on it.
 - The Confix scan: `Confix.h` 55 lines, `Confix.cpp` 312, `scripts/confix-corpus.py`, 43 edge cases, the oracle in `Parser.cpp`
   and the `-b -s -f -v` options of `mlnix-parse`. No consumer until bands are minted lazily (`docs/FABRIC.md`, item 4).
-- `experiments/`: 6 files, 1,109 lines, built by nothing, cited by `docs/COLLECTIONS.md`.
+- `experiments/`: 6 files, 1,109 lines, built by nothing, cited by `docs/COLLECTIONS.md` and `docs/IO.md`. Cut from the tree; the sources are in
+  history at `dd55950`.
 - `α`, `j` and `series` in `Series.h` have one caller, the loop of `Gen::defer`.
 
 Where the algebra is the shape but not the type: `Value::list`, the strings and the attribute arrays are a size and cells in the
