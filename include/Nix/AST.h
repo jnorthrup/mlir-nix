@@ -8,8 +8,10 @@
 #define NIX_AST_H
 
 #include <cstdint>
+#include <algorithm>
 #include <deque>
 #include <functional>
+#include <initializer_list>
 #include <map>
 #include <memory>
 #include <optional>
@@ -18,6 +20,8 @@
 #include <string>
 #include <vector>
 
+#include "Composite/Series.h"
+#include "Nix/Arena.h"
 #include "Nix/Name.h"
 
 namespace nixfe {
@@ -70,11 +74,12 @@ enum class ExprKind {
   ConcatStrings, CurPos, InheritFrom
 };
 
+/// A node is a plain struct: it is made in an ExprArena, found by its `kind` and never destroyed, so it has no virtual
+/// destructor and holds no vector or map; the arrays of a node are Slices of the same arena.
 struct Expr {
   ExprKind kind;
   Pos pos;
   explicit Expr(ExprKind k, Pos p = {}) : kind(k), pos(p) {}
-  virtual ~Expr() = default;
 };
 
 struct ExprInt : Expr { int64_t v; ExprInt(int64_t v) : Expr(ExprKind::Int), v(v) {} };
@@ -112,20 +117,18 @@ struct AttrName {
 struct NameLess {
   bool operator()(const Name &a, const Name &b) const { return a.str() < b.str(); }
 };
-using AttrPath = std::vector<AttrName>;
+using AttrPath = composite::Slice<AttrName>;
 
 struct ExprSelect : Expr {
   Expr *e;
   AttrPath path;
   Expr *def;
-  ExprSelect(Pos p, Expr *e, AttrPath path, Expr *def)
-      : Expr(ExprKind::Select, p), e(e), path(std::move(path)), def(def) {}
+  ExprSelect(Pos p, Expr *e, AttrPath path, Expr *def) : Expr(ExprKind::Select, p), e(e), path(path), def(def) {}
 };
 struct ExprHasAttr : Expr {
   Expr *e;
   AttrPath path;
-  ExprHasAttr(Pos p, Expr *e, AttrPath path)
-      : Expr(ExprKind::HasAttr, p), e(e), path(std::move(path)) {}
+  ExprHasAttr(Pos p, Expr *e, AttrPath path) : Expr(ExprKind::HasAttr, p), e(e), path(path) {}
 };
 
 struct ExprAttrs : Expr {
@@ -139,15 +142,36 @@ struct ExprAttrs : Expr {
     Expr *nameExpr, *valueExpr;
     Pos pos;
   };
+  struct Entry {
+    Name name;
+    AttrDef def;
+  };
   bool recursive = false;
-  std::map<Name, AttrDef, NameLess> attrs; // ordered by name (deterministic)
-  std::vector<DynamicAttrDef> dynamicAttrs;
-  std::vector<Expr *> inheritFromExprs;
+  /// The attributes in the order they were written, while the file is being parsed.  Nothing but the parser reads this:
+  /// entries() is the set, ordered by name.  Over a handful of entries `index` finds one by name (open addressing over
+  /// positions in `written`, plus one; 0 is empty); it is the parser's, and entries() drops it.
+  composite::Grow<Entry> written;
+  mutable uint32_t *index = nullptr;
+  mutable uint32_t indexMask = 0;
+  mutable bool ordered = true;
+  composite::Grow<DynamicAttrDef> dynamicAttrs;
+  composite::Grow<Expr *> inheritFromExprs;
   ExprAttrs(Pos p = {}) : Expr(ExprKind::Attrs, p) {}
+
+  /// The attributes ordered by name text (deterministic, and what `--parse` prints).  The first ask orders them in
+  /// place: the parser appends in source order, and a set that nothing reads (most of nixpkgs) is never ordered.
+  composite::Slice<Entry> entries() const {
+    if (!ordered) {
+      std::sort(written.begin(), written.end(), [](const Entry &a, const Entry &b) { return a.name.str() < b.name.str(); });
+      index = nullptr; // its positions moved
+      ordered = true;
+    }
+    return written.done();
+  }
 };
 
 struct ExprList : Expr {
-  std::vector<Expr *> elems;
+  composite::Slice<Expr *> elems;
   ExprList(Pos p) : Expr(ExprKind::List, p) {}
 };
 
@@ -160,7 +184,7 @@ struct Formal {
 struct ExprLambda : Expr {
   Name arg;                       // the null name when there is none
   bool hasFormals = false;
-  std::vector<Formal> formals;    // sorted by name
+  composite::Slice<Formal> formals; // sorted by name
   bool ellipsis = false;
   Expr *body;
   Name name;                      // set when bound to an attribute (else the null name)
@@ -169,9 +193,8 @@ struct ExprLambda : Expr {
 
 struct ExprCall : Expr {
   Expr *fun;
-  std::vector<Expr *> args;
-  ExprCall(Pos p, Expr *f, std::vector<Expr *> a)
-      : Expr(ExprKind::Call, p), fun(f), args(std::move(a)) {}
+  composite::Slice<Expr *> args;
+  ExprCall(Pos p, Expr *f, composite::Slice<Expr *> a) : Expr(ExprKind::Call, p), fun(f), args(a) {}
 };
 
 struct ExprLet : Expr {
@@ -200,21 +223,40 @@ struct ExprBin : Expr {
   Expr *e1, *e2;
   ExprBin(ExprKind k, Pos p, Expr *a, Expr *b) : Expr(k, p), e1(a), e2(b) {}
 };
+/// One piece of a string or path with interpolation: where it starts, and what it is.
+struct StrPart {
+  Pos pos;
+  Expr *e;
+};
 struct ExprConcatStrings : Expr {
   bool forceString;
-  std::vector<std::pair<Pos, Expr *>> es;
-  ExprConcatStrings(Pos p, bool fs, std::vector<std::pair<Pos, Expr *>> es)
-      : Expr(ExprKind::ConcatStrings, p), forceString(fs), es(std::move(es)) {}
+  composite::Slice<StrPart> es;
+  ExprConcatStrings(Pos p, bool fs, composite::Slice<StrPart> es) : Expr(ExprKind::ConcatStrings, p), forceString(fs), es(es) {}
 };
 
-/// Owns all nodes of one parse.
+/// Where the nodes of the trees, and every array they hold, are made: the bump arena of the thread (Nix/Arena.h), which
+/// is never freed and is shared by every parse on it.  A node costs one pointer bump, an array one more, and nothing is
+/// destroyed or released: the evaluator keeps the trees for the life of the process, and so does this.
 struct ExprArena {
-  std::deque<std::unique_ptr<Expr>> nodes;
+  ExprArena() : r(&ofThisThread()) {}
   template <typename T, typename... A> T *add(A &&...a) {
-    auto p = std::make_unique<T>(std::forward<A>(a)...);
-    T *r = p.get();
-    nodes.push_back(std::move(p));
-    return r;
+    static_assert(std::is_trivially_destructible_v<T>, "a node is never destroyed: its arrays are Slices of the arena");
+    return new (r->Allocate(sizeof(T), alignof(T))) T(std::forward<A>(a)...);
+  }
+  /// What composite::Grow allocates from.
+  nixev::Arena &region() { return *r; }
+  /// The cells given, as a Slice in the arena.
+  template <class T> composite::Slice<T> slice(std::initializer_list<T> xs) {
+    T *p = r->template Allocate<T>(xs.size());
+    std::uninitialized_copy(xs.begin(), xs.end(), p);
+    return {p, static_cast<uint32_t>(xs.size())};
+  }
+
+private:
+  nixev::Arena *r;
+  static nixev::Arena &ofThisThread() {
+    static thread_local nixev::Arena *arena = new nixev::Arena();
+    return *arena;
   }
 };
 

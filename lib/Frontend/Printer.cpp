@@ -60,10 +60,10 @@ static void showAttrPath(std::ostream &os, const AttrPath &path) {
 }
 
 static void showBindings(std::ostream &str, const ExprAttrs *a) {
-  // a->attrs is a std::map keyed by name: already lexicographic.
+  // entries() are ordered by name: the order `--parse` prints.
   std::vector<Name> inherits;
   std::map<size_t, std::vector<Name>> inheritsFrom;
-  for (auto &[name, def] : a->attrs) {
+  for (auto &[name, def] : a->entries()) {
     if (def.kind == ExprAttrs::DefKind::Inherited) inherits.push_back(name);
     else if (def.kind == ExprAttrs::DefKind::InheritedFrom) {
       auto *sel = static_cast<const ExprSelect *>(def.e);
@@ -83,7 +83,7 @@ static void showBindings(std::ostream &str, const ExprAttrs *a) {
     for (auto &s : syms) { str << ' '; printIdentifier(str, sv(s)); }
     str << "; ";
   }
-  for (auto &[name, def] : a->attrs) {
+  for (auto &[name, def] : a->entries()) {
     if (def.kind != ExprAttrs::DefKind::Plain) continue;
     printIdentifier(str, sv(name));
     str << " = ";

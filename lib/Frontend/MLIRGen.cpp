@@ -102,12 +102,12 @@ void FreeVars::Walk::walk(const Expr *e) {
     bool isLet = e->kind == ExprKind::Let;
     const ExprAttrs *a = isLet ? static_cast<const ExprLet *>(e)->attrs : static_cast<const ExprAttrs *>(e);
     bool binds = isLet || a->recursive;
-    for (auto &[name, def] : a->attrs) // `inherit x;` reads outside the group it defines
+    for (auto &[name, def] : a->entries()) // `inherit x;` reads outside the group it defines
       if (def.kind == ExprAttrs::DefKind::Inherited) walk(def.e);
     if (binds)
-      for (auto &[name, def] : a->attrs) enter(name.str());
+      for (auto &[name, def] : a->entries()) enter(name.str());
     for (auto *fe : a->inheritFromExprs) walk(fe);
-    for (auto &[name, def] : a->attrs)
+    for (auto &[name, def] : a->entries())
       if (def.kind == ExprAttrs::DefKind::Plain) walk(def.e);
     for (auto &d : a->dynamicAttrs) {
       walk(d.nameExpr);
@@ -115,7 +115,7 @@ void FreeVars::Walk::walk(const Expr *e) {
     }
     if (isLet) walk(static_cast<const ExprLet *>(e)->body);
     if (binds)
-      for (auto &[name, def] : a->attrs) leave(name.str());
+      for (auto &[name, def] : a->entries()) leave(name.str());
     return;
   }
   case ExprKind::Select: {
@@ -403,7 +403,7 @@ private:
     // Values of `inherit (e)` sources.
     SmallVector<Value> fromVals;
     for (auto *fe : a->inheritFromExprs) fromVals.push_back(gen(fe, inheritFromScope));
-    for (auto &[name, def] : a->attrs) {
+    for (auto &[name, def] : a->entries()) {
       Value v;
       switch (def.kind) {
       case ExprAttrs::DefKind::Plain: v = gen(def.e, defScope); break;
@@ -435,7 +435,7 @@ private:
       Scope ns;
       ns.parent = s;
       llvm::DenseMap<StringRef, Value> phs;
-      for (auto &[name, def] : a->attrs) {
+      for (auto &[name, def] : a->entries()) {
         Value ph = placeholder(def.pos);
         phs[name.str()] = ph;
         ns.vars[name.str()] = ph;
@@ -448,7 +448,7 @@ private:
       SmallVector<Value> phv;
       SmallVector<Pos> poses;
       int ovIdx = -1, idx = 0;
-      for (auto &[name, def] : a->attrs) {
+      for (auto &[name, def] : a->entries()) {
         phv.push_back(phs[name.str()]);
         poses.push_back(def.pos);
         if (name.str() == "__overrides") ovIdx = idx;
@@ -459,7 +459,7 @@ private:
       if (ovIdx >= 0) {
         Value ov = values[ovIdx];
         idx = 0;
-        for (auto &[name, def] : a->attrs) {
+        for (auto &[name, def] : a->entries()) {
           if (idx != ovIdx)
             values[idx] = selectLiteral(def.pos, ov, name.str(), values[idx]);
           idx++;
@@ -480,7 +480,7 @@ private:
     Scope ns;
     ns.parent = s;
     llvm::DenseMap<StringRef, Value> phs;
-    for (auto &[name, def] : l->attrs->attrs) {
+    for (auto &[name, def] : l->attrs->entries()) {
       Value ph = placeholder(def.pos);
       phs[name.str()] = ph;
       ns.vars[name.str()] = ph;
@@ -491,13 +491,13 @@ private:
     genBindings(l->attrs, &ns, s, &ns, names, values, positions);
     SmallVector<Value> phv;
     SmallVector<Pos> poses;
-    for (auto &[name, def] : l->attrs->attrs) {
+    for (auto &[name, def] : l->attrs->entries()) {
       phv.push_back(phs[name.str()]);
       poses.push_back(def.pos);
     }
     auto finals = finalizeGroup(phv, values, poses);
     size_t i = 0;
-    for (auto &[name, def] : l->attrs->attrs) {
+    for (auto &[name, def] : l->attrs->entries()) {
       (void)def;
       ns.vars[name.str()] = finals[i++];
     }

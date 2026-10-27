@@ -15,8 +15,11 @@
 #include "Nix/AST.h"
 #include "Nix/Confix.h"
 #include "Nix/LexRules.h"
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/Support/xxhash.h"
 
 #include <algorithm>
+#include <cassert>
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
@@ -422,6 +425,34 @@ private:
       }
     }
 
+    // The commonest single characters.  Each case below is a character no other rule can continue, and it is the same
+    // token matchDefault would return: `{`, `}` and `"` start no rule but their own; `=` is plain unless `==` follows; a
+    // space after `-`, `+`, `<`, `>`, `!` leaves no operator (`->`, `++`, `<=`, `<|`, `>=`, `!=`), no path and no <spath>;
+    // a `.` is plain unless a digit (float), `.` or `/` (operator, path) follows, or a run of path characters ends in `/`.
+    switch (c) {
+    case '{': p = i + 1; push(S_DEFAULT); t.t = T_CHAR; t.ch = c; return true;
+    case '}': p = i + 1; if (top() != S_INITIAL) pop(); t.t = T_CHAR; t.ch = c; return true;
+    case '\"': p = i + 1; push(S_STRING); t.t = T_CHAR; t.ch = c; return true;
+    case '=':
+      if (at(i + 1) == '=') break;
+      p = i + 1; t.t = T_CHAR; t.ch = c; return true;
+    case '-': case '+': case '<': case '>': case '!':
+      if (at(i + 1) != ' ') break;
+      p = i + 1; t.t = T_CHAR; t.ch = c; return true;
+    case '.': {
+      char n = at(i + 1);
+      if (isDigit(n) || n == '.' || n == '/') break;
+      if (isPathChar(n)) {
+        size_t j = i + 2;
+        while (!eof(j) && isPathChar(src[j])) j++;
+        if (at(j) == '/') break;
+      }
+      p = i + 1; t.t = T_CHAR; t.ch = c; return true;
+    }
+    default:
+      break;
+    }
+
     static constexpr Tok kwTok[] = {T_IF, T_THEN, T_ELSE, T_ASSERT, T_WITH, T_LET, T_IN, T_REC, T_INHERIT, T_OR_KW};
     static constexpr Tok opTok[] = {T_ELLIPSIS, T_EQ, T_NEQ, T_LEQ, T_GEQ, T_AND, T_OR, T_IMPL, T_UPDATE, T_CONCAT, T_PIPE_FROM, T_PIPE_INTO};
     lex::Match best = matchDefault(i, c); // the longest rule, the earlier winning a tie (LexRules.h)
@@ -495,7 +526,6 @@ private:
 // Parser
 //===----------------------------------------------------------------------===//
 
-using StrPart = std::pair<Pos, std::variant<Expr *, Token>>;
 
 class Parser {
 public:
@@ -514,43 +544,55 @@ private:
   std::shared_ptr<Origin> origin;
   const ParseOptions &opts;
   Lexer &lx;
-  std::deque<Token> toks; // lookahead buffer
+  /// The lookahead: the next `count` tokens, in a ring.  The deepest look is peek(3) (looksLikeFormals), so four slots hold
+  /// it; a slot is written only when it is filled, so a reference from cur() or peek() lives until four more tokens are taken.
+  static constexpr size_t kLook = 4;
+  Token ring[kLook];
+  uint32_t head = 0, count = 0;
   bool sawEof = false;
 
   void fill(size_t n) {
-    while (toks.size() <= n) {
-      if (sawEof) { toks.push_back(toks.back()); continue; }
-      toks.push_back(lx.nextToken());
-      if (toks.back().t == T_EOF) sawEof = true;
+    assert(n < kLook);
+    while (count <= n) {
+      Token &slot = ring[(head + count) % kLook];
+      if (sawEof) slot = ring[(head + count + kLook - 1) % kLook]; // end of file repeats
+      else {
+        slot = lx.nextToken();
+        if (slot.t == T_EOF) sawEof = true;
+      }
+      count++;
     }
   }
   std::string str(const Token &t) { return std::string(lx.text(t)); }
   /// The text of a token as a Name: a slice of the input (never freed) unless the text was derived from it.
   Name nameOf(const Token &t) { return t.derived ? Name::persist(lx.text(t)) : Name::of(lx.text(t)); }
-  const Token &cur() { fill(0); return toks[0]; }
-  const Token &peek(size_t n = 1) { fill(n); return toks[n]; }
+  const Token &cur() { if (count == 0) fill(0); return ring[head]; }
+  const Token &peek(size_t n = 1) { fill(n); return ring[(head + n) % kLook]; }
   bool isChar(const Token &t, char c) { return t.t == T_CHAR && t.ch == c; }
   bool atChar(char c) { return isChar(cur(), c); }
   Token take() {
-    fill(0);
-    Token t = toks.front();
-    if (t.t != T_EOF) toks.pop_front();
+    if (count == 0) fill(0);
+    Token t = ring[head];
+    if (t.t != T_EOF) { head = (head + 1) % kLook; count--; }
     return t;
   }
 
-  [[noreturn]] void unexpected(const std::string &expecting = "") {
+  [[noreturn]] void unexpected(std::string_view expecting = {}) {
     std::string msg = "syntax error, unexpected " + tokName(cur());
-    if (!expecting.empty()) msg += ", expecting " + expecting;
+    if (!expecting.empty()) msg += ", expecting " + std::string(expecting);
     throw ParseError(msg, cur().pos, origin);
   }
   [[noreturn]] void error(const std::string &msg, Pos p) {
     throw ParseError(msg, p, origin);
   }
-  void expectChar(char c, const std::string &expecting = "") {
-    if (!atChar(c)) unexpected(expecting.empty() ? std::string("'") + c + "'" : expecting);
+  void expectChar(char c, std::string_view expecting = {}) {
+    if (!atChar(c)) {
+      if (expecting.empty()) unexpected(std::string("'") + c + "'");
+      unexpected(expecting);
+    }
     take();
   }
-  void expect(Tok t, const std::string &what) {
+  void expect(Tok t, std::string_view what) {
     if (cur().t != t) unexpected(what);
     take();
   }
@@ -642,6 +684,7 @@ private:
 
   void parseFormals(ExprLambda *lam) {
     lam->hasFormals = true;
+    composite::Grow<Formal> formals;
     expectChar('{');
     while (true) {
       if (atChar('}')) { take(); break; }
@@ -659,16 +702,27 @@ private:
         take();
         f.def = parseExpr();
       }
-      lam->formals.push_back(f);
+      formals.push(arena.region(), f);
       if (atChar(',')) { take(); continue; }
       if (atChar('}')) { take(); break; }
       unexpected();
     }
+    lam->formals = formals.done();
   }
 
   void validateFormals(ExprLambda *lam, Pos pos) {
-    std::stable_sort(lam->formals.begin(), lam->formals.end(),
-                     [](const Formal &a, const Formal &b) { return a.name.str() < b.name.str(); });
+    const composite::Slice<Formal> &fs = lam->formals;
+    auto byName = [](const Formal &a, const Formal &b) { return a.name.str() < b.name.str(); };
+    if (fs.size() > 24) {
+      std::stable_sort(fs.begin(), fs.end(), byName);
+    } else { // insertion: stable, and std::stable_sort allocates a buffer even for two
+      for (size_t i = 1; i < fs.size(); i++) {
+        Formal f = fs[i];
+        size_t j = i;
+        for (; j > 0 && byName(f, fs[j - 1]); j--) fs[j] = fs[j - 1];
+        fs[j] = f;
+      }
+    }
     const Formal *dup = nullptr;
     for (size_t i = 0; i + 1 < lam->formals.size(); i++)
       if (lam->formals[i].name == lam->formals[i + 1].name) {
@@ -683,15 +737,6 @@ private:
       for (auto &f : lam->formals)
         if (f.name == lam->arg)
           error("duplicate formal function argument '" + lam->arg.toString() + "'", pos);
-  }
-
-  Expr *makeCall(Pos p, Expr *fn, Expr *arg) {
-    if (fn->kind == ExprKind::Call) {
-      auto *c = static_cast<ExprCall *>(fn);
-      c->args.push_back(arg);
-      return c;
-    }
-    return arena.add<ExprCall>(p, fn, std::vector<Expr *>{arg});
   }
 
   Expr *parseIf() {
@@ -709,7 +754,7 @@ private:
       while (cur().t == T_PIPE_INTO) {
         Pos p = take().pos;
         Expr *rhs = parseOp(0);
-        lhs = arena.add<ExprCall>(p, rhs, std::vector<Expr *>{lhs});
+        lhs = arena.add<ExprCall>(p, rhs, arena.slice<Expr *>({lhs}));
       }
       if (cur().t == T_PIPE_FROM) unexpected();
       return lhs;
@@ -717,7 +762,7 @@ private:
     if (cur().t == T_PIPE_FROM) {
       Pos p = take().pos;
       Expr *rhs = parseIfPipeFromRhs();
-      return arena.add<ExprCall>(p, lhs, std::vector<Expr *>{rhs});
+      return arena.add<ExprCall>(p, lhs, arena.slice<Expr *>({rhs}));
     }
     return lhs;
   }
@@ -726,7 +771,7 @@ private:
     if (cur().t == T_PIPE_FROM) {
       Pos p = take().pos;
       Expr *rhs = parseIfPipeFromRhs();
-      return arena.add<ExprCall>(p, lhs, std::vector<Expr *>{rhs});
+      return arena.add<ExprCall>(p, lhs, arena.slice<Expr *>({rhs}));
     }
     if (cur().t == T_PIPE_INTO) unexpected();
     return lhs;
@@ -768,8 +813,7 @@ private:
     } else if (atChar('-')) {
       take();
       Expr *e = parseOp(P_NEG);
-      lhs = arena.add<ExprCall>(pos, var("__sub"),
-                                std::vector<Expr *>{arena.add<ExprInt>(0), e});
+      lhs = arena.add<ExprCall>(pos, var("__sub"), arena.slice<Expr *>({arena.add<ExprInt>(0), e}));
     } else {
       lhs = parseApp();
     }
@@ -783,7 +827,7 @@ private:
       Pos opPos = op.pos;
       if (prec == P_HAS) {
         AttrPath path = parseAttrPath();
-        lhs = arena.add<ExprHasAttr>(opPos, lhs, std::move(path));
+        lhs = arena.add<ExprHasAttr>(opPos, lhs, path);
         lastNonAssoc = prec;
         continue;
       }
@@ -795,25 +839,21 @@ private:
       case T_EQ: lhs = arena.add<ExprBin>(ExprKind::Eq, opPos, lhs, rhs); break;
       case T_NEQ: lhs = arena.add<ExprBin>(ExprKind::NEq, opPos, lhs, rhs); break;
       case T_LEQ:
-        lhs = arena.add<ExprNot>(opPos, arena.add<ExprCall>(opPos, var("__lessThan"), std::vector<Expr *>{rhs, lhs}));
+        lhs = arena.add<ExprNot>(opPos, arena.add<ExprCall>(opPos, var("__lessThan"), arena.slice<Expr *>({rhs, lhs})));
         break;
       case T_GEQ:
-        lhs = arena.add<ExprNot>(opPos, arena.add<ExprCall>(opPos, var("__lessThan"), std::vector<Expr *>{lhs, rhs}));
+        lhs = arena.add<ExprNot>(opPos, arena.add<ExprCall>(opPos, var("__lessThan"), arena.slice<Expr *>({lhs, rhs})));
         break;
       case T_UPDATE: lhs = arena.add<ExprBin>(ExprKind::Update, opPos, lhs, rhs); break;
       case T_CONCAT: lhs = arena.add<ExprBin>(ExprKind::ConcatLists, opPos, lhs, rhs); break;
       default:
         switch (op.ch) {
-        case '<': lhs = arena.add<ExprCall>(opPos, var("__lessThan"), std::vector<Expr *>{lhs, rhs}); break;
-        case '>': lhs = arena.add<ExprCall>(opPos, var("__lessThan"), std::vector<Expr *>{rhs, lhs}); break;
-        case '+': {
-          std::vector<std::pair<Pos, Expr *>> es{{pos, lhs}, {rhs->pos, rhs}};
-          lhs = arena.add<ExprConcatStrings>(opPos, false, std::move(es));
-          break;
-        }
-        case '-': lhs = arena.add<ExprCall>(opPos, var("__sub"), std::vector<Expr *>{lhs, rhs}); break;
-        case '*': lhs = arena.add<ExprCall>(opPos, var("__mul"), std::vector<Expr *>{lhs, rhs}); break;
-        case '/': lhs = arena.add<ExprCall>(opPos, var("__div"), std::vector<Expr *>{lhs, rhs}); break;
+        case '<': lhs = arena.add<ExprCall>(opPos, var("__lessThan"), arena.slice<Expr *>({lhs, rhs})); break;
+        case '>': lhs = arena.add<ExprCall>(opPos, var("__lessThan"), arena.slice<Expr *>({rhs, lhs})); break;
+        case '+': lhs = arena.add<ExprConcatStrings>(opPos, false, arena.slice<StrPart>({{pos, lhs}, {rhs->pos, rhs}})); break;
+        case '-': lhs = arena.add<ExprCall>(opPos, var("__sub"), arena.slice<Expr *>({lhs, rhs})); break;
+        case '*': lhs = arena.add<ExprCall>(opPos, var("__mul"), arena.slice<Expr *>({lhs, rhs})); break;
+        case '/': lhs = arena.add<ExprCall>(opPos, var("__div"), arena.slice<Expr *>({lhs, rhs})); break;
         }
       }
       lastNonAssoc = na ? prec : -1;
@@ -836,11 +876,17 @@ private:
   Expr *parseApp() {
     Pos pos = cur().pos;
     Expr *f = parseSelect();
-    while (startsSelect()) {
-      Expr *a = parseSelect();
-      f = makeCall(pos, f, a);
+    if (!startsSelect()) return f;
+    // Upstream's makeCall: an argument after a call is another argument of that call, so `(f a) b` is `f a b`.
+    ExprCall *call = f->kind == ExprKind::Call ? static_cast<ExprCall *>(f) : nullptr;
+    composite::Grow<Expr *> args;
+    if (call) args = composite::Grow<Expr *>::from(arena.region(), call->args, 4);
+    while (startsSelect()) args.push(arena.region(), parseSelect());
+    if (call) {
+      call->args = args.done();
+      return call;
     }
-    return f;
+    return arena.add<ExprCall>(pos, f, args.done());
   }
 
   Expr *parseSelect() {
@@ -854,28 +900,27 @@ private:
         take();
         def = parseSelect();
       }
-      return arena.add<ExprSelect>(pos, e, std::move(path), def);
+      return arena.add<ExprSelect>(pos, e, path, def);
     }
     if (cur().t == T_OR_KW) {
       // "cursed or": `f or` is `f` applied to the variable `or`.
       Pos op = take().pos;
-      return arena.add<ExprCall>(pos, e, std::vector<Expr *>{arena.add<ExprVar>(op, Name::of("or"))});
+      return arena.add<ExprCall>(pos, e, arena.slice<Expr *>({arena.add<ExprVar>(op, Name::of("or"))}));
     }
     return e;
   }
 
   AttrPath parseAttrPath() {
-    AttrPath path;
+    composite::Grow<AttrName> path;
     while (true) {
-      const std::string expecting = "identifier or 'or' or '${' or '\"'";
-      if (cur().t == T_ID) path.emplace_back(nameOf(take()));
-      else if (cur().t == T_OR_KW) { take(); path.emplace_back(Name::of("or")); }
-      else if (atChar('"') || cur().t == T_DOLLAR_CURLY) path.push_back(parseStringAttr());
-      else unexpected(expecting);
+      if (cur().t == T_ID) path.push(arena.region(), AttrName(nameOf(take())));
+      else if (cur().t == T_OR_KW) { take(); path.push(arena.region(), AttrName(Name::of("or"))); }
+      else if (atChar('"') || cur().t == T_DOLLAR_CURLY) path.push(arena.region(), parseStringAttr());
+      else unexpected("identifier or 'or' or '${' or '\"'");
       if (atChar('.')) { take(); continue; }
       break;
     }
-    return path;
+    return path.done();
   }
 
   AttrName parseStringAttr() {
@@ -898,21 +943,37 @@ private:
 
   /// string_parts after an opening '"'; stops before the closing '"'.
   Expr *parseStringParts(Pos pos) {
-    std::vector<std::pair<Pos, Expr *>> parts;
+    composite::Grow<StrPart> parts;
     bool interpolated = false;
     Name single;
     bool haveSingle = false;
+    if (cur().t == T_STR) {
+      // The common string: one run of text, then the closing quote.  No parts, and no node but the result.
+      Token t = take();
+      if (atChar('"')) {
+        auto *s = arena.add<ExprString>(nameOf(t));
+        s->pos = pos;
+        return s;
+      }
+      parts.push(arena.region(), StrPart{t.pos, arena.add<ExprString>(nameOf(t))});
+      single = nameOf(t);
+      haveSingle = true;
+    } else if (atChar('"')) {
+      auto *s = arena.add<ExprString>(Name::of(""));
+      s->pos = pos;
+      return s;
+    }
     while (true) {
       if (cur().t == T_STR) {
         Token t = take();
-        parts.emplace_back(t.pos, arena.add<ExprString>(nameOf(t)));
+        parts.push(arena.region(), StrPart{t.pos, arena.add<ExprString>(nameOf(t))});
         single = nameOf(t);
         haveSingle = true;
       } else if (cur().t == T_DOLLAR_CURLY) {
         Pos p = take().pos;
         Expr *e = parseExpr();
         expectChar('}');
-        parts.emplace_back(p, e);
+        parts.push(arena.region(), StrPart{p, e});
         interpolated = true;
       } else {
         break;
@@ -924,7 +985,7 @@ private:
       s->pos = pos;
       return s;
     }
-    return arena.add<ExprConcatStrings>(pos, true, std::move(parts));
+    return arena.add<ExprConcatStrings>(pos, true, parts.done());
   }
 
   Expr *parseSimple() {
@@ -963,34 +1024,35 @@ private:
       Token pt = take();
       Expr *start = makePath(pt);
       if (cur().t == T_PATH_END) { take(); return start; }
-      std::vector<std::pair<Pos, Expr *>> parts{{pos, start}};
+      composite::Grow<StrPart> parts;
+      parts.push(arena.region(), StrPart{pos, start});
       while (true) {
         if (cur().t == T_STR) {
           Token s = take();
-          parts.emplace_back(s.pos, arena.add<ExprString>(nameOf(s)));
+          parts.push(arena.region(), StrPart{s.pos, arena.add<ExprString>(nameOf(s))});
         } else if (cur().t == T_DOLLAR_CURLY) {
           Pos p = take().pos;
           Expr *e = parseExpr();
           expectChar('}');
-          parts.emplace_back(p, e);
+          parts.push(arena.region(), StrPart{p, e});
         } else {
           break;
         }
       }
       if (cur().t != T_PATH_END) unexpected();
       take();
-      return arena.add<ExprConcatStrings>(pos, false, std::move(parts));
+      return arena.add<ExprConcatStrings>(pos, false, parts.done());
     }
     case T_SPATH: {
       Name s = nameOf(take());
       Name path = Name::of(s.str().substr(1, s.size - 2)); // the text between the angle brackets
-      return arena.add<ExprCall>(pos, var("__findFile"),
-                                 std::vector<Expr *>{var("__nixPath"), arena.add<ExprString>(path)});
+      return arena.add<ExprCall>(pos, var("__findFile"), arena.slice<Expr *>({var("__nixPath"), arena.add<ExprString>(path)}));
     }
     case T_URI: {
-      diagnose(opts.lintUrls, "lint-url-literals",
-               std::string("URL literals are ") + (opts.lintUrls == Lint::Fatal ? "disallowed" : "discouraged") +
-                   ". Consider using a string literal \"" + str(t) + "\" instead", pos);
+      if (opts.lintUrls != Lint::Ignore) // the message is built only when something will read it
+        diagnose(opts.lintUrls, "lint-url-literals",
+                 std::string("URL literals are ") + (opts.lintUrls == Lint::Fatal ? "disallowed" : "discouraged") +
+                     ". Consider using a string literal \"" + str(t) + "\" instead", pos);
       auto *e = arena.add<ExprString>(nameOf(take()));
       e->pos = pos;
       return e;
@@ -1003,7 +1065,7 @@ private:
       expectChar('}');
       a->recursive = true;
       a->pos = pos;
-      return arena.add<ExprSelect>(Pos{}, a, AttrPath{AttrName(Name::of("body"))}, nullptr);
+      return arena.add<ExprSelect>(Pos{}, a, arena.slice<AttrName>({AttrName(Name::of("body"))}), nullptr);
     }
     case T_REC: {
       take();
@@ -1037,11 +1099,13 @@ private:
       if (t.ch == '[') {
         take();
         auto *l = arena.add<ExprList>(pos);
+        composite::Grow<Expr *> elems;
         while (!atChar(']')) {
           if (!startsSelect()) unexpected();
-          l->elems.push_back(parseSelect());
+          elems.push(arena.region(), parseSelect());
         }
         take();
+        l->elems = elems.done();
         return l;
       }
       unexpected();
@@ -1059,25 +1123,30 @@ private:
   }
 
   Expr *makePath(const Token &t) {
-    std::string lit = str(t);
-    if (t.t == T_HPATH)
-      diagnose(opts.lintAbsolutePaths, "lint-absolute-path-literals",
-               "home path literals are not portable. Consider replacing path literal '" + lit +
-                   "' by a string, relative path, or parameter", t.pos);
-    else if (lit[0] == '/')
-      diagnose(opts.lintAbsolutePaths, "lint-absolute-path-literals",
-               "absolute path literals are not portable. Consider replacing path literal '" + lit +
-                   "' by a string, relative path, or parameter", t.pos);
-    else if (lit[0] != '.')
-      diagnose(opts.lintShortPaths, "lint-short-path-literals",
-               "relative path literal '" + lit + "' should be prefixed with '.' for clarity: './" + lit + "'", t.pos);
+    std::string_view lit = lx.text(t); // a slice of the input; the messages below copy it, and are built only when linting
     if (t.t == T_HPATH) {
-      std::string path = opts.home + lit.substr(1);
+      if (opts.lintAbsolutePaths != Lint::Ignore)
+        diagnose(opts.lintAbsolutePaths, "lint-absolute-path-literals",
+                 "home path literals are not portable. Consider replacing path literal '" + std::string(lit) +
+                     "' by a string, relative path, or parameter", t.pos);
+    } else if (lit[0] == '/') {
+      if (opts.lintAbsolutePaths != Lint::Ignore)
+        diagnose(opts.lintAbsolutePaths, "lint-absolute-path-literals",
+                 "absolute path literals are not portable. Consider replacing path literal '" + std::string(lit) +
+                     "' by a string, relative path, or parameter", t.pos);
+    } else if (lit[0] != '.') {
+      if (opts.lintShortPaths != Lint::Ignore)
+        diagnose(opts.lintShortPaths, "lint-short-path-literals",
+                 "relative path literal '" + std::string(lit) + "' should be prefixed with '.' for clarity: './" +
+                     std::string(lit) + "'", t.pos);
+    }
+    if (t.t == T_HPATH) {
+      std::string path = opts.home + std::string(lit.substr(1));
       return arena.add<ExprPath>(Name::persist(path));
     }
     std::string path;
     if (lit[0] == '/') path = canonPath(lit);
-    else path = canonPath(origin->baseDir + "/" + lit);
+    else path = canonPath(origin->baseDir + "/" + std::string(lit));
     if (lit.size() > 1 && lit.back() == '/') path += '/';
     auto *e = arena.add<ExprPath>(Name::persist(path));
     e->pos = t.pos;
@@ -1111,7 +1180,7 @@ private:
         }
       }
     }
-    std::vector<std::pair<Pos, Expr *>> es2;
+    composite::Grow<StrPart> es2;
     atStartOfLine = true;
     size_t curDropped = 0;
     size_t n = es.size();
@@ -1119,7 +1188,7 @@ private:
       if (auto *e = std::get_if<Expr *>(&it->second)) {
         atStartOfLine = false;
         curDropped = 0;
-        es2.emplace_back(it->first, *e);
+        es2.push(arena.region(), StrPart{it->first, *e});
         continue;
       }
       const Token &t = std::get<Token>(it->second);
@@ -1146,11 +1215,11 @@ private:
         if (p != std::string::npos && s2.find_first_not_of(' ', p + 1) == std::string::npos)
           s2 = s2.substr(0, p + 1);
       }
-      if (!s2.empty()) es2.emplace_back(it->first, arena.add<ExprString>(Name::persist(s2)));
+      if (!s2.empty()) es2.push(arena.region(), StrPart{it->first, arena.add<ExprString>(Name::persist(s2))});
     }
     if (es2.empty()) return arena.add<ExprString>(Name::of(""));
-    if (es2.size() == 1 && es2[0].second->kind == ExprKind::String) return es2[0].second;
-    return arena.add<ExprConcatStrings>(pos, true, std::move(es2));
+    if (es2.size() == 1 && es2[0].e->kind == ExprKind::String) return es2[0].e;
+    return arena.add<ExprConcatStrings>(pos, true, es2.done());
   }
 
   // binds: sequence of `attrpath = expr;` / `inherit ...;`
@@ -1166,7 +1235,7 @@ private:
           take();
           from = parseExpr();
           expectChar(')');
-          attrs->inheritFromExprs.push_back(from);
+          attrs->inheritFromExprs.push(arena.region(), from);
           fromRef = arena.add<ExprInheritFrom>(from->pos, attrs->inheritFromExprs.size() - 1);
         }
         while (!atChar(';')) {
@@ -1181,19 +1250,18 @@ private:
           } else {
             unexpected();
           }
-          auto it = attrs->attrs.find(name);
-          if (it != attrs->attrs.end())
-            error("attribute '" + displayName(name.str()) + "' already defined at " + fmtPos(it->second.pos), apos);
+          if (Entry *prev = findAttr(attrs, name))
+            error("attribute '" + displayName(name.str()) + "' already defined at " + fmtPos(prev->def.pos), apos);
           ExprAttrs::AttrDef def;
           def.pos = apos;
           if (fromRef) {
-            def.e = arena.add<ExprSelect>(apos, fromRef, AttrPath{AttrName(name)}, nullptr);
+            def.e = arena.add<ExprSelect>(apos, fromRef, arena.slice<AttrName>({AttrName(name)}), nullptr);
             def.kind = ExprAttrs::DefKind::InheritedFrom;
           } else {
             def.e = arena.add<ExprVar>(apos, name);
             def.kind = ExprAttrs::DefKind::Inherited;
           }
-          attrs->attrs.emplace(name, def);
+          appendAttr(attrs, name, def);
         }
         take();
         continue;
@@ -1204,7 +1272,7 @@ private:
         expectChar('=');
         Expr *e = parseExpr();
         expectChar(';');
-        addAttr(attrs, std::move(path), apos, e);
+        addAttr(attrs, path, apos, e);
         continue;
       }
       break;
@@ -1219,7 +1287,7 @@ private:
     return os.str();
   }
 
-  std::string showPath(const AttrPath &path) {
+  std::string showPath(llvm::ArrayRef<AttrName> path) {
     std::ostringstream os;
     bool first = true;
     for (auto &a : path) {
@@ -1231,8 +1299,58 @@ private:
     return os.str();
   }
 
-  void dupAttr(const AttrPath &path, Pos pos, Pos prev) {
+  void dupAttr(llvm::ArrayRef<AttrName> path, Pos pos, Pos prev) {
     error("attribute '" + showPath(path) + "' already defined at " + fmtPos(prev), pos);
+  }
+
+  // The attributes of a set while it is being parsed (ExprAttrs::written).  A set of a handful is searched by comparing;
+  // a larger one has an index of its own, open addressing over the positions in `written`.
+  using Entry = ExprAttrs::Entry;
+  static constexpr uint32_t kScan = 8;
+
+  static bool sameName(const Name &a, const Name &b) {
+    return a.size == b.size && (a.size == 0 || std::memcmp(a.data, b.data, a.size) == 0);
+  }
+  static uint32_t hashOf(const Name &n) {
+    return static_cast<uint32_t>(llvm::xxh3_64bits(llvm::ArrayRef<uint8_t>(reinterpret_cast<const uint8_t *>(n.data), n.size)));
+  }
+
+  Entry *findAttr(ExprAttrs *a, const Name &n) {
+    if (!a->index) {
+      for (Entry &e : a->written)
+        if (sameName(e.name, n)) return &e;
+      return nullptr;
+    }
+    for (uint32_t h = hashOf(n) & a->indexMask;; h = (h + 1) & a->indexMask) {
+      uint32_t k = a->index[h];
+      if (!k) return nullptr;
+      Entry &e = a->written[k - 1];
+      if (sameName(e.name, n)) return &e;
+    }
+  }
+
+  void indexEntry(ExprAttrs *a, uint32_t k) { // k: the position in `written`, plus one
+    uint32_t h = hashOf(a->written[k - 1].name) & a->indexMask;
+    while (a->index[h]) h = (h + 1) & a->indexMask;
+    a->index[h] = k;
+  }
+
+  void buildIndex(ExprAttrs *a) {
+    uint32_t count = a->written.size(), cap = 32;
+    while (cap < count * 4) cap *= 2; // at most a quarter full when built, a half before it is built again
+    a->index = arena.region().Allocate<uint32_t>(cap);
+    std::memset(a->index, 0, cap * sizeof(uint32_t));
+    a->indexMask = cap - 1;
+    for (uint32_t k = 1; k <= count; k++) indexEntry(a, k);
+  }
+
+  /// Add an attribute that the set does not have.
+  void appendAttr(ExprAttrs *a, const Name &n, ExprAttrs::AttrDef def) {
+    a->written.push(arena.region(), Entry{n, def});
+    uint32_t count = a->written.size();
+    a->ordered = count <= 1;
+    if (a->index && count * 2 <= a->indexMask + 1) indexEntry(a, count);
+    else if (count > kScan) buildIndex(a);
   }
 
   void addAttr(ExprAttrs *attrs, AttrPath path, Pos pos, Expr *e) {
@@ -1240,62 +1358,62 @@ private:
     for (; i + 1 < path.size(); i++) {
       ExprAttrs *nested;
       if (!path[i].computed()) {
-        auto j = attrs->attrs.find(path[i].symbol);
-        if (j != attrs->attrs.end()) {
-          nested = j->second.e->kind == ExprKind::Attrs ? static_cast<ExprAttrs *>(j->second.e) : nullptr;
-          if (!nested || j->second.kind != ExprAttrs::DefKind::Plain) {
-            AttrPath p2(path.begin(), path.begin() + i + 1);
-            dupAttr(p2, pos, j->second.pos);
-          }
+        Entry *j = findAttr(attrs, path[i].symbol);
+        if (j) {
+          nested = j->def.e->kind == ExprKind::Attrs ? static_cast<ExprAttrs *>(j->def.e) : nullptr;
+          if (!nested || j->def.kind != ExprAttrs::DefKind::Plain)
+            dupAttr(llvm::ArrayRef<AttrName>(path.data(), i + 1), pos, j->def.pos);
         } else {
           nested = arena.add<ExprAttrs>();
-          attrs->attrs[path[i].symbol] = ExprAttrs::AttrDef{nested, pos};
+          appendAttr(attrs, path[i].symbol, ExprAttrs::AttrDef{nested, pos});
         }
       } else {
         nested = arena.add<ExprAttrs>();
-        attrs->dynamicAttrs.push_back({path[i].expr, nested, pos});
+        attrs->dynamicAttrs.push(arena.region(), ExprAttrs::DynamicAttrDef{path[i].expr, nested, pos});
       }
       attrs = nested;
     }
     if (!path[i].computed()) {
-      addAttrSym(attrs, path, path[i].symbol, ExprAttrs::AttrDef{e, pos});
+      addAttrSym(attrs, llvm::ArrayRef<AttrName>(path.data(), path.size()), path[i].symbol, ExprAttrs::AttrDef{e, pos});
     } else {
-      attrs->dynamicAttrs.push_back({path[i].expr, e, pos});
+      attrs->dynamicAttrs.push(arena.region(), ExprAttrs::DynamicAttrDef{path[i].expr, e, pos});
     }
   }
 
-  void addAttrSym(ExprAttrs *attrs, AttrPath &path, const Name &sym, ExprAttrs::AttrDef def) {
-    auto j = attrs->attrs.find(sym);
-    if (j != attrs->attrs.end()) {
+  void addAttrSym(ExprAttrs *attrs, llvm::ArrayRef<AttrName> path, const Name &sym, ExprAttrs::AttrDef def) {
+    Entry *j = findAttr(attrs, sym);
+    if (j) {
       auto *ae = def.e->kind == ExprKind::Attrs ? static_cast<ExprAttrs *>(def.e) : nullptr;
-      auto *jAttrs = j->second.e->kind == ExprKind::Attrs && j->second.kind == ExprAttrs::DefKind::Plain
-                         ? static_cast<ExprAttrs *>(j->second.e) : nullptr;
+      auto *jAttrs = j->def.e->kind == ExprKind::Attrs && j->def.kind == ExprAttrs::DefKind::Plain
+                         ? static_cast<ExprAttrs *>(j->def.e) : nullptr;
       if (jAttrs && ae) {
         size_t base = jAttrs->inheritFromExprs.size();
-        for (auto &ad : ae->attrs) {
-          if (ad.second.kind == ExprAttrs::DefKind::InheritedFrom) {
-            auto *sel = static_cast<ExprSelect *>(ad.second.e);
+        std::vector<AttrName> full(path.begin(), path.end()); // the path to the merged set, for the messages
+        for (const Entry &ad : ae->entries()) { // by name, so the duplicate reported first is the least
+          if (ad.def.kind == ExprAttrs::DefKind::InheritedFrom) {
+            auto *sel = static_cast<ExprSelect *>(ad.def.e);
             auto *from = static_cast<ExprInheritFrom *>(sel->e);
             from->displ += base;
           }
-          path.emplace_back(ad.first);
-          addAttrSym(jAttrs, path, ad.first, ad.second);
-          path.pop_back();
+          full.emplace_back(ad.name);
+          addAttrSym(jAttrs, full, ad.name, ad.def);
+          full.pop_back();
         }
-        ae->attrs.clear();
-        for (auto &d : ae->dynamicAttrs) jAttrs->dynamicAttrs.push_back(d);
-        ae->dynamicAttrs.clear();
-        for (auto *x : ae->inheritFromExprs) jAttrs->inheritFromExprs.push_back(x);
-        ae->inheritFromExprs.clear();
+        ae->written = composite::Grow<Entry>();
+        ae->index = nullptr;
+        for (auto &d : ae->dynamicAttrs) jAttrs->dynamicAttrs.push(arena.region(), d);
+        ae->dynamicAttrs = composite::Grow<ExprAttrs::DynamicAttrDef>();
+        for (auto *x : ae->inheritFromExprs) jAttrs->inheritFromExprs.push(arena.region(), x);
+        ae->inheritFromExprs = composite::Grow<Expr *>();
       } else {
-        dupAttr(path, def.pos, j->second.pos);
+        dupAttr(path, def.pos, j->def.pos);
       }
     } else {
       if (def.e->kind == ExprKind::Lambda) {
         auto *l = static_cast<ExprLambda *>(def.e);
         if (l->name.isNull()) l->name = sym;
       }
-      attrs->attrs.emplace(sym, def);
+      appendAttr(attrs, sym, def);
     }
   }
 };
