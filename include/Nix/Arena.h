@@ -38,32 +38,27 @@ inline size_t pageSize() {
   return page;
 }
 
-/// One helper thread that makes ranges of fresh memory resident.
+/// One helper thread that makes ranges of fresh memory resident.  A request is admitted to its queue; at exit the queue
+/// is closed (the stop request), the thread empties it and is joined (PRELOAD: drain, not detach).
 struct Prefaulter {
   static Prefaulter &get() {
-    static Prefaulter *p = new Prefaulter(); // never destroyed: the thread may outlive main()
-    return *p;
+    static Prefaulter p;
+    return p;
   }
   void request(char *p, size_t n) {
     if (disabled) return;
     {
       std::lock_guard<std::mutex> g(m);
       queue.emplace_back(p, n);
-      if (!started) {
-        started = true;
-        std::thread([this] { run(); }).detach();
-      }
     }
     cv.notify_one();
   }
-
-  Prefaulter() : disabled(getenv("MLNIX_NO_PREFAULT") != nullptr) {}
-  void run() {
+  void run(std::stop_token st) {
     for (;;) {
       std::pair<char *, size_t> job;
       {
         std::unique_lock<std::mutex> g(m);
-        cv.wait(g, [this] { return !queue.empty(); });
+        if (!cv.wait(g, st, [this] { return !queue.empty(); })) return; // closed, and empty
         job = queue.front();
         queue.pop_front();
       }
@@ -78,11 +73,11 @@ struct Prefaulter {
     for (size_t off = 0; off < n; off += page)
       __atomic_fetch_add(reinterpret_cast<uint8_t *>(p + off), uint8_t(0), __ATOMIC_RELAXED);
   }
+  const bool disabled = getenv("MLNIX_NO_PREFAULT") != nullptr;
   std::mutex m;
-  std::condition_variable cv;
+  std::condition_variable_any cv;
   std::deque<std::pair<char *, size_t>> queue;
-  bool started = false;
-  const bool disabled;
+  std::jthread worker = disabled ? std::jthread() : std::jthread([this](std::stop_token st) { run(st); }); // last: built last, stopped first
 };
 
 } // namespace arena_detail
