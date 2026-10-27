@@ -5,6 +5,11 @@ interlocking dialect team-ups." Here is the examination, against what is measure
 against what the families promise. The rule stays: a team-up needs a consumer, and it has to win
 its interleaved A/B with identical result hashes or it goes in the failures column.
 
+The figures below that came from `MLNIX_STATS` (calls per lambda, thunks per kind of op, call-site monomorphism, literal-set
+shapes, frame slots, the resolution ladder) were read from counters that are no longer in the evaluator: they are in the history
+before the commit that cut them (`git log -S statCall`), and the tool keeps the op histogram, the `//` layers, the lowering and
+minting times and the lambda pools.
+
 ## What the time actually goes to (NixOS toplevel, hot, this branch)
 
     MLIR generation of ~1.1M ops (uniquing of locations/strings, ~20% of a cold profile;
