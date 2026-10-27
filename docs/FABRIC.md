@@ -175,6 +175,12 @@ Fresh profile of the NixOS toplevel run (2 s main-thread sample, 1449 busy sampl
    `lookup()` instead of probing twice: +2.5% / +0.4% (demand; CPU -0.3% / +0.6%). The cost that is
    left is more likely the memory behind the slot (frames 465 MB, Values 842 MB, the first item of this
    list); that is an inference from the two results, not a measurement.
+   A third form lost too (branch `exp/lookup-fast`): `lookup()` as an inline probe-and-walk with its first-touch path out of line,
+   and `operand()` / `evalTail()` probing once instead of twice. Demand +3.3% / +1.3%, eager +1.5% / +0.7% wall (toplevel /
+   nixpkgs-73, 17 interleaved runs, identical hashes). What the counts say about the ceiling (toplevel, demand): 20.9M `lookup`,
+   9.9M `operand` and 7.1M `evalTail` calls, about 38M probes of `slotMap`, for the ~190 ms the line profile charges them: about 5 ns
+   a call. The table is mostly cache-resident, so even a free probe is worth a few percent, and the 15.4M `evalOp` and 30.8M
+   `forceValue` calls are 9 ns and 1.6 ns each.
 3. Locations (done): 6.2% was FileLineColRange uniquing, one per op; sampled again on the demand
    schedule it was 143 of 269 ms of uniquing per run. A position is now a 64-bit word in the op's
    `pos` property (`include/Nix/Pos.h`, `docs/COMPOSITE.md`): wall -9.2% / -8.7% (demand) and

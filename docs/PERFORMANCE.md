@@ -17,20 +17,23 @@ its interleaved A/B with identical result hashes or it goes in the failures colu
 
 Two runs of the same expression touch the same files; cold, 29% of the run was the disk (docs/IO.md).
 
-## Where a run goes now (Mac, demand schedule, nixos-toplevel, after the arena and the names in the tree)
+## Where a run goes now (Mac, demand schedule, nixos-toplevel, after the region and the 24-byte Value)
 
-`/usr/bin/sample` at 1 ms, 3 runs, the evaluator thread only (1,436 ms busy a run; the arena's prefault thread is left out), every
+`/usr/bin/sample` at 1 ms, 3 runs, the evaluator thread only (1,288 ms busy a run; the arena's prefault thread is left out), every
 sample charged to the innermost phase on its stack:
 
-    eval            59.7%   evalOp / force 17.8, lookup / slotMap 13.0, other 10.7, symbols / strings 6.9,
-                            malloc / free 6.3, attrsets 4.4
-    parse           17.9%   lexer and parser 12.5 (the token pull, Parser::fill, is 10.5 of it), malloc / free 2.2, file I/O 1.3
-    store / drv     11.8%   the forcing a derivation does is charged to eval; this is the .drv text, hashing, files
-    demand mint      8.4%   MLIR uniquing 1.7, op creation 1.4
-    file lowering    2.2%
+    eval            71.3%   evalOp / force 21.6, lookup / slotMap 16.5, other 12.4, symbols / strings 8.6,
+                            malloc / free 6.4, attrsets 5.3
+    store / drv     10.7%   the forcing a derivation does is charged to eval; this is the .drv text, hashing, files
+    demand mint      8.3%   MLIR uniquing 2.3, op creation 1.1
+    parse            7.1%   lexer and parser 4.5, file I/O 1.3 (was 17.9% before the tree was a region)
+    file lowering    2.6%
 
-The earlier table of this section put the parse at 12.5%. Timing the parser alone over the 2,889 files the run touches (33.8 MB)
-gives 270.6 ms, which is this table's 258 ms and not that table's 166 ms, so this one replaces it.
+By line (a debug build, the `.dSYM` next to it, `sample` prints the line of every frame): the hottest are the three `slotMap.find`
+lines of `lookup`, `operand` and `evalTail` (about 7% together), the lexer (2.6%), and the `std::function` call into a primop
+(1.6%). What a run does, counted: 5.39M frames, 20.9M `lookup` + 9.9M `operand` + 7.1M `evalTail` calls, 15.4M `evalOp`, 30.8M
+`forceValue`; 14.4M `Value`s, 1.64M attribute sets. Arena by kind (before the 24-byte Value): Values 461 MB, attribute arrays 315 MB,
+frames 315 MB, strings 39 MB, list cells 14 MB; the syntax trees 186 MB and malloc 287 MB outside it.
 
 Footprint, 1.57 GB peak: the evaluator's bump arena is 1,147 MB of it, and `MLNIX_STATS` splits it:
 
