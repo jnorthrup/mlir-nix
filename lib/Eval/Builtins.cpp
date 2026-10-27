@@ -481,6 +481,7 @@ void registerBuiltins(EvalState &state) {
     Value *rest = st.allocValue();
     st.mkString(*rest, any ? s.substr(lastEnd) : s);
     out.push_back(rest);
+    MLNIX_FILL(st, EvalState::FillSplit, out.size());
     st.mkList(v, out.size());
     for (size_t i = 0; i < out.size(); i++) v.list.elems[i] = out[i];
   });
@@ -737,6 +738,7 @@ void registerBuiltins(EvalState &state) {
       st.forceAttrs(e, pos, "while evaluating an element in the list passed as second argument to builtins.catAttrs");
       if (const Attr *a = e.attrs->get(name)) res.push_back(a->value);
     }
+    MLNIX_FILL(st, EvalState::FillCatAttrs, res.size());
     st.mkList(v, res.size());
     for (size_t i = 0; i < res.size(); i++) v.list.elems[i] = res[i];
   });
@@ -845,6 +847,7 @@ void registerBuiltins(EvalState &state) {
       st.forceList(l, pos, "while evaluating a value of the list passed to builtins.concatLists");
       for (size_t j = 0; j < l.listSize(); j++) res.push_back(l.list.elems[j]);
     }
+    MLNIX_FILL(st, EvalState::FillConcatLists, res.size());
     st.mkList(v, res.size());
     for (size_t i = 0; i < res.size(); i++) v.list.elems[i] = res[i];
   });
@@ -857,6 +860,7 @@ void registerBuiltins(EvalState &state) {
       st.forceList(*r, pos, "while evaluating the return value of the function passed to builtins.concatMap");
       for (size_t j = 0; j < r->listSize(); j++) res.push_back(r->list.elems[j]);
     }
+    MLNIX_FILL(st, EvalState::FillConcatMap, res.size());
     st.mkList(v, res.size());
     for (size_t i = 0; i < res.size(); i++) v.list.elems[i] = res[i];
   });
@@ -872,6 +876,7 @@ void registerBuiltins(EvalState &state) {
       else same = false;
     }
     if (same) { v = *args[1]; return; }
+    MLNIX_FILL(st, EvalState::FillFilter, res.size());
     st.mkList(v, res.size());
     for (size_t i = 0; i < res.size(); i++) v.list.elems[i] = res[i];
   });
@@ -940,6 +945,7 @@ void registerBuiltins(EvalState &state) {
       return st.forceBool(r, pos, "while evaluating the return value of the sorting function passed to builtins.sort");
     };
     std::stable_sort(elems.begin(), elems.end(), cmp);
+    MLNIX_FILL(st, EvalState::FillSort, n);
     st.mkList(v, n);
     for (size_t i = 0; i < n; i++) v.list.elems[i] = elems[i];
   });
@@ -1010,6 +1016,7 @@ void registerBuiltins(EvalState &state) {
       st.forceList(r, pos, "while evaluating the return value of the `operator` passed to builtins.genericClosure");
       for (size_t i = 0; i < r.listSize(); i++) queue.push_back(r.list.elems[i]);
     }
+    MLNIX_FILL(st, EvalState::FillGenericClosure, res.size());
     st.mkList(v, res.size());
     for (size_t i = 0; i < res.size(); i++) v.list.elems[i] = res[i];
   });
