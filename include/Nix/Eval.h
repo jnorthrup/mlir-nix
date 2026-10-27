@@ -41,9 +41,11 @@ namespace nixev {
 
 using Symbol = uint32_t;
 
+inline uint64_t g_nSymCreate, g_nFormalProbe, g_nLambdaCalls, g_nLambdaFormalCalls;
 class SymbolTable {
 public:
   Symbol create(llvm::StringRef s) {
+    g_nSymCreate++;
     auto it = map.find(s);
     if (it != map.end()) return it->second;
     Symbol id = names.size();

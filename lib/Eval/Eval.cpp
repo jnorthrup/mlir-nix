@@ -280,6 +280,7 @@ void EvalState::printStats() {
     }
     llvm::errs() << "== frames: " << statFrames.size() << ", " << bytes / 1000000 << " MB, slots " << slots << ", ever filled " << filled
                  << " (" << llvm::format("%.1f", 100.0 * filled / std::max<uint64_t>(slots, 1)) << "%)\n";
+    llvm::errs() << "== symbols: create " << g_nSymCreate << ", formal probes " << g_nFormalProbe << ", lambda calls " << g_nLambdaCalls << ", with formals " << g_nLambdaFormalCalls << "\n";
     // Lowered against evaluated, per kind.  Literals and closures are served by lookup() without evalOp, so
     // their rows (nix.str, nix.int, nix.path, nix.lambda, nix.bool) read low; the rest is the dead code.
     llvm::StringMap<size_t> ev;
@@ -722,6 +723,8 @@ RegionInfo *EvalState::bodyOf(nixfe::BodyIndex idx) {
 
 void EvalState::callLambda(Value &fun, Value *arg, Value &out, PosPtr pos) {
   auto lam = cast<nd::LambdaOp>(fun.thunk.op);
+  g_nLambdaCalls++;
+  if (lam.getFormals()) g_nLambdaFormalCalls++;
   std::optional<uint64_t> deferred = lam.getBodyIndex();
   RegionInfo *ri = deferred ? bodyOf(nixfe::BodyIndex(*deferred)) : regionInfo(&lam.getBody());
   Frame *f = newFrame(ri, fun.thunk.env);
@@ -741,6 +744,7 @@ void EvalState::callLambda(Value &fun, Value *arg, Value &out, PosPtr pos) {
     size_t nFound = 0;
     for (size_t i = 0; i < formals->size(); i++) {
       auto name = cast<StringAttr>((*formals)[i]).getValue();
+      g_nFormalProbe++;
       if (arg->attrs->get(symbols.create(name))) nFound++;
       else if (!defs[i])
         throw EvalError(fnName() + " called without required argument '" + name.str() + "'", pos)
