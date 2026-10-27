@@ -176,9 +176,10 @@ struct Frame {
 
 /// Where an SSA value lives: its region, its frame slot, and whether its single
 /// strict/tail consumer evaluates it in place (NixDialect::evaluatesInPlace).
+inline constexpr unsigned kNoSlot = ~0u;
 struct Slot {
   RegionInfo *ri;
-  unsigned idx;
+  unsigned idx; // kNoSlot: the value is evaluated in place and has no cell
   bool inPlace;
 };
 
