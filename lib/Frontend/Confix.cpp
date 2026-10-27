@@ -37,7 +37,7 @@ struct Scanner : Rules {
     if (src.size() >= UINT32_MAX) return false; // segments are 32-bit
     st.assign(1, S_INITIAL);
     const size_t n = src.size();
-    bands.reserveFor(n);
+    bands.rows.reserve(n / 48 + 16); // about one band per 56 bytes of nixpkgs
     for (;;) {
       if (p >= n) {
         // At the end of the input a path ends (the lexer emits its end token), and a path with a trailing slash is an error.
