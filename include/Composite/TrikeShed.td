@@ -16,6 +16,7 @@
 //   Series<T>         Join<Int, (Int) -> T>                  !trikeshed.series<T>, trikeshed.series / size / at
 //   xs α f            the lazy projection                    trikeshed.alpha
 //   joins, combine    side by side, one after the other      trikeshed.joins / trikeshed.combine
+//   select            the rows of two series by a selection  trikeshed.select: `row j side`, a shadowing top as a view
 //   ↺                 the constant anchor                    trikeshed.anchor
 //   Cursor            Series<RowVec> over MutableSeries      !trikeshed.cursor<schema, [columns]>
 //
@@ -168,6 +169,23 @@ def TS_CombineOp : TS_Op<"combine", [Pure]> {
   let description = [{
     Series.h: `a + b` and `Combine`.  The size is counted once, in 64 bits; a combine is not indexed but drained
     part by part (`drain`), each part in one loop.
+  }];
+}
+
+def TS_SelectOp : TS_Op<"select", [Pure]> {
+  let summary = "the rows of two series chosen by a series of `row j side` words: a shadowing top, as a view";
+  let arguments = (ins TS_SeriesType:$a, TS_SeriesType:$b, TS_SeriesType:$sel);
+  let results = (outs TS_SeriesType:$result);
+  let description = [{
+    Series.h: `select(a, b, sel)`.  Word i of `sel` is `row j side` (Pack.h `TwInt`): side 0 reads a's row, side 1
+    reads b's.  The rows stay where they lie and the selection costs 8 bytes a row, against a row apiece for a copy.
+
+    This is how `base // top` is read (Nix/Eval.h, Bindings::Layer): `top` shadowing `base`, as a view, so a layered
+    attribute set is never the flattened union it used to be.  And it is the composition the algebra was missing
+    between `joins` (side by side) and `combine` (one after the other): a series of the rows of two others, in one
+    order, chosen by a third.
+
+    Laws: size(select(a, b, sel)) = size(sel); at(select(a, b, sel), i) = at(sel[i].second ? b : a, sel[i].first).
   }];
 }
 

@@ -36,6 +36,8 @@
 #include <utility>
 #include <vector>
 
+#include "Composite/Pack.h" // TwInt: the `row j side` word of a selection
+
 namespace composite {
 
 //===----------------------------------------------------------------------===//
@@ -133,6 +135,23 @@ template <class Parts, class T> constexpr T *drain(const Combine<Parts> &c, T *o
 }
 
 //===----------------------------------------------------------------------===//
+// select: a series of the rows of two series, chosen by a third
+//===----------------------------------------------------------------------===//
+
+/// The rows of `a` and `b` chosen by `sel`: word i is `row j side` (TwInt), side 0 for a's row and 1 for b's.  This is a
+/// shadowing top read where its rows lie -- `base // top` -- and it costs 8 bytes a row of selection against a row apiece
+/// for a copy.  Between `joins` (side by side) and `combine` (one after the other): the rows of two series in one order,
+/// chosen by a third.  Both sides must yield the same type; size(select(a, b, sel)) is size(sel).
+template <class A, class B, class S> constexpr auto select(A &&a, B &&b, S &&sel) {
+  uint32_t n = uint32_t(sel.size());
+  return n |j| [l = Held<A>{std::forward<A>(a)}, r = Held<B>{std::forward<B>(b)},
+                s = Held<S>{std::forward<S>(sel)}](uint32_t i) -> decltype(auto) {
+    join::TwInt w = s.s[i];
+    return w.second() ? r.s[w.first()] : l.s[w.first()];
+  };
+}
+
+//===----------------------------------------------------------------------===//
 // MutableSeries, ↺ and Cursor: where a Series is mutated, and says so
 //===----------------------------------------------------------------------===//
 
@@ -209,7 +228,17 @@ constexpr bool lawsHold() {
   for (int x : xs) sum += x;
   return project && fuse && lo == 1 && hi == 2 && sum == 30 && (xs |α| inc).size() == 3;
 }
+constexpr bool selectHolds() {
+  int a[] = {10, 30, 50}, b[] = {20};
+  join::TwInt sel[] = {join::TwInt(0, 0), join::TwInt(0, 1), join::TwInt(1, 0)}; // a[0], b[0], a[1]
+  auto m = select(series(a, 3), series(b, 1), series(sel, 3));
+  int sum = 0;
+  for (int x : m) sum += x;
+  return m.size() == 3 && m[0] == 10 && m[1] == 20 && m[2] == 30 && sum == 60;
+}
 static_assert(lawsHold(), "the Series laws do not hold");
+static_assert(selectHolds(), "the select law does not hold: a row is read where it lies, by row j side");
+
 
 } // namespace composite
 

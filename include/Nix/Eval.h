@@ -85,7 +85,7 @@ struct Bindings {
   struct Layer {
     Bindings *top, *base, *flat;
     Arena *alloc; // where flat() allocates
-    cp::MutableSeries<uint32_t> sel; // the rows of the layer, in name order
+    cp::MutableSeries<join::TwInt> sel; // the rows of the layer, in name order: `row j side`, side 1 for top
   };
   static inline uint64_t flattened = 0; // MLNIX_STATS
   static inline uint64_t merged = 0, mergedCells = 0; // MLNIX_STATS: flat sets made by mergeBindings, and their cells
@@ -102,9 +102,9 @@ struct Bindings {
       const Bindings *s = b;
       if (s->layered()) {
         const Layer &L = s->layer();
-        uint32_t w = L.sel[i];
-        s = (w & 1) ? L.top : L.base;
-        i = w >> 1;
+        join::TwInt w = L.sel[i]; // `row j side` (Pack.h): the row, and which set it is read from
+        s = w.second() ? L.top : L.base;
+        i = w.first();
         if (s->layered()) return (*s).rows()[i];
       }
       return s->attrs[i];

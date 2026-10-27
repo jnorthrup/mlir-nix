@@ -123,16 +123,17 @@ Bindings *EvalState::updateAttrs(Bindings *a, Bindings *b) {
     auto *r = new (mem) Bindings();
     r->size_ = Bindings::kLayered;
     auto *L = new (static_cast<void *>(r->attrs)) Bindings::Layer{top, base, nullptr, &alloc, {}};
-    // The rows of the layer, in name order, as a selection: one word a row, side 1 for `top`.  Both sides are sorted, so
-    // this is one walk over them and no row is copied; an equal name takes `top`'s row and shadows `base`'s.
+    // The rows of the layer, in name order, as a selection (Series.h `select`, the dialect's `trikeshed.select`): word a
+    // row, `row j side` (TwInt), side 1 for `top`.  Both sides are sorted, so this is one walk over them and no row is
+    // copied; an equal name takes `top`'s row and shadows `base`'s.
     L->sel.cells.reserve(size_t(base->size_) + top->size_);
     size_t i = 0, j = 0;
     while (i < base->size_ || j < top->size_) {
       if (j == top->size_ || (i < base->size_ && base->attrs[i].name < top->attrs[j].name))
-        L->sel.append(uint32_t(i++ << 1));
+        L->sel.append(join::TwInt(uint32_t(i++), 0));
       else if (i == base->size_ || top->attrs[j].name < base->attrs[i].name)
-        L->sel.append(uint32_t(j++ << 1) | 1);
-      else { L->sel.append(uint32_t(j++ << 1) | 1); i++; } // equal: top wins, base's row is shadowed
+        L->sel.append(join::TwInt(uint32_t(j++), 1));
+      else { L->sel.append(join::TwInt(uint32_t(j++), 1)); i++; } // equal: top wins, base's row is shadowed
     }
     return r;
   }
