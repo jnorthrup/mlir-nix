@@ -400,9 +400,8 @@ void registerBuiltins(EvalState &state) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.replaceStrings");
     if (args[0]->listSize() != args[1]->listSize())
       throw EvalError("'from' and 'to' arguments passed to builtins.replaceStrings have different lengths", pos);
-    std::vector<std::string> from;
-    for (size_t i = 0; i < args[0]->listSize(); i++)
-      from.push_back(str(st.forceString(*args[0]->list.elems[i], pos, "while evaluating one of the strings to replace passed to builtins.replaceStrings")));
+    auto from = llvm::to_vector(args[0]->values() |cp::α| [&](Value &e) {
+      return str(st.forceString(e, pos, "while evaluating one of the strings to replace passed to builtins.replaceStrings")); });
     std::map<size_t, std::string> cache;
     NixStringContext ctx;
     std::string s = str(st.forceString(*args[2], ctx, pos, "while evaluating the third argument passed to builtins.replaceStrings"));

@@ -127,9 +127,8 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
           else if (i->name == st.s.outputHashMode) handleHashMode(st.forceStringNoCtx(*i->value, pos));
           else if (i->name == st.s.outputs) {
             st.forceList(*i->value, pos, "");
-            std::vector<std::string> ss;
-            for (size_t k = 0; k < i->value->listSize(); k++)
-              ss.push_back(str(st.forceStringNoCtx(*i->value->list.elems[k], pos)));
+            auto strs = i->value->values() |cp::α| [&](Value &e) { return str(st.forceStringNoCtx(e, pos)); };
+            std::vector<std::string> ss(strs.begin(), strs.end());
             handleOutputs(ss);
           }
           static const char *legacy[] = {"allowedReferences", "allowedRequisites", "disallowedReferences",

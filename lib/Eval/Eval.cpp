@@ -521,8 +521,7 @@ void EvalState::printStats() {
     // Shapes: the literal ops grouped by their sorted names.  Instances per shape say what a pool per shape would hold.
     std::map<std::string, std::pair<uint64_t, uint64_t>> shapes; // sorted names -> (instances made, ops)
     for (auto &[o, c] : literalSets) {
-      std::vector<std::string> ns;
-      for (const nixfe::Name &n : cast<nd::AttrsOp>(o).getNames()) ns.push_back(std::string(n.str()));
+      auto ns = llvm::to_vector(llvm::map_range(cast<nd::AttrsOp>(o).getNames(), [](const nixfe::Name &n) { return n.toString(); }));
       std::sort(ns.begin(), ns.end());
       std::string key;
       for (auto &s : ns) { key += s; key += '\0'; }
@@ -530,8 +529,7 @@ void EvalState::printStats() {
       e.first += c;
       e.second++;
     }
-    std::vector<uint64_t> inst;
-    for (auto &kv : shapes) inst.push_back(kv.second.first);
+    auto inst = llvm::to_vector(llvm::map_range(shapes, [](auto &kv) { return kv.second.first; }));
     std::sort(inst.rbegin(), inst.rend());
     llvm::errs() << "== literal attribute sets: " << literalSets.size() << " ops evaluated, " << shapes.size() << " distinct shapes; share of the sets made"
                  << " that the commonest N shapes cover:";
@@ -1392,8 +1390,7 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
       .Case<nd::ApplyOp>([&](nd::ApplyOp ap) {
         Value *f = lookup(env, ap.getCallee());
         auto as = ap.getArgs();
-        llvm::SmallVector<Value *, 4> args;
-        for (mlir::Value a : as) args.push_back(lookup(env, a));
+        auto args = llvm::to_vector<4>(llvm::map_range(as, [&](mlir::Value a) { return lookup(env, a); }));
         MLNIX_FILL(*this, EvalState::FillApplyArgs, args.size());
         callFunction(*f, args.size(), args.data(), out, pos);
         if (statsEnabled) noteCallee(ap.getOperation(), *f);
@@ -2097,8 +2094,7 @@ Value *EvalState::evalMLIRFile(const std::string &path, const std::string &sym) 
   if (!m) throw EvalError("failed to parse MLIR file '" + path + "'");
   nd::ExprOp found;
   // Move all ops into our module (renaming symbols to avoid clashes).
-  llvm::SmallVector<nd::ExprOp> exprs;
-  for (auto e : m->getOps<nd::ExprOp>()) exprs.push_back(e);
+  auto exprs = llvm::to_vector(m->getOps<nd::ExprOp>());
   for (auto e : exprs) {
     bool match = sym.empty() ? !found : e.getSymName() == sym;
     e->remove();
