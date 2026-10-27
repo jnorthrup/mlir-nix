@@ -358,7 +358,20 @@ int runEvalCommand(Options &o, bool build) {
   finishOptions(o);
   if (o.evalOnly && !o.readWrite) o.store.readOnly = true;
   auto store = std::make_shared<nixstore::Store>(o.store);
-  EvalState st(o.eval, store);
+  // An evaluation never destroys its state: the process exits right after, and taking a module of a
+  // million ops, the attribute uniquer and the arenas apart one object at a time cost 6.6% of a NixOS
+  // evaluation (docs/PERFORMANCE.md).  The one thing the destructor did, printing the statistics, is
+  // done here.  `build` keeps the ordinary teardown.
+  EvalState *stp = new EvalState(o.eval, store);
+  struct Teardown {
+    EvalState *st;
+    bool leak;
+    ~Teardown() {
+      if (!leak) delete st;
+      else if (st->statsEnabled) st->printStats();
+    }
+  } teardown{stp, !build};
+  EvalState &st = *stp;
   try {
     return runEvalCommandIn(o, build, st, store);
   } catch (nixfe::ParseError &e) {
@@ -830,7 +843,33 @@ int realMain(int argc, char **argv) {
 
 } // namespace
 
+#if defined(__linux__) && defined(__GLIBC__)
+/// Ask glibc malloc for transparent huge pages (glibc 2.35+; THP in madvise or always mode).  An
+/// evaluation touches ~1.8 GiB, and the first touch of a 4 KiB page costs about 4 us under WSL2: with
+/// these tunables a NixOS evaluation goes from 450k page faults to 70k and runs 23% faster, user time
+/// included (fewer TLB misses).  Tunables are read by the dynamic loader, so the program re-executes
+/// itself once with them set; the second image removes them again so that child processes (builders)
+/// do not inherit them.  MLNIX_NO_HUGEPAGES=1 opts out, and a GLIBC_TUNABLES that is already set is
+/// left alone.
+static void useHugePages(char **argv) {
+  if (getenv("MLNIX_HUGEPAGES")) { // this is the second image
+    unsetenv("MLNIX_HUGEPAGES");
+    unsetenv("GLIBC_TUNABLES");
+    return;
+  }
+  if (getenv("MLNIX_NO_HUGEPAGES") || getenv("GLIBC_TUNABLES")) return;
+  setenv("GLIBC_TUNABLES", "glibc.malloc.hugetlb=1:glibc.malloc.top_pad=268435456", 1);
+  setenv("MLNIX_HUGEPAGES", "1", 1);
+  execv("/proc/self/exe", argv); // returns only on failure: carry on as we are
+  unsetenv("GLIBC_TUNABLES");
+  unsetenv("MLNIX_HUGEPAGES");
+}
+#endif
+
 int main(int argc, char **argv) {
+#if defined(__linux__) && defined(__GLIBC__)
+  useHugePages(argv);
+#endif
   nixprefetch::init(argc, argv); // MLNIX_PREFETCH=record:FILE | replay:FILE | auto
   std::ios::sync_with_stdio(true);
   int rc = 1;
