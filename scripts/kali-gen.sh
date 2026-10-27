@@ -21,13 +21,16 @@ refs=(--ref "Nix 2.35.4=${NIX_BIN:-}")
 [ -n "${LIX_BIN:-}" ] && refs+=(--ref "Lix 2.91.3=$LIX_BIN")
 [ -e .cache ] || ln -s "$HOME/work/mlir-nix/.cache" .cache
 
+# BUILD_DIR and CMAKE_EXTRA (for instance BUILD_DIR=build23 CMAKE_EXTRA=-DCMAKE_CXX_STANDARD=23) build another configuration
+# beside the default one; the gates and the benchmarks still run the binaries of ./build.
 stage_build() {
-  if [ ! -f build/build.ninja ]; then
-    cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-22 -DCMAKE_CXX_COMPILER=clang++-22 \
-      -DLLVM_DIR=$LLVM_PREFIX/lib/cmake/llvm -DMLIR_DIR=$LLVM_PREFIX/lib/cmake/mlir > "$OUT/configure.log" 2>&1 \
+  local b=${BUILD_DIR:-build}
+  if [ ! -f $b/build.ninja ]; then
+    cmake -S . -B $b -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-22 -DCMAKE_CXX_COMPILER=clang++-22 \
+      -DLLVM_DIR=$LLVM_PREFIX/lib/cmake/llvm -DMLIR_DIR=$LLVM_PREFIX/lib/cmake/mlir ${CMAKE_EXTRA:-} > "$OUT/configure.log" 2>&1 \
       || { say "configure failed"; tail -20 "$OUT/configure.log"; return 1; }
   fi
-  cmake --build build --target mlnix mlnix-opt -j8 > "$OUT/build.log" 2>&1
+  cmake --build $b --target mlnix mlnix-opt -j8 ${BUILD_KEEP_GOING:+-- -k 0} > "$OUT/build.log" 2>&1
   local rc=$?
   say "build rc=$rc, error lines: $(grep -c 'error:' "$OUT/build.log")"
   [ $rc -eq 0 ] || { grep -m10 'error:' "$OUT/build.log" | cut -c1-260; return 1; }
