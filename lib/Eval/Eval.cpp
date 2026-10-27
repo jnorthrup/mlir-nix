@@ -7,6 +7,7 @@
 #include "mlir/Transforms/Passes.h"
 #include <mutex>
 #include "llvm/Support/Format.h"
+#include "llvm/Support/MemoryBuffer.h"
 #include "Nix/MLIRGen.h"
 
 #include "mlir/IR/Builders.h"
@@ -434,6 +435,83 @@ void EvalState::printStats() {
         if (i + 1 == marks[next]) { llvm::errs() << " " << marks[next] << ": " << llvm::format("%.1f%%", pct(acc, totalCalls)); next++; }
       }
       llvm::errs() << "\n";
+    }
+    // Where the calls are made: the busiest lambdas with the line of source each starts on, then the calls by file and by area of the
+    // tree.  Library code that does what a primop could do shows up here.
+    {
+      struct Row {
+        uint64_t calls;
+        unsigned ops;
+        std::string file;
+        unsigned line, col;
+      };
+      std::vector<Row> rows;
+      std::map<std::string, std::pair<uint64_t, uint64_t>> byFile; // file -> (calls, lambdas)
+      for (auto &[l, c] : lambdaCalls) {
+        auto lam = cast<nd::LambdaOp>(l);
+        std::optional<uint64_t> deferred = lam.getBodyIndex();
+        RegionInfo *ri = deferred ? bodyOf(nixfe::BodyIndex(*deferred)) : regionInfo(&lam.getBody());
+        unsigned ops = 0;
+        ri->region->walk([&](mlir::Operation *) { ops++; });
+        Row r{c, ops, "", 0, 0};
+        if (auto p = nd::decodePos(nd::posOfOp(l))) { r.file = p->file; r.line = p->line; r.col = p->col; }
+        auto &e = byFile[r.file];
+        e.first += c;
+        e.second++;
+        rows.push_back(std::move(r));
+      }
+      std::sort(rows.begin(), rows.end(), [](const Row &a, const Row &b) { return a.calls > b.calls; });
+      // The name of a file from the checkout of nixpkgs on, and the part of the tree it belongs to: lib, or two directories deep.
+      auto shortName = [](const std::string &f) {
+        size_t k = f.find("/nixpkgs/");
+        return k == std::string::npos ? f : f.substr(k + 9);
+      };
+      auto areaOf = [&](const std::string &f) {
+        std::string s = shortName(f);
+        if (s == f) return std::string("(outside nixpkgs)");
+        size_t a = s.find('/');
+        if (a == std::string::npos) return s;
+        if (s.compare(0, a, "lib") == 0) return std::string("lib");
+        size_t b = s.find('/', a + 1);
+        return b == std::string::npos ? s.substr(0, a) : s.substr(0, b);
+      };
+      std::map<std::string, std::string> text; // file -> its text, for the line a busy lambda starts on
+      auto lineOf = [&](const Row &r) {
+        auto it = text.find(r.file);
+        if (it == text.end()) {
+          auto buf = llvm::MemoryBuffer::getFile(r.file);
+          it = text.emplace(r.file, buf ? (*buf)->getBuffer().str() : std::string()).first;
+        }
+        llvm::StringRef rest = it->second;
+        for (unsigned i = 1; i < r.line && !rest.empty(); i++) rest = rest.split('\n').second;
+        std::string s = rest.split('\n').first.trim().str();
+        return s.size() > 72 ? s.substr(0, 72) : s;
+      };
+      // MLNIX_STATS_LAMBDAS=N prints N rows (default 60); a curried function is one row per argument, on one line of source.
+      size_t nRows = 60;
+      if (const char *e = getenv("MLNIX_STATS_LAMBDAS")) nRows = strtoul(e, nullptr, 10);
+      llvm::errs() << "== busiest lambdas: calls, share of all calls, ops in the body, where, the line it starts on\n";
+      for (size_t i = 0; i < rows.size() && i < nRows; i++) {
+        const Row &r = rows[i];
+        llvm::errs() << "  " << llvm::format("%9llu", (unsigned long long)r.calls) << llvm::format("%6.1f%%", pct(r.calls, totalCalls))
+                     << llvm::format("%5u ops  ", r.ops) << shortName(r.file) << ':' << r.line << ':' << r.col << "  " << lineOf(r) << "\n";
+      }
+      auto table = [&](const char *what, const std::map<std::string, std::pair<uint64_t, uint64_t>> &m, size_t limit) {
+        std::vector<std::pair<std::string, std::pair<uint64_t, uint64_t>>> v(m.begin(), m.end());
+        std::sort(v.begin(), v.end(), [](auto &a, auto &b) { return a.second.first > b.second.first; });
+        llvm::errs() << "== lambda calls by " << what << ": calls, share, lambdas called\n";
+        for (size_t i = 0; i < v.size() && i < limit; i++)
+          llvm::errs() << "  " << llvm::format("%9llu", (unsigned long long)v[i].second.first) << llvm::format("%6.1f%%", pct(v[i].second.first, totalCalls))
+                       << llvm::format("%7llu  ", (unsigned long long)v[i].second.second) << shortName(v[i].first) << "\n";
+      };
+      table("file", byFile, 30);
+      std::map<std::string, std::pair<uint64_t, uint64_t>> byArea;
+      for (auto &[f, e] : byFile) {
+        auto &a = byArea[areaOf(f)];
+        a.first += e.first;
+        a.second += e.second;
+      }
+      table("area", byArea, 20);
     }
     llvm::errs() << "== attribute sets: " << nBindings << " allocated by builders and primops (" << nBindingCells << " cells), " << Bindings::merged
                  << " flat sets made by merging (" << Bindings::mergedCells << " cells), " << nUpdLayered << " layers; literal `nix.attrs` with static names: "
