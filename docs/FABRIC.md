@@ -72,12 +72,12 @@ The demand schedule (`MLNIX_DEFER=1`) changes when ops exist, not what the IR is
 the first call by the same generator that lowers eagerly. The pool is C++ beside the IR: it is not in the module, so it cannot be
 printed, verified or serialized. That is the one place where the IR is incomplete by design.
 
-## The treeless design, against this tree
+## The treeless design, built
 
 Sam H. Smith, [*Parsing without ASTs and Optimizing with Sea of Nodes*](https://www.youtube.com/watch?v=NxiKlnUtyio) (Better Software
 Conference 2025; the questions start at [1:00:16](https://www.youtube.com/watch?v=NxiKlnUtyio&t=3616s)), is the design this tree is
 measured against. Its claim: a compiler can parse straight into the graph with no tree between the text and the nodes, and optimize the
-graph while it is built. Each mechanism of the talk, and what is here (the code was read for this list):
+graph while it is built. Each mechanism of the talk, and what is here:
 
 - **Group characters, keep no token array** ([3:30](https://www.youtube.com/watch?v=NxiKlnUtyio&t=210s)): `peek` gives an enum and a
   slice of the file, `consume` moves on. Here: `Parser::peek` over a ring of four 32-byte tokens, none kept (Parser.cpp:579-602). Have it.
@@ -85,11 +85,12 @@ graph while it is built. Each mechanism of the talk, and what is here (the code 
   ([12:31](https://www.youtube.com/watch?v=NxiKlnUtyio&t=751s)). Here there is no rewind: Nix tells `{ a, b }: x` from `{ a = 1; }`
   within three tokens (`looksLikeFormals`, Parser.cpp:641-650). The talk prices it: the tokenizer runs more
   ([69:01](https://www.youtube.com/watch?v=NxiKlnUtyio&t=4141s)). Not needed.
-- **Parse straight into the graph; no tree.** Here the parser builds a tree (`AST.h`, a region of `Slice`s), `MLIRGen` walks it into ops
-  (`FreeVars` is a second walk, for the free names of a lambda), and `Printer` prints it for `--parse`: 1,185 code lines (AST.h 227,
-  MLIRGen.cpp 643, MLIRGen.h 74, Printer.cpp 241). The tree's weight, measured with `mlnix-parse -n` against `-s` over the 39,646 files
-  of the nixpkgs checkout (104.0 MB of source): 720 MB of footprint parsed against 161 MB scanned in one run and 730 MB against 154 MB in another, **5.4 to 5.5 bytes of tree per byte of
-  source**, so 180 to 190 MB of the toplevel's 1,505 MB (it touches 33.8 MB of source). This is the gap.
+- **Parse straight into the graph; no tree.** Built (`lib/Frontend/Parser.cpp`, 4555421). One parser in three modes: `Gen` lowers to the
+  nix dialect as it reads, resolving each name on the spot; `Skip` builds nothing and learns a lambda's free names; `Show` prints
+  `--parse`. `AST.h`, `MLIRGen.cpp`, `Printer.cpp` and the `FreeVars` walk are gone (the tree's 1,185 code lines; the front end is 238
+  code lines smaller than with them, 13,117 -> 12,879). The tree weighed 5.4 to 5.5 bytes per byte of source (720 MB parsed against
+  161 MB scanned over the 39,646 files of nixpkgs); the toplevel's peak RSS is 9 to 10% lower without it (kali, same host, 9 interleaved
+  runs: 1.577 -> 1.414 GB demand, 1.708 -> 1.535 GB eager).
 - **Peepholes and value numbering when the node is made, while it is still in L1**
   ([35:01](https://www.youtube.com/watch?v=NxiKlnUtyio&t=2101s), [36:31](https://www.youtube.com/watch?v=NxiKlnUtyio&t=2191s),
   [41:32](https://www.youtube.com/watch?v=NxiKlnUtyio&t=2492s)). Here a base name resolves when its op is made (`baseRef`,
@@ -97,14 +98,18 @@ graph while it is built. Each mechanism of the talk, and what is here (the code 
   directly on a minted body (Eval.cpp:1948). There is no value numbering: stock `cse` as a pass costs +7.1% / +5.4% (below), because a
   file is lowered once; made at creation, where the table is hot and there is no second pass, it has not been measured. Partly.
 - **A variable is a name bound to a node, and the scope is a stack** ([44:00](https://www.youtube.com/watch?v=NxiKlnUtyio&t=2640s)).
-  Here `Gen` resolves names to SSA values, and the free names of a lambda come from the `FreeVars` walk over the tree (memoized). When
-  the parse makes the ops, a free name is found as the body reads it and the walk goes. The scope is here; the walk is the tree's price.
+  Built: a scope is a run of rows of one bindings Cursor (`BindCol` in `TrikeShed.td`: name, hash, value), `first j count`, compared
+  by hash before bytes; a lambda's free names are noted as its skim reads them, at the edge of its scope.
 - **Inline or defer by jumping into the source and parsing it again** ([28:31](https://www.youtube.com/watch?v=NxiKlnUtyio&t=1711s)).
-  Here the deferred lambda is `file j row` into a pool that keeps the tree, and is minted from it. With no tree the recipe is
-  `file j [begin, end)` and the mint is a parse: the same idea with the tree out of the way.
+  Built: a deferred lambda is `file j row`, the row is where it starts (`PoolCol` in `TrikeShed.td`), and its mint parses it again
+  from there. A skim records where each lambda inside it ends and what it reads, so the mint jumps over them. The expression of a
+  whole source, which its importer calls, is lowered with its body at the import (9729014): its body is parsed once, not skimmed
+  and parsed again (toplevel demand, `MLNIX_STATS`: minted on demand 315 ms -> 31 ms).
 - **A prepass over the global declarations, so that later work knows them**
-  ([63:00](https://www.youtube.com/watch?v=NxiKlnUtyio&t=3780s)). Here the Confix scan (293 code lines) finds balanced bands without a
-  lexer. It has no consumer yet (`docs/COMPOSITE.md`).
+  ([63:00](https://www.youtube.com/watch?v=NxiKlnUtyio&t=3780s)). Built and consumed: the Confix scan finds the bands and the
+  statements that end in them (`NixSyntax.td`, layers 0 and 1), and the parser reads the names a `let`, a `rec` set or a formals list
+  binds from where its statements start (layer 2) before it reaches the first value. From 64 KiB up the scan runs on a thread of
+  its own ahead of the parse, which waits on a band only until the scan has closed it (9729014, 745f861).
 - **Treeless parsing and the sea of nodes are independent** ([92:31](https://www.youtube.com/watch?v=NxiKlnUtyio&t=5551s)); the talk
   calls the first the front end and the second the back end ([95:02](https://www.youtube.com/watch?v=NxiKlnUtyio&t=5702s)). Here the back
   end exists (graph regions of `nix` ops) with a tree front end.
@@ -357,12 +362,15 @@ Fresh profile of the NixOS toplevel run (2 s main-thread sample, 1449 busy sampl
    the same lines.
 9. Hashing (Linux; `docs/PERFORMANCE.md`, section Hashing): a toplevel run puts 53 MB through SHA-256, and Linux did it in LLVM's
    portable C. libcrypto now, where there is one. Not measured on kali yet.
-10. Parse into the IR with no tree (the section above). The front end writes the ops as it reads, through a sink that the printer also
-   implements, so `--parse` keeps a tree and the evaluator has none. Ceilings: 180 to 190 MB of the toplevel's footprint (5.4 to 5.5 bytes of
-   tree per byte of source), which the demand schedule keeps alive today in its pool, so the memory only comes back with
-   `file j [begin, end)` recipes; and the second walk (`FreeVars`, `MLIRGen`). The parse itself stays: lexing and parsing are 6.5% of
-   the evaluator thread (rung 6) and a builder cannot remove them. Costs: a placeholder for a use that precedes its definition, the
-   scope at a deferred site, and rung 4's (a)-(c). Under the C++ ratchet it is the largest cut on the table, 1,185 lines of tree,
-   printer and walk, against whatever the builder calls add to the parser.
+10. Parse into the IR with no tree (the section above): done, on master since 745f861. Kali, same host, 9 interleaved runs against
+   aea88bf65 (median wall, peak RSS): demand -3.6% / -2.2% and -10.4% / -8.8%, eager -10.1% / -1.1% and -10.1% / -6.9% (toplevel /
+   nixpkgs-73); the minima went the other way (demand +7.4% / +5.4%, eager +4.2% / +3.9%), and the old binary's runs spread 18%
+   between minimum and median against the new one's 2 to 7%. Mac, 7 interleaved runs under a load average of 5: demand +4.4% /
+   +2.4%, eager +2.9% / +2.8%. Hashes identical everywhere.
+   The generation benches of 4ff9187ca, c452893cb and 8f0bf3aa1 (vs-nix.py, runs stopped at 1.2x the record) stopped 5, 2 and 5
+   mlnix runs, and their medians count them: the same host ran aea88bf65's own binary, interleaved, at a median 20% above that
+   record (4.135 s against 3.456 s, toplevel demand), so the record is no longer what the host does and the A/B above is the
+   comparison. Their raw output is on kali under /tmp/kb/gen-*; the README keeps aea88bf65 as the last generation until a bench
+   of the host stops no run.
 11. Only then: closure conversion to `func` + the stock inliner, strictness
    analysis (needs a lattice type instead of the single `!nix.value`).
