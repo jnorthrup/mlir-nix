@@ -38,7 +38,7 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
   try {
     drvName = str(st.forceStringNoCtx(*nameAttr->value, pos, "while evaluating the `name` attribute passed to builtins.derivationStrict"));
   } catch (EvalError &e) {
-    e.addTrace(nameAttr->pos, "while evaluating the derivation attribute 'name'");
+    e.addTrace(posOf(*nameAttr), "while evaluating the derivation attribute 'name'");
     throw;
   }
   try {
@@ -160,7 +160,7 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
           }
         }
       } catch (EvalError &e) {
-        e.addTrace(i->pos, "while evaluating attribute '" + key + "' of derivation '" + drvName + "'");
+        e.addTrace(posOf(*i), "while evaluating attribute '" + key + "' of derivation '" + drvName + "'");
         throw;
       }
     }
@@ -239,7 +239,7 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
     st.mkAttrs(v, bb.finish());
   } catch (EvalError &e) {
     e.addTrace(nullptr, "while evaluating derivation '" + drvName + "'\n  whose name attribute is located at " +
-                            st.showPos(nameAttr->pos));
+                            st.showPos(posOf(*nameAttr)));
     throw;
   }
 }

@@ -791,7 +791,7 @@ void EvalState::forceValueDeep(Value &v) {
         try {
           rec(*a.value);
         } catch (EvalError &e) {
-          e.addTrace(a.pos, "while evaluating the attribute '" + symbols[a.name].str() + "'");
+          e.addTrace(posOf(a), "while evaluating the attribute '" + symbols[a.name].str() + "'");
           throw;
         }
       }

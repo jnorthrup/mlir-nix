@@ -69,9 +69,10 @@ using PosPtr = const void *;
 
 struct Attr {
   Symbol name;
+  uint32_t posIdx; // SPIKE: always 0
   Value *value;
-  PosPtr pos;
 };
+inline PosPtr posOf(const Attr &) { return nullptr; }
 
 struct Bindings {
   /// `size_` of a layered set (below).
@@ -337,7 +338,7 @@ public:
   class BindingsBuilder {
   public:
     BindingsBuilder(EvalState &st) : st(st) {}
-    void insert(Symbol s, Value *v, PosPtr pos = nullptr) { attrs.push_back({s, v, pos}); }
+    void insert(Symbol s, Value *v, PosPtr pos = nullptr) { attrs.push_back({s, 0, v}); (void)pos; }
     void insert(llvm::StringRef name, Value *v, PosPtr pos = nullptr) { insert(st.symbols.create(name), v, pos); }
     Value &alloc(llvm::StringRef name, PosPtr pos = nullptr) {
       Value *v = st.allocValue();

@@ -664,8 +664,8 @@ void registerBuiltins(EvalState &state) {
     auto name = st.forceStringNoCtx(*args[0], pos);
     st.forceAttrs(*args[1], pos);
     const Attr *a = args[1]->attrs->get(st.symbols.create(name));
-    if (!a || !a->pos) { st.mkNull(v); return; }
-    auto f = nd::decodePos(a->pos);
+    if (!a || !posOf(*a)) { st.mkNull(v); return; }
+    auto f = nd::decodePos(posOf(*a));
     if (!f) { st.mkNull(v); return; }
     EvalState::BindingsBuilder bb(st);
     st.mkString(bb.alloc(st.s.file), f->file);
@@ -704,7 +704,7 @@ void registerBuiltins(EvalState &state) {
       const Attr *val = e.attrs->get(st.s.value);
       if (!val) throw EvalError("attribute 'value' missing", pos)
                     .addTrace(pos, "in a {name=...; value=...;} pair");
-      bb.insert(st.symbols.create(name), val->value, val->pos);
+      bb.insert(st.symbols.create(name), val->value, posOf(*val));
     }
     st.mkAttrs(v, bb.finish());
   });
@@ -765,7 +765,7 @@ void registerBuiltins(EvalState &state) {
       Value *name = st.allocValue();
       st.mkString(*name, st.symbols[a.name]);
       Value *f1 = st.mkAppValue(args[0], name);
-      b->attrs[n++] = {a.name, st.mkAppValue(f1, a.value), a.pos};
+      b->attrs[n++] = {a.name, 0, st.mkAppValue(f1, a.value)};
     }
     b->size_ = n;
     st.mkAttrs(v, b);
