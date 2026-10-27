@@ -220,10 +220,29 @@ Fresh profile of the NixOS toplevel run (2 s main-thread sample, 1449 busy sampl
    A fair estimate of the net is a third to a half of the ceiling, that is 4 to 6% on the Mac, for a change that touches the
    lambda deferral; the cheaper rungs above and below come first.
 5. Core ops behind `NixEvalOpInterface` models; delete the `TypeSwitch`.
-6. Lexer: `Parser::fill`, the token pull with its 88-byte `Token` and a deque, is 10.5% of the evaluator thread; the parse
-   phase is 17.9% (258 ms; 270.6 ms parsing the touched files alone). The identifier shortcut took 3.4% off the parse
-   (`keywordOf`); a compact token and a lookahead that does not copy are the next step, and benefit every schedule.
+6. Lexer and parser (done). `Parser::fill`, the token pull with its 88-byte `Token` and a deque, was 10.5% of the evaluator thread and the
+   parse phase 17.9%. The token is 32 bytes and the lookahead a ring of four, `posAt` goes from newline to newline, and the AST is a
+   region of `Slice`s with no vector, map, virtual destructor or string (`docs/COMPOSITE.md`): the parser over the 40,181-file corpus
+   (104 MB) went from 0.757 s to 0.375 s (-50%), the region commit alone -5% to -7% of a run in situ, and the parse phase is 6.5% of
+   the evaluator thread now.
 7. Lowered-IR cache as MLIR bytecode, keyed by file hash (skips lex, parse and
    lowering on warm runs; the uniquing cost moves to the reader, so measure).
+8. The call path (done; Mac, interleaved, identical hashes). A sampled profile put the allocator at 5.1% of the evaluator thread, and
+   the callers that owned it were places that allocated or hashed on every call: `callFunction` (two `std::vector` for the arguments
+   of a primop call), `BindingsBuilder` (a `std::vector<Attr>` grown 1, 2, 4, 8) and `callLambda` (a string hash per formal per call,
+   915,300 of them in a toplevel run). Stack storage for the first two and the formals' symbols made once: wall -4.4% / -3.5% (demand)
+   and -5.1% / -3.3% (eager) on toplevel / nixpkgs-73, 17 runs; the allocator share fell from 5.1% to 3.9%.
+   What the hop histogram says about `lookup` (toplevel, demand): of 20.9M calls, 72% walk no frame (mean 0.59 hops, 12.4M hops in the
+   run), and 9.2M are first touches of a cell, 7.75M of those making a thunk. So the chain of frames is not what `lookup` costs, which
+   is why rung 2's cheaper forms lost; the first touch is. It called `Value::getDefiningOp()` (a call into libMLIR, 2.3% of the
+   thread) and then eight `isa<>` that read the op's header, in every frame. The `Slot` now holds the defining op and the kind of
+   first touch: -1.0% / -1.6% (demand), -1.4% / -0.6% (eager). Primops are function pointers, not `std::function` (the call was
+   1.6% of the thread): -0.6% / -0.6% (demand), -0.5% / -0.3% (eager), the sign the same in all eight wall and cpu figures.
+   Two lost to the noise (17 runs, identical hashes, branches kept): `forceValue` as an inline compare of the type tag
+   (`exp/force-inline`: demand +0.1% / -1.6%, eager -1.8% / +0.0% wall) and `newFrame` without its `memset`, the arena being zero
+   (`exp/frame-zero`: demand +0.4% / -1.0%, eager +0.4% / +0.1%): the 1.3% of samples on that `memset` moves to the first write of
+   the same lines.
+9. Hashing (Linux; `docs/PERFORMANCE.md`, section Hashing): a toplevel run puts 53 MB through SHA-256, and Linux did it in LLVM's
+   portable C. libcrypto now, where there is one. Not measured on kali yet.
 8. Only then: closure conversion to `func` + the stock inliner, strictness
    analysis (needs a lattice type instead of the single `!nix.value`).

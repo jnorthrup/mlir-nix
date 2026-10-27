@@ -17,23 +17,50 @@ its interleaved A/B with identical result hashes or it goes in the failures colu
 
 Two runs of the same expression touch the same files; cold, 29% of the run was the disk (docs/IO.md).
 
-## Where a run goes now (Mac, demand schedule, nixos-toplevel, after the region and the 24-byte Value)
+## Where a run goes now (Mac, demand schedule, nixos-toplevel, after the call-path commit)
 
-`/usr/bin/sample` at 1 ms, 3 runs, the evaluator thread only (1,288 ms busy a run; the arena's prefault thread is left out), every
+`/usr/bin/sample` at 1 ms, 3 runs, the evaluator thread only (1,197 ms busy a run; the arena's prefault thread is left out), every
 sample charged to the innermost phase on its stack:
 
-    eval            71.3%   evalOp / force 21.6, lookup / slotMap 16.5, other 12.4, symbols / strings 8.6,
-                            malloc / free 6.4, attrsets 5.3
-    store / drv     10.7%   the forcing a derivation does is charged to eval; this is the .drv text, hashing, files
-    demand mint      8.3%   MLIR uniquing 2.3, op creation 1.1
-    parse            7.1%   lexer and parser 4.5, file I/O 1.3 (was 17.9% before the tree was a region)
-    file lowering    2.6%
+    eval            69.4%   evalOp / force 22.7, lookup / slotMap 17.9, other 11.6, symbols / strings 6.8,
+                            attrsets 6.1, malloc / free 3.9
+    store / drv     14.0%   file I/O 4.8 (the NAR dump of path values), symbols / strings 4.5, malloc / free 1.9, hashing 1.1
+    demand mint      7.9%   MLIR uniquing 1.7, op creation 1.1
+    parse            6.5%   lexer and parser 4.0, file I/O 0.8 (was 17.9% before the tree was a region)
+    file lowering    2.3%
 
-By line (a debug build, the `.dSYM` next to it, `sample` prints the line of every frame): the hottest are the three `slotMap.find`
-lines of `lookup`, `operand` and `evalTail` (about 7% together), the lexer (2.6%), and the `std::function` call into a primop
-(1.6%). What a run does, counted: 5.39M frames, 20.9M `lookup` + 9.9M `operand` + 7.1M `evalTail` calls, 15.4M `evalOp`, 30.8M
-`forceValue`; 14.4M `Value`s, 1.64M attribute sets. Arena by kind (before the 24-byte Value): Values 461 MB, attribute arrays 315 MB,
-frames 315 MB, strings 39 MB, list cells 14 MB; the syntax trees 186 MB and malloc 287 MB outside it.
+By line (a debug build, the `.dSYM` next to it, `sample` prints the line of every frame): the hottest were the three `slotMap.find`
+lines of `lookup`, `operand` and `evalTail` (about 7% together), the lexer (2.6%) and the `std::function` call into a primop (1.6%,
+since replaced by a function pointer). What a run does, counted: 5.39M frames, 20.9M `lookup` + 9.9M `operand` + 7.1M `evalTail`
+calls, 15.4M `evalOp`, 30.8M `forceValue`; 14.4M `Value`s, 1.64M attribute sets; of the `lookup` calls 72% walk no frame and 9.2M
+are first touches of a cell (`docs/FABRIC.md`, item 8). Arena by kind (before the 24-byte Value): Values 461 MB, attribute arrays
+315 MB, frames 315 MB, strings 39 MB, list cells 14 MB; the syntax trees 186 MB and malloc 287 MB outside it.
+
+## Hashing: the one cost that is not the same on every platform
+
+A run of nixos-toplevel puts 53,447,350 bytes through SHA-256 in 143,831 updates (128,603 of them under 256 bytes: the NAR stream of a
+path is made of small tokens); nixpkgs-73 61,648,493 bytes in 60,213. macOS has CommonCrypto, which uses the ARM SHA instructions
+(13 ms of the 1.2 s of a run: the 1.1% above). Every other platform used `llvm::SHA256`, portable C, until `lib/Store/Hash.cpp` took
+libcrypto's. Forcing the Mac onto LLVM's (`-DMLNIX_SHA256=llvm`, 11 interleaved runs, identical hashes) costs +7.9% / +12.0% wall
+(demand, toplevel / nixpkgs-73) and +7.3% / +9.9% (eager). That is the size of the hashing share against hardware SHA, not what
+Linux gains: kali's CPU is an Intel Core i7-6820HK (Skylake), which has no SHA instructions (`/proc/cpuinfo`: avx2, ssse3, sse4_1,
+no sha_ni), so libcrypto runs its AVX2 code there, as it does for Nix and Lix. The gain on kali is therefore expected to be a few
+percent, and is not measured. libcrypto.a is linked in preference to libcrypto.so: the shared library is 0.65 ms of the 10 ms of
+`mlnix eval -E 1` (10.18 -> 10.83 ms median of 100 interleaved runs), the static one 0.15 ms.
+A class using the x86 SHA instructions, with a self-test and a check against hashlib with the instructions emulated in plain C++
+(600/600 digests; ten mutants caught), is parked on branch `exp/sha256-ni`: a CPU like kali's would never run it.
+
+## This window, end to end (Mac)
+
+Nine commits since the parent of the region commit (the parser as a region of Series, the lexer's positions and 32-byte token, the
+24-byte Value, primops as function pointers, the call path, the slot's defining op, hashing), one binary against the other, 11
+interleaved runs, identical hashes in every cell; median wall (min wall):
+
+    demand  nixos-toplevel  1.827 -> 1.569 s  -14.1% (-13.2%)    nixpkgs-73  1.491 -> 1.299 s  -12.9% (-12.2%)
+    eager   nixos-toplevel  1.927 -> 1.657 s  -14.0% (-13.5%)    nixpkgs-73  1.586 -> 1.424 s  -10.2% (-10.3%)
+
+Footprint of the toplevel run -6.7% (demand) and -7.0% (eager) of it from the 24-byte Value. Not yet measured on kali: the
+head-to-head below is of the generation before the parser work.
 
 Footprint, 1.57 GB peak: the evaluator's bump arena is 1,147 MB of it, and `MLNIX_STATS` splits it:
 
