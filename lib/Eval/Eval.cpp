@@ -266,6 +266,29 @@ void EvalState::printStats() {
   };
   llvm::errs() << "== mlnix ops lowered: " << total << "\n";
   llvm::errs() << "== `//`: " << nUpdLayered << " layered (" << nUpdBase << " entries not copied, " << nUpdTop << " top entries incl. merges), " << nUpdMerged << " flat merges, " << Bindings::flattened << " layers flattened later\n";
+  {
+    // Frame slots allocated against slots ever filled: a slot is made for every value of a body, whether or not
+    // anything demands it.
+    uint64_t slots = 0, filled = 0, bytes = 0;
+    for (Frame *f : statFrames) {
+      slots += f->info->numSlots;
+      bytes += sizeof(Frame) + f->info->numSlots * sizeof(Value *);
+      for (unsigned i = 0; i < f->info->numSlots; i++) filled += f->slots[i] != nullptr;
+    }
+    llvm::errs() << "== frames: " << statFrames.size() << ", " << bytes / 1000000 << " MB, slots " << slots << ", ever filled " << filled
+                 << " (" << llvm::format("%.1f", 100.0 * filled / std::max<uint64_t>(slots, 1)) << "%)\n";
+    // Lowered against evaluated, per kind.  Literals and closures are served by lookup() without evalOp, so
+    // their rows (nix.str, nix.int, nix.path, nix.lambda, nix.bool) read low; the rest is the dead code.
+    llvm::StringMap<size_t> ev;
+    for (Operation *op : evaluated) ev[op->getName().getStringRef()]++;
+    std::vector<std::pair<std::string, size_t>> rows;
+    for (auto &e : opStats) rows.push_back({e.getKey().str(), e.getValue()});
+    std::sort(rows.begin(), rows.end(), [](auto &a, auto &b) { return a.second > b.second; });
+    llvm::errs() << "== per op kind: lowered, evaluated (distinct), share\n";
+    for (size_t i = 0; i < rows.size() && i < 12; i++)
+      llvm::errs() << "  " << llvm::format("%-22s", rows[i].first.c_str()) << llvm::format("%9zu", rows[i].second)
+                   << llvm::format("%9zu", ev[rows[i].first]) << llvm::format("%7.1f%%", 100.0 * ev[rows[i].first] / std::max<size_t>(rows[i].second, 1)) << "\n";
+  }
   llvm::errs() << "== operands evaluated in place: " << nInPlace << ", thunks created by lookup(): " << nThunks << "\n";
   llvm::errs() << "== ops ever evaluated (distinct): " << evaluated.size() << " of " << total << " lowered ("
                << llvm::format("%.1f", 100.0 * evaluated.size() / std::max<size_t>(total, 1)) << "%)\n";
@@ -432,6 +455,7 @@ Frame *EvalState::newFrame(RegionInfo *ri, Frame *up) {
   f->up = up;
   f->info = ri;
   memset(f->slots, 0, ri->numSlots * sizeof(Value *));
+  if (statsEnabled) statFrames.push_back(f);
   return f;
 }
 

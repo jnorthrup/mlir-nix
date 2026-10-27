@@ -478,6 +478,7 @@ private:
   uint64_t nUpdLayered = 0, nUpdMerged = 0, nUpdBase = 0, nUpdTop = 0; // MLNIX_STATS: `//` as a layer / a flat merge, entries not copied / copied
   uint64_t nInPlace = 0, nThunks = 0; // MLNIX_STATS: operands evaluated in place / thunks created by lookup()
   uint64_t nDemandMinted = 0; // MLNIX_STATS: lambda bodies minted on first call
+  std::vector<Frame *> statFrames; // MLNIX_STATS: every frame, to count the slots that were ever filled
   uint64_t nsLower = 0, nsMint = 0; // MLNIX_STATS: time lowering files (analysis of deferred lambdas included) / minting bodies on demand
   llvm::DenseSet<mlir::Operation *> evaluated; // MLNIX_STATS: the ops evalOp ever ran
   llvm::DenseMap<mlir::Region *, RegionInfo *> regionInfos;
