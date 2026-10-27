@@ -276,7 +276,7 @@ Value *findAlongAttrPath(EvalState &st, const std::string &path, const std::map<
         throw TypeError("the expression selected by the selection path '" + path + "' should be a list but is " +
                         EvalState::showType(*v));
       size_t idx = std::stoul(c);
-      if (idx >= v->list.size) throw EvalError("list index " + c + " in selection path '" + path + "' is out of range");
+      if (idx >= v->listSize()) throw EvalError("list index " + c + " in selection path '" + path + "' is out of range");
       v = v->list.elems[idx];
     }
   }
@@ -322,7 +322,7 @@ void getDerivations(EvalState &st, Value &vIn, const std::string &prefix, const 
       }
     }
   } else if (v.type == VType::List) {
-    for (size_t i = 0; i < v.list.size; i++) {
+    for (size_t i = 0; i < v.listSize(); i++) {
       std::string p2 = prefix.empty() ? std::to_string(i) : prefix + "." + std::to_string(i);
       if (getDerivation(st, *v.list.elems[i], p2, drvs, done))
         getDerivations(st, *v.list.elems[i], p2, autoArgs, drvs, done);

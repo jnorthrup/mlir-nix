@@ -148,8 +148,13 @@ Fresh profile of the NixOS toplevel run (2 s main-thread sample, 1449 busy sampl
    32 B), frames 465 MB, attrsets 404 MB; MLIR IR is another 686 MB. `//` alone is 65-81%
    of attrset memory (264 MB / 514 MB copied; 374 / 773 calls with a 256+ entry left
    operand are 56% / 67% of that). A persistent or layered attribute set is the one place
-   a tree structure could pay, and a 24-byte `Value` saves ~200 MB
-   (`docs/COLLECTIONS.md`, section 6). Neither is built.
+   a tree structure could pay (`docs/COLLECTIONS.md`, section 6); not built.
+   The 24-byte `Value` is built: a tag and a 32-bit count (the length of a string, a path or a list), then two words.
+   Max RSS of the toplevel 1,696 -> 1,580 MB (-6.7%, demand) and 1,833 -> 1,705 MB (-7.0%, eager); wall within the noise
+   of 13 interleaved runs on the Mac (+0.4% / 0.0% demand, -0.5% / -0.8% eager on toplevel / nixpkgs-73), identical hashes.
+   Where the rest is (toplevel, demand, `MLNIX_STATS`, before it): the evaluator's arena 1,147 MB = Values 461 MB (14.4M),
+   attribute arrays 315 MB (1.64M sets, 13M attributes at 24 B each), frames 315 MB (5.39M, half of their 28.6M slots ever
+   filled), strings 39 MB, list cells 14 MB; the syntax trees 186 MB (33.8 MB of source); malloc 287 MB (1.27M blocks: the IR).
    What is done is the first touch of those pages, a page fault on the one thread that evaluates. The arena
    (`include/Nix/Arena.h`) takes 4 MiB slabs in order from reserved ranges of address space, and a helper thread
    populates the next slab while the evaluator fills the current one. Mac wall -2.1% / -3.1% (demand), -3.5% / -2.7%

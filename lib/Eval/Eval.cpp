@@ -165,21 +165,24 @@ const StringContext *EvalState::makeContext(const NixStringContext &c) {
 }
 
 void EvalState::mkString(Value &v, std::string_view s, const NixStringContext &ctx) {
+  if (s.size() > UINT32_MAX) throw EvalError("string of 4 GiB or more");
   v.type = VType::String;
   v.str.s = copyString(s);
-  v.str.len = s.size();
+  v.aux = static_cast<uint32_t>(s.size());
   v.str.ctx = makeContext(ctx);
 }
 
 void EvalState::mkPath(Value &v, std::string_view p) {
+  if (p.size() > UINT32_MAX) throw EvalError("path of 4 GiB or more");
   v.type = VType::Path;
   v.path.s = copyString(p);
-  v.path.len = p.size();
+  v.aux = static_cast<uint32_t>(p.size());
 }
 
 void EvalState::mkList(Value &v, size_t n) {
+  if (n > UINT32_MAX) throw EvalError("list of 4 Gi or more cells");
   v.type = VType::List;
-  v.list.size = n;
+  v.aux = static_cast<uint32_t>(n);
   v.list.elems = allocList(n);
 }
 
@@ -597,7 +600,7 @@ void EvalState::forceValueDeep(Value &v) {
         }
       }
     } else if (v.type == VType::List) {
-      for (size_t i = 0; i < v.list.size; i++) rec(*v.list.elems[i]);
+      for (size_t i = 0; i < v.listSize(); i++) rec(*v.list.elems[i]);
     }
   };
   rec(v);
@@ -1125,9 +1128,9 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
         forceList(*l, pos, "in the left operand of the list concatenation operator");
         Value *r = &operand(env, c.getRhs(), tr);
         forceList(*r, pos, "in the right operand of the list concatenation operator");
-        if (l->list.size == 0) { out = *r; return; }
-        if (r->list.size == 0) { out = *l; return; }
-        size_t n1 = l->list.size, n2 = r->list.size;
+        if (l->listSize() == 0) { out = *r; return; }
+        if (r->listSize() == 0) { out = *l; return; }
+        size_t n1 = l->listSize(), n2 = r->listSize();
         Value **e1 = l->list.elems, **e2 = r->list.elems;
         mkList(out, n1 + n2);
         memcpy(out.list.elems, e1, n1 * sizeof(Value *));
@@ -1220,7 +1223,7 @@ std::string EvalState::coerceToString(Value &v, NixStringContext &ctx, bool coer
     if (v.type == VType::Null) return "";
     if (v.type == VType::List) {
       std::string result;
-      for (size_t n = 0; n < v.list.size; n++) {
+      for (size_t n = 0; n < v.listSize(); n++) {
         Value *e = v.list.elems[n];
         try {
           result += coerceToString(*e, ctx, coerceMore, copyToStore, pos, errorCtx);
@@ -1228,7 +1231,7 @@ std::string EvalState::coerceToString(Value &v, NixStringContext &ctx, bool coer
           err.addTrace(pos, "while evaluating one element of the list");
           throw;
         }
-        if (n < v.list.size - 1 && (e->type != VType::List || e->list.size != 0)) result += " ";
+        if (n < v.listSize() - 1 && (e->type != VType::List || e->listSize() != 0)) result += " ";
       }
       return result;
     }
@@ -1300,8 +1303,8 @@ bool EvalState::eqValues(Value &v1, Value &v2, PosPtr pos) {
   case VType::String: return v1.sv() == v2.sv();
   case VType::Path: return v1.pathView() == v2.pathView();
   case VType::List:
-    if (v1.list.size != v2.list.size) return false;
-    for (size_t i = 0; i < v1.list.size; i++) {
+    if (v1.listSize() != v2.listSize()) return false;
+    for (size_t i = 0; i < v1.listSize(); i++) {
       Value *a = v1.list.elems[i], *b = v2.list.elems[i];
       if (a == b) continue; // value identity optimisation
       if (!eqValues(*a, *b, pos)) return false;
@@ -1346,8 +1349,8 @@ bool EvalState::lessThan(Value &v1, Value &v2, PosPtr pos) {
   case VType::Path: return v1.pathView() < v2.pathView();
   case VType::List:
     for (size_t i = 0;; i++) {
-      if (i == v2.list.size) return false;
-      if (i == v1.list.size) return true;
+      if (i == v2.listSize()) return false;
+      if (i == v1.listSize()) return true;
       if (!eqValues(*v1.list.elems[i], *v2.list.elems[i], pos))
         return lessThan(*v1.list.elems[i], *v2.list.elems[i], pos);
     }
@@ -1390,10 +1393,10 @@ void EvalState::printValue(std::ostream &str, Value &v, std::set<const void *> *
     }
     break;
   case VType::List:
-    if (seen && v.list.size && !seen->insert(&v).second) str << "«repeated»";
+    if (seen && v.listSize() && !seen->insert(&v).second) str << "«repeated»";
     else {
       str << "[ ";
-      for (size_t i = 0; i < v.list.size; i++) {
+      for (size_t i = 0; i < v.listSize(); i++) {
         printValue(str, *v.list.elems[i], seen, depth + 1);
         str << " ";
       }
@@ -1491,14 +1494,14 @@ struct TracePrinter {
       break;
     }
     case VType::List: {
-      if (v.list.size && !seen.insert(&v).second) { out << "«repeated»"; break; }
+      if (v.listSize() && !seen.insert(&v).second) { out << "«repeated»"; break; }
       if (depth >= maxDepth) { out << "[ ... ]"; break; }
       out << "[";
       size_t cur = 0;
-      for (size_t i = 0; i < v.list.size; i++) {
+      for (size_t i = 0; i < v.listSize(); i++) {
         out << " ";
         if (listPrinted >= maxList) {
-          elided(v.list.size - cur, "item", "items");
+          elided(v.listSize() - cur, "item", "items");
           break;
         }
         print(*v.list.elems[i], depth + 1);
@@ -1838,7 +1841,7 @@ void EvalState::realiseContext(const NixStringContext &ctx, PosPtr pos) {
 
 std::string EvalState::findFile(Value &searchPath, std::string_view name, PosPtr pos) {
   forceList(searchPath, pos);
-  for (size_t i = 0; i < searchPath.list.size; i++) {
+  for (size_t i = 0; i < searchPath.listSize(); i++) {
     Value &e = *searchPath.list.elems[i];
     forceAttrs(e, pos);
     std::string prefix;

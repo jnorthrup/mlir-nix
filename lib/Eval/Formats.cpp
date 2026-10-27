@@ -102,7 +102,7 @@ void EvalState::printValueAsJSON(std::ostream &out, Value &v, bool strict, NixSt
   }
   case VType::List:
     out << "[";
-    for (size_t i = 0; i < v.list.size; i++) {
+    for (size_t i = 0; i < v.listSize(); i++) {
       if (i) out << ",";
       try {
         printValueAsJSON(out, *v.list.elems[i], strict, ctx, copyToStore, pos);
@@ -412,7 +412,7 @@ void toXML(EvalState &st, XMLWriter &doc, Value &v, bool strict, bool location, 
     break;
   case VType::List:
     doc.open("list");
-    for (size_t i = 0; i < v.list.size; i++) toXML(st, doc, *v.list.elems[i], strict, location, ctx, drvsSeen, pos);
+    for (size_t i = 0; i < v.listSize(); i++) toXML(st, doc, *v.list.elems[i], strict, location, ctx, drvsSeen, pos);
     doc.close();
     break;
   case VType::Lambda: {

@@ -111,7 +111,7 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
           }
         } else if (i->name == st.s.args) {
           st.forceList(*i->value, pos, "");
-          for (size_t k = 0; k < i->value->list.size; k++)
+          for (size_t k = 0; k < i->value->listSize(); k++)
             drv.args.push_back(st.coerceToString(*i->value->list.elems[k], context, true, true, pos,
                                                  "while evaluating an element of the argument list"));
         } else if (structured) {
@@ -128,7 +128,7 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
           else if (i->name == st.s.outputs) {
             st.forceList(*i->value, pos, "");
             std::vector<std::string> ss;
-            for (size_t k = 0; k < i->value->list.size; k++)
+            for (size_t k = 0; k < i->value->listSize(); k++)
               ss.push_back(str(st.forceStringNoCtx(*i->value->list.elems[k], pos)));
             handleOutputs(ss);
           }

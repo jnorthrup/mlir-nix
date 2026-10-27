@@ -121,25 +121,26 @@ enum class VType : uint8_t {
   Lambda, PrimOp, PrimOpApp
 };
 
+/// 24 bytes: a tag and a 32-bit count, then two words.  The count is the byte length of a string or path and the length of
+/// a list (a string of 4 GiB or a list of 4 Gi cells does not fit in the memory of the machines this runs on; mkString and
+/// mkPath refuse the first, and a list of that many cells would be 32 GB of pointers).
 struct Value {
   VType type = VType::Null;
+  uint32_t aux = 0; // length of a string or path, size of a list: see listSize(), sv(), pathView()
   union {
     int64_t integer;
     double fpoint;
     bool boolean;
     struct {
       const char *s;
-      size_t len;
       const StringContext *ctx;
     } str;
     struct {
       const char *s;
-      size_t len;
     } path;
     Bindings *attrs;
     struct {
       Value **elems;
-      size_t size;
     } list;
     struct {
       mlir::Operation *op;
@@ -150,13 +151,17 @@ struct Value {
     } app; // App thunk and PrimOpApp
     const PrimOp *primOp;
   };
+
   Value() : integer(0) {}
 
   bool isThunk() const { return type == VType::Thunk || type == VType::App || type == VType::Blackhole; }
   bool isFunction() const { return type == VType::Lambda || type == VType::PrimOp || type == VType::PrimOpApp; }
-  std::string_view sv() const { return {str.s, str.len}; }
-  std::string_view pathView() const { return {path.s, path.len}; }
+  std::string_view sv() const { return {str.s, aux}; }
+  std::string_view pathView() const { return {path.s, aux}; }
+  size_t listSize() const { return aux; }
 };
+static_assert(sizeof(Value) == 24, "a Value is a tag, a count and two words");
+
 
 struct PrimOp {
   std::string name;

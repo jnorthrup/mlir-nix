@@ -386,7 +386,7 @@ void registerBuiltins(EvalState &state) {
     auto sep = st.forceString(*args[0], ctx, pos, "while evaluating the first argument (the separator string) passed to builtins.concatStringsSep");
     st.forceList(*args[1], pos, "while evaluating the second argument (the list of strings to concat) passed to builtins.concatStringsSep");
     std::string res;
-    for (size_t i = 0; i < args[1]->list.size; i++) {
+    for (size_t i = 0; i < args[1]->listSize(); i++) {
       if (i) res += sep;
       res += st.coerceToString(*args[1]->list.elems[i], ctx, false, true, pos,
                                "while evaluating one element of the list of strings to concat passed to builtins.concatStringsSep");
@@ -396,10 +396,10 @@ void registerBuiltins(EvalState &state) {
   S.addPrimOp("__replaceStrings", 3, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[0], pos, "while evaluating the first argument passed to builtins.replaceStrings");
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.replaceStrings");
-    if (args[0]->list.size != args[1]->list.size)
+    if (args[0]->listSize() != args[1]->listSize())
       throw EvalError("'from' and 'to' arguments passed to builtins.replaceStrings have different lengths", pos);
     std::vector<std::string> from;
-    for (size_t i = 0; i < args[0]->list.size; i++)
+    for (size_t i = 0; i < args[0]->listSize(); i++)
       from.push_back(str(st.forceString(*args[0]->list.elems[i], pos, "while evaluating one of the strings to replace passed to builtins.replaceStrings")));
     std::map<size_t, std::string> cache;
     NixStringContext ctx;
@@ -626,9 +626,9 @@ void registerBuiltins(EvalState &state) {
         }
       if (const Attr *p = a.value->attrs->get(st.s.outputs)) {
         st.forceList(*p->value, pos);
-        if (p->value->list.size && (path.size() < 4 || path.substr(path.size() - 4) != ".drv"))
+        if (p->value->listSize() && (path.size() < 4 || path.substr(path.size() - 4) != ".drv"))
           throw EvalError("tried to add derivation output context of " + path + ", which is not a derivation, to a string", pos);
-        for (size_t i = 0; i < p->value->list.size; i++)
+        for (size_t i = 0; i < p->value->listSize(); i++)
           ctx.insert("!" + str(st.forceStringNoCtx(*p->value->list.elems[i], pos)) + "!" + path);
       }
     }
@@ -682,7 +682,7 @@ void registerBuiltins(EvalState &state) {
     st.forceAttrs(*args[0], pos, "while evaluating the first argument passed to builtins.removeAttrs");
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.removeAttrs");
     std::set<Symbol> rm;
-    for (size_t i = 0; i < args[1]->list.size; i++)
+    for (size_t i = 0; i < args[1]->listSize(); i++)
       rm.insert(st.symbols.create(st.forceStringNoCtx(*args[1]->list.elems[i], pos, "while evaluating the values of the second argument passed to builtins.removeAttrs")));
     Bindings *b = st.allocBindings(args[0]->attrs->size());
     size_t n = 0;
@@ -694,7 +694,7 @@ void registerBuiltins(EvalState &state) {
   S.addPrimOp("__listToAttrs", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[0], pos, "while evaluating the argument passed to builtins.listToAttrs");
     EvalState::BindingsBuilder bb(st);
-    for (size_t i = 0; i < args[0]->list.size; i++) {
+    for (size_t i = 0; i < args[0]->listSize(); i++) {
       Value &e = *args[0]->list.elems[i];
       st.forceAttrs(e, pos, "while evaluating an element of the list passed to builtins.listToAttrs");
       const Attr *n = e.attrs->get(st.s.name);
@@ -732,7 +732,7 @@ void registerBuiltins(EvalState &state) {
     Symbol name = st.symbols.create(st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.catAttrs"));
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.catAttrs");
     std::vector<Value *> res;
-    for (size_t i = 0; i < args[1]->list.size; i++) {
+    for (size_t i = 0; i < args[1]->listSize(); i++) {
       Value &e = *args[1]->list.elems[i];
       st.forceAttrs(e, pos, "while evaluating an element in the list passed as second argument to builtins.catAttrs");
       if (const Attr *a = e.attrs->get(name)) res.push_back(a->value);
@@ -773,7 +773,7 @@ void registerBuiltins(EvalState &state) {
   S.addPrimOp("__zipAttrsWith", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.zipAttrsWith");
     std::map<Symbol, std::vector<Value *>> m;
-    for (size_t i = 0; i < args[1]->list.size; i++) {
+    for (size_t i = 0; i < args[1]->listSize(); i++) {
       Value &e = *args[1]->list.elems[i];
       st.forceAttrs(e, pos, "while evaluating a value of the list passed as second argument to builtins.zipAttrsWith");
       for (auto &a : *e.attrs) m[a.name].push_back(a.value);
@@ -793,7 +793,7 @@ void registerBuiltins(EvalState &state) {
   // -- Lists -----------------------------------------------------------------
   S.addPrimOp("map", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.map");
-    size_t n = args[1]->list.size;
+    size_t n = args[1]->listSize();
     if (!n) { v = *args[1]; return; }
     Value **src = args[1]->list.elems;
     Value *f = args[0];
@@ -802,19 +802,19 @@ void registerBuiltins(EvalState &state) {
   });
   S.addPrimOp("__length", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[0], pos, "while evaluating the first argument passed to builtins.length");
-    st.mkInt(v, (int64_t)args[0]->list.size);
+    st.mkInt(v, (int64_t)args[0]->listSize());
   });
   S.addPrimOp("__head", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[0], pos, "while evaluating the first argument passed to builtins.head");
-    if (!args[0]->list.size) throw EvalError("'builtins.head' called on an empty list", pos);
+    if (!args[0]->listSize()) throw EvalError("'builtins.head' called on an empty list", pos);
     Value *e = args[0]->list.elems[0];
     st.forceValue(*e, pos);
     v = *e;
   });
   S.addPrimOp("__tail", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[0], pos, "while evaluating the first argument passed to builtins.tail");
-    if (!args[0]->list.size) throw EvalError("'builtins.tail' called on an empty list", pos);
-    size_t n = args[0]->list.size - 1;
+    if (!args[0]->listSize()) throw EvalError("'builtins.tail' called on an empty list", pos);
+    size_t n = args[0]->listSize() - 1;
     Value **src = args[0]->list.elems;
     st.mkList(v, n);
     for (size_t i = 0; i < n; i++) v.list.elems[i] = src[i + 1];
@@ -822,7 +822,7 @@ void registerBuiltins(EvalState &state) {
   S.addPrimOp("__elemAt", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[0], pos, "while evaluating the first argument passed to builtins.elemAt");
     int64_t n = st.forceInt(*args[1], pos, "while evaluating the second argument passed to builtins.elemAt");
-    if (n < 0 || (uint64_t)n >= args[0]->list.size)
+    if (n < 0 || (uint64_t)n >= args[0]->listSize())
       throw EvalError("list index " + std::to_string(n) + " is out of bounds", pos);
     Value *e = args[0]->list.elems[n];
     st.forceValue(*e, pos);
@@ -831,7 +831,7 @@ void registerBuiltins(EvalState &state) {
   S.addPrimOp("__elem", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.elem");
     bool res = false;
-    for (size_t i = 0; i < args[1]->list.size; i++) {
+    for (size_t i = 0; i < args[1]->listSize(); i++) {
       Value *e = args[1]->list.elems[i];
       if (e == args[0] || st.eqValues(*args[0], *e, pos)) { res = true; break; }
     }
@@ -840,10 +840,10 @@ void registerBuiltins(EvalState &state) {
   S.addPrimOp("__concatLists", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[0], pos, "while evaluating the first argument passed to builtins.concatLists");
     std::vector<Value *> res;
-    for (size_t i = 0; i < args[0]->list.size; i++) {
+    for (size_t i = 0; i < args[0]->listSize(); i++) {
       Value &l = *args[0]->list.elems[i];
       st.forceList(l, pos, "while evaluating a value of the list passed to builtins.concatLists");
-      for (size_t j = 0; j < l.list.size; j++) res.push_back(l.list.elems[j]);
+      for (size_t j = 0; j < l.listSize(); j++) res.push_back(l.list.elems[j]);
     }
     st.mkList(v, res.size());
     for (size_t i = 0; i < res.size(); i++) v.list.elems[i] = res[i];
@@ -851,11 +851,11 @@ void registerBuiltins(EvalState &state) {
   S.addPrimOp("__concatMap", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.concatMap");
     std::vector<Value *> res;
-    for (size_t i = 0; i < args[1]->list.size; i++) {
+    for (size_t i = 0; i < args[1]->listSize(); i++) {
       Value *r = st.allocValue();
       st.callFunction(*args[0], *args[1]->list.elems[i], *r, pos);
       st.forceList(*r, pos, "while evaluating the return value of the function passed to builtins.concatMap");
-      for (size_t j = 0; j < r->list.size; j++) res.push_back(r->list.elems[j]);
+      for (size_t j = 0; j < r->listSize(); j++) res.push_back(r->list.elems[j]);
     }
     st.mkList(v, res.size());
     for (size_t i = 0; i < res.size(); i++) v.list.elems[i] = res[i];
@@ -864,7 +864,7 @@ void registerBuiltins(EvalState &state) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.filter");
     std::vector<Value *> res;
     bool same = true;
-    for (size_t i = 0; i < args[1]->list.size; i++) {
+    for (size_t i = 0; i < args[1]->listSize(); i++) {
       Value r;
       st.callFunction(*args[0], *args[1]->list.elems[i], r, pos);
       if (st.forceBool(r, pos, "while evaluating the return value of the filtering function passed to builtins.filter"))
@@ -877,7 +877,7 @@ void registerBuiltins(EvalState &state) {
   });
   S.addPrimOp("__any", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.any");
-    for (size_t i = 0; i < args[1]->list.size; i++) {
+    for (size_t i = 0; i < args[1]->listSize(); i++) {
       Value r;
       st.callFunction(*args[0], *args[1]->list.elems[i], r, pos);
       if (st.forceBool(r, pos, "while evaluating the return value of the function passed to builtins.any")) { st.mkBool(v, true); return; }
@@ -886,7 +886,7 @@ void registerBuiltins(EvalState &state) {
   });
   S.addPrimOp("__all", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.all");
-    for (size_t i = 0; i < args[1]->list.size; i++) {
+    for (size_t i = 0; i < args[1]->listSize(); i++) {
       Value r;
       st.callFunction(*args[0], *args[1]->list.elems[i], r, pos);
       if (!st.forceBool(r, pos, "while evaluating the return value of the function passed to builtins.all")) { st.mkBool(v, false); return; }
@@ -896,7 +896,7 @@ void registerBuiltins(EvalState &state) {
   S.addPrimOp("__foldl'", 3, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceFunction(*args[0], pos, "while evaluating the first argument passed to builtins.foldlStrict");
     st.forceList(*args[2], pos, "while evaluating the third argument passed to builtins.foldlStrict");
-    size_t n = args[2]->list.size;
+    size_t n = args[2]->listSize();
     if (n) {
       Value *cur = args[1];
       Value **elems = args[2]->list.elems;
@@ -925,7 +925,7 @@ void registerBuiltins(EvalState &state) {
   });
   S.addPrimOp("__sort", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.sort");
-    size_t n = args[1]->list.size;
+    size_t n = args[1]->listSize();
     std::vector<Value *> elems(args[1]->list.elems, args[1]->list.elems + n);
     for (auto *e : elems) st.forceValue(*e, pos);
     if (n == 0) { v = *args[1]; return; }
@@ -946,7 +946,7 @@ void registerBuiltins(EvalState &state) {
   S.addPrimOp("__partition", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.partition");
     std::vector<Value *> right, wrong;
-    for (size_t i = 0; i < args[1]->list.size; i++) {
+    for (size_t i = 0; i < args[1]->listSize(); i++) {
       Value *e = args[1]->list.elems[i];
       st.forceValue(*e, pos);
       Value r;
@@ -967,7 +967,7 @@ void registerBuiltins(EvalState &state) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.groupBy");
     std::map<Symbol, std::vector<Value *>> m;
     std::vector<Symbol> order;
-    for (size_t i = 0; i < args[1]->list.size; i++) {
+    for (size_t i = 0; i < args[1]->listSize(); i++) {
       Value *e = args[1]->list.elems[i];
       Value r;
       st.callFunction(*args[0], *e, r, pos);
@@ -989,12 +989,12 @@ void registerBuiltins(EvalState &state) {
     st.forceList(*ss->value, pos, "while evaluating the 'startSet' attribute passed as argument to builtins.genericClosure");
     const Attr *op = args[0]->attrs->get(st.s.operator_);
     if (!op) throw EvalError("attribute 'operator' missing", pos);
-    std::vector<Value *> work(ss->value->list.elems, ss->value->list.elems + ss->value->list.size);
+    std::vector<Value *> work(ss->value->list.elems, ss->value->list.elems + ss->value->listSize());
     std::reverse(work.begin(), work.end());
     std::vector<Value *> res;
     auto cmp = [&](Value *a, Value *b) { return st.lessThan(*a, *b, pos); };
     std::set<Value *, decltype(cmp)> done(cmp);
-    std::vector<Value *> queue(ss->value->list.elems, ss->value->list.elems + ss->value->list.size);
+    std::vector<Value *> queue(ss->value->list.elems, ss->value->list.elems + ss->value->listSize());
     size_t qi = 0;
     while (qi < queue.size()) {
       Value *e = queue[qi++];
@@ -1008,7 +1008,7 @@ void registerBuiltins(EvalState &state) {
       Value r;
       st.callFunction(*op->value, *e, r, pos);
       st.forceList(r, pos, "while evaluating the return value of the `operator` passed to builtins.genericClosure");
-      for (size_t i = 0; i < r.list.size; i++) queue.push_back(r.list.elems[i]);
+      for (size_t i = 0; i < r.listSize(); i++) queue.push_back(r.list.elems[i]);
     }
     st.mkList(v, res.size());
     for (size_t i = 0; i < res.size(); i++) v.list.elems[i] = res[i];
