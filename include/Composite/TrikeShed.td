@@ -143,6 +143,13 @@ def TS_CursorType : TS_Type<"Cursor", "cursor"> {
   let description = [{
     Series.h: `composite::Cursor<T...>`, a tuple of MutableSeries and `meta`.  `schema` names the enum of this file
     whose cases are the columns: ColumnMeta is `stringifyEnum` of each case, `col<Case>()` the typed column.
+
+    The evaluator's value heap is its instance: `!trikeshed.cursor<"Value", [i8, i32, i64, i64]>` -- a row a
+    `Value` (Nix/Eval.h), the columns the tag, the count (a string's or a list's length) and the two payload
+    words.  The facets are the tag's cases: int, string, attrs, and the rest; a force re-types the row in place,
+    so every row carries the largest facet's words -- `MLNIX_STATS`'s "value heap by facet" table measures what
+    that uniform row costs against facet-sized rows.  The deferred-lambda pools of lib/Eval/Eval.cpp are another
+    instance (`cursor<"PoolCol", ...>`), one a file.
   }];
 }
 

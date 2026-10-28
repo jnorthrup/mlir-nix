@@ -345,7 +345,10 @@ struct EvalState {
   Bindings *builtinsAttrs = nullptr;
 
   // -- Allocation --------------------------------------------------------
-  Value *allocValue() { return new (alloc.Allocate<Value>()) Value(); }
+  Value *allocValue() {
+    if (statsEnabled) ++nVT[14];
+    return new (alloc.Allocate<Value>()) Value();
+  }
   Bindings *allocBindings(size_t n);
   /// `a // b` (see Bindings::Layer).
   Bindings *updateAttrs(Bindings *a, Bindings *b);
@@ -354,10 +357,10 @@ struct EvalState {
   const StringContext *makeContext(const NixStringContext &c);
 
   // -- Value construction ------------------------------------------------
-  void mkInt(Value &v, int64_t n) { v.type = VType::Int; v.integer = n; }
-  void mkFloat(Value &v, double d) { v.type = VType::Float; v.fpoint = d; }
-  void mkBool(Value &v, bool b) { v.type = VType::Bool; v.boolean = b; }
-  void mkNull(Value &v) { v.type = VType::Null; }
+  void mkInt(Value &v, int64_t n) { if (statsEnabled) ++nVT[unsigned(VType::Int)];  v.type = VType::Int; v.integer = n; }
+  void mkFloat(Value &v, double d) { if (statsEnabled) ++nVT[unsigned(VType::Float)];  v.type = VType::Float; v.fpoint = d; }
+  void mkBool(Value &v, bool b) { if (statsEnabled) ++nVT[unsigned(VType::Bool)];  v.type = VType::Bool; v.boolean = b; }
+  void mkNull(Value &v) { if (statsEnabled) ++nVT[unsigned(VType::Null)];  v.type = VType::Null; }
   void mkString(Value &v, std::string_view s, const NixStringContext &ctx = {});
   void mkPath(Value &v, std::string_view p);
   void mkList(Value &v, size_t n);
@@ -367,8 +370,8 @@ struct EvalState {
     mkList(v, size_t(s.size()));
     cp::drain(s, v.list.elems);
   }
-  void mkAttrs(Value &v, Bindings *b) { v.type = VType::Attrs; v.attrs = b; }
-  void mkApp(Value &v, Value *f, Value *x) { v.type = VType::App; v.app.left = f; v.app.right = x; }
+  void mkAttrs(Value &v, Bindings *b) { if (statsEnabled) ++nVT[unsigned(VType::Attrs)];  v.type = VType::Attrs; v.attrs = b; }
+  void mkApp(Value &v, Value *f, Value *x) { if (statsEnabled) ++nVT[unsigned(VType::App)];  v.type = VType::App; v.app.left = f; v.app.right = x; }
   Value *mkAppValue(Value *f, Value *x) { Value *v = allocValue(); mkApp(*v, f, x); return v; }
   Value *newString(std::string_view s, const NixStringContext &ctx = {}) { Value *v = allocValue(); mkString(*v, s, ctx); return v; }
 
@@ -543,6 +546,8 @@ struct EvalState {
   llvm::DenseMap<void *, Slot> slotMap;
   uint64_t nUpdLayered = 0, nUpdMerged = 0, nUpdBase = 0, nUpdTop = 0; // MLNIX_STATS: `//` as a layer / a flat merge, entries not copied / copied
   uint64_t nDemandMinted = 0; // MLNIX_STATS: lambda bodies minted on first call
+  uint64_t nVT[15] = {}; // MLNIX_STATS: values by facet, every write of the tag counted (a force re-types a thunk once);
+                         // [14] is allocations, the rows the value cursor ever appended
   uint64_t nsLower = 0, nsMint = 0; // MLNIX_STATS: time lowering files (analysis of deferred lambdas included) / minting bodies on demand
   llvm::DenseMap<mlir::Region *, RegionInfo *> regionInfos;
   llvm::DenseMap<mlir::Operation *, Value *> constCache;

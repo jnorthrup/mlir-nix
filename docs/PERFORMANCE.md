@@ -39,6 +39,16 @@ also reads 30 to 50% higher than the tree's in the same profile on both schedule
 
 Two runs of the same expression touch the same files; cold, 29% of the run was the disk (docs/IO.md).
 
+The value heap by facet (MLNIX_STATS, this branch, toplevel demand): 14,424,328 rows allocated (346 MB at
+24 B); the final states are bool 3.82M, app 2.61M, string 2.26M, lambda 1.93M, attrs 1.65M, list 1.21M,
+int 0.51M, primopapp 0.15M -- ~340 MB of rows, ~156 MB on facet-sized rows (the payload words each facet
+needs, no tag column).  The blackhole mark is written 6.03M times; it is a force's transient mark, not a
+row's state.  The missing half is the price of call-by-need, not a layout bug: a force re-types the row in
+place because frames, list cells and applications hold the row's address, so the row must fit the largest
+facet.  A facet pool -- a cursor per facet, rows addressed by index -- would halve the heap but turns every
+reference into an indirection, which the one-bit-per-row experiment already measured and lost.  Measured,
+the 24-B row stands.
+
 ## Where a run goes now (Mac, demand schedule, nixos-toplevel, after the call-path commit)
 
 `/usr/bin/sample` at 1 ms, 3 runs, the evaluator thread only (1,197 ms busy a run; the arena's prefault thread is left out), every

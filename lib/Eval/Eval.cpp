@@ -208,7 +208,7 @@ const StringContext *EvalState::makeContext(const NixStringContext &c) {
 
 void EvalState::mkString(Value &v, std::string_view s, const NixStringContext &ctx) {
   if (s.size() > UINT32_MAX) throw EvalError("string of 4 GiB or more");
-  v.type = VType::String;
+  v.type = VType::String; if (statsEnabled) ++nVT[unsigned(VType::String)];
   v.str.s = copyString(s);
   v.aux = static_cast<uint32_t>(s.size());
   v.str.ctx = makeContext(ctx);
@@ -216,14 +216,14 @@ void EvalState::mkString(Value &v, std::string_view s, const NixStringContext &c
 
 void EvalState::mkPath(Value &v, std::string_view p) {
   if (p.size() > UINT32_MAX) throw EvalError("path of 4 GiB or more");
-  v.type = VType::Path;
+  v.type = VType::Path; if (statsEnabled) ++nVT[unsigned(VType::Path)];
   v.path.s = copyString(p);
   v.aux = static_cast<uint32_t>(p.size());
 }
 
 void EvalState::mkList(Value &v, size_t n) {
   if (n > UINT32_MAX) throw EvalError("list of 4 Gi or more cells");
-  v.type = VType::List;
+  v.type = VType::List; if (statsEnabled) ++nVT[unsigned(VType::List)];
   v.aux = static_cast<uint32_t>(n);
   v.list.elems = allocList(n);
 }
@@ -308,6 +308,34 @@ void EvalState::printStats() {
     llvm::errs() << "== " << title << " (" << m.size() << ")\n";
     for (auto &[n, c] : sorted(m)) llvm::errs() << "  " << llvm::format("%-9s", n.c_str()) << llvm::format("%9zu", c) << "\n";
   };
+  // The value heap by facet: what the rows of the value cursor hold.  A force re-types a row in place, so a
+  // facet's count is what its rows ended as; thunk and blackhole are a force's transient marks, not a row's state.
+  // The two byte columns price the layout: every row is 24 B, and what the row would be if the facet were the
+  // pool (the payload words it needs, no tag column -- the pool is the tag).
+  {
+    static const char *nm[] = {"thunk", "app", "blackhole", "int", "float", "bool", "null", "string", "path",
+                               "attrs", "list", "lambda", "primop", "primopapp"};
+    static const bool transient[] = {true, false, true, false, false, false, false, false, false,
+                                     false, false, false, false, false};
+    static const size_t facetRow[] = {16, 16, 0, 8, 8, 1, 0, 20, 12, 8, 12, 16, 8, 16}; // payload words only
+    uint64_t finalRows = 0, bytes24 = 0, bytesFacet = 0;
+    for (int i = 0; i < 14; i++)
+      if (!transient[i]) { finalRows += nVT[i]; bytes24 += nVT[i] * sizeof(Value); bytesFacet += nVT[i] * facetRow[i]; }
+    llvm::errs() << "== value heap by facet: " << nVT[14] << " rows allocated ("
+                 << llvm::format("%.0f", nVT[14] * sizeof(Value) / 1e6) << " MB), " << finalRows
+                 << " of them with a final state; thunk and blackhole tags are a force's transient marks\n";
+    for (int i = 0; i < 14; i++)
+      if (nVT[i]) {
+        llvm::errs() << "  " << llvm::format("%-11s", nm[i]) << llvm::format("%10llu", (unsigned long long)nVT[i]);
+        if (transient[i]) llvm::errs() << "  (transient)\n";
+        else llvm::errs() << llvm::format("  row %2zu B  facet %2zu B  %7.1f -> %6.1f MB\n", sizeof(Value),
+                                          facetRow[i], nVT[i] * sizeof(Value) / 1e6, nVT[i] * facetRow[i] / 1e6);
+      }
+    llvm::errs() << "  final states at 24 B a row: " << llvm::format("%.0f MB", bytes24 / 1e6)
+                 << "; on facet-sized rows: " << llvm::format("%.0f MB", bytesFacet / 1e6)
+                 << ".  A force re-types a row in place, so a row must fit the largest facet: the uniform 24-B row"
+                 << " is the price of call-by-need, and this measures it.\n";
+  }
   llvm::errs() << "== mlnix ops lowered: " << total << "\n";
   llvm::errs() << "== `//`: " << nUpdLayered << " layered (" << nUpdBase << " entries not copied, " << nUpdTop << " top entries incl. merges), " << nUpdMerged << " flat merges, " << Bindings::flattened << " layers flattened later\n";
   llvm::errs() << "== lowering " << llvm::format("%.0f", nsLower / 1e6) << " ms (the analysis of deferred lambdas included), minted on demand "
@@ -373,7 +401,7 @@ void EvalState::registerPrimOp(const std::string &name, PrimOp *p) {
     // A constant computed by calling fn immediately.
     p->call(*this, nullptr, *v, nullptr);
   } else {
-    v->type = VType::PrimOp;
+    v->type = VType::PrimOp; if (statsEnabled) ++nVT[unsigned(VType::PrimOp)];
     v->primOp = p;
   }
   addConstant(name, v);
@@ -541,7 +569,7 @@ Value *EvalState::lookup(Frame *f, mlir::Value v) {
 /// closures, built where lookup() would build them.
 void EvalState::evalDefinition(mlir::Operation *def, Frame *f, Value &dest) {
   if (isa<nd::LambdaOp>(def)) {
-    dest.type = VType::Lambda;
+    dest.type = VType::Lambda; if (statsEnabled) ++nVT[unsigned(VType::Lambda)];
     dest.thunk.op = def;
     dest.thunk.env = f;
   } else {
@@ -585,22 +613,22 @@ void EvalState::forceValue(Value &v, PosPtr pos) {
   if (v.type == VType::Thunk) {
     Operation *op = v.thunk.op;
     Frame *env = v.thunk.env;
-    v.type = VType::Blackhole;
+    v.type = VType::Blackhole; if (statsEnabled) ++nVT[unsigned(VType::Blackhole)];
     try {
       evalOp(op, env, v);
     } catch (...) {
-      v.type = VType::Thunk;
+      v.type = VType::Thunk; if (statsEnabled) ++nVT[unsigned(VType::Thunk)];
       v.thunk.op = op;
       v.thunk.env = env;
       throw;
     }
   } else if (v.type == VType::App) {
     Value *l = v.app.left, *r = v.app.right;
-    v.type = VType::Blackhole;
+    v.type = VType::Blackhole; if (statsEnabled) ++nVT[unsigned(VType::Blackhole)];
     try {
       callFunction(*l, 1, &r, v, pos);
     } catch (...) {
-      v.type = VType::App;
+      v.type = VType::App; if (statsEnabled) ++nVT[unsigned(VType::App)];
       v.app.left = l;
       v.app.right = r;
       throw;
@@ -869,7 +897,7 @@ void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out,
           Value *app = (i + 1 == nargs) ? &out : allocValue();
           Value *l = acc;
           if (app == &out && l == &out) { l = allocValue(); *l = out; }
-          app->type = VType::PrimOpApp;
+          app->type = VType::PrimOpApp; if (statsEnabled) ++nVT[unsigned(VType::PrimOpApp)];
           app->app.left = l;
           app->app.right = args[i];
           acc = app;

@@ -13,6 +13,7 @@
 // CHECK-SAME: ts.s2 = !trikeshed.series2<i64, i8>
 // CHECK-SAME: ts.sp = !trikeshed.split<i64, i8>
 // CHECK-SAME: ts.t = !trikeshed.twin<i64>
+// CHECK-SAME: ts.v = !trikeshed.cursor<"Value", [i8, i32, i64, i64]>
 module attributes {
   ts.t = !trikeshed.twin<i64>,
   ts.j = !trikeshed.join<i64, i64>,
@@ -22,7 +23,8 @@ module attributes {
   ts.s = !trikeshed.series<index>,
   ts.s2 = !trikeshed.series2<i64, i8>,
   ts.sp = !trikeshed.split<i64, i8>,
-  ts.c = !trikeshed.cursor<"BandCol", [i32, i8, i64]>
+  ts.c = !trikeshed.cursor<"BandCol", [i32, i8, i64]>,
+  ts.v = !trikeshed.cursor<"Value", [i8, i32, i64, i64]>
 } {}
 
 // The chains, as ops: the Layers type, its resolve, and the frame chain's cell.  The block arguments stand for
