@@ -336,6 +336,10 @@ void EvalState::printStats() {
                  << ".  A force re-types a row in place, so a row must fit the largest facet: the uniform 24-B row"
                  << " is the price of call-by-need, and this measures it.\n";
   }
+  if (nSlotsAssigned)
+    llvm::errs() << "== frame cells: " << nSlotsAssigned << " assigned, " << nSlotsNoRead
+                 << " to a value with no use at all (" << llvm::format("%.1f", 100.0 * nSlotsNoRead / nSlotsAssigned)
+                 << "%) -- a value no one reads still costs a cell in every frame of its region\n";
   llvm::errs() << "== mlnix ops lowered: " << total << "\n";
   llvm::errs() << "== `//`: " << nUpdLayered << " layered (" << nUpdBase << " entries not copied, " << nUpdTop << " top entries incl. merges), " << nUpdMerged << " flat merges, " << Bindings::flattened << " layers flattened later\n";
   llvm::errs() << "== lowering " << llvm::format("%.0f", nsLower / 1e6) << " ms (the analysis of deferred lambdas included), minted on demand "
@@ -481,7 +485,10 @@ void EvalState::indexRegion(Region &r) {
   Block &blk = r.front();
   unsigned slot = 0;
   auto *core = ctx.getLoadedDialect<nd::NixDialect>();
-  for (BlockArgument a : blk.getArguments()) slotMap[a.getAsOpaquePointer()] = {ri, nullptr, slot++, Slot::Unknown, false};
+  for (BlockArgument a : blk.getArguments()) {
+    if (statsEnabled) { ++nSlotsAssigned; if (a.use_empty()) ++nSlotsNoRead; }
+    slotMap[a.getAsOpaquePointer()] = {ri, nullptr, slot++, Slot::Unknown, false};
+  }
   for (Operation &op : blk) {
     if (auto ret = dyn_cast<nd::ReturnOp>(op)) {
       ri->result = ret.getValue();
@@ -490,6 +497,7 @@ void EvalState::indexRegion(Region &r) {
     for (mlir::Value res : op.getResults()) {
       // A value evaluated in place has exactly one use, strict or tail: it needs no cell that outlives that use.
       bool inPlace = inPlaceEnabled && core->evaluatesInPlace(res);
+      if (statsEnabled) { ++nSlotsAssigned; if (res.use_empty()) ++nSlotsNoRead; }
       slotMap[res.getAsOpaquePointer()] = {ri, &op, inPlace ? kNoSlot : slot++, Slot::Unknown, inPlace};
     }
     // A deferred lambda's region is a shell until its first call; it is indexed when it is minted.

@@ -548,6 +548,7 @@ struct EvalState {
   uint64_t nDemandMinted = 0; // MLNIX_STATS: lambda bodies minted on first call
   uint64_t nVT[15] = {}; // MLNIX_STATS: values by facet, every write of the tag counted (a force re-types a thunk once);
                          // [14] is allocations, the rows the value cursor ever appended
+  uint64_t nSlotsAssigned = 0, nSlotsNoRead = 0; // MLNIX_STATS: frame cells assigned, and those given to a value with no use at all
   uint64_t nsLower = 0, nsMint = 0; // MLNIX_STATS: time lowering files (analysis of deferred lambdas included) / minting bodies on demand
   llvm::DenseMap<mlir::Region *, RegionInfo *> regionInfos;
   llvm::DenseMap<mlir::Operation *, Value *> constCache;

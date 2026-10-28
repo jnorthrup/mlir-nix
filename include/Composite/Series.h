@@ -18,7 +18,9 @@
 //   Cursor<T...>       the instance pool of one type: a MutableSeries per column, plus the column names, which are the
 //                      cases of its enum in TrikeShed.td (the dialect of this algebra).
 //                      PRELOAD's Cursor is Series<RowVec>, the row-shaped face of the same columns: `row(i)` reads
-//                      one out as a tuple, column by column (a mint reads its pool row so); the Series face is not built.
+//                      one out as a tuple, column by column (a mint reads its pool row so), and `rows()` is the same
+//                      columns as one Series of row tuples.  The row is copied whole and a use that reads one member
+//                      dissolves the copies of the others as dead code, so there is no lazy projection to build.
 //
 //===----------------------------------------------------------------------===//
 
@@ -160,11 +162,11 @@ template <class A, class B, class S> constexpr auto select(A &&a, B &&b, S &&sel
 template <class T> struct MutableSeries {
   std::vector<T> cells;
   bool operator==(const MutableSeries &) const = default;
-  uint32_t size() const { return uint32_t(cells.size()); }
+  constexpr uint32_t size() const { return uint32_t(cells.size()); }
   T &operator[](uint32_t i) { return cells[i]; }
-  const T &operator[](uint32_t i) const { return cells[i]; }
+  constexpr const T &operator[](uint32_t i) const { return cells[i]; }
   /// Accumulate.  The result is the index of the new cell: the `b` of whatever refers back to it.
-  uint32_t append(T v) {
+  constexpr uint32_t append(T v) {
     cells.push_back(std::move(v));
     return size() - 1;
   }
@@ -230,7 +232,7 @@ template <class... T> struct Cursor {
   template <class E> requires std::is_enum_v<E> explicit Cursor(E) {
     for (size_t i = 0; i < width; i++) meta[i] = stringifyEnum(E(i)).data();
   }
-  uint32_t size() const { return std::get<0>(cols).size(); }
+  constexpr uint32_t size() const { return std::get<0>(cols).size(); }
   template <auto K> auto &col() { return std::get<size_t(K)>(cols); }
   template <auto K> const auto &col() const { return std::get<size_t(K)>(cols); }
   /// Accumulate one row; the result is its index.
@@ -239,7 +241,11 @@ template <class... T> struct Cursor {
     return size() - 1;
   }
   /// Row i, its cells copied out (a row is read before an append can move the cells), column by column.
-  auto row(uint32_t i) const { return std::apply([i](const auto &...c) { return std::tuple(c[i]...); }, cols); }
+  constexpr auto row(uint32_t i) const { return std::apply([i](const auto &...c) { return std::tuple(c[i]...); }, cols); }
+  /// The Series<RowVec> face: the same columns as one Series, a row a position.  Every combinator works over rows
+  /// (`a + b` appends, α projects, fold reduces, where picks); the row is copied whole, and a use that reads one
+  /// member dissolves the copies of the rest as dead code, which is why there is no lazy projection beside this.
+  auto rows() const { return size() |j| [this](uint32_t i) { return row(i); }; }
   void clear() { std::apply([](auto &...c) { (c.cells.clear(), ...); }, cols); }
   void reserve(size_t n) { std::apply([n](auto &...c) { (c.cells.reserve(n), ...); }, cols); }
 };
@@ -268,6 +274,19 @@ constexpr bool selectHolds() {
   for (int x : m) sum += x;
   return m.size() == 3 && m[0] == 10 && m[1] == 20 && m[2] == 30 && sum == 60;
 }
+constexpr bool rowSeriesHolds() {
+  Cursor<int, char> c{std::array<const char *, 2>{"i", "ch"}};
+  c.append(10, 'a');
+  c.append(20, 'b');
+  auto rs = c.rows();
+  bool same = rs.size() == 2 && rs[1] == c.row(1);
+  auto firsts = rs |α| [](std::tuple<int, char> r) { return std::get<0>(r); };
+  bool project = firsts.size() == 2 && firsts[0] == 10 && firsts[1] == 20;
+  int sum = 0;
+  for (auto r : rs) sum += std::get<0>(r);
+  return same && project && sum == 30;
+}
+static_assert(rowSeriesHolds(), "the Series<RowVec> face does not hold: a cursor is a Series of its rows");
 static_assert(lawsHold(), "the Series laws do not hold");
 static_assert(selectHolds(), "the select law does not hold: a row is read where it lies, by row j side");
 
