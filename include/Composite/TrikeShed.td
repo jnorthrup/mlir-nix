@@ -282,6 +282,11 @@ def TS_LayersType : TS_Type<"Layers", "layers"> {
     layer it depends on), and `Bindings::get` walks the chain: the first layer that binds the key wins, and the walk is
     bounded (`kMaxDepth`), past which the chain is materialised.
 
+    The chain law covers three chains of the evaluator, one type for all three: the attribute-set layers above (a
+    read resolved by NAME), the frames of lambda calls (each frame a row of cells made for exactly one region,
+    resolved by REGION -- `trikeshed.cell`), and the lexical scopes of `with` (resolved by name again, Eval.h's
+    `with` list).  In all three the nearest layer wins and the walk never materialises.
+
     Laws: a chain is acyclic and ordered -- a layer depends only on layers already made; resolve(layers(l0, l1, ... lk), k)
     is lk's row for k if it has one, else resolve of the chain before it; the rows of a chain are the rows of its layers
     in name order, a later layer's row shadowing an earlier one's for the same name.
@@ -295,6 +300,24 @@ def TS_ResolveOp : TS_Op<"resolve", [Pure]> {
   let description = [{
     Series.h/Nix: `Bindings::get` over a `Layer` chain.  Laws: resolve is left-to-right with the nearest layer winning,
     and it never materialises the chain -- a layer that does not bind the key passes the read to the layer it depends on.
+  }];
+}
+
+def TS_CellOp : TS_Op<"cell", [Pure]> {
+  let summary = "the cell of a value: the first frame of a frame chain whose region defines it";
+  let arguments = (ins AnyType:$value);
+  let results = (outs AnyType:$cell);
+  let description = [{
+    The frame chain's half of the resolve law (`!trikeshed.layers` above covers all three chains).  A lambda call
+    makes a frame: a row of cells, one a free variable of the body, made for exactly one region (`Frame::info` in
+    Nix/Eval.h says which `RegionInfo` the frame is made of).  Frames chain through `Frame::up`, the caller's
+    frame the callee's layer.  Reading a value walks the chain nearest-first and stops at the first frame of the
+    value's own region -- the frame made for the region that defines it holds its cell (`EvalState::lookup`).
+    A value with one use, strict or tail, is evaluated in place instead and has no cell: the use makes a thunk of
+    its own (`EvalState::operand`).
+
+    Laws: a frame is made for exactly one region; the chain is acyclic and ordered, a frame's layer the frame it
+    was made in; the cell is the frame of the value's own region, and past that frame the value has no cell.
   }];
 }
 

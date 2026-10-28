@@ -27,6 +27,12 @@ also reads 30 to 50% higher than the tree's in the same profile on both schedule
       only 5.5% of nix.formal, 19% of select, 26% of attrs ops are ever evaluated)
     evalOp dispatch + handlers                     ~10%
     lookup/slot resolution (DenseMap<Value, Slot>)  ~8%
+      (the attribute form of "slot indices as op properties" was built and measured, this branch: one ts.addr
+      integer a defining op, region id, slot, kind and in-place bit packed in it, read at every use with no map
+      between.  It LOSES: the attribute read is a name scan a use, and the DenseMap probe it replaces is one
+      hash of a pointer -- alternating 3-run A/B, toplevel demand, 3.22-3.76 s against the probe build's
+      2.22-2.55 s, peak RSS 1443 against 1450 MB.  Reverted.  The lever waits for real op PROPERTIES: data in
+      the op's own storage, no dictionary to scan.)
     forcing, callLambda/callFunction, allocation    ~8%
     lexer (was 22%, now ~7% after the tape rewrite)
     everything else: builtins, strings, attrsets (now a layered view), store
