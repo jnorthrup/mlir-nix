@@ -28,6 +28,7 @@
 namespace composite {
 /// The dialect, plus the dialects its regions may hold (the nix values a series carries).
 void registerTrikeShedDialect(mlir::DialectRegistry &registry);
+void registerTrikeShedPasses();
 } // namespace composite
 
 #endif // COMPOSITE_TRIKESHED_H

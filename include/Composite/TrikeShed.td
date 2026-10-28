@@ -437,6 +437,33 @@ def TS_SortedOp : TS_Op<"sorted", [Pure]> {
   let description = [{ Series.kt's `sortedWith`.  A sort is the one place a lazy series must be read to be ordered. }];
 }
 
+def TS_ClusterOrderOp : TS_Op<"cluster_order"> {
+  let summary = "order one cache-local cluster, keeping payloads at their original rows";
+  let arguments = (ins Arg<AnyMemRef, "signed i64 keys", [MemRead]>:$keys,
+                       Arg<AnyMemRef, "row indices in key order", [MemWrite]>:$order);
+  let results = (outs I1:$accepted);
+  let hasVerifier = 1;
+  let description = [{
+    MinMaxHeap.h `clusterOrder`: read a contiguous run of at most 23 keys,
+    fill a 15-row Atkinson min-max heap and eight spare pegs, and drain row
+    indices in (signed key, original row) order. Equal keys keep their input
+    order. Payloads stay in place; `trikeshed.project` can read the permutation.
+
+    Both buffers are rank-one i64 memrefs in host memory. A run over capacity,
+    unequal lengths, or a non-unit stride returns false without reading keys
+    or writing output. An accepted run writes every output row and returns
+    true. Input and output may alias: fill reads the whole run before drain
+    writes. The scratch belongs to the invocation, never a shared hash table.
+
+    A coroutine owns its output until it publishes a completion token or
+    async value. Graph edges carry dependencies; no implicit cross-task
+    reads are allowed. This op has memory effects and is not speculatable:
+    a caller must keep speculative output private and validate before use.
+    `trikeshed-lower-clusters` lowers it to the bounded native kernel; MLIR's
+    async dialect owns suspension, fan-in and coroutine lowering.
+  }];
+}
+
 def TS_CompareOp : TS_Op<"compare", [Pure]> {
   let summary = "the first difference between two series, then the shorter one is less";
   let arguments = (ins TS_SeriesType:$a, TS_SeriesType:$b);

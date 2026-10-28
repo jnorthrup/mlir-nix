@@ -9,9 +9,13 @@ add_mlir_dialect_library(MLIRNix
 # borg.trikeshed.lib, generated from include/Composite/TrikeShed.td.
 add_mlir_dialect_library(MLIRTrikeShed
   Composite/TrikeShedDialect.cpp
+  Composite/ClusterLowering.cpp
   PARTIAL_SOURCES_INTENDED
   DEPENDS TrikeShedIncGen
-  LINK_LIBS PUBLIC MLIRIR MLIRSideEffectInterfaces)
+  LINK_LIBS PUBLIC MLIRIR MLIRSideEffectInterfaces MLIRFuncDialect MLIRMemRefDialect MLIRPass)
+
+add_library(TrikeShedRuntime SHARED Composite/ClusterRuntime.cpp)
+set_target_properties(TrikeShedRuntime PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/lib)
 
 add_library(NixStore STATIC Store/Hash.cpp Store/StorePaths.cpp Store/LocalStore.cpp Store/StructuredAttrs.cpp Store/Prefetch.cpp)
 target_link_libraries(NixStore PUBLIC LLVMSupport)
