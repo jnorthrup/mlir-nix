@@ -86,7 +86,7 @@ struct Bindings {
   struct Layer {
     Bindings *top, *base, *flat;
     Arena *alloc; // where flat() allocates
-    cp::MutableSeries<join::TwInt> sel; // the rows of the layer, in name order: `row j side`, side 1 for top
+    cp::Sel sel;                        // `row j side` packed in 32 bits: 4 bytes a row, one load to read
     uint32_t depth = 1;                 // how many layers the walk from here can pass through
   };
   static inline uint64_t flattened = 0; // MLNIX_STATS
@@ -104,7 +104,7 @@ struct Bindings {
       const Bindings *s = b;
       if (s->layered()) {
         const Layer &L = s->layer();
-        join::TwInt w = L.sel[i]; // `row j side` (Pack.h): the row, and which set it is read from
+        join::TwInt w = L.sel.at(i); // `row j side` (Pack.h): the row, and which set it is read from
         s = w.second() ? L.top : L.base;
         i = w.first();
         if (s->layered()) return (*s).rows()[i];

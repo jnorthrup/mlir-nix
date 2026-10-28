@@ -125,18 +125,40 @@ Bindings *EvalState::updateAttrs(Bindings *a, Bindings *b) {
     auto *r = new (mem) Bindings();
     r->size_ = Bindings::kLayered;
     auto *L = new (static_cast<void *>(r->attrs)) Bindings::Layer{b, a, nullptr, &alloc, {}, uint32_t(depth + 1)};
-    // The rows of the layer, in name order, as a selection (Series.h `select`, the dialect's `trikeshed.select`): word a
-    // row, `row j side` (TwInt), side 1 for the top.  Both sides are sorted and both are read as Series, so a `base` that
-    // is itself a layer is read through its own selection: one walk, no row copied, an equal name shadowed by the top.
+    // The rows of the layer, in name order, as a selection (Series.h `Bits`, the dialect's `trikeshed.select`): one bit a
+    // row, side 1 for the top.  Both sides are sorted and both are read as Series, so a `base` that is itself a layer is
+    // read through its own selection: one walk, no row copied, an equal name shadowed by the top.  The two names in the
+    // walk are carried, not re-read: a row is read once, in order, and the selection's memo (Series.h) serves each next
+    // row as a load and an add -- a re-read of the same row would jump, and a jump is a bisection over the shadows.
     auto rb = a->rows();
     auto rt = b->rows();
     uint32_t nb = uint32_t(baseSize), nt = uint32_t(b->size_);
-    L->sel.cells.reserve(size_t(nb) + nt);
+    L->sel.words.cells.reserve(size_t(nb) + nt);
     uint32_t i = 0, j = 0;
-    while (i < nb || j < nt) {
-      if (j == nt || (i < nb && rb[i].name < rt[j].name)) L->sel.append(join::TwInt(i++, 0));
-      else if (i == nb || rt[j].name < rb[i].name) L->sel.append(join::TwInt(j++, 1));
-      else { L->sel.append(join::TwInt(j++, 1)); i++; } // equal: the top's row wins, the base's is shadowed
+    bool haveB = nb > 0, haveT = nt > 0;
+    Symbol bn{}, tn{};
+    if (haveB) bn = rb[0].name;
+    if (haveT) tn = rt[0].name;
+    while (haveB || haveT) {
+      if (!haveT || (haveB && bn < tn)) { // the base's row is smaller, or the top is spent
+        L->sel.append(i, false);
+        i++;
+        haveB = i < nb;
+        if (haveB) bn = rb[i].name;
+      } else if (!haveB || tn < bn) { // the top's row is smaller: it is inserted
+        L->sel.append(j, true);
+        j++;
+        haveT = j < nt;
+        if (haveT) tn = rt[j].name;
+      } else { // equal: the top's row wins, the base's is shadowed -- and simply not in the selection
+        L->sel.append(j, true);
+        i++;
+        j++;
+        haveB = i < nb;
+        if (haveB) bn = rb[i].name;
+        haveT = j < nt;
+        if (haveT) tn = rt[j].name;
+      }
     }
     return r;
   }

@@ -27,6 +27,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
@@ -187,6 +188,36 @@ template <class T, class Mint> T anchor(MutableSeries<T> &cells, uint32_t i, Min
   cells[i] = v;
   return v;
 }
+
+//===----------------------------------------------------------------------===//
+// Sel: a selection word, four bytes a row
+//===----------------------------------------------------------------------===//
+
+/// A selection word: one bit the side, 31 bits the row.  A layer of a set uses this to say which set each row came
+/// from and where it lies.  Four bytes a row, against the eight a TwInt costs, and one load reads it; the rows a top
+/// shadowed are simply not in it, so a shadow costs nothing at read time.
+///
+/// One bit a row was tried and measured: it cut 28 MB of peak from the toplevel, and the rank over the ones -- a
+/// bisection over the shadowed rows for every base row it shifts, tamed to a load and an add by a one-row memo on
+/// sequential reads -- still left the run 7% slower than this form.  The bit is the wrong side of the trade while the
+/// rows are read one at a time.
+struct Sel {
+  MutableSeries<uint32_t> words; // `row << 1 | side`
+  uint32_t rows = 0;
+
+  uint32_t size() const { return rows; }
+  /// Accumulate one row: where it lies, and which set it comes from.
+  uint32_t append(uint32_t row, bool side) {
+    words.append((row << 1) | (side ? 1u : 0u));
+    return rows++;
+  }
+  /// Row i as `row j side` (Pack.h).
+  join::TwInt at(uint32_t i) const {
+    uint32_t w = words[i];
+    return join::TwInt(w >> 1, w & 1);
+  }
+  bool operator==(const Sel &o) const { return words == o.words && rows == o.rows; }
+};
 
 /// The instance pool of one type: a column per field (the names are its ColumnMeta), rows addressed by index.
 template <class... T> struct Cursor {
