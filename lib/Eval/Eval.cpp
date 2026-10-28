@@ -1,6 +1,7 @@
 //===- Eval.cpp - Lazy evaluator over the nix dialect ---------------------===//
 
 #include "Nix/Prefetch.h"
+#include <bit>
 #include "Nix/Eval.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassRegistry.h"
@@ -336,6 +337,28 @@ void EvalState::printStats() {
                  << ".  A force re-types a row in place, so a row must fit the largest facet: the uniform 24-B row"
                  << " is the price of call-by-need, and this measures it.\n";
   }
+  { // The sea of nodes against its schedule: the ops the index holds against the ops that ever ran,
+    // file code against the bodies demand minted.  The thunk cells are finer grain's rows.
+    llvm::DenseSet<RegionInfo *> minted;
+    for (auto &p : pools)
+      for (nixev::RegionInfo *ri : p->rows.col<nixfe::PoolCol::Body>().view())
+        if (ri) minted.insert(ri);
+    uint64_t fOps = 0, fRan = 0, fEvals = 0, fTh = 0, mOps = 0, mRan = 0, mEvals = 0, mTh = 0;
+    unsigned fR = 0, mR = 0;
+    for (auto &kv : regionInfos) {
+      RegionInfo *ri = kv.second;
+      uint64_t ran = 0;
+      for (uint64_t w : ri->everRan) ran += std::popcount(w);
+      if (minted.count(ri)) { mR++; mOps += ri->nOps; mRan += ran; mEvals += ri->nEvals; mTh += ri->nThunks; }
+      else { fR++; fOps += ri->nOps; fRan += ran; fEvals += ri->nEvals; fTh += ri->nThunks; }
+    }
+    llvm::errs() << "== sea of nodes: " << fR << " file regions hold " << fOps << " ops ("
+                 << llvm::format("%.1f", fOps ? 100.0 * fRan / fOps : 0.0) << "% ever ran, " << fEvals << " evals, "
+                 << fTh << " thunk cells); " << mR << " minted bodies hold " << mOps << " ops ("
+                 << llvm::format("%.1f", mOps ? 100.0 * mRan / mOps : 0.0) << "% ever ran, " << mEvals << " evals, "
+                 << mTh << " thunk cells).  Finer grain mints a cell: the thunk cells are its rows against lambda grain's "
+                 << mR << "\n";
+  }
   if (nSlotsAssigned)
     llvm::errs() << "== frame cells: " << nSlotsAssigned << " assigned, " << nSlotsNoRead
                  << " to a value with no use at all (" << llvm::format("%.1f", 100.0 * nSlotsNoRead / nSlotsAssigned)
@@ -497,7 +520,14 @@ void EvalState::indexRegion(Region &r) {
     for (mlir::Value res : op.getResults()) {
       // A value evaluated in place has exactly one use, strict or tail: it needs no cell that outlives that use.
       bool inPlace = inPlaceEnabled && core->evaluatesInPlace(res);
-      if (statsEnabled) { ++nSlotsAssigned; if (res.use_empty()) ++nSlotsNoRead; }
+      if (statsEnabled) {
+        ++nSlotsAssigned;
+        if (res.use_empty()) ++nSlotsNoRead;
+        // A cell that starts as a thunk is finer grain's row: an attribute value, a let binding, an argument,
+        // minted when it is forced instead of when its body is (howOf's Thunk case, spelled out -- it sits below).
+        if (!inPlace && !isa<nd::IntOp, nd::FloatOp, nd::StringOp, nd::PathOp, nd::BoolOp, nd::NullOp,
+                                nd::BuiltinOp, nd::LambdaOp>(&op)) ++ri->nThunks;
+      }
       slotMap[res.getAsOpaquePointer()] = {ri, &op, inPlace ? kNoSlot : slot++, Slot::Unknown, inPlace};
     }
     // A deferred lambda's region is a shell until its first call; it is indexed when it is minted.
@@ -507,6 +537,12 @@ void EvalState::indexRegion(Region &r) {
       if (!nested.empty()) indexRegion(nested);
   }
   ri->numSlots = slot;
+  if (statsEnabled) {
+    ri->nOps = uint32_t(blk.getOperations().size());
+    ri->everRan.assign((ri->nOps + 63) / 64, 0);
+    uint32_t oi = 0;
+    for (Operation &op : blk) ri->opIdx[&op] = oi++;
+  }
   regionInfos[&r] = ri;
 }
 
@@ -1068,6 +1104,11 @@ Symbol EvalState::pathSymbol(const nixfe::Name &comp, mlir::OperandRange dyn, un
 }
 
 void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
+  if (statsEnabled && env) {
+    ++env->info->nEvals;
+    auto it = env->info->opIdx.find(op);
+    if (it != env->info->opIdx.end()) env->info->everRan[it->second >> 6] |= 1ull << (it->second & 63);
+  }
   PosPtr pos = nd::posOfOp(op);
   auto copyFrom = [&](Value *v) {
     forceValue(*v, pos);

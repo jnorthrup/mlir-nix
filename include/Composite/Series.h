@@ -275,17 +275,20 @@ constexpr bool selectHolds() {
   return m.size() == 3 && m[0] == 10 && m[1] == 20 && m[2] == 30 && sum == 60;
 }
 constexpr bool rowSeriesHolds() {
-  Cursor<int, char> c{std::array<const char *, 2>{"i", "ch"}};
-  c.append(10, 'a');
-  c.append(20, 'b');
-  auto rs = c.rows();
-  bool same = rs.size() == 2 && rs[1] == c.row(1);
+  int i0[] = {10, 20};
+  char c0[] = {'a', 'b'};
+  auto rs = 2u |j| [i0, c0](uint32_t i) { return std::tuple(i0[i], c0[i]); }; // the shape rows() yields
+  bool same = rs.size() == 2 && rs[1] == std::tuple(20, 'b');
   auto firsts = rs |α| [](std::tuple<int, char> r) { return std::get<0>(r); };
   bool project = firsts.size() == 2 && firsts[0] == 10 && firsts[1] == 20;
   int sum = 0;
   for (auto r : rs) sum += std::get<0>(r);
   return same && project && sum == 30;
 }
+// The law runs on the shape because C++20 cannot constant-evaluate a Cursor: a std::vector member is not a
+// literal type before C++23.  These two pin rows() itself: it returns a Series whose element is the row tuple.
+static_assert(std::is_same_v<decltype(std::declval<const Cursor<int, char> &>().rows()[0]), std::tuple<int, char>>);
+static_assert(std::is_same_v<decltype(std::declval<const Cursor<int, char> &>().rows().size()), uint32_t>);
 static_assert(rowSeriesHolds(), "the Series<RowVec> face does not hold: a cursor is a Series of its rows");
 static_assert(lawsHold(), "the Series laws do not hold");
 static_assert(selectHolds(), "the select law does not hold: a row is read where it lies, by row j side");

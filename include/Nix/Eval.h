@@ -220,6 +220,13 @@ struct RegionInfo {
   /// they were made from.
   const Symbol *formalSyms = nullptr;
   mlir::Operation *formalsOf = nullptr;
+  /// MLNIX_STATS: what this region's sea of nodes holds.  nOps its body's ops; nThunks its cells that start as
+  /// thunks (finer-grain deferral would mint those, so they are its rows); nEvals its ops' evals (a region called
+  /// N times counts N times); everRan the distinct ops that ran, one bit an op, opIdx the op -> bit.
+  uint32_t nOps = 0, nThunks = 0;
+  uint64_t nEvals = 0;
+  llvm::DenseMap<mlir::Operation *, uint32_t> opIdx{};
+  std::vector<uint64_t> everRan{};
 };
 
 struct Frame {

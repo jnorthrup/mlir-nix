@@ -189,12 +189,26 @@ file in place and restores it, so it is not kept in the repo.
 
 Type pools for every node (the whole AST as `Cursor`s of typed instances, Confix mapping a tree to rows)
 have a consumer only if deferral goes finer than the lambda: an attribute value, a `let` binding, an
-argument, minted when it is forced. The headroom, from the tables above: after lambda grain, 80.4% of
-the ops that toplevel still lowers are never evaluated (80.0% on nixpkgs-73), and the bodies it mints
-cost 544 ms (307 ms). If the never-evaluated ops cost what the rest cost, thunk grain is worth about 440 ms
-(17% of the demand wall) on toplevel and 245 ms (12%) on nixpkgs-73, before the price of a finer plan,
-which at lambda grain was 77 ms of lowering and grows with the number of rows. A frame per deferred thunk
-and a region per row are the design risks. That is the next measurement to make, not a conclusion.
+argument, minted when it is forced. The measurement this section demanded is now made: the MLNIX_STATS
+"sea of nodes" line counts, per region, the ops the index holds, the distinct ops that ever ran (one bit
+an op), and the thunk cells finer grain would mint -- file code against the bodies demand minted.
+
+    toplevel, demand      ops held    ever ran     evals        thunk cells
+    5,811 file regions    562,915     17.4%        258,116      358,550
+    2,476 minted bodies    53,038     44.2%        15.16M       27,826
+
+    nixpkgs-73, demand
+    2,395 file regions    315,435     14.2%        395,916      178,084
+    2,315 minted bodies    67,797     47.3%        10.41M       37,099
+
+The naive cell-grain ceiling is ~304 ms on toplevel (544 ms of minting times the 55.8% of a minted body's
+ops that never run), not the 440 ms the estimate above assumed -- minted bodies run at 44-47%, not 20%. The
+rows grow from lambda grain's 2,476 to 27,826 (bodies alone) or 386,376 (with file code), against a plan
+that cost 77 ms of lowering at 29,744 rows; and the frame-per-deferred-thunk risk is priced: 15.16M evals
+a run (toplevel) would each pay the mint check. The file code's dead ops cost almost nothing where finer
+grain would collect -- all of demand lowering is 77 ms -- they cost IR memory and slot-map indexing, which
+minting per force does not save. Finer grain in this form is closed by the numbers; this is the
+measurement, and now it is a conclusion.
 
 The default stays eager. Flipping it is a separate decision: it would make any `MLNIX_PIPELINE` other
 than `nix-prims` an error (the stock passes cannot run on a body that does not exist yet), and it costs
