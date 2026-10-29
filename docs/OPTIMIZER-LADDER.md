@@ -131,3 +131,19 @@ bash scripts/optimizer-ladder.sh /tmp/old
 
 `cd60c69` is the last commit with the loop heap (the transform rewrite is `d2fbbe2`; the earlier `46182e5` lacks `Cluster::min`, which
 the benchmark uses). `CLANG=` and `GCC=` select the compilers.
+
+## Whole-evaluator PGO (2026-10-29)
+
+`scripts/pgo-build.sh` builds mlnix with clang's instrumentation, trains on the two benchmark workloads (demand schedule) and rebuilds with the
+profile. Mac (Apple clang, `-fprofile-instr-use`), nine interleaved rounds each, outputs identical in every arm:
+
+| | base, min | PGO, min | |
+|---|---:|---:|---:|
+| plain, nixos-toplevel | 1.565 s | 1.509 s | -3.6% |
+| plain, nixpkgs-73 | 1.349 s | 1.306 s | -3.2% |
+| prelowering (2 helpers), nixos-toplevel | 1.257 s | 1.236 s | -1.7% |
+| prelowering (2 helpers), nixpkgs-73 | 1.137 s | 1.121 s | -1.4% |
+
+Small because the hot code is mostly in the prebuilt MLIR and LLVM libraries (only mlnix's own sources are rebuilt with the profile) and the
+evaluator is latency-bound, not branch-bound. Trained on the workloads it is measured on, so it flatters itself a little. **Not measured on
+Kali:** the instrumented link needs clang's profile runtime (`libclang-rt-22-dev`), which the host does not have; `llvm-profdata` is there.

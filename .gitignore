@@ -4,3 +4,4 @@ tasktrees/
 .cache/
 .idea/
 build-g/
+build-pgo*/
