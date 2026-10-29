@@ -293,12 +293,9 @@ EvalState::EvalState(EvalSettings st, std::shared_ptr<nixstore::Store> store)
   statsEnabled = getenv("MLNIX_STATS") != nullptr;
   scalarJIT = ScalarJIT::create();
   settings.mapSources = !getenv("MLNIX_NOMMAP"); // ablation switch: read and copy every file, as before
-  stackFramesOn = !getenv("MLNIX_NOSTACKFRAMES"); // ablation switch: every call's frame is in the arena, as before
   composite::todoSink = [](const char *what) { llvm::errs() << "TODO: " << what << "\n"; };
-  eagerOn = !getenv("MLNIX_NOEAGER"); // ablation switch: a value forced at its first touch is made a thunk first, as before
   recycleOn = getenv("MLNIX_RECYCLE") != nullptr; // opt-in: -2 to -3% peak memory, +1 to +4% time on Kali (docs/FRAME-BYTES.md)
   selectorsOn = !getenv("MLNIX_NOSELECTORS"); // ablation switch: every curried selector runs as two calls, as before
-  inPlaceEnabled = !getenv("MLNIX_NOINPLACE"); // ablation switch: every operand gets a thunk, as before
   settings.deferBodies = getenv("MLNIX_DEFER") != nullptr; // sea-of-nodes schedule: mint bodies on first call
   // The evaluator is single-threaded.  With threading enabled every attribute
   // and location is uniqued through sharded, locked, thread-cached tables --
@@ -425,38 +422,6 @@ void EvalState::printStats() {
       llvm::errs() << llvm::format("   %-12s frames %9llu (%5.1f%%)   %7.1f MB (%5.1f%% of frame storage)   slot words %6.1f MB   read %5.1f%%   dead %6.1f MB\n", names[b], (unsigned long long)frames[b],
                                    100.0 * frames[b] / nFrames, bytes[b] / 1048576.0, 100.0 * bytes[b] / nFrameBytes, slotsBy[b] * 8 / 1048576.0,
                                    slotsBy[b] ? 100.0 * nTouchedBy[b] / slotsBy[b] : 0.0, (slotsBy[b] - nTouchedBy[b]) * 8 / 1048576.0);
-  }
-  if (nFrames) {
-    // Frames of 9+ slots: what a chunked frame (a table of chunks, a chunk made on its first read) would hold against the flat frame, for
-    // chunks of 8, 4, 2 and 1 slots.  Each chunk costs its slots; the table costs a pointer a chunk; the header is one pointer more.
-    unsigned sizes[4] = {8, 4, 2, 1};
-    uint64_t flat = 0, big = 0, slotsRead = 0, slotsTotal = 0, chunkedBy[4] = {}, touchedBy[4] = {}, totalBy[4] = {};
-    for (Frame *f : statFrames) {
-      unsigned n = f->info->numSlots;
-      if (n < 9) continue;
-      ++big;
-      const uint64_t *m = reinterpret_cast<const uint64_t *>(f->slots + n);
-      auto bit = [&](unsigned i) { return (m[i / 64] >> (i % 64)) & 1; };
-      for (unsigned i = 0; i < n; ++i) slotsRead += bit(i);
-      slotsTotal += n;
-      flat += sizeof(Frame) + n * sizeof(Value *);
-      for (unsigned k = 0; k < 4; ++k) {
-        unsigned cs = sizes[k], nc = (n + cs - 1) / cs, used = 0;
-        for (unsigned c = 0; c < nc; ++c) {
-          bool any = false;
-          for (unsigned i = c * cs; i < n && i < (c + 1) * cs; ++i) any |= bit(i);
-          used += any;
-        }
-        totalBy[k] += nc; touchedBy[k] += used;
-        chunkedBy[k] += sizeof(Frame) + sizeof(void *) + nc * sizeof(void *) + uint64_t(used) * cs * sizeof(Value *);
-      }
-    }
-    llvm::errs() << llvm::format("== chunked frames (frames of 9+ slots: %llu; slots read %.1f%%; flat storage %.1f MB):\n", (unsigned long long)big,
-                                 slotsTotal ? 100.0 * slotsRead / slotsTotal : 0.0, flat / 1048576.0);
-    for (unsigned k = 0; k < 4; ++k)
-      llvm::errs() << llvm::format("   %u-slot chunks: %5.1f%% touched, storage %7.1f MB  (saves %6.1f MB = %5.1f%% of those frames)\n", sizes[k],
-                                   totalBy[k] ? 100.0 * touchedBy[k] / totalBy[k] : 0.0, chunkedBy[k] / 1048576.0,
-                                   (double(flat) - double(chunkedBy[k])) / 1048576.0, flat ? 100.0 * (double(flat) - double(chunkedBy[k])) / double(flat) : 0.0);
   }
   if (nFrames) {
     auto mb = [](uint64_t b) { return b / 1048576.0; };
@@ -781,7 +746,7 @@ void EvalState::indexRegion(Region &r) {
     }
     for (mlir::Value res : op.getResults()) {
       // A value evaluated in place has exactly one use, strict or tail: it needs no cell that outlives that use.
-      bool inPlace = inPlaceEnabled && core->evaluatesInPlace(res);
+      bool inPlace = core->evaluatesInPlace(res);
       if (statsEnabled) {
         ++nSlotsAssigned;
         if (res.use_empty()) ++nSlotsNoRead;
@@ -934,7 +899,7 @@ Frame *EvalState::newFrame(RegionInfo *ri, Frame *up) {
       ++nSimReuseDist[dist < (32u << 10) ? 0 : dist < (256u << 10) ? 1 : dist < (2u << 20) ? 2 : dist < (32u << 20) ? 3 : 4];
     }
   }
-  if (statsEnabled) { frameWords(f)[2] = 1; statFrames.push_back(f); if (ri->numSlots) reinterpret_cast<uint64_t *>(f->slots + ri->numSlots)[0] |= 1; } // slot 0 is the argument
+  if (statsEnabled) { frameWords(f)[2] = 1; if (ri->numSlots) reinterpret_cast<uint64_t *>(f->slots + ri->numSlots)[0] |= 1; } // slot 0 is the argument
   return f;
 }
 
@@ -987,7 +952,7 @@ Value *EvalState::lookupImpl(Frame *f, mlir::Value v, bool forced) {
     return slot = bv;
   }
   Value *nv = allocValue();
-  if (forced && eagerOn && s.how == Slot::Thunk && idx != kNoSlot) {
+  if (forced && s.how == Slot::Thunk && idx != kNoSlot) {
     // The caller forces this value as the very next thing, so evaluate it now, into its cell: the same work in the same order as making a
     // thunk and forcing it, with no thunk, no frame captured.  The cell is in its slot first and a blackhole while it is evaluated, so a
     // reference back to it is infinite recursion, as before; if the evaluation throws, the cell becomes the thunk a later force retries.
@@ -1284,7 +1249,7 @@ void EvalState::callLambdaIn(Value &fun, RegionInfo *ri, Value *arg, Value &out,
     throw StackOverflowError("stack overflow; max-call-depth exceeded", pos);
   DepthGuard g(callDepth);
   auto interpret = [&] {
-    if (stackFramesOn && stackFrameOK(ri)) {
+    if (stackFrameOK(ri)) {
       // a body of strict ops over its one argument: the frame is two words and the argument, on the stack
       alignas(Frame) char buf[sizeof(Frame) + sizeof(Value *)];
       Frame *sf = ::new (static_cast<void *>(buf)) Frame{reinterpret_cast<uintptr_t>(fun.thunk.env), ri, {}};
@@ -1668,14 +1633,11 @@ void EvalState::evalConcatStrings(nd::ConcatStringsOp op, Frame *env, Value &out
       if (v->type == VType::Int) nf += (double)v->integer;
       else if (v->type == VType::Float) nf += v->fpoint;
       else throw EvalError(std::string("cannot add ") + showType(*v) + " to a float", ppos);
-    } else if (v->type == VType::String) {
-      copyContext(*v, context);                // exactly what coerceToString does for a string, without copying its bytes
-      views.push_back(v->window());
-      total += v->aux;
     } else {
-      owned.push_back(coerceToString(*v, context, false, firstType == VType::String, ppos, "while evaluating a path segment", !first));
-      views.push_back(composite::CharWindow(std::string_view(owned.back())));
-      total += owned.back().size();
+      // a string is a window on its own bytes; only a coerced piece makes text, in the back of `owned`
+      owned.emplace_back();
+      views.push_back(coerceToWindow(*v, context, false, firstType == VType::String, ppos, "while evaluating a path segment", owned.back(), !first));
+      total += views.back().size();
     }
     first = false;
   }
@@ -1893,6 +1855,18 @@ std::optional<std::string> EvalState::tryAttrsToString(Value &v, NixStringContex
   callFunction(*f->value, v, *r, nullptr);
   return coerceToString(*r, ctx, coerceMore, copyToStore, nullptr,
                         "while evaluating the result of the `__toString` attribute");
+}
+
+composite::CharWindow EvalState::coerceToWindow(Value &v, NixStringContext &ctx, bool coerceMore, bool copyToStore,
+                                                 PosPtr pos, std::string_view errorCtx, std::string &scratch,
+                                                 bool canonicalizePath) {
+  forceValue(v, pos);
+  if (v.type == VType::String) {
+    copyContext(v, ctx);
+    return v.window();
+  }
+  scratch = coerceToString(v, ctx, coerceMore, copyToStore, pos, errorCtx, canonicalizePath);
+  return composite::CharWindow(std::string_view(scratch));
 }
 
 std::string EvalState::coerceToString(Value &v, NixStringContext &ctx, bool coerceMore, bool copyToStore,

@@ -473,6 +473,9 @@ struct EvalState {
   std::string coerceToString(Value &v, NixStringContext &ctx, bool coerceMore, bool copyToStore,
                              PosPtr pos = nullptr, std::string_view errorCtx = "",
                              bool canonicalizePath = true);
+  // The same coercion as a window: a string is its own bytes in the arena (nothing copied); anything else is made in `scratch`, which the window views.
+  composite::CharWindow coerceToWindow(Value &v, NixStringContext &ctx, bool coerceMore, bool copyToStore, PosPtr pos,
+                                       std::string_view errorCtx, std::string &scratch, bool canonicalizePath = true);
   std::string coerceToPath(Value &v, NixStringContext &ctx, PosPtr pos, std::string_view errorCtx = "");
   std::string coerceToStorePath(Value &v, NixStringContext &ctx, PosPtr pos, std::string_view errorCtx = "");
   std::string copyPathToStore(NixStringContext &ctx, const std::string &path);
@@ -541,7 +544,6 @@ struct EvalState {
   /// MLNIX_STATS=1: op histogram of every module lowered, printed at exit.
   llvm::StringMap<size_t> opStats;
   bool statsEnabled = false;
-  bool inPlaceEnabled = true;
 
   /// The operand `v` of the op being evaluated in frame `f`, for a consumer that forces it
   /// right away and does not keep the Value (a `strict` operand, see NixModes).  When the
@@ -634,13 +636,10 @@ struct EvalState {
   uint64_t nChainOuter = 0, nChainOuterSlots = 0; // MLNIX_STATS: frames (and their slots) that exist only to capture an argument for an inner lambda
   uint64_t nStackable = 0, nStackableBytes = 0, nStackableOneSlot = 0; // MLNIX_STATS: frames (and their bytes) of bodies that cannot leak their frame
   uint64_t nTouchedBy[6] = {}; // MLNIX_STATS: slots ever read, by the slot count of their frame (1, 2-3, 4-8, 9-16, 17-64, 65+)
-  std::vector<Frame *> statFrames; // MLNIX_STATS: every frame made, each followed by a mask of the slots ever read (bit i = slot i)
   uint64_t nBindingBytes = 0, nListBytes = 0, nStringBytes = 0; // MLNIX_STATS: arena bytes by use (values and frames are counted above)
   uint64_t nStackFrames = 0; // MLNIX_STATS: calls run on a stack frame, nothing allocated in the arena
-  bool stackFramesOn = true; // MLNIX_NOSTACKFRAMES turns it off
   bool stackFrameOK(RegionInfo *ri);
   Value *lookupImpl(Frame *f, mlir::Value v, bool forced);
-  bool eagerOn = true;  // MLNIX_NOEAGER turns it off
   uint64_t nEager = 0;   // MLNIX_STATS
   // Frames that returned uncaptured, by slot count: a stack per size, linked through the frame's own first word.  The newest is reused first, so
   // a recycled frame is almost always still in L1 (docs/FRAME-BYTES.md: 97 to 98% of reuses are within 32 KiB of allocation).

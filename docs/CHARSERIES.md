@@ -27,6 +27,14 @@ No loop is written in the header (every walk is a `fold` or `firstWhere`) and no
 - **`builtins.substring`** of a string is a window on the original bytes sharing its context: no copy at all (it was three).
   Nix string values were never read as C strings (the pointer always travels with its length), so a window need not be terminated.
 - **`builtins.getEnv`** passes the name's own bytes when `facet<Terminated>` says they are a C string, and copies only a window.
+- **`coerceToWindow`** is `coerceToString` as a window: a string is its own arena bytes and context, anything else is made in the
+  caller's scratch string. Concatenation and `concatStringsSep` use it for every piece. `toString`, `stringLength`, `baseNameOf`, `dirOf`,
+  `unsafeDiscardStringContext` and `match` and `split` (on `std::cmatch` over the window, `groupValue` over `csub_match`) no longer
+  copy a string argument: `toString`, `baseNameOf`, `dirOf` and `unsafeDiscardStringContext` share its bytes (the first three its
+  context too), `baseNameOf` and `dirOf` as a sub-window like `substring`. The other `coerceToString` callers stay `std::string`: the
+  error messages (`abort`, `throw`, `addErrorContext`), the store paths (`StoreBuiltins.cpp`: derivation arguments, fetch URLs),
+  `mlnix.cpp` and the path coercions in `Eval.cpp` throw or hand the text to the store, so a window would save no copy that matters.
+  Of the 25 callers, 9 were hot string copies and 2 collapsed into `coerceToWindow`; the rest are cold.
 - **Numbers in `fromJSON` and `fromTOML`** are read by `facet<Integer<Base, Signed>>`, the reading `strtoll` and `strtoull` make (leading
   whitespace, sign, `0x` for base 16, saturation and `ERANGE` on overflow, and where the reading stopped) without libc. The facets agree
   with `strtoll` and `strtoull` on 400,000 random strings in five bases. `<cctype>`, `atoll` and `snprintf` are gone from `Formats.cpp`:
@@ -35,6 +43,13 @@ No loop is written in the header (every walk is a `fold` or `firstWhere`) and no
 
 All of it is invisible: language 487/487 on both schedules, both workloads byte-identical to the build before, 36 JSON and TOML number
 cases and 22 substring and `concatStringsSep` cases identical to it (contexts, paths, coercion, overflow, errors, UTF-8).
+
+## The lexer's derived texts: not worth a pool
+
+A counter in `setSlice`, `setFixed` and `setDerived` (a `thread_local` bump per lexeme, read by `mlnix-parse -v`) measured the corpus: of
+5.7M lexemes, 3,284 needed a text of their own (the derived pool, a `std::string` each), 0.057%. The rest are windows on the input or the
+four fixed texts. A `CharSeries` accumulator for 0.057% would not pay, and the counter itself taxed every lexeme, so it was taken out. To
+measure again, put the three increments back behind a compile-time flag.
 
 ## The weight, measured
 

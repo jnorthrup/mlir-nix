@@ -53,6 +53,9 @@ The reads are scattered: a quarter to a third of the slots are read but half to 
 The best chunking (4 slots) saves 10.5 MB of nixos-toplevel's 1.2 GB peak (0.9%) and 38.7 MB of nixpkgs-drvs (about 3%), and every
 read of a slot would pay the table indirection. It is not worth building.
 
+The table above is the record: the pricing code that produced it has been taken out of `MLNIX_STATS` (the mask stays, it counts the
+slots ever read).
+
 ## What the peak is made of
 
 `MLNIX_STATS=1` now prints the arena against the process's peak RSS. Everything the evaluator builds is in one never-freed bump arena

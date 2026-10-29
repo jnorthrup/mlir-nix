@@ -89,10 +89,20 @@ static std::regex &getRegex(EvalState &st, const std::string &re, PosPtr pos) {
   }
 }
 
+/// A string result that is `w`, a window on the bytes of `arg` when the argument was a string: those bytes and its context are shared,
+/// nothing is copied.  Any other argument was coerced into text of its own, so the result is made from it with `ctx`.
+static void mkSharedString(EvalState &st, Value &v, const Value &arg, composite::CharWindow w, const NixStringContext &ctx) {
+  if (arg.type != VType::String) return st.mkString(v, w.view(), ctx);
+  v.type = VType::String;
+  v.str.s = w.data();
+  v.aux = w.size();
+  v.str.ctx = arg.str.ctx;
+}
+
 /// A group of a regex match as Nix gives it: its text, or null where the group took no part.
-static Value *groupValue(EvalState &st, const std::ssub_match &g) {
+static Value *groupValue(EvalState &st, const std::csub_match &g) {
   if (!g.matched) { Value *e = st.allocValue(); st.mkNull(*e); return e; }
-  return st.newString(g.str());
+  return st.newString(std::string_view(g.first, g.length()));
 }
 
 //===----------------------------------------------------------------------===//
@@ -359,13 +369,15 @@ void registerBuiltins(EvalState &state) {
   // -- Strings ---------------------------------------------------------------
   S.addPrimOp("toString", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
     NixStringContext ctx;
-    auto s = st.coerceToString(*args[0], ctx, true, false, pos, "while evaluating the first argument passed to builtins.toString");
-    st.mkString(v, s, ctx);
+    std::string scratch;
+    auto w = st.coerceToWindow(*args[0], ctx, true, false, pos, "while evaluating the first argument passed to builtins.toString", scratch);
+    mkSharedString(st, v, *args[0], w, ctx);
   });
   S.addPrimOp("__stringLength", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
     NixStringContext ctx;
-    auto s = st.coerceToString(*args[0], ctx, false, true, pos, "while evaluating the argument passed to builtins.stringLength");
-    st.mkInt(v, (int64_t)s.size());
+    std::string scratch;
+    auto w = st.coerceToWindow(*args[0], ctx, false, true, pos, "while evaluating the argument passed to builtins.stringLength", scratch);
+    st.mkInt(v, (int64_t)w.size());
   });
   S.addPrimOp("__substring", 3, [](EvalState &st, A args, Value &v, PosPtr pos) {
     int64_t start = st.forceInt(*args[0], pos, "while evaluating the first argument (the start offset) passed to builtins.substring");
@@ -385,7 +397,8 @@ void registerBuiltins(EvalState &state) {
       return;
     }
     NixStringContext ctx;
-    auto s = st.coerceToString(*args[2], ctx, false, true, pos, "while evaluating the third argument (the string) passed to builtins.substring");
+    std::string scratch;  // only a coerced argument (a path, a set) gets here: a string was shared above
+    std::string_view s = st.coerceToWindow(*args[2], ctx, false, true, pos, "while evaluating the third argument (the string) passed to builtins.substring", scratch).view();
     size_t l = len < 0 ? std::string::npos : (size_t)len;
     st.mkString(v, (uint64_t)start >= s.size() ? "" : s.substr(start, l), ctx);
   });
@@ -401,14 +414,9 @@ void registerBuiltins(EvalState &state) {
       if (i) pieces.push_back(composite::CharWindow(sep));  // a window on the separator's own arena bytes
       Value &e = *args[1]->list.elems[i];
       st.forceValue(e, pos);
-      if (e.type == VType::String) {
-        st.copyContext(e, ctx);
-        pieces.push_back(e.window());
-      } else {
-        owned.push_back(st.coerceToString(e, ctx, false, true, pos,
-                                          "while evaluating one element of the list of strings to concat passed to builtins.concatStringsSep"));
-        pieces.push_back(composite::CharWindow(std::string_view(owned.back())));
-      }
+      owned.emplace_back();
+      pieces.push_back(st.coerceToWindow(e, ctx, false, true, pos,
+                                         "while evaluating one element of the list of strings to concat passed to builtins.concatStringsSep", owned.back()));
     }
     st.mkStringOf(v, pieces, st.makeContext(ctx));
   });
@@ -456,26 +464,27 @@ void registerBuiltins(EvalState &state) {
     auto re = str(st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.match"));
     std::regex &regex = getRegex(st, re, pos);
     NixStringContext ctx;
-    auto s = st.coerceToString(*args[1], ctx, false, true, pos, "while evaluating the second argument passed to builtins.match");
-    std::smatch m;
-    if (!std::regex_match(s, m, regex)) { st.mkNull(v); return; }
+    std::string scratch;
+    auto s = st.coerceToWindow(*args[1], ctx, false, true, pos, "while evaluating the second argument passed to builtins.match", scratch).view();
+    std::cmatch m;
+    if (!std::regex_match(s.data(), s.data() + s.size(), m, regex)) { st.mkNull(v); return; }
     st.mkList(v, uint32_t(m.size() - 1) |cp::j| [&](uint32_t i) { return groupValue(st, m[i + 1]); });
   });
   S.addPrimOp("__split", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     auto re = str(st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.split"));
     std::regex &regex = getRegex(st, re, pos);
     NixStringContext ctx;
-    auto s = st.coerceToString(*args[1], ctx, false, true, pos, "while evaluating the second argument passed to builtins.split");
-    auto begin = std::sregex_iterator(s.begin(), s.end(), regex);
-    auto end = std::sregex_iterator();
+    std::string scratch;
+    auto s = st.coerceToWindow(*args[1], ctx, false, true, pos, "while evaluating the second argument passed to builtins.split", scratch).view();
+    auto begin = std::cregex_iterator(s.data(), s.data() + s.size(), regex);
+    auto end = std::cregex_iterator();
     composite::MutableSeries<Value *> out;
     size_t lastEnd = 0;
-    std::smatch last;
     bool any = false;
     for (auto i = begin; i != end; ++i) {
       any = true;
-      const std::smatch &m = *i;
-      Value *pre = st.newString(str(std::string_view(s).substr(lastEnd, m.position(0) - lastEnd)));
+      const std::cmatch &m = *i;
+      Value *pre = st.newString(s.substr(lastEnd, m.position(0) - lastEnd));
       out.append(pre);
       Value *groups = st.allocValue();
       st.mkList(*groups, uint32_t(m.size() - 1) |cp::j| [&](uint32_t g) { return groupValue(st, m[g + 1]); });
@@ -518,16 +527,18 @@ void registerBuiltins(EvalState &state) {
   });
   S.addPrimOp("baseNameOf", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
     NixStringContext ctx;
-    auto s = st.coerceToString(*args[0], ctx, false, false, pos, "while evaluating the first argument passed to builtins.baseNameOf");
-    std::string_view p = s;
-    std::string res;
+    std::string scratch;
+    auto w = st.coerceToWindow(*args[0], ctx, false, false, pos, "while evaluating the first argument passed to builtins.baseNameOf", scratch);
+    std::string_view p = w.view();
+    uint32_t from = 0, to = 0;
     if (!p.empty()) {
       size_t last = p.size() - 1;
       if (p[last] == '/' && last > 0) last--;
       size_t slash = p.rfind('/', last);
-      res = slash == std::string_view::npos ? str(p.substr(0, last + 1)) : str(p.substr(slash + 1, last - slash));
+      from = slash == std::string_view::npos ? 0 : uint32_t(slash + 1);
+      to = uint32_t(last + 1);
     }
-    st.mkString(v, res, ctx);
+    mkSharedString(st, v, *args[0], w.CharWindow::operator[](join::TwInt(from, to)), ctx);
   });
   S.addPrimOp("dirOf", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceValue(*args[0], pos);
@@ -537,17 +548,20 @@ void registerBuiltins(EvalState &state) {
       return;
     }
     NixStringContext ctx;
-    auto s = st.coerceToString(*args[0], ctx, false, false, pos, "while evaluating the first argument passed to 'builtins.dirOf'");
-    auto slash = s.rfind('/');
-    std::string d = slash == std::string::npos ? "." : slash == 0 ? "/" : s.substr(0, slash);
-    st.mkString(v, d, ctx);
+    std::string scratch;
+    auto w = st.coerceToWindow(*args[0], ctx, false, false, pos, "while evaluating the first argument passed to 'builtins.dirOf'", scratch);
+    auto slash = w.view().rfind('/');
+    if (slash == std::string_view::npos) return st.mkString(v, ".", ctx);
+    mkSharedString(st, v, *args[0], w.CharWindow::operator[](join::TwInt(0, slash == 0 ? 1 : uint32_t(slash))), ctx);
   });
 
   // -- Context ---------------------------------------------------------------
   S.addPrimOp("__unsafeDiscardStringContext", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
     NixStringContext ctx;
-    auto s = st.coerceToString(*args[0], ctx, false, true, pos);
-    st.mkString(v, s);
+    std::string scratch;
+    auto w = st.coerceToWindow(*args[0], ctx, false, true, pos, "", scratch);
+    mkSharedString(st, v, *args[0], w, {});
+    if (args[0]->type == VType::String) v.str.ctx = nullptr;  // the bytes are shared, the context is not
   });
   S.addPrimOp("__hasContext", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceString(*args[0], pos, "while evaluating the argument passed to builtins.hasContext");
@@ -555,9 +569,10 @@ void registerBuiltins(EvalState &state) {
   });
   S.addPrimOp("__unsafeDiscardOutputDependency", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
     NixStringContext ctx, out;
-    auto s = st.coerceToString(*args[0], ctx, false, true, pos);
+    std::string scratch;
+    auto w = st.coerceToWindow(*args[0], ctx, false, true, pos, "", scratch);
     for (auto &c : ctx) out.insert(c[0] == '=' ? c.substr(1) : c);
-    st.mkString(v, s, out);
+    st.mkString(v, w.view(), out);
   });
   S.addPrimOp("__addDrvOutputDependencies", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
     NixStringContext ctx;
