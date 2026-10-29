@@ -112,6 +112,57 @@ template <class S, class G> constexpr auto operator|(Held<S> l, G g) {
 }
 
 //===----------------------------------------------------------------------===//
+// fold: the one loop.  Everything that walks a Series is a transform over it.
+//===----------------------------------------------------------------------===//
+
+/// A transform over a handful of registers must dissolve into its caller: a call per fold step costs more than the step.
+#define COMPOSITE_INLINE [[gnu::always_inline]] inline
+
+/// iota(n): the Series 0..n-1, the domain every index transform ranges over.
+COMPOSITE_INLINE constexpr auto iota(uint32_t n) { return n |j| [](uint32_t i) { return i; }; }
+
+/// fold(xs, init, f, halt): left reduction, f(state, x) -> state, stopping once halt(state).  This is the only loop the
+/// algebra owns; first-match, contains, argmin, drain and the level walks of the funnel are folds with a state.
+template <class S, class T, class F, class H>
+COMPOSITE_INLINE constexpr T fold(const S &xs, T init, F f, H halt) {
+  for (uint32_t i = 0, n = uint32_t(xs.size()); i < n && !halt(init); ++i) init = f(std::move(init), xs[i]);
+  return init;
+}
+template <class S, class T, class F> COMPOSITE_INLINE constexpr T fold(const S &xs, T init, F f) {
+  return fold(xs, std::move(init), std::move(f), [](const T &) { return false; });
+}
+
+/// vec<N>(f): Kotlin's `List(N) { f(it) }`.  The size is a constant, the generator is called once per index, and the layout
+/// is the flat array of N cells -- nothing to discover.  No loop: the indices are an integer sequence, expanded at compile time.
+template <uint32_t N, class F> COMPOSITE_INLINE constexpr auto vec(F f) {
+  return [&]<uint32_t... K>(std::integer_sequence<uint32_t, K...>) __attribute__((always_inline)) {
+    return std::array<std::remove_cvref_t<decltype(f(0u))>, N>{f(K)...};
+  }(std::make_integer_sequence<uint32_t, N>{});
+}
+
+/// foldN<N>(init, f): the fold of f over the indices 0..N-1 with N a constant, so the whole walk is straight-line code.
+template <uint32_t N, class T, class F> COMPOSITE_INLINE constexpr T foldN(T init, F f) {
+  [&]<uint32_t... K>(std::integer_sequence<uint32_t, K...>) __attribute__((always_inline)) { ((init = f(std::move(init), K)), ...); }(std::make_integer_sequence<uint32_t, N>{});
+  return init;
+}
+
+/// The index of the first element satisfying p, or size when none does (the Series' own bisect convention).
+template <class S, class P> COMPOSITE_INLINE constexpr uint32_t firstWhere(const S &xs, P p) {
+  struct At { uint32_t i; bool hit; };
+  At r = fold(iota(uint32_t(xs.size())), At{uint32_t(xs.size()), false},
+              [&](At a, uint32_t k) { return p(xs[k]) ? At{k, true} : a; }, [](const At &a) { return a.hit; });
+  return r.i;
+}
+template <class S, class P> constexpr bool anyOf(const S &xs, P p) { return firstWhere(xs, std::move(p)) < uint32_t(xs.size()); }
+
+/// The index of the least element under less (the first of equals); 0 when xs is empty.  Seeded from element 0, so a
+/// Series of n elements costs n-1 comparisons.
+template <class S, class L> COMPOSITE_INLINE constexpr uint32_t argMin(const S &xs, L less) {
+  uint32_t n = uint32_t(xs.size());
+  return fold(iota(n ? n - 1 : 0), 0u, [&](uint32_t m, uint32_t k) { return less(xs[k + 1], xs[m]) ? k + 1 : m; });
+}
+
+//===----------------------------------------------------------------------===//
 // joins and combine: across the rows and along them (TrikeShed lib/Join.kt, lib/Combine.kt, cursor/CursorOps.kt)
 //===----------------------------------------------------------------------===//
 

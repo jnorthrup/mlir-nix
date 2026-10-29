@@ -11,7 +11,10 @@
 // below cover each unit, not the residency of a whole bucket array in L1.
 
 #include <array>
+#include <bit>
 #include <cstdint>
+
+#include "Composite/Series.h"
 
 namespace composite {
 
@@ -47,14 +50,18 @@ static_assert(sizeof(InodeRow) == 16);
 /// root; the maximum is a child of the root -- both edges are O(1) reads, and
 /// every removal swaps an edge row with the last row and sifts it down.
 /// The caller must not push when full or read/pop when empty.
+/// No loop is written here: a sift is a fold over the levels with a (position, live) state, and a scan is a transform.
 template <class Row, unsigned N>
 struct MinMaxHeap {
   static_assert((N & (N + 1)) == 0, "N is one less than a power of two (level-clean)");
+  static constexpr uint32_t kLevels = std::bit_width(N);
   std::array<Row, N> a{};
   uint32_t n = 0;
 
   constexpr uint32_t size() const { return n; }
   constexpr bool full() const { return n == N; }
+  /// The rows in heap order, as a Series.
+  constexpr auto rows() const { return series(a.data(), n); }
 
   constexpr void push(Row r) {
     uint32_t i = n++;
@@ -64,81 +71,71 @@ struct MinMaxHeap {
     bool minLevel = ((31 - __builtin_clz(i + 1)) & 1) == 0;
     uint32_t p = (i - 1) / 2;
     if (minLevel ? a[p] < a[i] : a[i] < a[p]) {
-      Row t = a[i]; a[i] = a[p]; a[p] = t;  // settle at the parent edge
-      minLevel ? upMax(p) : upMin(p);
+      swap(i, p);  // settle at the parent edge
+      minLevel ? climb(p, kMaxFirst) : climb(p, kMinFirst);
     } else {
-      minLevel ? upMin(i) : upMax(i);
+      minLevel ? climb(i, kMinFirst) : climb(i, kMaxFirst);
     }
   }
 
   constexpr Row min() const { return a[0]; }
-  constexpr Row max() const {
-    if (n == 1) return a[0];
-    uint32_t m = 1;
-    if (n > 2 && a[1] < a[2]) m = 2;
-    return a[m];
-  }
+  constexpr Row max() const { return a[maxAt()]; }
 
   constexpr Row popMin() {
     Row r = a[0];
     a[0] = a[--n];
-    if (n > 1) downMin(0);
+    if (n > 1) sift(0, kMinFirst);
     return r;
   }
   constexpr Row popMax() {
     if (n == 1) return popMin();
-    uint32_t m = 1;
-    if (n > 2 && a[1] < a[2]) m = 2;
+    uint32_t m = maxAt();
     Row r = a[m];
     a[m] = a[--n];
-    if (m < n) downMax(m);
+    if (m < n) sift(m, kMaxFirst);
     return r;
   }
 
 private:
-  constexpr void upMin(uint32_t i) {
-    while (i >= 3) {
-      uint32_t g = (i - 3) / 4;
-      if (a[i] < a[g]) { Row t = a[i]; a[i] = a[g]; a[g] = t; i = g; } else break;
-    }
+  /// before(x, y): x belongs nearer the edge than y.  Min levels put the smaller first, max levels the larger.
+  static constexpr auto kMinFirst = [](const Row &x, const Row &y) { return x < y; };
+  static constexpr auto kMaxFirst = [](const Row &x, const Row &y) { return y < x; };
+  struct Walk { uint32_t i; bool live; };
+
+  constexpr void swap(uint32_t x, uint32_t y) { Row t = a[x]; a[x] = a[y]; a[y] = t; }
+  constexpr uint32_t maxAt() const { return n == 1 ? 0u : n > 2 && a[1] < a[2] ? 2u : 1u; }
+
+  /// Grandparent walk upward: while the row is nearer the edge than its grandparent, swap with it.  kLevels is a constant,
+  /// so the walk is straight-line code.
+  template <class B> constexpr void climb(uint32_t from, B before) {
+    foldN<kLevels>(Walk{from, true}, [&](Walk w, uint32_t) __attribute__((always_inline)) -> Walk {
+      if (!w.live || w.i < 3) return Walk{w.i, false};
+      uint32_t g = (w.i - 3) / 4;
+      if (!before(a[w.i], a[g])) return Walk{w.i, false};
+      swap(w.i, g);
+      return Walk{g, true};
+    });
   }
-  constexpr void upMax(uint32_t i) {
-    while (i >= 3) {
-      uint32_t g = (i - 3) / 4;
-      if (a[g] < a[i]) { Row t = a[i]; a[i] = a[g]; a[g] = t; i = g; } else break;
-    }
-  }
-  constexpr void downMin(uint32_t i) {
-    for (;;) {
-      uint32_t l = 2 * i + 1;
-      if (l >= n) break;
-      uint32_t m = l;
-      if (l + 1 < n && a[l + 1] < a[m]) m = l + 1;
-      for (uint32_t g = 4 * i + 3; g < n && g <= 4 * i + 6; ++g)
-        if (a[g] < a[m]) m = g;
-      if (!(a[m] < a[i])) break;
-      Row t = a[i]; a[i] = a[m]; a[m] = t;
-      if (m < 4 * i + 3) break; // a child is on the opposite level: stop here
+
+  /// Walk downward: the nearest-the-edge of children and grandchildren replaces the row if it is nearer the edge.  Stop
+  /// after a child swap (the child is on the opposite level); after a grandchild swap, repair against its parent and go on.
+  /// The candidates are the constant vec<6>: two children, then four grandchildren, in index order.
+  template <class B> constexpr void sift(uint32_t from, B before) {
+    foldN<kLevels>(Walk{from, true}, [&](Walk w, uint32_t) __attribute__((always_inline)) -> Walk {
+      uint32_t i = w.i, l = 2 * i + 1;
+      if (!w.live || l >= n) return Walk{i, false};
+      auto kin = vec<6>([&](uint32_t k) __attribute__((always_inline)) { return k < 2 ? l + k : 4 * i + 1 + k; });
+      uint32_t m = foldN<5>(l, [&](uint32_t best, uint32_t k) __attribute__((always_inline)) -> uint32_t {
+        uint32_t x = kin[k + 1];
+        return x < n && before(a[x], a[best]) ? x : best;
+      });
+      if (!before(a[m], a[i])) return Walk{i, false};
+      swap(i, m);
+      if (m < 4 * i + 3) return Walk{m, false};
       uint32_t p = (m - 1) / 2;
-      if (a[p] < a[m]) { Row u = a[m]; a[m] = a[p]; a[p] = u; }
-      i = m;
-    }
-  }
-  constexpr void downMax(uint32_t i) {
-    for (;;) {
-      uint32_t l = 2 * i + 1;
-      if (l >= n) break;
-      uint32_t m = l;
-      if (l + 1 < n && a[m] < a[l + 1]) m = l + 1;
-      for (uint32_t g = 4 * i + 3; g < n && g <= 4 * i + 6; ++g)
-        if (a[m] < a[g]) m = g;
-      if (!(a[i] < a[m])) break;
-      Row t = a[i]; a[i] = a[m]; a[m] = t;
-      if (m < 4 * i + 3) break;
-      uint32_t p = (m - 1) / 2;
-      if (a[m] < a[p]) { Row u = a[m]; a[m] = a[p]; a[p] = u; }
-      i = m;
-    }
+      if (before(a[p], a[m])) swap(m, p);
+      return Walk{m, true};
+    });
   }
 };
 
@@ -156,23 +153,17 @@ struct Pegs {
 
   constexpr uint32_t size() const { return cnt; }
   constexpr bool full() const { return cnt == P; }
-  constexpr void push(Row r) { a[(head + cnt++) & (P - 1)] = r; }
+  constexpr void push(Row r) { a[(head + cnt++) & mask] = r; }
+  /// The pegs oldest first, as a Series over the ring.
+  constexpr auto ring() const { return cnt |j| [this](uint32_t i) -> const Row & { return a[(head + i) & mask]; }; }
 
-  /// The smallest peg, by a scan of the ring: P is register scale.
-  constexpr Row min() const {
-    Row r = a[head & (P - 1)];
-    for (uint32_t i = 1; i < cnt; ++i) {
-      Row c = a[(head + i) & (P - 1)];
-      if (c < r) r = c;
-    }
-    return r;
-  }
+  /// The smallest peg: P is register scale, so this is an argMin over the ring.
+  constexpr uint32_t least() const { return argMin(ring(), [](const Row &x, const Row &y) { return x < y; }); }
+  constexpr Row min() const { return ring()[least()]; }
   constexpr Row popMin() {
-    uint32_t m = 0;
-    for (uint32_t i = 1; i < cnt; ++i)
-      if (a[(head + i) & (P - 1)] < a[(head + m) & (P - 1)]) m = i;
-    Row r = a[(head + m) & (P - 1)];
-    a[(head + m) & (P - 1)] = a[(head + cnt - 1) & (P - 1)];
+    uint32_t m = least();
+    Row r = ring()[m];
+    a[(head + m) & mask] = a[(head + cnt - 1) & mask];
     --cnt;
     return r;
   }
@@ -212,24 +203,23 @@ struct Cluster {
   }
 
   /// The stored row equal to `r`, or null.  The heap's edges are O(1) reads, so a key outside [min, max] skips the heap
-  /// scan; the pegs are unordered and always scanned.  Both scans are register scale.
+  /// search; the pegs are unordered and always searched.  Both are firstWhere over a Series.
   constexpr const Row *find(const Row &r) const {
-    if (heap.size() && !(r < heap.min()) && !(heap.max() < r))
-      for (uint32_t i = 0; i < heap.size(); ++i)
-        if (heap.a[i] == r) return &heap.a[i];
-    for (uint32_t i = 0; i < pegs.size(); ++i) {
-      const Row &c = pegs.a[(pegs.head + i) & (decltype(pegs)::mask)];
-      if (c == r) return &c;
+    auto is = [&](const Row &c) { return c == r; };
+    if (heap.size() && !(r < heap.min()) && !(heap.max() < r)) {
+      uint32_t k = firstWhere(heap.rows(), is);
+      if (k < heap.size()) return &heap.a[k];
     }
-    return nullptr;
+    uint32_t k = firstWhere(pegs.ring(), is);
+    return k < pegs.size() ? &pegs.a[(pegs.head + k) & Pegs<Row, P>::mask] : nullptr;
   }
 
   /// Emits every row in key order: the min edge of the heap and the min peg
   /// race, and the smaller leaves.  The drain of a fill -- no search, one pop
-  /// a row, locally dispatched.
+  /// a row, locally dispatched.  A fold over as many steps as there are rows.
   template <class Emit>
   constexpr void drain(Emit &&emit) {
-    while (size()) emit(popMin());
+    fold(iota(size()), 0u, [&](uint32_t done, uint32_t) { emit(popMin()); return done + 1; });
   }
 };
 
@@ -244,23 +234,23 @@ constexpr bool clusterOrder(const Keys &keys, Emit emit) {
     constexpr bool operator<(const Row &r) const { return key != r.key ? key < r.key : index < r.index; }
   };
   Cluster<Row, 15, 8> c;
-  for (uint32_t i = 0; i < keys.size(); ++i) c.insert({int64_t(keys[i]), i});
+  fold(iota(uint32_t(keys.size())), 0u, [&](uint32_t, uint32_t i) { c.insert({int64_t(keys[i]), i}); return 0u; });
   c.drain([&](Row r) { emit(r.index); });
   return true;
 }
 
 namespace law {
 constexpr bool mixedEdges() {
-  const int input[] = {0, 0, 1, 0, 0, 0, 1}, expected[] = {0, 1, 0, 1, 0, 0, 0};
-  for (unsigned reverse = 0; reverse < 2; ++reverse) {
+  constexpr int input[] = {0, 0, 1, 0, 0, 0, 1}, expected[] = {0, 1, 0, 1, 0, 0, 0};
+  auto run = [&](uint32_t reverse) {
     MinMaxHeap<int, 7> h;
-    for (int x : input) h.push(reverse ? -x : x);
-    for (unsigned i = 0; i < 7; ++i) {
+    fold(series(input, 7), 0, [&](int, int x) { h.push(reverse ? -x : x); return 0; });
+    return fold(iota(7), true, [&](bool ok, uint32_t i) {
       int x = ((i & 1) != reverse) ? h.popMax() : h.popMin();
-      if (x != (reverse ? -expected[i] : expected[i])) return false;
-    }
-  }
-  return true;
+      return ok && x == (reverse ? -expected[i] : expected[i]);
+    });
+  };
+  return run(0) && run(1);
 }
 static_assert(mixedEdges(), "equal child/grandchild keys preserve both heap edges");
 
@@ -268,31 +258,21 @@ static_assert(mixedEdges(), "equal child/grandchild keys preserve both heap edge
 /// and drained emits the same stream a sort of the same rows emits; a full
 /// cluster says so and stays intact.
 constexpr bool clusterSorts() {
-  const uint32_t seed[23] = {7, 3, 9, 1, 8, 12, 5, 14, 0, 11, 6, 13, 2, 10, 4,
-                             20, 16, 18, 15, 19, 17, 22, 21};
-  InodeRow rows[23];
-  for (uint32_t i = 0; i < 23; ++i)
-    rows[i] = InodeRow::pack(100 + (seed[i] >> 3), uint8_t(1 + (seed[i] & 3)), seed[i] * 11,
-                             100, seed[i]);
+  constexpr uint32_t seed[23] = {7, 3, 9, 1, 8, 12, 5, 14, 0, 11, 6, 13, 2, 10, 4,
+                                 20, 16, 18, 15, 19, 17, 22, 21};
+  auto rowOf = [&](uint32_t i) { return InodeRow::pack(100 + (seed[i] >> 3), uint8_t(1 + (seed[i] & 3)), seed[i] * 11, 100, seed[i]); };
   Cluster<InodeRow, 15, 8> c;
-  for (uint32_t i = 0; i < 23; ++i) c.insert(rows[i]);
+  fold(iota(23), 0u, [&](uint32_t, uint32_t i) { c.insert(rowOf(i)); return 0u; });
   // the 24th row spills: the cluster is full, intact, and says so
-  InodeRow extra = InodeRow::pack(999, 1, 0, 100, 999);
-  if (c.insert(extra) != 2 || c.size() != 23) return false;
-  InodeRow out[23];
-  uint32_t k = 0;
-  c.drain([&](InodeRow r) { out[k++] = r; });
-  if (k != 23 || c.size() != 0) return false;
-  // insertion sort of the same rows, as the reference order
-  InodeRow ref[23];
-  for (uint32_t i = 0; i < 23; ++i) ref[i] = rows[i];
-  for (uint32_t i = 1; i < 23; ++i)
-    for (uint32_t j = i; j > 0 && ref[j] < ref[j - 1]; --j) {
-      InodeRow t = ref[j]; ref[j] = ref[j - 1]; ref[j - 1] = t;
-    }
-  for (uint32_t i = 0; i < 23; ++i)
-    if (!(out[i] == ref[i] && out[i].val == ref[i].val)) return false;
-  return true;
+  if (c.insert(InodeRow::pack(999, 1, 0, 100, 999)) != 2 || c.size() != 23) return false;
+  // the drained stream must equal the sorted order: row k of the drain is the row of rank k
+  struct Out { uint32_t k; bool ok; };
+  Out out = {0, true};
+  c.drain([&](InodeRow r) {
+    uint32_t rank = fold(iota(23), 0u, [&](uint32_t below, uint32_t i) { return below + (rowOf(i) < r ? 1u : 0u); });
+    out = Out{out.k + 1, out.ok && rank == out.k};
+  });
+  return out.k == 23 && out.ok && c.size() == 0;
 }
 static_assert(clusterSorts(), "a drained cluster emits the sorted stream, and a full cluster spills");
 }  // namespace law
