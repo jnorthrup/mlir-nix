@@ -674,6 +674,11 @@ void EvalState::printStats() {
     for (auto &e : matchPairs) { repeats += e.getValue() - 1; res[e.getKey().split('\0').first] = 1; }
     llvm::errs() << llvm::format("== builtins.match: %llu calls, %u distinct (regex, input) pairs over %u regexes; %llu calls (%.1f%%) repeat a pair already matched\n",
                                  (unsigned long long)nMatchCalls, matchPairs.size(), res.size(), (unsigned long long)repeats, 100.0 * repeats / nMatchCalls);
+    if (getenv("MLNIX_STATS_REGEX")) { // every pattern, with its calls
+      llvm::StringMap<uint64_t> byRe;
+      for (auto &e : matchPairs) byRe[e.getKey().split('\0').first] += e.getValue();
+      for (auto &e : byRe) llvm::errs() << llvm::format("   regex %8llu  ", (unsigned long long)e.getValue()) << e.getKey() << "\n";
+    }
   }
   { // The IR the evaluator reads: ops evaluated, and how many bytes of MLIR operations hold the hottest of them (what a compact form would shrink).
     struct Hot { uint32_t evals; uint32_t bytes; };
