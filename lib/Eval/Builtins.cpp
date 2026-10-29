@@ -139,13 +139,20 @@ template <class Walk> static ku::Result kursiveRun(const ku::Program &p, std::st
   }
 }
 
+/// A piece of the input of a match or a split: a window on its bytes when they are an arena string's, which stay; a copy when they are the
+/// text a coercion made in `scratch`.
+static Value *pieceOf(EvalState &st, std::string_view s, size_t b, size_t n, const std::string &scratch) {
+  std::string_view piece = s.substr(b, n);
+  return s.data() == scratch.data() ? st.newString(piece) : st.newStringWindow(piece);
+}
+
 /// The groups of a walk's answer as Nix gives them: each group's text, or null where it took no part.
-static void kursiveGroups(EvalState &st, Value &v, const ku::Program &p, std::string_view s) {
+static void kursiveGroups(EvalState &st, Value &v, const ku::Program &p, std::string_view s, const std::string &scratch) {
   const uint32_t *best = kursiveScratch().best.data();
   st.mkList(v, p.groups |cp::j| [&](uint32_t i) -> Value * {
     uint32_t b = best[2 * (i + 1)], e = best[2 * (i + 1) + 1];
     if (b == ~0u || e == ~0u) { Value *n = st.allocValue(); st.mkNull(*n); return n; }
-    return st.newString(s.substr(b, e - b));
+    return pieceOf(st, s, b, e - b, scratch);
   });
 }
 
@@ -538,7 +545,7 @@ void registerBuiltins(EvalState &state) {
     // Kursive walks the pattern's program over the input's bytes where they lie: the groups are marks, and nothing is allocated.
     ku::Result r = kursiveRun(prog, re, pos, [&](ku::Scratch &k) { return ku::matchAll(prog, s.data(), uint32_t(s.size()), k); });
     if (r == ku::Result::NoMatch) st.mkNull(v);
-    else kursiveGroups(st, v, prog, s);
+    else kursiveGroups(st, v, prog, s, scratch);
     st.matchMemo.try_emplace(key, v);
   });
   S.addPrimOp("__split", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
@@ -562,16 +569,16 @@ void registerBuiltins(EvalState &state) {
       }
       const uint32_t *best = kursiveScratch().best.data();
       uint32_t ms = best[0], me = best[1];
-      out.append(st.newString(s.substr(lastEnd, ms - lastEnd)));
+      out.append(pieceOf(st, s, lastEnd, ms - lastEnd, scratch));
       Value *groups = st.allocValue();
-      kursiveGroups(st, *groups, prog, s);
+      kursiveGroups(st, *groups, prog, s, scratch);
       out.append(groups);
       lastEnd = me;
       from = me;
       afterEmpty = ms == me;
       if (afterEmpty && me == n) break;
     }
-    out.append(st.newString(s.substr(lastEnd)));
+    out.append(pieceOf(st, s, lastEnd, n - lastEnd, scratch));
     st.mkList(v, out);
   });
   S.addPrimOp("__compareVersions", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
@@ -725,7 +732,7 @@ void registerBuiltins(EvalState &state) {
   S.addPrimOp("__attrNames", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceAttrs(*args[0], pos, "while evaluating the argument passed to builtins.attrNames");
     auto sorted = args[0]->attrs->lexicographicOrder(st.symbols);
-    st.mkList(v, sorted |cp::α| [&](const Attr *a) { return st.newString(st.symbols[a->name]); });
+    st.mkList(v, sorted |cp::α| [&](const Attr *a) { return st.newStringWindow(st.symbols[a->name]); }); // the names' own bytes
   });
   S.addPrimOp("__attrValues", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceAttrs(*args[0], pos, "while evaluating the argument passed to builtins.attrValues");
@@ -846,7 +853,7 @@ void registerBuiltins(EvalState &state) {
     Bindings *b = st.allocBindings(args[1]->attrs->size());
     size_t n = 0;
     for (auto &a : *args[1]->attrs) {
-      Value *name = st.newString(st.symbols[a.name]);
+      Value *name = st.newStringWindow(st.symbols[a.name]); // the name's own bytes, in the symbol table
       Value *f1 = st.mkAppValue(args[0], name);
       b->attrs[n++] = {a.name, a.pos, st.mkAppValue(f1, a.value)};
     }
@@ -872,7 +879,7 @@ void registerBuiltins(EvalState &state) {
     for (uint32_t i = 0, n = all.size(); i < n;) {
       uint32_t j = i;
       while (j < n && all[j].name == all[i].name) j++;
-      Value *name = st.newString(st.symbols[all[i].name]);
+      Value *name = st.newStringWindow(st.symbols[all[i].name]);
       Value *list = st.allocValue();
       st.mkList(*list, cp::series(all.data() + i, j - i) |cp::α| [](const NV &x) { return x.value; });
       bb.insert(all[i].name, st.mkAppValue(st.mkAppValue(args[0], name), list));

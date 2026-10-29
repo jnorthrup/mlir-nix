@@ -515,6 +515,8 @@ struct EvalState {
   void mkApp(Value &v, Value *f, Value *x) { if (statsEnabled) ++nVT[unsigned(VType::App)];  v.type = VType::App; v.app.left = f; v.app.right = x; }
   Value *mkAppValue(Value *f, Value *x) { Value *v = allocValue(); mkApp(*v, f, x); return v; }
   Value *newString(std::string_view s, const NixStringContext &ctx = {}) { Value *v = allocValue(); mkString(*v, s, ctx); return v; }
+  /// A string on bytes that stay where they are (a name in the symbol table, a piece of an arena string): a window, nothing copied.
+  Value *newStringWindow(llvm::StringRef r) { Value *v = allocValue(); mkStringWindow(*v, r); return v; }
 
   /// Builder for attribute sets.
   struct BindingsBuilder {
