@@ -119,6 +119,7 @@ def main():
     ap.add_argument("--budget", type=float, default=0, help="wall-clock cap in seconds for each workload (0: none)")
     ap.add_argument("--workload", action="append", default=[], choices=list(workloads("", "")), help="only this workload (repeatable)")
     ap.add_argument("--demand", action="store_true", help="also run mlnix with MLNIX_DEFER=1")
+    ap.add_argument("--jit", action="store_true", help="also run mlnix with MLNIX_DEFER=1 MLNIX_JIT=1 (the guarded native tier, docs/JIT.md)")
     ap.add_argument("--mlnix", default=os.path.join(ROOT, "build", "bin", "mlnix"))
     ap.add_argument("--native", action="store_true", help="reference evaluators run on this machine, not in the container")
     ap.add_argument("--no-copy", action="store_true")
@@ -144,7 +145,8 @@ def main():
     refs = ([] if NATIVE else [("Nix 2.35.4", "nix-instantiate")]) + [tuple(r.split("=", 1)) for r in a.ref]
     if not refs:
         sys.exit("--native needs at least one --ref NAME=/path/to/nix-instantiate")
-    arms = [("mlnix", {})] + ([("mlnix demand", {"MLNIX_DEFER": "1"})] if a.demand else [])
+    arms = [("mlnix", {})] + ([("mlnix demand", {"MLNIX_DEFER": "1"})] if a.demand else []) \
+        + ([("mlnix demand jit", {"MLNIX_DEFER": "1", "MLNIX_JIT": "1"})] if a.jit else [])
     if not NATIVE and not a.no_copy and not a.reuse_refs:
         host(f"[ -d {NP} ] || cp -a /work/.cache/nixpkgs {NP}")
     mline = machine()

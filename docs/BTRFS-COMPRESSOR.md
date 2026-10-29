@@ -93,7 +93,7 @@ The current code orders synthetic records between those boundaries:
 | dense bucket over the window's tiny address space, fill + drain sort | built, `scripts/inode-bench.cc` |
 | ordered overflow drain | built in the benchmark: bounded cluster runs, merged by a small heap of run heads |
 | `trikeshed.cluster_order` -- stable row indices from one bounded cluster | kernel and native lowering; coroutine execution checked on Mac and Kali |
-| `composite::Funnel` -- a table whose buckets are clusters; a full bucket reroutes one level down | built, `include/Composite/Funnel.h`, checked by `scripts/funnel-check.cc` (Mac only so far) |
+| `composite::Funnel` -- a table whose buckets are clusters; a full bucket reroutes one level down | built, `include/Composite/Funnel.h`, checked by `scripts/funnel-check.cc` on Mac and Kali |
 | the sea-of-nodes client: dense bucket vs sparse hash, decided per window | not built; the Nix evaluator does not use this heap |
 | the btrfs leaf adapter (25 B headers -> records) and the delta emit into the zstd trie envelope | not started |
 
@@ -210,7 +210,7 @@ key against a reference set and counts probes. Buckets touched per lookup, Mac, 
 | 0.99 | 1.86 / 6 | 5.84 / 6 |
 
 No insert was refused, even at 0.99 load. These are probe counts, not times: each probe scans up to 23 rows, and no
-timing against a conventional table has been taken. The build has not been run on Kali.
+timing against a conventional table has been taken. Kali (g++-16, ASan and UBSan) passes the same check with the same probe bounds.
 
 ```sh
 clang++ -std=c++20 -O2 -g -fsanitize=address,undefined -I include scripts/funnel-check.cc -o build/funnel-check
