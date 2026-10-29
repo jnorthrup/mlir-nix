@@ -304,48 +304,50 @@ namespace {
 /// arity, effects and foldability are declared in NixPrims.irdl.mlir.  Calls with too
 /// few arguments stay partial applications; extra arguments are applied to the
 /// result.
+static LogicalResult devirtualizeCall(ApplyOp op, RewriterBase &rw) {
+  if (op.getArgs().empty())
+    return failure();
+  auto *core = op.getContext()->getLoadedDialect<NixDialect>();
+  const NixDialect::PrimInfo *info = nullptr;
+  Value callee = op.getCallee();
+  if (auto b = callee.getDefiningOp<BuiltinOp>()) {
+    auto it = core->prims.find(b.getName().str());
+    if (it != core->prims.end())
+      info = &it->second;
+  } else if (auto sel = callee.getDefiningOp<SelectOp>()) {
+    // builtins.<name>
+    if (sel.getDefaultValue() || sel.getPath().size() != 1)
+      return failure();
+    auto base = sel.getBase().getDefiningOp<BuiltinOp>();
+    const nixfe::Name &key = sel.getPath()[0];
+    if (!base || base.getName().str() != "builtins" || key.isNull())
+      return failure();
+    llvm::SmallString<48> internal("__");
+    internal += key.str();
+    auto it = core->prims.find(internal);
+    if (it == core->prims.end())
+      it = core->prims.find(key.str());
+    if (it != core->prims.end())
+      info = &it->second;
+  }
+  if (!info || op.getArgs().size() < info->arity)
+    return failure();
+  // An IRDL op has no property to hold the position, so a primop keeps the call's FileLineColLoc: made
+  // here, for the calls that are primops, not for every op.
+  OperationState st(locOfWord(op.getContext(), op.getPos()), info->name);
+  st.addOperands(op.getArgs().take_front(info->arity));
+  st.addTypes(op.getType());
+  Value res = rw.create(st)->getResult(0);
+  if (op.getArgs().size() > info->arity)
+    res = ApplyOp::create(rw, UnknownLoc::get(op.getContext()), op.getType(), res,
+                          op.getArgs().drop_front(info->arity), op.getPos());
+  rw.replaceOp(op, res);
+  return success();
+}
+
 struct DevirtualizePrimCall : OpRewritePattern<ApplyOp> {
   using OpRewritePattern::OpRewritePattern;
-  LogicalResult matchAndRewrite(ApplyOp op, PatternRewriter &rw) const override {
-    if (op.getArgs().empty())
-      return failure();
-    auto *core = getContext()->getLoadedDialect<NixDialect>();
-    const NixDialect::PrimInfo *info = nullptr;
-    Value callee = op.getCallee();
-    if (auto b = callee.getDefiningOp<BuiltinOp>()) {
-      auto it = core->prims.find(b.getName().str());
-      if (it != core->prims.end())
-        info = &it->second;
-    } else if (auto sel = callee.getDefiningOp<SelectOp>()) {
-      // builtins.<name>
-      if (sel.getDefaultValue() || sel.getPath().size() != 1)
-        return failure();
-      auto base = sel.getBase().getDefiningOp<BuiltinOp>();
-      const nixfe::Name &key = sel.getPath()[0];
-      if (!base || base.getName().str() != "builtins" || key.isNull())
-        return failure();
-      llvm::SmallString<48> internal("__");
-      internal += key.str();
-      auto it = core->prims.find(internal);
-      if (it == core->prims.end())
-        it = core->prims.find(key.str());
-      if (it != core->prims.end())
-        info = &it->second;
-    }
-    if (!info || op.getArgs().size() < info->arity)
-      return failure();
-    // An IRDL op has no property to hold the position, so a primop keeps the call's FileLineColLoc: made
-    // here, for the calls that are primops, not for every op.
-    OperationState st(locOfWord(op.getContext(), op.getPos()), info->name);
-    st.addOperands(op.getArgs().take_front(info->arity));
-    st.addTypes(op.getType());
-    Value res = rw.create(st)->getResult(0);
-    if (op.getArgs().size() > info->arity)
-      res = ApplyOp::create(rw, UnknownLoc::get(op.getContext()), op.getType(), res,
-                            op.getArgs().drop_front(info->arity), op.getPos());
-    rw.replaceOp(op, res);
-    return success();
-  }
+  LogicalResult matchAndRewrite(ApplyOp op, PatternRewriter &rw) const override { return devirtualizeCall(op, rw); }
 };
 
 /// `nix.apply %v()` (application to zero arguments) is the identity; it only
@@ -427,10 +429,17 @@ FrozenRewritePatternSet mlir::nix::makeDevirtualizePatterns(MLIRContext *ctx) {
   return FrozenRewritePatternSet(std::move(patterns));
 }
 
-/// One walk of the single devirtualization pattern, then the cleanup of the callee computations it
-/// orphaned.
-void mlir::nix::devirtualizePrims(Operation *root, const FrozenRewritePatternSet &patterns) {
-  walkAndApplyPatterns(root, patterns);
+/// The single devirtualization rewrite on every call, then the cleanup of the callee computations it orphaned.  The calls are found by a
+/// walk that stops only at `nix.apply` and are rewritten directly: the pattern driver, asked of every op of every minted body, cost the
+/// evaluator 1.5% of its cycles for a rewrite that costs 0.04% (the pattern is the same function, for the nix-prims pass).
+void mlir::nix::devirtualizePrims(Operation *root, const FrozenRewritePatternSet &) {
+  llvm::SmallVector<ApplyOp, 32> calls;
+  root->walk([&](ApplyOp op) { calls.push_back(op); });
+  IRRewriter rw(root->getContext());
+  for (ApplyOp op : calls) {
+    rw.setInsertionPoint(op);
+    (void)devirtualizeCall(op, rw);
+  }
   // The callee computations of rewritten calls are now unreferenced; erase
   // them, and whatever only they kept alive.
   llvm::SmallVector<Operation *> work;
