@@ -1947,50 +1947,43 @@ static size_t sortRowsFirstWins(Attr *rows, size_t n) {
 
 void EvalState::evalAttrs(Node *node, Frame *env, Value &out) {
   if (node->flags & Node::kDynamic) return evalAttrsDynamic(node, env, out);
-  auto op = cast<nd::AttrsOp>(node->def);
-  auto names = op.getNames();
-  size_t n = names.size();
-  if (statsEnabled) [[unlikely]] { ++nBuilders; nBuilderRows += n; if (n > 12) { ++nBuildersBig; nBuilderBigRows += n; } }
+  const AttrsShape *shape = node->attrsShape;
+  if (!shape) shape = node->attrsShape = attrsShapeOf(cast<nd::AttrsOp>(node->def));
+  uint32_t m = shape->m;
+  if (statsEnabled) [[unlikely]] { ++nBuilders; nBuilderRows += m; if (m > 12) { ++nBuildersBig; nBuilderBigRows += m; } }
   // A set of size 0 is the one constant: every empty set is the same cell.
-  if (n == 0) { if (statsEnabled) ++nEmptyShared; return mkAttrs(out, vEmptyAttrs.attrs); }
+  if (m == 0) { if (statsEnabled) ++nEmptyShared; return mkAttrs(out, vEmptyAttrs.attrs); }
+  // The set is allocated at its size and the rows are written where they stay, in name order: no builder, no vector, no sort.  The values
+  // are lazy operands, so making their cells in that order changes nothing.
   Node **values = node->operands;
-  auto positions = op.getPositions(); // one position word per name, or none
-  PosIdx posBase = positionBase(op);
-  // The names are known, so the set is allocated at its size and the rows are written where they stay, already in name order (the literal's
-  // order, worked out once): no builder, no vector, no sort.  The values are lazy operands, so making their cells in that order changes nothing.
-  const uint32_t *order = attrsOrderOf(op);
-  uint32_t m = order[0];
   Bindings *b = allocBindings(m);
   Attr *rows = b->attrs;
   for (uint32_t k = 0; k < m; k++) {
-    uint32_t i = order[k + 1];
-    rows[k] = Attr{symbolOf(names[i]), i < positions.size() ? posBase + PosIdx(i) : PosIdx(0), lookup(env, values[i])};
+    const AttrsShape::Row &r = shape->rows[k];
+    rows[k] = Attr{r.sym, r.pos, lookup(env, values[r.operand])};
   }
   b->size_ = m;
   mkAttrs(out, b);
 }
 
-const uint32_t *EvalState::attrsOrderOf(nd::AttrsOp op) {
-  void *key = op.getOperation();
-  AttrsOrderEntry &e = attrsOrderCache[(reinterpret_cast<uintptr_t>(key) >> 4) & 1023];
-  if (e.op == key) return e.order;
-  const uint32_t *&order = attrsOrders[key];
-  if (!order) {
-    auto names = op.getNames();
-    uint32_t n = uint32_t(names.size());
-    struct Row { Symbol s; uint32_t i; };
-    Row stackRows[32];
-    Row *rows = n <= 32 ? stackRows : static_cast<Row *>(alloc.Allocate(n * sizeof(Row), alignof(Row)));
-    for (uint32_t i = 0; i < n; i++) rows[i] = {symbolOf(names[i]), i};
-    cp::sortRows(rows, n, [](const Row &a, const Row &b) { return a.s < b.s; }); // stable: equal names keep their source order
-    uint32_t m = uint32_t(cp::uniqueFirst(rows, n, [](const Row &r) { return r.s; }));
-    auto *o = static_cast<uint32_t *>(alloc.Allocate((m + 1) * sizeof(uint32_t), alignof(uint32_t)));
-    o[0] = m;
-    for (uint32_t k = 0; k < m; k++) o[k + 1] = rows[k].i;
-    order = o;
+const AttrsShape *EvalState::attrsShapeOf(nd::AttrsOp op) {
+  auto names = op.getNames();
+  auto positions = op.getPositions(); // one position word per name, or none
+  PosIdx posBase = positionBase(op);
+  uint32_t n = uint32_t(names.size());
+  struct Row { Symbol s; uint32_t i; };
+  Row stackRows[32];
+  Row *rows = n <= 32 ? stackRows : static_cast<Row *>(alloc.Allocate(n * sizeof(Row), alignof(Row)));
+  for (uint32_t i = 0; i < n; i++) rows[i] = {symbolOf(names[i]), i};
+  cp::sortRows(rows, n, [](const Row &a, const Row &b) { return a.s < b.s; }); // stable: equal names keep their source order
+  uint32_t m = uint32_t(cp::uniqueFirst(rows, n, [](const Row &r) { return r.s; }));
+  auto *shape = static_cast<AttrsShape *>(alloc.Allocate(sizeof(AttrsShape) + m * sizeof(AttrsShape::Row), alignof(AttrsShape)));
+  shape->m = m;
+  for (uint32_t k = 0; k < m; k++) {
+    uint32_t i = rows[k].i;
+    shape->rows[k] = {i, rows[k].s, i < positions.size() ? posBase + PosIdx(i) : PosIdx(0)};
   }
-  e = {key, order};
-  return order;
+  return shape;
 }
 
 /// Dynamic attributes are inserted one by one with duplicate checks: out of line, where the std::map lives.

@@ -321,6 +321,13 @@ struct Frame {
 using Promotion = mlir::nix::NixDialect::Promotion;
 
 inline constexpr unsigned kNoSlot = ~0u;
+/// A set literal as its evaluation writes it, worked out at its first evaluation and kept in its node: its rows in name order (the first
+/// of equal names wins), each the operand that holds its value, its symbol and its position.  A literal's names, their symbols and its
+/// positions never change, so no later evaluation sorts, interns or reads the op's properties.
+struct AttrsShape {
+  uint32_t m;
+  struct Row { uint32_t operand; Symbol sym; uint32_t pos; } rows[0];
+};
 /// How a node is evaluated: one function a kind, which the node holds, so evaluating it is one indirect call into a function that saves
 /// what that kind needs and no more (a single switch saved, at every entry, the registers of its biggest case).
 using EvalFn = void (*)(EvalState &, Node *, Frame *, Value &);
@@ -350,8 +357,9 @@ struct Node {
   Node **operands = nullptr; // the op's operands, in order
   mlir::Operation *def;     // the op that defines the value; a block argument's lambda (kind Arg)
   union {
-    const PrimOp *prim = nullptr; // Prim: what the op runs
-    uint32_t rowGuess;            // Select, HasAttr, Formal: the row its (first) name was found at last (Bindings::getGuess)
+    const PrimOp *prim = nullptr;  // Prim: what the op runs
+    uint32_t rowGuess;             // Select, HasAttr, Formal: the row its (first) name was found at last (Bindings::getGuess)
+    const AttrsShape *attrsShape;  // Attrs: its rows, once worked out (EvalState::attrsShapeOf)
   };
   EvalFn eval = nullptr;    // what evaluating the op is
   static constexpr uint8_t kDefault = 1, kDynamic = 1, kForceString = 1;
@@ -490,12 +498,7 @@ struct EvalState {
   PosPtr positionOf(const Attr &a) const { return attributePositions[a.pos]; }
   PosIdx positionIndex(PosPtr pos);
   PosIdx positionBase(mlir::nix::AttrsOp op);
-  /// A set literal's rows in name order, worked out at its first evaluation and kept: `m` then the source index of each row (the first of
-  /// equal names wins).  A literal's names and their symbols never change, so no evaluation after the first sorts anything.
-  const uint32_t *attrsOrderOf(mlir::nix::AttrsOp op);
-  struct AttrsOrderEntry { void *op = nullptr; const uint32_t *order = nullptr; };
-  AttrsOrderEntry attrsOrderCache[1024];                        // 16 KB, direct-mapped by the op's address
-  llvm::DenseMap<void *, const uint32_t *> attrsOrders;
+  const AttrsShape *attrsShapeOf(mlir::nix::AttrsOp op);
   cp::MutableSeries<PosPtr> attributePositions{nullptr};
   std::unordered_map<PosPtr, PosIdx> dynamicPositions;
   llvm::DenseMap<mlir::Operation *, PosIdx> attrPositionBases;
