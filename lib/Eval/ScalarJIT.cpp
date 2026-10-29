@@ -696,8 +696,8 @@ void ScalarJIT::evaluate(EvalState &st, mlir::Operation *lambda, mlir::Value res
     auto entry = std::make_unique<Impl::Entry>();
     entry->pointer = pointerPlan(lam, result);
     if (entry->pointer.capture) {
-      uint32_t slot = st.slotOf(entry->pointer.capture.getAsOpaquePointer());
-      if (slot == EvalState::kNoHandle || !st.slotStore[slot].persists()) {
+      const nixev::Node *slot = st.nodeOf(entry->pointer.capture.getAsOpaquePointer());
+      if (!slot || !slot->persists()) {
         // lookup() of an in-place value makes a temporary cell. It cannot be forced and then replayed safely.
         cache = &p.refused; ++p.rejected; interpret(); return;
       }

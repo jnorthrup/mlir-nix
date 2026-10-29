@@ -84,6 +84,7 @@ struct SymbolTable {
 struct Value;
 struct Frame;
 struct RegionInfo;
+struct Node;
 struct EvalState;
 class ScalarJIT;
 
@@ -218,7 +219,10 @@ struct Value {
       Value **elems;
     } list;
     struct {
-      mlir::Operation *op;
+      union {
+        Node *node;          // Thunk: the record of the op it evaluates
+        mlir::Operation *op; // Lambda: the lambda op
+      };
       Frame *env;
     } thunk; // Thunk and Lambda
     struct {
@@ -262,6 +266,7 @@ struct RegionInfo {
   mlir::Region *region;
   unsigned numSlots;
   mlir::Value result;
+  Node *resultNode = nullptr; // the record of `result`
   /// For a lambda body: the symbols of the lambda's formals (made at its first call, by EvalState::callLambda) and the op
   /// they were made from.
   const Symbol *formalSyms = nullptr;
@@ -306,22 +311,42 @@ struct Frame {
 /// What the dialect promotes a value to (NixDialect::promotionOf): which cell it gets, if any, and what may read it back.
 using Promotion = mlir::nix::NixDialect::Promotion;
 
-/// Where an SSA value lives: its region, its frame slot, and what the dialect promoted it to.
 inline constexpr unsigned kNoSlot = ~0u;
-struct Slot {
+/// What evaluating an op does, as a switch case: not a chain of TypeID compares.  Prim is an op of the continent dialects (a primop), Other
+/// anything the evaluator reaches through NixEvalOpInterface.
+enum class NodeKind : uint8_t {
+  Arg, List, Attrs, Select, HasAttr, Apply, If, Assert, Not, And, Or, Impl, Eq, Neq, Update, ConcatLists, ConcatStrings, WithVar, Formal,
+  Int, Bool, Null, Float, String, Path, Builtin, Lambda, Prim, Other
+};
+/// An SSA value of an indexed body as the evaluator reads it: one record, made when the body is indexed, at an address that stays put.  Where
+/// the value lives (its region, its frame slot, what the dialect promoted it to) and, for an op's result, what evaluating the op reads: its
+/// kind, its operands as the records of the values they name, its position.  A thunk holds the record of its op, so forcing it and reading
+/// the operands touches no MLIR structure: no TypeID chain, no operand list, no hash probe per operand.  The op's attributes (names, paths,
+/// literals) are still read from the op.
+struct Node {
   /// What the first touch of a value's cell makes, from the defining op (Unknown for a block argument).
   enum How : uint8_t { Unknown, Thunk, Lambda, Const, Builtin };
-  RegionInfo *ri;
-  mlir::Operation *def; // the op that defines the value, null for a block argument (Value::getDefiningOp() is a call into MLIR)
-  unsigned idx;         // kNoSlot: the value has no frame cell (it is evaluated in place, or it is fixed)
+  NodeKind kind;
   How how;
   Promotion promo;
-  Value *fixed = nullptr; // a literal or a builtin: its one cell, the same in every frame, made at its first touch
+  uint8_t flags = 0;        // Select: kDefault; Attrs: kDynamic; ConcatStrings: kForceString
+  unsigned idx;             // kNoSlot: the value has no frame cell (it is evaluated in place, made by its one use, or fixed)
+  uint32_t nOperands = 0;
+  uint32_t nDyn = 0;        // Select and HasAttr: the dynamic keys after the base; Attrs: the static values, first
+  RegionInfo *ri;
+  Value *fixed = nullptr;   // a literal or a builtin: its one cell, the same in every frame, made at its first touch
+  Node **operands = nullptr; // the op's operands, in order
+  mlir::Operation *def;     // the op that defines the value, null for a block argument
+  const PrimOp *prim = nullptr; // Prim: what the op runs
+  PosPtr pos = nullptr;     // the op's position; a block argument's is its lambda's
+  static constexpr uint8_t kDefault = 1, kDynamic = 1, kForceString = 1;
   bool inPlace() const { return promo == Promotion::InPlace; }
   /// A value with a cell to read back: its frame cell, or its fixed one.  Not one evaluated in place, whose lookup makes a temporary, nor
   /// one made by its one use, whose cell the frame does not keep.
   bool persists() const { return promo != Promotion::InPlace && promo != Promotion::Once; }
+  auto args() const { return cp::series(operands, nOperands); }
 };
+static_assert(sizeof(Node) == 64, "a node is one cache line");
 
 //===----------------------------------------------------------------------===//
 // Errors
@@ -622,11 +647,11 @@ struct EvalState {
   /// right away and does not keep the Value (a `strict` operand, see NixModes).  When the
   /// value is evaluated in place the result is `tmp`, already in WHNF; otherwise it is the
   /// frame's (possibly still unevaluated) thunk, exactly like lookup().
-  Value &operand(Frame *f, mlir::Value v, Value &tmp);
+  Value &operand(Frame *f, Node *v, Value &tmp);
   /// Evaluates `v` to WHNF into `out` (a `tail` operand: the op's result is its value).
-  void evalTail(Frame *f, mlir::Value v, Value &out, PosPtr pos);
+  void evalTail(Frame *f, Node *v, Value &out, PosPtr pos);
 
-  void evalDefinition(mlir::Operation *def, Frame *f, Value &dest);
+  void evalDefinition(Node *def, Frame *f, Value &dest);
   void printStats();
   /// Constant folding hook of the continent dialects: run primop `key` on
   /// scalar constants; null when it throws or yields a non-scalar.
@@ -650,9 +675,17 @@ struct EvalState {
   llvm::DenseMap<const void *, Symbol> attrSymbols;
   /// Symbol of one select/has_attr path component: literal (a name) or the
   /// next computed key (operand), forced to a string.
-  Symbol pathSymbol(const nixfe::Name &comp, mlir::OperandRange dyn, unsigned &nextDyn, Frame *env, PosPtr pos);
-  Value *lookup(Frame *f, mlir::Value v) { return lookupImpl(f, v, false); }
-  void evalOp(mlir::Operation *op, Frame *env, Value &out);
+  Symbol pathSymbol(const nixfe::Name &comp, Node *const *dyn, unsigned &nextDyn, Frame *env, PosPtr pos);
+  Value *lookup(Frame *f, Node *v) { return lookupImpl(f, v, false); }
+  /// The same from the SSA value: one hash probe to find its record (the JITs, the primop model, the cold paths).
+  Value *lookup(Frame *f, mlir::Value v) { return lookupImpl(f, nodeOfValue(v), false); }
+  Node *nodeOfValue(mlir::Value v) {
+    Node *n = nodeOf(v.getAsOpaquePointer());
+    if (!n) unindexed();
+    return n;
+  }
+  [[noreturn]] static void unindexed();
+  void evalOp(Node *n, Frame *env, Value &out);
   RegionInfo *regionInfo(mlir::Region *r);
   Frame *newFrame(RegionInfo *ri, Frame *up);
 
@@ -697,41 +730,30 @@ struct EvalState {
   mlir::nix::ExprOp takePrelowered(const std::string &resolved);
   std::function<void(const std::string &)> printTrace;
 
-  // Where each SSA value lives.  The slots sit in a deque, at addresses that stay put as the map grows (the demand schedule keeps adding
-  // values); slotOf() answers from a direct-mapped cache in front of the hash map, a load and a compare on a hit, where every operand access
-  // paid a hash probe (lookup, operand and evalTail were 16.6% of the CPU of a NixOS evaluation on Kali).  A slot is rewritten in place
-  // when a value's address is indexed again, so the cache never holds a stale one.
-  // A slot is named by a handle, its index in slotStore, and read by value: nothing holds a Slot by address, so the store is a plain series.
-  static constexpr uint32_t kNoHandle = 0xFFFFFFFFu;
-  llvm::DenseMap<void *, uint32_t> slotMap;
-  cp::MutableSeries<Slot> slotStore;
-  struct SlotCacheEntry { void *key = nullptr; uint32_t slot = kNoHandle; };
-  static constexpr size_t kSlotCache = 8192;
-  SlotCacheEntry slotCache[kSlotCache];
-#ifdef MLNIX_NO_LOOKUP_CACHES
-  uint32_t slotOf(void *key) {
-    auto it = slotMap.find(key);
-    return it == slotMap.end() ? kNoHandle : it->second;
-  }
-#else
-  uint32_t slotOf(void *key) {
-    SlotCacheEntry &e = slotCache[(reinterpret_cast<uintptr_t>(key) >> 4) & (kSlotCache - 1)];
-    if (e.key == key) return e.slot;
+  // The record of each SSA value, by the value's address: the evaluator reads the records an op's record points at and never asks; the JITs,
+  // the primop model and the cold paths ask here, through a direct-mapped cache in front of the hash map.  A value's address indexed again
+  // (an op erased by a pass and its storage reused) gets a new record, and the map and the cache are rewritten, so neither holds a stale one.
+  llvm::DenseMap<void *, Node *> nodeMap;
+  struct NodeCacheEntry { void *key = nullptr; Node *node = nullptr; };
+  static constexpr size_t kNodeCache = 8192;
+  NodeCacheEntry nodeCache[kNodeCache];
+  Node *nodeOf(void *key) {
+    NodeCacheEntry &e = nodeCache[(reinterpret_cast<uintptr_t>(key) >> 4) & (kNodeCache - 1)];
+    if (e.key == key) return e.node;
     if (statsEnabled) [[unlikely]] ++nSlotMisses;
-    auto it = slotMap.find(key);
-    if (it == slotMap.end()) return kNoHandle;
+    auto it = nodeMap.find(key);
+    if (it == nodeMap.end()) return nullptr;
     e = {key, it->second};
-    return e.slot;
+    return e.node;
   }
-#endif
-  void setSlot(void *key, const Slot &slot) {
-    auto [it, fresh] = slotMap.try_emplace(key, kNoHandle);
-    if (it->second == kNoHandle) it->second = slotStore.append(slot);
-    else slotStore[it->second] = slot;
+  void setNode(void *key, Node *n) {
+    nodeMap[key] = n;
+    NodeCacheEntry &e = nodeCache[(reinterpret_cast<uintptr_t>(key) >> 4) & (kNodeCache - 1)];
+    if (e.key == key) e.node = n;
   }
   uint64_t nUpdLayered = 0, nUpdMerged = 0, nUpdBase = 0, nUpdTop = 0; // MLNIX_STATS: `//` as a layer / a flat merge, entries not copied / copied
   uint64_t nDemandMinted = 0; // MLNIX_STATS: lambda bodies minted on first call
-  uint64_t nSlotMisses = 0;   // MLNIX_STATS: slotOf answered by the hash map, not its cache
+  uint64_t nSlotMisses = 0;   // MLNIX_STATS: nodeOf answered by the hash map, not its cache
   static constexpr unsigned kAllocated = unsigned(VType::PrimOpApp) + 1; // nVT's last row: cells allocated
   uint64_t nVT[kAllocated + 1] = {}; // MLNIX_STATS: instrumented tag writes, including stack values and repeated retyping;
                          // [14] alone counts allocated Value rows, not tag writes
@@ -757,7 +779,7 @@ struct EvalState {
   uint64_t nBindingBytes = 0, nListBytes = 0, nStringBytes = 0; // MLNIX_STATS: arena bytes by use (values and frames are counted above)
   uint64_t nStackFrames = 0; // MLNIX_STATS: calls run on a stack frame, nothing allocated in the arena
   bool stackFrameOK(RegionInfo *ri);
-  Value *lookupImpl(Frame *f, mlir::Value v, bool forced);
+  Value *lookupImpl(Frame *f, Node *v, bool forced);
   uint64_t nEager = 0;   // MLNIX_STATS
   // Frames that returned uncaptured, by slot count: a stack per size, linked through the frame's own first word.  The newest is reused first, so
   // a recycled frame is almost always still in L1 (docs/FRAME-BYTES.md: 97 to 98% of reuses are within 32 KiB of allocation).
@@ -831,10 +853,10 @@ struct EvalState {
   uint64_t nsLower = 0, nsMint = 0; // MLNIX_STATS: time lowering files (analysis of deferred lambdas included) / minting bodies on demand
   llvm::DenseMap<mlir::Region *, RegionInfo *> regionInfos;
   void indexRegion(mlir::Region &r);
-  void evalConcatStrings(mlir::nix::ConcatStringsOp op, Frame *env, Value &out);
-  void evalAttrsDynamic(mlir::nix::AttrsOp op, Frame *env, Value &out);
+  void evalConcatStrings(Node *n, Frame *env, Value &out);
+  void evalAttrsDynamic(Node *n, Frame *env, Value &out);
   [[noreturn]] void notAFunction(Value &cur, PosPtr pos); // cold: builds the message
-  void evalAttrs(mlir::nix::AttrsOp op, Frame *env, Value &out);
+  void evalAttrs(Node *n, Frame *env, Value &out);
   RegionInfo *mintLambda(nixfe::FilePool &p, uint32_t row);
   RegionInfo *bodyOf(nixfe::BodyIndex idx);
   void callLambda(Value &fun, Value *arg, Value &out, PosPtr pos);

@@ -55,7 +55,7 @@ struct StringLiteral {
   mlir::Value value;
   std::string bytes; // immutable after plan construction; activeRuns pins its storage
 };
-struct Node {
+struct PlanNode {
   Kind kind = Kind::Deopt;
   unsigned a = 0, b = 0, c = 0, leaf = 0;
   VType tag = VType::Null;
@@ -104,13 +104,12 @@ struct Continuation {
 // Read only an existing cell. This must not be replaced with lookup(): callee
 // specialization and guards may not create or force a captured computation.
 Value *existing(EvalState &st, Frame *env, mlir::Value value) {
-  uint32_t found = st.slotOf(value.getAsOpaquePointer());
-  if (found == EvalState::kNoHandle) return nullptr;
-  const Slot slot = st.slotStore[found];
-  if (slot.fixed) return slot.fixed; // a literal or a builtin, once made: one cell for every frame
-  if (slot.idx == kNoSlot) return nullptr;
-  while (env && env->info != slot.ri) env = env->up();
-  return env && slot.idx < env->info->numSlots ? env->slots[slot.idx] : nullptr;
+  const nixev::Node *slot = st.nodeOf(value.getAsOpaquePointer());
+  if (!slot) return nullptr;
+  if (slot->fixed) return slot->fixed; // a literal or a builtin, once made: one cell for every frame
+  if (slot->idx == kNoSlot) return nullptr;
+  while (env && env->info != slot->ri) env = env->up();
+  return env && slot->idx < env->info->numSlots ? env->slots[slot->idx] : nullptr;
 }
 
 int predicateTag(llvm::StringRef name) {
@@ -146,7 +145,7 @@ struct LazyJITPlan::Impl {
   mlir::Value result;
   llvm::SmallVector<mlir::Value, kMaxArguments> arguments;
   llvm::SmallVector<mlir::Region *, kMaxArguments> chainRegions;
-  llvm::SmallVector<Node, 16> nodes;
+  llvm::SmallVector<PlanNode, 16> nodes;
   llvm::SmallVector<Leaf, 4> leaves;
   llvm::SmallVector<ListRecipe, 4> listRecipes;
   llvm::SmallVector<StringLiteral, 4> literals;
@@ -253,8 +252,8 @@ struct LazyJITPlan::Impl {
     const auto &eliminated = context ? contexts[context].regions : chainRegions;
     for (auto *chainRegion : eliminated)
       if (v.getParentRegion() == chainRegion) return false;
-    uint32_t found = state.slotOf(v.getAsOpaquePointer());
-    return found != EvalState::kNoHandle && state.slotStore[found].persists();
+    const nixev::Node *found = state.nodeOf(v.getAsOpaquePointer());
+    return found && found->persists();
   }
   bool projection(mlir::Value v, unsigned context) const {
     auto select = v.getDefiningOp<nd::SelectOp>();
@@ -358,7 +357,7 @@ struct LazyJITPlan::Impl {
     if (depth >= kMaxNodes || visited.size() + projectionComponents + literals.size() >= kMaxNodes) { failed = true; return 0; }
     visited[key] = 0; // gray until all supported children have been visited
     auto *currentRegion = contexts[context].region;
-    Node n;
+    PlanNode n;
     if (demandable(v, context)) {
       n.kind = Kind::Leaf;
       n.leaf = leaf(v, context);
@@ -499,7 +498,7 @@ struct LazyJITPlan::Impl {
     // Bound continuation specialization, including compound nodes whose shared
     // DAG could otherwise expand exponentially under different continuations.
     if (++expansions > kMaxBlocks) { failed = true; return kDeoptDest; }
-    const Node &n = nodes[index];
+    const PlanNode &n = nodes[index];
     unsigned result = kDeoptDest;
     switch (n.kind) {
     case Kind::Deopt: break;
@@ -726,7 +725,7 @@ void LazyJITPlan::print(llvm::raw_ostream &os) const {
     else os << " current-closure capture\n";
   }
   for (unsigned i = 0; i < impl->nodes.size(); ++i) {
-    const Node &n = impl->nodes[i];
+    const PlanNode &n = impl->nodes[i];
     os << "node " << i << " " << names[unsigned(n.kind)];
     if (n.kind == Kind::Constant) os << " " << n.literal;
     if (n.kind == Kind::Empty) os << " recipe=" << emptyName(n.empty) << " code=" << emptyCode(n.empty);
@@ -824,7 +823,7 @@ bool LazyJITPlan::emit(mlir::ModuleOp module) {
 
   for (unsigned i = 0; i < impl->continuations.size(); ++i) {
     const Continuation &c = impl->continuations[i];
-    const Node &n = impl->nodes[c.node];
+    const PlanNode &n = impl->nodes[c.node];
     if (n.kind == Kind::StringCompare && c.action == Action::Atomic) {
       Block *ready = newBlock(), *guardMiss = newBlock(), *loop = newBlock(), *probe = newBlock(), *step = newBlock();
       b.setInsertionPointToEnd(destinations[i + 3]);
@@ -1066,7 +1065,7 @@ LazyJITPlan::RunResult LazyJITPlan::observe(EvalState &st, Frame *env, llvm::Arr
     if (dest == kDeoptDest) { result.outcome = Outcome::Deopt; return result; }
     if (dest < 3 || dest - 3 >= impl->continuations.size()) return result;
     const Continuation &c = impl->continuations[dest - 3];
-    const Node &n = impl->nodes[c.node];
+    const PlanNode &n = impl->nodes[c.node];
     if (n.kind == Kind::StringCompare && c.action == Action::Atomic) {
       std::array<std::string_view, 2> strings;
       for (unsigned i = 0; i < 2; ++i) {
@@ -1228,7 +1227,7 @@ LazyJITPlan::RunResult LazyJITPlan::run(EvalState &st, Frame *env, llvm::ArrayRe
         (status >> 3) < 3 || (status >> 3) >= impl->continuations.size() + 3) return result;
     unsigned continuation = status >> 3;
     const Continuation &c = impl->continuations[continuation - 3];
-    const Node &n = impl->nodes[c.node];
+    const PlanNode &n = impl->nodes[c.node];
     if (action == kDepthOverflow) {
       if (c.action != Action::Enter || observeOnly) return result;
       throw StackOverflowError("stack overflow; max-call-depth exceeded", nd::posOfOp(n.op));

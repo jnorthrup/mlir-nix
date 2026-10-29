@@ -651,7 +651,7 @@ void EvalState::printStats() {
                  << llvm::format("%.1f", share(epochEvals.size() / 10)) << "%\n";
   }
   llvm::errs() << "== symbols: " << symbols.creates << " interning calls, " << symbols.size() << " symbols\n";
-  llvm::errs() << "== slotOf: " << nSlotMisses << " answered by the hash map (" << slotMap.size() << " values indexed), not its cache\n";
+  llvm::errs() << "== nodeOf: " << nSlotMisses << " answered by the hash map (" << nodeMap.size() << " values indexed), not its cache\n";
   if (nLookups) {
     llvm::errs() << "== lookupImpl: " << nLookups << " calls, " << nLookupHits << " answered by a filled slot ("
                  << llvm::format("%.1f", 100.0 * nLookupHits / nLookups) << "%); frame hops to the defining region: ";
@@ -895,7 +895,52 @@ void EvalState::throwTypeError(const char *expected, Value &v, PosPtr pos, std::
 // Regions & frames
 //===----------------------------------------------------------------------===//
 
-static Slot::How howOf(Operation *op);
+static Node::How howOf(Operation *op);
+/// What evaluating `op` is, read once from the op: its kind, and what its operand segments say.
+static void describe(Node *n, Operation *op, const nd::NixDialect *core) {
+  n->how = howOf(op);
+  n->kind = llvm::TypeSwitch<Operation *, NodeKind>(op)
+      .Case<nd::ApplyOp>([](auto) { return NodeKind::Apply; })
+      .Case<nd::SelectOp>([&](nd::SelectOp sel) {
+        const auto &sz = sel.getProperties().operandSegmentSizes;
+        n->nDyn = uint32_t(sz[1]);
+        n->flags = sz[2] ? Node::kDefault : 0;
+        return NodeKind::Select;
+      })
+      .Case<nd::IfOp>([](auto) { return NodeKind::If; })
+      .Case<nd::AttrsOp>([&](nd::AttrsOp a) {
+        const auto &sz = a.getProperties().operandSegmentSizes;
+        n->nDyn = uint32_t(sz[0]);
+        n->flags = sz[1] ? Node::kDynamic : 0;
+        return NodeKind::Attrs;
+      })
+      .Case<nd::EqOp>([](auto) { return NodeKind::Eq; })
+      .Case<nd::HasAttrOp>([&](nd::HasAttrOp h) { n->nDyn = h->getNumOperands() - 1; return NodeKind::HasAttr; })
+      .Case<nd::ListOp>([](auto) { return NodeKind::List; })
+      .Case<nd::StringOp>([](auto) { return NodeKind::String; })
+      .Case<nd::AndOp>([](auto) { return NodeKind::And; })
+      .Case<nd::OrOp>([](auto) { return NodeKind::Or; })
+      .Case<nd::UpdateOp>([](auto) { return NodeKind::Update; })
+      .Case<nd::NotOp>([](auto) { return NodeKind::Not; })
+      .Case<nd::FormalOp>([](auto) { return NodeKind::Formal; })
+      .Case<nd::NeqOp>([](auto) { return NodeKind::Neq; })
+      .Case<nd::ConcatListsOp>([](auto) { return NodeKind::ConcatLists; })
+      .Case<nd::ConcatStringsOp>([&](nd::ConcatStringsOp c) { n->flags = c.getForceString() ? Node::kForceString : 0; return NodeKind::ConcatStrings; })
+      .Case<nd::WithVarOp>([](auto) { return NodeKind::WithVar; })
+      .Case<nd::AssertOp>([](auto) { return NodeKind::Assert; })
+      .Case<nd::ImplOp>([](auto) { return NodeKind::Impl; })
+      .Case<nd::IntOp>([](auto) { return NodeKind::Int; })
+      .Case<nd::BoolOp>([](auto) { return NodeKind::Bool; })
+      .Case<nd::NullOp>([](auto) { return NodeKind::Null; })
+      .Case<nd::FloatOp>([](auto) { return NodeKind::Float; })
+      .Case<nd::PathOp>([](auto) { return NodeKind::Path; })
+      .Case<nd::BuiltinOp>([](auto) { return NodeKind::Builtin; })
+      .Case<nd::LambdaOp>([](auto) { return NodeKind::Lambda; })
+      .Default([&](Operation *o) { return core->primOf(o) ? NodeKind::Prim : NodeKind::Other; }); // a primop is found at its first evaluation
+}
+
+void EvalState::unindexed() { throw EvalError("internal error: unindexed SSA value"); }
+
 void EvalState::indexRegion(Region &r) {
   auto *ri = new RegionInfo{&r, 0, {}};
   if (auto lam = dyn_cast_or_null<nd::LambdaOp>(r.getParentOp())) {
@@ -909,10 +954,20 @@ void EvalState::indexRegion(Region &r) {
   Block &blk = r.front();
   unsigned slot = 0;
   auto *core = ctx.getLoadedDialect<nd::NixDialect>();
+  auto newNode = [&] { return ::new (alloc.Allocate(sizeof(Node), alignof(Node))) Node{}; };
   for (BlockArgument a : blk.getArguments()) {
     if (statsEnabled) { ++nSlotsAssigned; if (a.use_empty()) ++nSlotsNoRead; }
-    setSlot(a.getAsOpaquePointer(), {ri, nullptr, slot++, Slot::Unknown, Promotion::Argument});
+    Node *n = newNode();
+    n->kind = NodeKind::Arg;
+    n->how = Node::Unknown;
+    n->promo = Promotion::Argument;
+    n->idx = slot++;
+    n->ri = ri;
+    n->def = nullptr;
+    n->pos = nd::posOfOp(r.getParentOp()); // a block argument was made where its lambda is
+    setNode(a.getAsOpaquePointer(), n);
   }
+  // Every value's record first: an op may read a value defined after it (a graph region) or from a body nested in it.
   for (Operation &op : blk) {
     if (auto ret = dyn_cast<nd::ReturnOp>(op)) {
       ri->result = ret.getValue();
@@ -931,15 +986,37 @@ void EvalState::indexRegion(Region &r) {
         if (p == Promotion::Shared || p == Promotion::Distinct || p == Promotion::Once) ++ri->nThunks;
       }
       bool cell = p != Promotion::InPlace && p != Promotion::Fixed && p != Promotion::Once;
-      setSlot(res.getAsOpaquePointer(), {ri, &op, cell ? slot++ : kNoSlot, howOf(&op), p});
+      Node *n = newNode();
+      describe(n, &op, core);
+      n->promo = p;
+      n->idx = cell ? slot++ : kNoSlot;
+      n->ri = ri;
+      n->def = &op;
+      n->pos = nd::posOfOp(&op);
+      setNode(res.getAsOpaquePointer(), n);
     }
-    // A deferred lambda's region is a shell until its first call; it is indexed when it is minted.
+  }
+  ri->numSlots = slot;
+  // A deferred lambda's region is a shell until its first call; it is indexed when it is minted.
+  for (Operation &op : blk) {
     auto lam = dyn_cast<nd::LambdaOp>(op);
     if (lam && lam.getBodyIndex()) continue;
     for (Region &nested : op.getRegions())
       if (!nested.empty()) indexRegion(nested);
   }
-  ri->numSlots = slot;
+  // Then each op's operands, as the records of the values they name (an operand not indexed stays null: its use is an internal error).
+  for (Operation &op : blk) {
+    unsigned k = op.getNumOperands();
+    if (op.getNumResults() == 0 || k == 0) continue;
+    auto **ops = static_cast<Node **>(alloc.Allocate(k * sizeof(Node *), alignof(Node *)));
+    for (unsigned i = 0; i < k; i++) ops[i] = nodeOf(op.getOperand(i).getAsOpaquePointer());
+    for (mlir::Value res : op.getResults()) {
+      Node *n = nodeOf(res.getAsOpaquePointer());
+      n->operands = ops;
+      n->nOperands = k;
+    }
+  }
+  if (ri->result) ri->resultNode = nodeOf(ri->result.getAsOpaquePointer());
   if (statsEnabled) {
     ri->nOps = uint32_t(blk.getOperations().size());
     ri->everRan.assign((ri->nOps + 63) / 64, 0);
@@ -1081,11 +1158,11 @@ Frame *EvalState::newFrame(RegionInfo *ri, Frame *up) {
   return f;
 }
 
-static Slot::How howOf(Operation *op) {
-  if (isa<nd::IntOp, nd::FloatOp, nd::StringOp, nd::PathOp, nd::BoolOp, nd::NullOp>(op)) return Slot::Const;
-  if (isa<nd::BuiltinOp>(op)) return Slot::Builtin;
-  if (isa<nd::LambdaOp>(op)) return Slot::Lambda;
-  return Slot::Thunk;
+static Node::How howOf(Operation *op) {
+  if (isa<nd::IntOp, nd::FloatOp, nd::StringOp, nd::PathOp, nd::BoolOp, nd::NullOp>(op)) return Node::Const;
+  if (isa<nd::BuiltinOp>(op)) return Node::Builtin;
+  if (isa<nd::LambdaOp>(op)) return Node::Lambda;
+  return Node::Thunk;
 }
 
 /// MLNIX_STATS: the first read of a frame slot.  Cold and out of line, so lookup() carries one test and one call, not the census.
@@ -1101,13 +1178,11 @@ void EvalState::statHops(Frame *f, RegionInfo *ri, bool hit) {
   ++nLookups; nLookupHits += hit; ++nHopHist[h < 5 ? h : 5];
 }
 
-Value *EvalState::lookupImpl(Frame *f, mlir::Value v, bool forced) {
-  uint32_t sh = slotOf(v.getAsOpaquePointer());
-  if (sh == kNoHandle) throw EvalError("internal error: unindexed SSA value");
-  Slot s = slotStore[sh]; // by value: the store grows while this evaluates (a nested body is indexed)
-  if (s.fixed) return s.fixed; // a literal or a builtin: no frame to find, no cell to fill
-  RegionInfo *ri = s.ri;
-  unsigned idx = s.idx;
+Value *EvalState::lookupImpl(Frame *f, Node *s, bool forced) {
+  if (!s) unindexed();
+  if (s->fixed) return s->fixed; // a literal or a builtin: no frame to find, no cell to fill
+  RegionInfo *ri = s->ri;
+  unsigned idx = s->idx;
   if (statsEnabled) [[unlikely]] { Frame *g = f; while (g && g->info != ri) g = g->up(); statHops(f, ri, g && idx != kNoSlot && g->slots[idx]); }
   while (f && f->info != ri) f = f->up();
   if (!f) throw EvalError("internal error: SSA value used outside its scope");
@@ -1115,9 +1190,9 @@ Value *EvalState::lookupImpl(Frame *f, mlir::Value v, bool forced) {
   Value *&slot = idx == kNoSlot ? noCell : f->slots[idx];
   if (slot) return slot;
   if (statsEnabled && idx != kNoSlot) [[unlikely]] statTouch(f, ri, idx);
-  Operation *op = s.def;
+  Operation *op = s->def;
   if (!op) throw EvalError("internal error: unbound block argument");
-  if (s.how == Slot::Const) { // made once, at the first touch in any frame, and kept in the Slot
+  if (s->how == Node::Const) { // made once, at the first touch in any frame, and kept in the node
     Value *cv = allocValue();
     if (auto i = dyn_cast<nd::IntOp>(op)) mkInt(*cv, i.getValue());
     else if (auto fl = dyn_cast<nd::FloatOp>(op)) mkFloat(*cv, fl.getValue().convertToDouble());
@@ -1125,18 +1200,18 @@ Value *EvalState::lookupImpl(Frame *f, mlir::Value v, bool forced) {
     else if (auto bl = dyn_cast<nd::BoolOp>(op)) mkBool(*cv, bl.getValue());
     else if (isa<nd::NullOp>(op)) mkNull(*cv);
     else mkPath(*cv, cast<nd::PathOp>(op).getValue().str());
-    slotStore[sh].fixed = cv;
+    s->fixed = cv;
     return slot = cv;
   }
-  if (s.how == Slot::Builtin) { // the base environment is complete before anything is evaluated: found once, kept in the Slot
+  if (s->how == Node::Builtin) { // the base environment is complete before anything is evaluated: found once, kept in the node
     auto b = cast<nd::BuiltinOp>(op);
     Value *bv = baseEnvValue(b.getName().str());
     if (!bv) throw EvalError("undefined variable '" + b.getName().toString() + "'", nd::posOfOp(op));
-    slotStore[sh].fixed = bv;
+    s->fixed = bv;
     return slot = bv;
   }
   Value *nv = allocValue();
-  bool eager = forced && s.how == Slot::Thunk && (idx != kNoSlot || s.promo == Promotion::Once);
+  bool eager = forced && s->how == Node::Thunk && (idx != kNoSlot || s->promo == Promotion::Once);
   if (statsEnabled) [[unlikely]] { auto &e = cellsByKind[op->getName().getAsOpaquePointer()]; e.first = op->getName().getStringRef(); ++e.second[eager ? 0 : 1]; }
   if (eager) {
     // The caller forces this value as the very next thing, so evaluate it now, into its cell: the same work in the same order as making a
@@ -1145,13 +1220,13 @@ Value *EvalState::lookupImpl(Frame *f, mlir::Value v, bool forced) {
     slot = nv;
     nv->type = VType::Blackhole;
     try {
-      evalOp(op, f, *nv);
+      evalOp(s, f, *nv);
     } catch (EvalError &) {
       fail(*nv);
       throw;
     } catch (...) {
       nv->type = VType::Thunk;
-      nv->thunk.op = op;
+      nv->thunk.node = s;
       nv->thunk.env = f;
       if (recycleOn) f->capture();
       throw;
@@ -1159,8 +1234,8 @@ Value *EvalState::lookupImpl(Frame *f, mlir::Value v, bool forced) {
     if (statsEnabled) ++nEager;
     return nv;
   }
-  nv->type = s.how == Slot::Lambda ? VType::Lambda : VType::Thunk;
-  nv->thunk.op = op;
+  if (s->how == Node::Lambda) { nv->type = VType::Lambda; nv->thunk.op = op; }
+  else { nv->type = VType::Thunk; nv->thunk.node = s; }
   nv->thunk.env = f;
   if (recycleOn && f) f->capture();
   if (statsEnabled && f) [[unlikely]] {
@@ -1180,10 +1255,10 @@ Value *EvalState::lookupImpl(Frame *f, mlir::Value v, bool forced) {
 
 /// Evaluates the defining op of an in-place value straight into `dest`.  Lambdas are
 /// closures, built where lookup() would build them.
-void EvalState::evalDefinition(mlir::Operation *def, Frame *f, Value &dest) {
-  if (isa<nd::LambdaOp>(def)) {
+void EvalState::evalDefinition(Node *def, Frame *f, Value &dest) {
+  if (def->kind == NodeKind::Lambda) {
     dest.type = VType::Lambda; if (statsEnabled) ++nVT[unsigned(VType::Lambda)];
-    dest.thunk.op = def;
+    dest.thunk.op = def->def;
     dest.thunk.env = f;
     if (recycleOn && f) f->capture();
     if (statsEnabled && f) [[unlikely]] markPinned(f);
@@ -1192,26 +1267,18 @@ void EvalState::evalDefinition(mlir::Operation *def, Frame *f, Value &dest) {
   }
 }
 
-Value &EvalState::operand(Frame *f, mlir::Value v, Value &tmp) {
-  uint32_t sh = slotOf(v.getAsOpaquePointer());
-  if (sh != kNoHandle) {
-    const Slot s = slotStore[sh];
-    if (s.inPlace() && f && f->info == s.ri) {
-      evalDefinition(s.def, f, tmp);
-      return tmp;
-    }
+Value &EvalState::operand(Frame *f, Node *v, Value &tmp) {
+  if (v && v->inPlace() && f && f->info == v->ri) {
+    evalDefinition(v, f, tmp);
+    return tmp;
   }
   return *lookupImpl(f, v, true);  // every caller of operand() forces what it gets
 }
 
-void EvalState::evalTail(Frame *f, mlir::Value v, Value &out, PosPtr pos) {
-  uint32_t sh = slotOf(v.getAsOpaquePointer());
-  if (sh != kNoHandle) {
-    const Slot s = slotStore[sh];
-    if (s.inPlace() && f && f->info == s.ri) {
-      evalDefinition(s.def, f, out);
-      return;
-    }
+void EvalState::evalTail(Frame *f, Node *v, Value &out, PosPtr pos) {
+  if (v && v->inPlace() && f && f->info == v->ri) {
+    evalDefinition(v, f, out);
+    return;
   }
   Value *p = lookupImpl(f, v, true);
   forceValue(*p, pos);
@@ -1240,22 +1307,22 @@ void EvalState::epochTouch(const Value &v) {
 void EvalState::forceValue(Value &v, PosPtr pos) {
   if (recordEdges && !epochEvals.empty()) [[unlikely]] epochTouch(v);
   if (statsEnabled && lastThunk) [[unlikely]] {
-    if (&v == lastThunk && v.type == VType::Thunk) { ++nImmediate; ++immediateByOp[v.thunk.op->getName().getStringRef()]; }
+    if (&v == lastThunk && v.type == VType::Thunk) { ++nImmediate; ++immediateByOp[v.thunk.node->def->getName().getStringRef()]; }
     lastThunk = nullptr;
   }
   if (v.type == VType::Thunk) {
-    Operation *op = v.thunk.op;
+    Node *n = v.thunk.node;
     Frame *env = v.thunk.env;
     v.type = VType::Blackhole; if (statsEnabled) ++nVT[unsigned(VType::Blackhole)];
     try {
-      evalOp(op, env, v);
-      if (statsEnabled && env && !isProjection(op)) [[unlikely]] statUnref(env);
+      evalOp(n, env, v);
+      if (statsEnabled && env && !isProjection(n->def)) [[unlikely]] statUnref(env);
     } catch (EvalError &) {
       fail(v);
       throw;
     } catch (...) {
       v.type = VType::Thunk; if (statsEnabled) ++nVT[unsigned(VType::Thunk)];
-      v.thunk.op = op;
+      v.thunk.node = n;
       v.thunk.env = env;
       throw;
     }
@@ -1513,12 +1580,12 @@ void EvalState::callLambdaIn(Value &fun, RegionInfo *ri, Value *arg, Value &out,
       Frame *sf = ::new (static_cast<void *>(buf)) Frame{reinterpret_cast<uintptr_t>(fun.thunk.env), ri, {}};
       sf->slots[0] = arg;
       if (statsEnabled) ++nStackFrames;
-      evalTail(sf, ri->result, out, pos);
+      evalTail(sf, ri->resultNode, out, pos);
       return;
     }
     Frame *f = newFrame(ri, fun.thunk.env);
     f->slots[0] = arg;
-    evalTail(f, ri->result, out, pos);
+    evalTail(f, ri->resultNode, out, pos);
     if (statsEnabled) [[unlikely]] statReturn(f);
     else if (!f->captured() && recycleOn) recycleFrame(f);  // returned with nothing made over it: nothing can reach it again
   };
@@ -1833,26 +1900,18 @@ static size_t sortRowsFirstWins(Attr *rows, size_t n) {
   return cp::uniqueFirst(rows, n, attrName);
 }
 
-// The operands of the hottest ops, read from the op directly: the generated accessors (getBase, getDynKeys, getArgs, ...) each sum the operand
-// segments in an out-of-line call, two or three times an evaluation.  A select's segments are (base, dynamic keys, default); an attribute set's
-// (values, dynamic names, dynamic values); has_attr, formal and apply are one operand and then the rest.
-struct SelectOperands { mlir::Value base; mlir::OperandRange dyn; mlir::Value def; };
-static SelectOperands selectOperands(nd::SelectOp sel) {
-  const auto &sz = sel.getProperties().operandSegmentSizes;
-  mlir::OperandRange all = sel->getOperands();
-  return {all[0], all.slice(1, unsigned(sz[1])), sz[2] ? all[1 + unsigned(sz[1])] : mlir::Value()};
-}
-static mlir::OperandRange attrsValues(nd::AttrsOp a) { return a->getOperands().take_front(unsigned(a.getProperties().operandSegmentSizes[0])); }
-static bool attrsDynamic(nd::AttrsOp a) { return a.getProperties().operandSegmentSizes[1] != 0; }
+// An op's operands are its node's: a select's are (base, dynamic keys, default), an attribute set's (values, dynamic names, dynamic values),
+// has_attr's, formal's and apply's one operand and then the rest; the segments were read once, when the body was indexed.
 
-void EvalState::evalAttrs(nd::AttrsOp op, Frame *env, Value &out) {
-  if (attrsDynamic(op)) return evalAttrsDynamic(op, env, out);
+void EvalState::evalAttrs(Node *node, Frame *env, Value &out) {
+  if (node->flags & Node::kDynamic) return evalAttrsDynamic(node, env, out);
+  auto op = cast<nd::AttrsOp>(node->def);
   auto names = op.getNames();
   size_t n = names.size();
   if (statsEnabled) [[unlikely]] { ++nBuilders; nBuilderRows += n; if (n > 12) { ++nBuildersBig; nBuilderBigRows += n; } }
   // A set of size 0 is the one constant: every empty set is the same cell.
   if (n == 0) { if (statsEnabled) ++nEmptyShared; return mkAttrs(out, vEmptyAttrs.attrs); }
-  mlir::OperandRange values = attrsValues(op);
+  Node **values = node->operands;
   auto positions = op.getPositions(); // one position word per name, or none
   PosIdx posBase = positionBase(op);
   // The names are known, so the set is allocated at its size and the rows are written where they stay, already in name order (the literal's
@@ -1893,10 +1952,12 @@ const uint32_t *EvalState::attrsOrderOf(nd::AttrsOp op) {
 }
 
 /// Dynamic attributes are inserted one by one with duplicate checks: out of line, where the std::map lives.
-void EvalState::evalAttrsDynamic(nd::AttrsOp op, Frame *env, Value &out) {
+void EvalState::evalAttrsDynamic(Node *node, Frame *env, Value &out) {
+  auto op = cast<nd::AttrsOp>(node->def);
   auto names = op.getNames();
-  auto values = op.getValues();
-  auto dynNames = op.getDynNames();
+  Node **values = node->operands;
+  size_t nDynNames = (node->nOperands - node->nDyn) / 2;     // the dynamic names, then their values
+  Node **dynNames = node->operands + node->nDyn, **dynValues = dynNames + nDynNames;
   auto positions = op.getPositions();
   PosIdx posBase = positionBase(op);
   BindingsBuilder bb(*this);
@@ -1907,10 +1968,9 @@ void EvalState::evalAttrsDynamic(nd::AttrsOp op, Frame *env, Value &out) {
   std::map<Symbol, PosPtr> seen;
   for (size_t i = 0; i < names.size(); i++)
     seen[symbolOf(names[i])] = nullptr;
-  auto dynValues = op.getDynValues();
-  for (size_t j = 0; j < dynNames.size(); j++) {
+  for (size_t j = 0; j < nDynNames; j++) {
     Value *nv = lookup(env, dynNames[j]);
-    PosPtr p = nd::posOfValue(dynNames[j]);
+    PosPtr p = dynNames[j]->pos;
     forceValue(*nv, p);
     if (nv->type == VType::Null) continue;
     auto name = forceStringNoCtx(*nv, p, "while evaluating the name of a dynamic attribute");
@@ -1925,12 +1985,12 @@ void EvalState::evalAttrsDynamic(nd::AttrsOp op, Frame *env, Value &out) {
   mkAttrs(out, bb.finish());
 }
 
-void EvalState::evalConcatStrings(nd::ConcatStringsOp op, Frame *env, Value &out) {
+void EvalState::evalConcatStrings(Node *node, Frame *env, Value &out) {
   // The result is the series of its parts.  A part that is already a string is a view of its arena bytes: no copy and no heap string; only a
   // part that must be coerced (a number, a path, a set with __toString or outPath) makes text, kept in `owned` where it does not move.  The
   // total is known before anything is written, so the result is one arena buffer, filled once.  Numbers and paths are as they were.
-  auto parts = op.getParts();
-  bool forceString = op.getForceString();
+  auto parts = node->args();
+  bool forceString = node->flags & Node::kForceString;
   NixStringContext context;
   // The windows of the parts: a stack array (the arena past sixteen parts).  A part that must be coerced (a number, a path, a set with __toString)
   // makes text in `scratch`, which is copied into the arena at once, so no part owns anything and nothing is a heap list.
@@ -1944,8 +2004,8 @@ void EvalState::evalConcatStrings(nd::ConcatStringsOp op, Frame *env, Value &out
   double nf = 0;
   bool first = !forceString;
   VType firstType = VType::String;
-  for (mlir::Value pv : parts) {
-    PosPtr ppos = nd::posOfValue(pv);
+  for (Node *pv : parts) {
+    PosPtr ppos = pv->pos;
     Value *v = lookup(env, pv);
     forceValue(*v, ppos);
     if (first) firstType = v->type;
@@ -1973,7 +2033,7 @@ void EvalState::evalConcatStrings(nd::ConcatStringsOp op, Frame *env, Value &out
     }
     first = false;
   }
-  PosPtr pos = nd::posOfOp(op);
+  PosPtr pos = node->pos;
   if (firstType == VType::Int) return mkInt(out, n);
   if (firstType == VType::Float) return mkFloat(out, nf);
   if (firstType == VType::Path) {
@@ -1987,7 +2047,7 @@ void EvalState::evalConcatStrings(nd::ConcatStringsOp op, Frame *env, Value &out
   mkStringOf(out, llvm::ArrayRef<composite::Chars>(views, nv), own.result(*this, context));
 }
 
-Symbol EvalState::pathSymbol(const nixfe::Name &comp, mlir::OperandRange dyn, unsigned &nextDyn, Frame *env,
+Symbol EvalState::pathSymbol(const nixfe::Name &comp, Node *const *dyn, unsigned &nextDyn, Frame *env,
                              PosPtr pos) {
   if (!comp.isNull()) return symbolOf(comp);
   return symbols.create(forceStringNoCtx(*lookup(env, dyn[nextDyn++]), pos, "while evaluating an attribute name"));
@@ -2001,172 +2061,170 @@ Value *EvalState::selectField(Value &base, Symbol key, PosPtr pos) {
   throwAttrMissing(symbols[key], pos);
 }
 
-void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
-  if (statsEnabled) [[unlikely]] { auto &e = evalsByKind[op->getName().getAsOpaquePointer()]; e.first = op->getName().getStringRef(); ++e.second; }
-  if (statsEnabled && env) {
-    ++env->info->nEvals;
-    if (!epochEvals.empty()) ++epochEvals.back();
-    auto it = env->info->opIdx.find(op);
-    if (it != env->info->opIdx.end()) { env->info->everRan[it->second >> 6] |= 1ull << (it->second & 63); ++env->info->opEvals[it->second]; }
+void EvalState::evalOp(Node *n, Frame *env, Value &out) {
+  Operation *op = n->def;
+  if (statsEnabled) [[unlikely]] {
+    auto &e = evalsByKind[op->getName().getAsOpaquePointer()]; e.first = op->getName().getStringRef(); ++e.second;
+    if (env) {
+      ++env->info->nEvals;
+      if (!epochEvals.empty()) ++epochEvals.back();
+      auto it = env->info->opIdx.find(op);
+      if (it != env->info->opIdx.end()) { env->info->everRan[it->second >> 6] |= 1ull << (it->second & 63); ++env->info->opEvals[it->second]; }
+    }
   }
-  PosPtr pos = nd::posOfOp(op);
+  PosPtr pos = n->pos;
+  Node **x = n->operands;
   auto copyFrom = [&](Value *v) {
     forceValue(*v, pos);
     out = *v;
   };
-  llvm::TypeSwitch<Operation *>(op)
-      .Case<nd::ListOp>([&](nd::ListOp l) {
-        mkList(out, l.getElements() |cp::α| [&](mlir::Value x) { return lookup(env, x); });
-      })
-      .Case<nd::AttrsOp>([&](nd::AttrsOp a) { evalAttrs(a, env, out); })
-      .Case<nd::SelectOp>([&](nd::SelectOp sel) {
-        auto [base, dyn, def] = selectOperands(sel);
-        Value tb;
-        Value *cur = dyn.empty() ? &operand(env, base, tb) : lookup(env, base);
-        unsigned nextDyn = 0;
-        for (const nixfe::Name &comp : sel.getPath()) {
-          Symbol sym = pathSymbol(comp, dyn, nextDyn, env, pos);
-          if (!def) {
-            Value *baseV = cur;
-            cur = selectField(*cur, sym, pos);
-            if (statsEnabled) statSelect(op, baseV->attrs, sym, !dyn.empty());
-            continue;
-          }
-          forceValue(*cur, pos);
-          if (cur->type != VType::Attrs) return copyFrom(lookupImpl(env, def, true));
-          if (statsEnabled) statSelect(op, cur->attrs, sym, !dyn.empty());
-          const Attr *a = cur->attrs->get(sym);
-          if (!a) return copyFrom(lookupImpl(env, def, true));
-          cur = a->value;
-        }
-        copyFrom(cur);
-      })
-      .Case<nd::HasAttrOp>([&](nd::HasAttrOp h) {
-        mlir::OperandRange dyn = h->getOperands().drop_front(1);
-        Value tb;
-        Value *cur = dyn.empty() ? &operand(env, h->getOperand(0), tb) : lookup(env, h->getOperand(0));
-        unsigned nextDyn = 0;
-        for (const nixfe::Name &comp : h.getPath()) {
-          forceValue(*cur, pos);
-          Symbol sym = pathSymbol(comp, dyn, nextDyn, env, pos);
-          if (cur->type != VType::Attrs) return mkBool(out, false);
-          const Attr *a = cur->attrs->get(sym);
-          if (!a) return mkBool(out, false);
-          cur = a->value;
-        }
-        mkBool(out, true);
-      })
-      .Case<nd::ApplyOp>([&](nd::ApplyOp ap) {
-        Value *f = lookupImpl(env, ap->getOperand(0), true);  // callFunction forces the callee before anything else it does
-        mlir::OperandRange as = ap->getOperands().drop_front(1);
-        auto cells = as |cp::α| [&](mlir::Value a) { return lookup(env, a); }; // the argument cells, a series; drained into a stack array (arena past six)
-        size_t na = cells.size();
-        Value *buf[6];
-        Value **args = na <= 6 ? buf : allocList(na);
-        cp::drain(cells, args);
-        callFunction(*f, na, args, out, pos);
-      })
-      .Case<nd::IfOp>([&](nd::IfOp i) {
-        Value tc;
-        bool c = forceBool(operand(env, i.getCond(), tc), pos, "while evaluating a branch condition");
-        evalTail(env, c ? i.getThenValue() : i.getElseValue(), out, pos);
-      })
-      .Case<nd::AssertOp>([&](nd::AssertOp a) {
-        Value tc;
-        bool c = forceBool(operand(env, a.getCond(), tc), pos, "in the condition of the assert statement");
-        if (!c) throwAssertFailed(a, pos);
-        evalTail(env, a.getBody(), out, pos);
-      })
-      .Case<nd::NotOp>([&](nd::NotOp n) {
-        Value t;
-        mkBool(out, !forceBool(operand(env, n.getOperand(), t), pos, "in the argument of the not operator"));
-      })
-      .Case<nd::AndOp>([&](nd::AndOp a) {
-        Value t1, t2;
-        if (!forceBool(operand(env, a.getLhs(), t1), pos, "in the left operand of the AND (&&) operator"))
-          return mkBool(out, false);
-        mkBool(out, forceBool(operand(env, a.getRhs(), t2), pos, "in the right operand of the AND (&&) operator"));
-      })
-      .Case<nd::OrOp>([&](nd::OrOp o) {
-        Value t1, t2;
-        if (forceBool(operand(env, o.getLhs(), t1), pos, "in the left operand of the OR (||) operator"))
-          return mkBool(out, true);
-        mkBool(out, forceBool(operand(env, o.getRhs(), t2), pos, "in the right operand of the OR (||) operator"));
-      })
-      .Case<nd::ImplOp>([&](nd::ImplOp o) {
-        Value t1, t2;
-        if (!forceBool(operand(env, o.getLhs(), t1), pos, "in the left operand of the IMPL (->) operator"))
-          return mkBool(out, true);
-        mkBool(out, forceBool(operand(env, o.getRhs(), t2), pos, "in the right operand of the IMPL (->) operator"));
-      })
-      .Case<nd::EqOp>([&](nd::EqOp e) {
-        Value ta, tb;
-        Value &ra = operand(env, e.getLhs(), ta);
-        forceValue(ra, pos);
-        Value &rb = operand(env, e.getRhs(), tb);
-        forceValue(rb, pos);
-        Value a = ra, b = rb;
-        mkBool(out, eqValues(a, b, pos));
-      })
-      .Case<nd::NeqOp>([&](nd::NeqOp e) {
-        Value ta, tb;
-        Value &ra = operand(env, e.getLhs(), ta);
-        forceValue(ra, pos);
-        Value &rb = operand(env, e.getRhs(), tb);
-        forceValue(rb, pos);
-        Value a = ra, b = rb;
-        mkBool(out, !eqValues(a, b, pos));
-      })
-      .Case<nd::UpdateOp>([&](nd::UpdateOp u) {
-        Value tl, tr;
-        Value *l = &operand(env, u.getLhs(), tl);
-        forceAttrs(*l, pos, "in the left operand of the update (//) operator");
-        Value *r = &operand(env, u.getRhs(), tr);
-        forceAttrs(*r, pos, "in the right operand of the update (//) operator");
-        if (l->attrs->empty()) { out = *r; return; }
-        if (r->attrs->empty()) { out = *l; return; }
-        mkAttrs(out, updateAttrs(l->attrs, r->attrs));
-      })
-      .Case<nd::ConcatListsOp>([&](nd::ConcatListsOp c) {
-        Value tl, tr;
-        Value *l = &operand(env, c.getLhs(), tl);
-        forceList(*l, pos, "in the left operand of the list concatenation operator");
-        Value *r = &operand(env, c.getRhs(), tr);
-        forceList(*r, pos, "in the right operand of the list concatenation operator");
-        if (l->listSize() == 0) { out = *r; return; }
-        if (r->listSize() == 0) { out = *l; return; }
-        mkList(out, l->items() + r->items());
-      })
-      .Case<nd::ConcatStringsOp>([&](nd::ConcatStringsOp c) { evalConcatStrings(c, env, out); })
-      .Case<nd::WithVarOp>([&](nd::WithVarOp w) {
-        Symbol sym = symbolOf(w.getName());
-        for (mlir::Value sc : w.getScopes()) {
-          Value *sv = lookup(env, sc);
-          forceAttrs(*sv, nd::posOfValue(sc), "while evaluating the first subexpression of a with expression");
-          if (const Attr *a = sv->attrs->get(sym)) return copyFrom(a->value);
-        }
-        throwUndefinedVariable(w.getName(), pos);
-      })
-      .Case<nd::FormalOp>([&](nd::FormalOp f) {
-        Value *arg = lookup(env, f->getOperand(0));
-        forceAttrs(*arg, pos);
-        if (const Attr *a = arg->attrs->get(symbolOf(f.getName()))) return copyFrom(a->value);
-        if (!f.getDefaultValue()) throwMissingFormal(f.getName(), pos);
-        copyFrom(lookupImpl(env, f.getDefaultValue(), true));
-      })
-      .Case<nd::IntOp>([&](nd::IntOp i) { mkInt(out, i.getValue()); })
-      .Case<nd::BoolOp>([&](nd::BoolOp b) { mkBool(out, b.getValue()); })
-      .Case<nd::NullOp>([&](nd::NullOp) { mkNull(out); })
-      .Case<nd::FloatOp>([&](nd::FloatOp fl) { mkFloat(out, fl.getValue().convertToDouble()); })
-      .Case<nd::StringOp>([&](nd::StringOp s) { mkStringWindow(out, s.getValue().str()); })
-      .Case<nd::PathOp>([&](nd::PathOp p) { mkPath(out, p.getValue().str()); })
-      .Case<nd::BuiltinOp>([&](nd::BuiltinOp b) { copyFrom(baseEnvValue(b.getName().str())); })
-      .Default([&](Operation *o) {
-        // Everything else (all primop ops of the continent dialects) runs
-        // through the externally attached NixEvalOpInterface model.
-        if (auto e = dyn_cast<nd::NixEvalOpInterface>(o)) return e.eval(*this, env, out);
-        throwCannotEvaluate(o, pos);
-      });
+  switch (n->kind) {
+  case NodeKind::Apply: {
+    Value *f = lookupImpl(env, x[0], true);  // callFunction forces the callee before anything else it does
+    size_t na = n->nOperands - 1;
+    auto cells = cp::series(x + 1, na) |cp::α| [&](Node *a) { return lookup(env, a); }; // the argument cells, drained into a stack array (arena past six)
+    Value *buf[6];
+    Value **args = na <= 6 ? buf : allocList(na);
+    cp::drain(cells, args);
+    return callFunction(*f, na, args, out, pos);
+  }
+  case NodeKind::Select: {
+    Node *const *dyn = x + 1;
+    Node *def = n->flags & Node::kDefault ? x[1 + n->nDyn] : nullptr;
+    bool dynamic = n->nDyn != 0;
+    Value tb;
+    Value *cur = dynamic ? lookup(env, x[0]) : &operand(env, x[0], tb);
+    unsigned nextDyn = 0;
+    for (const nixfe::Name &comp : cast<nd::SelectOp>(op).getPath()) {
+      Symbol sym = pathSymbol(comp, dyn, nextDyn, env, pos);
+      if (!def) {
+        Value *baseV = cur;
+        cur = selectField(*cur, sym, pos);
+        if (statsEnabled) statSelect(op, baseV->attrs, sym, dynamic);
+        continue;
+      }
+      forceValue(*cur, pos);
+      if (cur->type != VType::Attrs) return copyFrom(lookupImpl(env, def, true));
+      if (statsEnabled) statSelect(op, cur->attrs, sym, dynamic);
+      const Attr *a = cur->attrs->get(sym);
+      if (!a) return copyFrom(lookupImpl(env, def, true));
+      cur = a->value;
+    }
+    return copyFrom(cur);
+  }
+  case NodeKind::If: {
+    Value tc;
+    bool c = forceBool(operand(env, x[0], tc), pos, "while evaluating a branch condition");
+    return evalTail(env, x[c ? 1 : 2], out, pos);
+  }
+  case NodeKind::Attrs: return evalAttrs(n, env, out);
+  case NodeKind::Eq: case NodeKind::Neq: {
+    Value ta, tb;
+    Value &ra = operand(env, x[0], ta);
+    forceValue(ra, pos);
+    Value &rb = operand(env, x[1], tb);
+    forceValue(rb, pos);
+    Value a = ra, b = rb;
+    return mkBool(out, eqValues(a, b, pos) == (n->kind == NodeKind::Eq));
+  }
+  case NodeKind::HasAttr: {
+    Node *const *dyn = x + 1;
+    Value tb;
+    Value *cur = n->nDyn ? lookup(env, x[0]) : &operand(env, x[0], tb);
+    unsigned nextDyn = 0;
+    for (const nixfe::Name &comp : cast<nd::HasAttrOp>(op).getPath()) {
+      forceValue(*cur, pos);
+      Symbol sym = pathSymbol(comp, dyn, nextDyn, env, pos);
+      if (cur->type != VType::Attrs) return mkBool(out, false);
+      const Attr *a = cur->attrs->get(sym);
+      if (!a) return mkBool(out, false);
+      cur = a->value;
+    }
+    return mkBool(out, true);
+  }
+  case NodeKind::List: return mkList(out, n->args() |cp::α| [&](Node *e) { return lookup(env, e); });
+  case NodeKind::String: return mkStringWindow(out, cast<nd::StringOp>(op).getValue().str());
+  case NodeKind::And: {
+    Value t1, t2;
+    if (!forceBool(operand(env, x[0], t1), pos, "in the left operand of the AND (&&) operator")) return mkBool(out, false);
+    return mkBool(out, forceBool(operand(env, x[1], t2), pos, "in the right operand of the AND (&&) operator"));
+  }
+  case NodeKind::Or: {
+    Value t1, t2;
+    if (forceBool(operand(env, x[0], t1), pos, "in the left operand of the OR (||) operator")) return mkBool(out, true);
+    return mkBool(out, forceBool(operand(env, x[1], t2), pos, "in the right operand of the OR (||) operator"));
+  }
+  case NodeKind::Update: {
+    Value tl, tr;
+    Value *l = &operand(env, x[0], tl);
+    forceAttrs(*l, pos, "in the left operand of the update (//) operator");
+    Value *r = &operand(env, x[1], tr);
+    forceAttrs(*r, pos, "in the right operand of the update (//) operator");
+    if (l->attrs->empty()) { out = *r; return; }
+    if (r->attrs->empty()) { out = *l; return; }
+    return mkAttrs(out, updateAttrs(l->attrs, r->attrs));
+  }
+  case NodeKind::Not: {
+    Value t;
+    return mkBool(out, !forceBool(operand(env, x[0], t), pos, "in the argument of the not operator"));
+  }
+  case NodeKind::Formal: {
+    auto f = cast<nd::FormalOp>(op);
+    Value *arg = lookup(env, x[0]);
+    forceAttrs(*arg, pos);
+    if (const Attr *a = arg->attrs->get(symbolOf(f.getName()))) return copyFrom(a->value);
+    if (n->nOperands < 2) throwMissingFormal(f.getName(), pos);
+    return copyFrom(lookupImpl(env, x[1], true));
+  }
+  case NodeKind::ConcatLists: {
+    Value tl, tr;
+    Value *l = &operand(env, x[0], tl);
+    forceList(*l, pos, "in the left operand of the list concatenation operator");
+    Value *r = &operand(env, x[1], tr);
+    forceList(*r, pos, "in the right operand of the list concatenation operator");
+    if (l->listSize() == 0) { out = *r; return; }
+    if (r->listSize() == 0) { out = *l; return; }
+    return mkList(out, l->items() + r->items());
+  }
+  case NodeKind::ConcatStrings: return evalConcatStrings(n, env, out);
+  case NodeKind::WithVar: {
+    auto w = cast<nd::WithVarOp>(op);
+    Symbol sym = symbolOf(w.getName());
+    for (Node *sc : n->args()) {
+      Value *sv = lookup(env, sc);
+      forceAttrs(*sv, sc->pos, "while evaluating the first subexpression of a with expression");
+      if (const Attr *a = sv->attrs->get(sym)) return copyFrom(a->value);
+    }
+    throwUndefinedVariable(w.getName(), pos);
+  }
+  case NodeKind::Assert: {
+    Value tc;
+    bool c = forceBool(operand(env, x[0], tc), pos, "in the condition of the assert statement");
+    if (!c) throwAssertFailed(cast<nd::AssertOp>(op), pos);
+    return evalTail(env, x[1], out, pos);
+  }
+  case NodeKind::Impl: {
+    Value t1, t2;
+    if (!forceBool(operand(env, x[0], t1), pos, "in the left operand of the IMPL (->) operator")) return mkBool(out, true);
+    return mkBool(out, forceBool(operand(env, x[1], t2), pos, "in the right operand of the IMPL (->) operator"));
+  }
+  case NodeKind::Prim: { // an op of a continent dialect: its primop, found once, on its operands' cells
+    if (!n->prim) n->prim = primFor(op);
+    Value *args[8];
+    for (unsigned i = 0; i < n->nOperands; i++) args[i] = lookup(env, x[i]);
+    return callPrimOp(*n->prim, args, out, pos);
+  }
+  case NodeKind::Int: return mkInt(out, cast<nd::IntOp>(op).getValue());
+  case NodeKind::Bool: return mkBool(out, cast<nd::BoolOp>(op).getValue());
+  case NodeKind::Null: return mkNull(out);
+  case NodeKind::Float: return mkFloat(out, cast<nd::FloatOp>(op).getValue().convertToDouble());
+  case NodeKind::Path: return mkPath(out, cast<nd::PathOp>(op).getValue().str());
+  case NodeKind::Builtin: return copyFrom(baseEnvValue(cast<nd::BuiltinOp>(op).getName().str()));
+  case NodeKind::Arg: case NodeKind::Lambda: case NodeKind::Other: break;
+  }
+  // Anything else runs through the externally attached NixEvalOpInterface model.
+  if (auto e = dyn_cast<nd::NixEvalOpInterface>(op)) return e.eval(*this, env, out);
+  throwCannotEvaluate(op, pos);
 }
 
 //===----------------------------------------------------------------------===//
@@ -2735,7 +2793,7 @@ nd::ExprOp EvalState::takePrelowered(const std::string &resolved) {
 Value *EvalState::evalExprOp(nd::ExprOp op) {
   RegionInfo *ri = regionInfo(&op.getBody());
   Frame *f = newFrame(ri, nullptr);
-  return lookup(f, ri->result);
+  return lookup(f, ri->resultNode);
 }
 
 static const char *corepkgsFetchurl = R"NIX({
