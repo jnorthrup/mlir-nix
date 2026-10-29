@@ -54,6 +54,7 @@ using Symbol = uint32_t;
 
 struct SymbolTable {
   Symbol create(llvm::StringRef s) {
+    ++creates; // (counted always: one add; MLNIX_STATS prints it)
     auto it = map.find(s);
     if (it != map.end()) return it->second;
     Symbol id = names.size();
@@ -77,6 +78,7 @@ struct SymbolTable {
   llvm::StringMap<Symbol> map;
   composite::MutableSeries<llvm::StringRef> names;
   composite::MutableSeries<uint64_t> prefix; // per symbol: its first eight bytes as one word (less)
+  uint64_t creates = 0;
 };
 
 struct Value;
@@ -697,7 +699,7 @@ struct EvalState {
   cp::MutableSeries<Slot> slotStore;
   struct SlotCacheEntry { void *key = nullptr; uint32_t slot = kNoHandle; };
   static constexpr size_t kSlotCache = 8192;
-  alignas(64) SlotCacheEntry slotCache[kSlotCache];
+  SlotCacheEntry slotCache[kSlotCache];
 #ifdef MLNIX_NO_LOOKUP_CACHES
   uint32_t slotOf(void *key) {
     auto it = slotMap.find(key);
@@ -705,23 +707,13 @@ struct EvalState {
   }
 #else
   uint32_t slotOf(void *key) {
-    // Four ways a set (one 64-byte line), the most recent first, in the same 128 KB (L2/2 on Kali): values that map to one set no longer
-    // evict each other.
-    SlotCacheEntry *set = &slotCache[((reinterpret_cast<uintptr_t>(key) >> 4) & (kSlotCache / 4 - 1)) * 4];
-    if (set[0].key == key) return set[0].slot;
-    for (unsigned w = 1; w < 4; w++)
-      if (set[w].key == key) {
-        SlotCacheEntry hit = set[w];
-        for (unsigned k = w; k > 0; k--) set[k] = set[k - 1];
-        set[0] = hit;
-        return hit.slot;
-      }
+    SlotCacheEntry &e = slotCache[(reinterpret_cast<uintptr_t>(key) >> 4) & (kSlotCache - 1)];
+    if (e.key == key) return e.slot;
     if (statsEnabled) [[unlikely]] ++nSlotMisses;
     auto it = slotMap.find(key);
     if (it == slotMap.end()) return kNoHandle;
-    set[3] = set[2]; set[2] = set[1]; set[1] = set[0];
-    set[0] = {key, it->second};
-    return it->second;
+    e = {key, it->second};
+    return e.slot;
   }
 #endif
   void setSlot(void *key, const Slot &slot) {
