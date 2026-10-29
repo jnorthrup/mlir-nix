@@ -926,9 +926,10 @@ void registerBuiltins(EvalState &state) {
       st.callFunction(*args[0], 2, fargs, r, pos);
       return st.forceBool(r, pos, "while evaluating the return value of the sorting function passed to builtins.sort");
     };
-    // the result list is the argument's cells drained into a fresh arena list and sorted where they lie: no copy through a vector
-    st.mkList(v, composite::series(args[1]->list.elems, uint32_t(n)));
-    std::stable_sort(v.list.elems, v.list.elems + n, cmp);
+    // The argument's cells are const and read where they lie: the sort's first pass is the drain into the result list.
+    Value *const *from = args[1]->list.elems;
+    st.mkList(v, n);
+    composite::sortRows(from, v.list.elems, n, cmp);
   });
   S.addPrimOp("__partition", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.partition");
@@ -1017,9 +1018,8 @@ void registerBuiltins(EvalState &state) {
     NixStringContext ctx;
     std::string path = st.coerceToPath(*args[1], ctx, pos, "while evaluating the second argument passed to builtins.scopedImport");
     st.realiseContext(ctx, pos);
-    composite::MutableSeries<std::string> names;
-    for (auto &a : *args[0]->attrs) names.append(str(st.symbols[a.name]));
-    std::sort(names.begin(), names.end());
+    composite::MutableSeries<std::string> names; // the scope's names in order: the cache key, and the names the file is lowered against
+    for (const Attr *a : args[0]->attrs->lexicographicOrder(st.symbols)) names.append(str(st.symbols[a->name]));
     std::string real = st.resolveExprPath(st.realisePath(path, pos));
     std::string key = real;
     for (auto &n : names) key += "\n" + n;

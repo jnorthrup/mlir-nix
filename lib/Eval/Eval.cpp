@@ -1,8 +1,8 @@
 //===- Eval.cpp - Lazy evaluator over the nix dialect ---------------------===//
 
 #include <sys/resource.h>
-#include <deque>
 #include <map>
+#include "Composite/Folds.h"
 #include "Composite/Mutable.h"
 #include "Nix/Prefetch.h"
 #include <bit>
@@ -64,7 +64,7 @@ void EvalState::statSelect(const void *site, const Bindings *b, Symbol key, bool
   ++s.calls; s.hits += hit; s.dynamic |= dynamic;
   if (s.calls > 1 && s.last == sig) ++s.sameAsLast;
   s.last = sig;
-  if (std::find(s.seen.begin(), s.seen.end(), sig) == s.seen.end()) { if (s.seen.size() < 6) s.seen.push_back(sig); else s.seen[5] = sig ^ 1; }
+  if (!cp::anyOf(s.seen, [&](uint64_t x) { return x == sig; })) { if (s.seen.size() < 6) s.seen.append(sig); else s.seen[5] = sig ^ 1; }
 }
 
 static const auto attrName = [](const Attr &a) { return a.name; };
@@ -114,7 +114,7 @@ composite::Frozen<const Attr *> Bindings::lexicographicOrder(const SymbolTable &
   composite::MutableSeries<const Attr *> v;
   v.reserve(size());
   for (auto &a : *this) v.append(&a);
-  std::sort(v.begin(), v.end(), [&](const Attr *a, const Attr *b) { return st[a->name] < st[b->name]; });
+  cp::sortRows(v.data(), v.size(), [&](const Attr *a, const Attr *b) { return st[a->name] < st[b->name]; });
   return std::move(v).freeze();  // sorted once, then only read: the handle's cells move into a const Series
 }
 
@@ -321,6 +321,16 @@ EvalState::EvalState(EvalSettings st, std::shared_ptr<nixstore::Store> store)
   createBaseEnv();
 }
 
+/// The entries of a map ranked by a count, largest first (ties keep the map's order): pointers to the entries where they lie, nothing copied.
+template <class Map, class Count> static auto ranked(const Map &m, Count count) {
+  using Entry = cp::bare_t<decltype(*m.begin())>;
+  cp::MutableSeries<const Entry *> v;
+  v.reserve(m.size());
+  for (auto &e : m) v.append(&e);
+  cp::sortRows(v.data(), v.size(), [&](const Entry *a, const Entry *b) { return count(*a) > count(*b); });
+  return std::move(v).freeze();
+}
+
 void EvalState::printStats() {
   if (scalarJIT) scalarJIT->printStats();
   llvm::errs() << "attribute cells: bytes=" << sizeof(Attr)
@@ -351,7 +361,7 @@ void EvalState::printStats() {
   if (nFrames) {
     composite::MutableSeries<RegionInfo *> top;
     for (auto &kv : regionInfos) if (kv.second->calls) top.append(kv.second);
-    std::sort(top.begin(), top.end(), [](RegionInfo *a, RegionInfo *b) { return a->calls > b->calls; });
+    cp::sortRows(top.data(), top.size(), [](RegionInfo *a, RegionInfo *b) { return a->calls > b->calls; });
     size_t keep = 40;
     if (const char *t = getenv("MLNIX_STATS_TOP")) keep = std::max<size_t>(1, strtoul(t, nullptr, 10));
     llvm::errs() << "== the " << keep << " lambdas that make the most frames (calls, slots, where):\n";
@@ -376,17 +386,16 @@ void EvalState::printStats() {
       if (g.example.empty()) g.example = showPos(nd::posOfOp(ri->region->getParentOp()));
       g.frames += ri->calls; ++g.lambdas; g.shape = sh;
     }
-    composite::MutableSeries<Group> gs;
-    for (auto &kv : byShape) gs.append(kv.second);
-    std::sort(gs.begin(), gs.end(), [](const Group &a, const Group &b) { return a.frames > b.frames; });
+    auto gs = ranked(byShape, [](auto &e) { return e.second.frames; });
     size_t keep = 30;
     if (const char *t = getenv("MLNIX_STATS_SHAPES")) keep = std::max<size_t>(1, strtoul(t, nullptr, 10));
     llvm::errs() << "== lambda shapes by the frames they make (" << gs.size() << " shapes, " << nFrames << " frames):\n";
     uint64_t cum = 0;
     for (size_t i = 0; i < gs.size() && i < keep; ++i) {
-      cum += gs[i].frames;
-      llvm::errs() << llvm::format("   %9llu frames in %5llu lambdas  cum %5.1f%%  ", (unsigned long long)gs[i].frames, (unsigned long long)gs[i].lambdas, 100.0 * cum / nFrames)
-                   << gs[i].shape << "   e.g. " << gs[i].example << "\n";
+      const Group &g = gs[i]->second;
+      cum += g.frames;
+      llvm::errs() << llvm::format("   %9llu frames in %5llu lambdas  cum %5.1f%%  ", (unsigned long long)g.frames, (unsigned long long)g.lambdas, 100.0 * cum / nFrames)
+                   << g.shape << "   e.g. " << g.example << "\n";
     }
   }
   if (nFrames) llvm::errs() << llvm::format("== frames that cannot leak (strict ops only, nothing built over the frame): %llu = %.1f%% of frames, %.1f MB of %.1f MB of frame storage\n",
@@ -441,28 +450,24 @@ void EvalState::printStats() {
     llvm::errs() << llvm::format("   a one-entry cache per site (same layout as the site's last select) would hit %.1f%% of selects\n", 100.0 * sameLast / nSelects);
   }
   if (!thunksByOp.empty()) {
-    composite::MutableSeries<std::pair<std::string, std::pair<uint64_t, uint64_t>>> v;
-    for (auto &kv : thunksByOp) v.append({kv.getKey().str(), kv.getValue()});
-    std::sort(v.begin(), v.end(), [](auto &a, auto &b) { return a.second.first > b.second.first; });
+    auto v = ranked(thunksByOp, [](auto &e) { return e.getValue().first; });
     llvm::errs() << "== thunks that need the frame, by operation (share of those; mean operands, of which defined in the same body):\n";
     uint64_t cum = 0;
     for (size_t i = 0; i < v.size() && i < 14; ++i) {
-      cum += v[i].second.first;
-      uint64_t n = v[i].second.first, packed = v[i].second.second, ops = 0, inside = 0;
+      cum += v[i]->getValue().first;
+      uint64_t n = v[i]->getValue().first, packed = v[i]->getValue().second, ops = 0, inside = 0;
       ops = packed / 8; inside = 0;   // the in-body count is accumulated separately below
       (void)inside;
-      llvm::errs() << llvm::format("   %-22s %9llu  %5.1f%%  cum %5.1f%%   %.1f operands\n", v[i].first.c_str(), (unsigned long long)n, 100.0 * n / nHardThunks, 100.0 * cum / nHardThunks, double(ops) / n);
+      llvm::errs() << llvm::format("   %-22s %9llu  %5.1f%%  cum %5.1f%%   %.1f operands\n", v[i]->getKey().str().c_str(), (unsigned long long)n, 100.0 * n / nHardThunks, 100.0 * cum / nHardThunks, double(ops) / n);
     }
   }
   llvm::errs() << "values evaluated at their first touch, never a thunk (the caller forces them next): " << nEager << "\n";
   if (nHardThunks) {
     llvm::errs() << llvm::format("== of the thunks that need their frame, %llu (%.1f%%) are forced as the very next thing after they are made: eager evaluation would keep the order and never capture the frame\n",
                                  (unsigned long long)nImmediate, 100.0 * nImmediate / nHardThunks);
-    composite::MutableSeries<std::pair<std::string, uint64_t>> v;
-    for (auto &kv : immediateByOp) v.append({kv.getKey().str(), kv.getValue()});
-    std::sort(v.begin(), v.end(), [](auto &a, auto &b) { return a.second > b.second; });
+    auto v = ranked(immediateByOp, [](auto &e) { return e.getValue(); });
     llvm::errs() << "   by operation:";
-    for (size_t i = 0; i < v.size() && i < 8; ++i) llvm::errs() << llvm::format(" %s %.1f%%", v[i].first.c_str(), 100.0 * v[i].second / nImmediate);
+    for (size_t i = 0; i < v.size() && i < 8; ++i) llvm::errs() << llvm::format(" %s %.1f%%", v[i]->getKey().str().c_str(), 100.0 * v[i]->getValue() / nImmediate);
     llvm::errs() << "\n";
   }
   if (nProjThunks + nHardThunks) llvm::errs() << llvm::format("== thunks made over a frame: %llu, of which %llu (%.1f%%) are projections of the body's argument or a captured value (the rest %llu need the frame)\n",
@@ -530,14 +535,9 @@ void EvalState::printStats() {
     perContinent[it == core->continents.end() ? "core" : llvm::StringRef(it->second.continent)] += e.getValue();
     total += e.getValue();
   }
-  auto sorted = [](llvm::StringMap<size_t> &m) {
-    auto v = llvm::to_vector(llvm::map_range(m, [](auto &e) { return std::pair(e.getKey().str(), e.getValue()); }));
-    std::sort(v.begin(), v.end(), [](auto &a, auto &b) { return a.second > b.second; });
-    return v;
-  };
   auto section = [&](const char *title, llvm::StringMap<size_t> &m) {
     llvm::errs() << "== " << title << " (" << m.size() << ")\n";
-    for (auto &[n, c] : sorted(m)) llvm::errs() << "  " << llvm::format("%-9s", n.c_str()) << llvm::format("%9zu", c) << "\n";
+    for (auto *e : ranked(m, [](auto &e) { return e.getValue(); })) llvm::errs() << "  " << llvm::format("%-9s", e->getKey().str().c_str()) << llvm::format("%9zu", e->getValue()) << "\n";
   };
   // These writes include stack temporaries and repeated mutations of a cell. They
   // describe evaluator work, not a live-heap census or a per-facet allocation count.
@@ -608,9 +608,8 @@ void EvalState::printStats() {
   if (epochEvals.size() > 1) { // how the work divides among the attributes the driver visited: a serial prefix or a flat spread
     uint64_t tot = 0, mx = 0;
     for (uint64_t e : epochEvals) { tot += e; mx = std::max(mx, e); }
-    composite::MutableSeries<uint64_t> sorted;
-    for (uint64_t e : epochEvals) sorted.append(e);
-    std::sort(sorted.begin(), sorted.end());
+    composite::MutableSeries<uint64_t> sorted(epochEvals.size()); // the epochs are only read: the sort's first pass is the drain
+    cp::sortRows(epochEvals.data(), sorted.data(), epochEvals.size(), [](uint64_t a, uint64_t b) { return a < b; });
     auto share = [&](size_t n) { uint64_t c = 0; for (size_t i = 0; i < n && i < epochEvals.size(); i++) c += epochEvals[i]; return 100.0 * c / tot; };
     llvm::errs() << "== epochs (attributes visited): " << epochEvals.size() << ", " << tot << " evalOp calls; median " << sorted[sorted.size() / 2] << ", p90 " << sorted[sorted.size() * 9 / 10]
                  << ", max " << mx << " (" << llvm::format("%.1f", 100.0 * mx / tot) << "%); share of the work in the first 1 / 10 / 100 / 10% of the epochs: "
@@ -622,19 +621,18 @@ void EvalState::printStats() {
                  << llvm::format("%.1f", 100.0 * nLookupHits / nLookups) << "%); frame hops to the defining region: ";
     for (unsigned i = 0; i < 6; i++) llvm::errs() << (i == 5 ? "5+" : std::to_string(i)) << " " << llvm::format("%.1f", 100.0 * nHopHist[i] / nLookups) << "%  ";
     llvm::errs() << '\n';
-    composite::MutableSeries<std::pair<llvm::StringRef, uint64_t>> ev;
     uint64_t tot = 0;
-    for (auto &e : evalsByKind) { ev.append(e.second); tot += e.second.second; }
-    std::sort(ev.begin(), ev.end(), [](auto &a, auto &b) { return a.second > b.second; });
-    { composite::MutableSeries<std::pair<llvm::StringRef, std::array<uint64_t, 2>>> cv; uint64_t ct = 0;
-      for (auto &e : cellsByKind) { cv.append(e.second); ct += e.second.second[0] + e.second.second[1]; }
-      std::sort(cv.begin(), cv.end(), [](auto &a, auto &b) { return a.second[0] + a.second[1] > b.second[0] + b.second[1]; });
+    for (auto &e : evalsByKind) tot += e.second.second;
+    auto ev = ranked(evalsByKind, [](auto &e) { return e.second.second; });
+    { uint64_t ct = 0;
+      for (auto &e : cellsByKind) ct += e.second.second[0] + e.second.second[1];
+      auto cv = ranked(cellsByKind, [](auto &e) { return e.second.second[0] + e.second.second[1]; });
       llvm::errs() << "== cells made by lookup, by defining op (" << ct << " in all): evaluated at once (forced), left as a thunk\n";
       for (size_t i = 0; i < cv.size() && i < 14; i++)
-        llvm::errs() << "  " << llvm::format("%-26s", cv[i].first.str().c_str()) << llvm::format("%12llu", (unsigned long long)cv[i].second[0]) << llvm::format("%12llu", (unsigned long long)cv[i].second[1]) << '\n'; }
+        llvm::errs() << "  " << llvm::format("%-26s", cv[i]->second.first.str().c_str()) << llvm::format("%12llu", (unsigned long long)cv[i]->second.second[0]) << llvm::format("%12llu", (unsigned long long)cv[i]->second.second[1]) << '\n'; }
     llvm::errs() << "== evalOp calls by op kind (" << tot << " in all)\n";
     for (size_t i = 0; i < ev.size() && i < 16; i++)
-      llvm::errs() << "  " << llvm::format("%-26s", ev[i].first.str().c_str()) << llvm::format("%12llu", (unsigned long long)ev[i].second) << llvm::format("%7.1f%%", 100.0 * ev[i].second / tot) << '\n';
+      llvm::errs() << "  " << llvm::format("%-26s", ev[i]->second.first.str().c_str()) << llvm::format("%12llu", (unsigned long long)ev[i]->second.second) << llvm::format("%7.1f%%", 100.0 * ev[i]->second.second / tot) << '\n';
   }
   if (getenv("MLNIX_STATS_USES")) { // single-use census: per op kind, how many results have no use, one use, several (who could move, who must copy)
     struct U { uint64_t ops = 0, zero = 0, one = 0, many = 0, ranOne = 0; };
@@ -660,21 +658,17 @@ void EvalState::printStats() {
           mlir::Operation *c = *op->getUsers().begin();
           { auto &row = by[(op->getName().getStringRef() + " -> " + c->getName().getStringRef()).str()]; row[c->getParentRegion() == op->getParentRegion() ? 0 : 1]++; row[2] += kv.second->opEvals[o.second]; }
         }
-      composite::MutableSeries<std::pair<std::string, std::array<uint64_t, 3>>> r2;
-      for (auto &e : by) r2.append({e.getKey().str(), e.getValue()});
-      std::sort(r2.begin(), r2.end(), [](auto &a, auto &b) { return a.second[2] > b.second[2]; });
+      auto r2 = ranked(by, [](auto &e) { return e.getValue()[2]; });
       llvm::errs() << "== single-use string/attrs/concat producers -> consumer: same region, nested region, producer evals (ranked by evals)\n";
       for (size_t i = 0; i < r2.size() && i < 30; i++)
-        llvm::errs() << "  " << llvm::format("%-44s", r2[i].first.c_str()) << llvm::format("%9llu", (unsigned long long)r2[i].second[0]) << llvm::format("%9llu", (unsigned long long)r2[i].second[1]) << llvm::format("%11llu", (unsigned long long)r2[i].second[2]) << '\n';
+        llvm::errs() << "  " << llvm::format("%-44s", r2[i]->getKey().str().c_str()) << llvm::format("%9llu", (unsigned long long)r2[i]->getValue()[0]) << llvm::format("%9llu", (unsigned long long)r2[i]->getValue()[1]) << llvm::format("%11llu", (unsigned long long)r2[i]->getValue()[2]) << '\n';
     }
-    composite::MutableSeries<std::pair<llvm::StringRef, U>> rows;
-    for (auto &e : byKind) rows.append({e.getKey(), e.getValue()});
-    std::sort(rows.begin(), rows.end(), [](auto &a, auto &b) { return a.second.ops > b.second.ops; });
+    auto rows = ranked(byKind, [](auto &e) { return e.getValue().ops; });
     llvm::errs() << "== single-use census (one-result ops): kind, ops, no use, one use, several, one-use that ran\n";
     for (size_t i = 0; i < rows.size() && i < 40; i++)
-      llvm::errs() << "  " << llvm::format("%-26s", rows[i].first.str().c_str()) << llvm::format("%9llu", (unsigned long long)rows[i].second.ops)
-                   << llvm::format("%9llu", (unsigned long long)rows[i].second.zero) << llvm::format("%9llu", (unsigned long long)rows[i].second.one)
-                   << llvm::format("%9llu", (unsigned long long)rows[i].second.many) << llvm::format("%9llu", (unsigned long long)rows[i].second.ranOne) << '\n';
+      llvm::errs() << "  " << llvm::format("%-26s", rows[i]->getKey().str().c_str()) << llvm::format("%9llu", (unsigned long long)rows[i]->getValue().ops)
+                   << llvm::format("%9llu", (unsigned long long)rows[i]->getValue().zero) << llvm::format("%9llu", (unsigned long long)rows[i]->getValue().one)
+                   << llvm::format("%9llu", (unsigned long long)rows[i]->getValue().many) << llvm::format("%9llu", (unsigned long long)rows[i]->getValue().ranOne) << '\n';
   }
   if (nSlotsAssigned)
     llvm::errs() << "== frame cells: " << nSlotsAssigned << " assigned, " << nSlotsNoRead
@@ -712,11 +706,10 @@ void EvalState::printStats() {
   section("scopes", perScope);
   section("continents", perContinent);
   section("dialects", perDialect);
-  auto o = llvm::to_vector(llvm::map_range(opStats, [](auto &e) { return std::pair(e.getKey().str(), e.getValue()); }));
-  std::sort(o.begin(), o.end(), [](auto &a, auto &b) { return a.second > b.second; });
+  auto o = ranked(opStats, [](auto &e) { return e.getValue(); });
   llvm::errs() << "== top ops\n";
   for (size_t i = 0; i < o.size() && i < 14; i++)
-    llvm::errs() << "  " << llvm::format("%-22s", o[i].first.c_str()) << llvm::format("%9zu", o[i].second) << "\n";
+    llvm::errs() << "  " << llvm::format("%-22s", o[i]->getKey().str().c_str()) << llvm::format("%9zu", o[i]->getValue()) << "\n";
 }
 
 EvalState::~EvalState() {
@@ -1613,12 +1606,16 @@ void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out,
         }
         return;
       }
-      Value *all[kMaxPrimArity];
-      {
+      // With no chain upstream, the cells of this call are the primop's arguments where they lie: the reification is nothing.  A chain is
+      // joined in front of them, so then the two are scanned and drained into one array.
+      Value **all = args + i;
+      Value *joined[kMaxPrimArity];
+      if (applied) {
         size_t k = applied;
-        for (Value *q = cur; q->type == VType::PrimOpApp; q = q->app.left) all[--k] = q->app.right;
+        for (Value *q = cur; q->type == VType::PrimOpApp; q = q->app.left) joined[--k] = q->app.right;
+        cp::drain(cp::series(args + i, uint32_t(need)), joined + applied);
+        all = joined;
       }
-      cp::drain(cp::series(args + i, uint32_t(need)), all + applied);
       i += need;
       res = (i == nargs) ? &out : allocValue();
       callPrimOp(*op, all, *res, pos);
@@ -2320,7 +2317,7 @@ struct TracePrinter {
       out << "{";
       composite::MutableSeries<const Attr *> sorted;
       for (auto &a : *v.attrs) sorted.append(&a);
-      std::sort(sorted.begin(), sorted.end(), [&](const Attr *a, const Attr *b) {
+      cp::sortRows(sorted.data(), sorted.size(), [&](const Attr *a, const Attr *b) {
         auto an = st.symbols[a->name], bn = st.symbols[b->name];
         bool ai = an == "type" || an == "_type", bi = bn == "type" || bn == "_type";
         if (ai != bi) return ai;

@@ -751,7 +751,7 @@ struct EvalState {
   void statHops(Frame *f, RegionInfo *ri, bool hit);
   // MLNIX_STATS: the select census.  A layout signature is the set's size and three sampled names; a site is mono-, few- or megamorphic
   // by how many distinct signatures it has seen.
-  struct SelSite { uint64_t calls = 0, hits = 0, sameAsLast = 0, last = 0; llvm::SmallVector<uint64_t, 6> seen; bool dynamic = false; };
+  struct SelSite { uint64_t calls = 0, hits = 0, sameAsLast = 0, last = 0; cp::MutableSeries<uint64_t, cp::Inline<uint64_t, 6>> seen; bool dynamic = false; };
   llvm::DenseMap<const void *, SelSite> selSites;
   uint64_t nSelects = 0, nSelectHits = 0, nSelectDyn = 0, nSelectLayered = 0, nSelectProbes = 0, nSelectSizeLog[18] = {};
   void statSelect(const void *site, const Bindings *b, Symbol key, bool dynamic);

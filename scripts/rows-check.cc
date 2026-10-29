@@ -4,9 +4,14 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <new>
 #include <random>
 #include <vector>
 using namespace composite;
+static long live = 0; // blocks from operator new not yet given back: the unwind of a throwing comparator must leave it where it was
+void *operator new(std::size_t n) { ++live; if (void *p = std::malloc(n ? n : 1)) return p; throw std::bad_alloc(); }
+void operator delete(void *p) noexcept { if (p) { --live; std::free(p); } }
+void operator delete(void *p, std::size_t) noexcept { operator delete(p); }
 struct Row { uint32_t key; uint32_t tag; };
 static void require(bool ok, const char *what) { if (!ok) { std::printf("FAIL %s\n", what); std::exit(1); } }
 int main() {
@@ -20,6 +25,17 @@ int main() {
     std::stable_sort(ref.begin(), ref.end(), less);
     sortRows(mine.data(), n, less);
     for (size_t i = 0; i < n; i++) require(mine[i].key == ref[i].key && mine[i].tag == ref[i].tag, "stable sort");
+    std::vector<Row> into(n);                                              // out of place: the source is read where it lies and left as it was
+    sortRows(static_cast<const Row *>(v.data()), into.data(), n, less);
+    for (size_t i = 0; i < n; i++) require(into[i].key == ref[i].key && into[i].tag == ref[i].tag && v[i].tag == uint32_t(i), "stable sort into");
+    if (n > 30) { // a comparator that throws mid-sort: the temporary run is released by the unwind (run under a leak checker to see it)
+      size_t calls = 0;
+      long before = live;
+      try { sortRows(mine.data(), n, [&](const Row &a, const Row &b) { if (++calls == n) throw 1; return a.key < b.key; }); require(false, "throws"); }
+      catch (int) {}
+      require(live == before, "the temporary run is released when the comparator throws");
+      sortRows(mine.data(), n, less);
+    }
     size_t m = uniqueFirst(mine.data(), n, key);
     std::vector<Row> uniq; for (size_t i = 0; i < n; i++) if (uniq.empty() || uniq.back().key != ref[i].key) uniq.push_back(ref[i]);
     require(m == uniq.size(), "unique count");
@@ -44,6 +60,6 @@ int main() {
     require(want.size() == un, "union count");
     for (size_t i = 0; i < un; i++) require(out[i].key == want[i].key && out[i].tag == want[i].tag, "union rows, y wins");
   }
-  std::printf("PASS rows: findRow, stable sortRows, uniqueFirst and union against the standard library on 4000 random runs of up to 300 rows\n");
+  std::printf("PASS rows: findRow, stable sortRows (in place, into, and unwound by a throwing comparator with nothing left allocated), uniqueFirst and union against the standard library on 4000 random runs of up to 300 rows\n");
   return 0;
 }

@@ -21,35 +21,43 @@ template <class Row, class K, class Key> constexpr const Row *findRow(const Row 
   return key(*base) == k ? base : nullptr;
 }
 
-/// Sort rows in place, stable: equal rows keep their order.  An insertion sort for the short runs nearly every set is; a bottom-up merge
-/// sort past that, through one temporary run of the same length.
-template <class Row, class Less> void sortRows(Row *rows, size_t n, Less less) {
+/// Sort n rows read from `src` into `dst`, stable: equal rows keep their order.  `src` is only read, and is either `dst` itself or apart from
+/// it: a const source is not copied first, the first pass reads it where it lies.  That pass insertion-sorts runs of kRun rows, the short
+/// sets nearly every set is; longer ones are merged bottom-up through one temporary run of the same length, and the runs are written to
+/// whichever side makes the last merge land in `dst`, so nothing is copied back.
+template <class Row, class Less> void sortRows(const Row *src, Row *dst, size_t n, Less less) {
   static_assert(plainData<Row>, "rows are moved by copy");
-  constexpr size_t kShort = 24;
-  if (n <= kShort) {
-    for (size_t i = 1; i < n; i++) {
-      Row x = rows[i];
-      size_t j = i;
-      while (j > 0 && less(x, rows[j - 1])) { rows[j] = rows[j - 1]; --j; }
-      rows[j] = x;
+  constexpr size_t kRun = 24;
+  size_t passes = 0;
+  for (size_t w = kRun; w < n; w *= 2) passes++;
+  struct Temp { // the other side of the merges, released when this leaves scope, a comparator that throws included
+    Row *p;
+    explicit Temp(size_t m) : p(m ? static_cast<Row *>(::operator new(m * sizeof(Row))) : nullptr) {}
+    ~Temp() { ::operator delete(p); }
+  } temp(passes ? n : 0);
+  Row *a = passes % 2 ? temp.p : dst, *b = passes % 2 ? dst : temp.p;
+  for (size_t lo = 0; lo < n; lo += kRun) {
+    size_t hi = lo + kRun < n ? lo + kRun : n;
+    for (size_t i = lo; i < hi; i++) { // src[i] is read before a[i] is written, so src may be a
+      Row x = src[i];
+      size_t k = i;
+      while (k > lo && less(x, a[k - 1])) { a[k] = a[k - 1]; --k; }
+      a[k] = x;
     }
-    return;
   }
-  Row *tmp = static_cast<Row *>(::operator new(n * sizeof(Row)));
-  Row *src = rows, *dst = tmp;
-  for (size_t w = 1; w < n; w *= 2) {
+  for (size_t w = kRun; w < n; w *= 2) {
     for (size_t lo = 0; lo < n; lo += 2 * w) {
       size_t mid = lo + w < n ? lo + w : n, hi = lo + 2 * w < n ? lo + 2 * w : n;
       size_t i = lo, j = mid, k = lo;
-      while (i < mid && j < hi) dst[k++] = less(src[j], src[i]) ? src[j++] : src[i++]; // the right run only when strictly less: stable
-      while (i < mid) dst[k++] = src[i++];
-      while (j < hi) dst[k++] = src[j++];
+      while (i < mid && j < hi) b[k++] = less(a[j], a[i]) ? a[j++] : a[i++]; // the right run only when strictly less: stable
+      while (i < mid) b[k++] = a[i++];
+      while (j < hi) b[k++] = a[j++];
     }
-    Row *t = src; src = dst; dst = t;
+    Row *t = a; a = b; b = t;
   }
-  if (src != rows) for (size_t i = 0; i < n; i++) rows[i] = src[i];
-  ::operator delete(tmp);
 }
+/// Sort rows in place, stable.
+template <class Row, class Less> void sortRows(Row *rows, size_t n, Less less) { sortRows(static_cast<const Row *>(rows), rows, n, less); }
 
 /// Rows sorted by key, the first of each run of equal keys kept: the rows left, packed at the front.
 template <class Row, class Key> constexpr size_t uniqueFirst(Row *rows, size_t n, Key key) {
