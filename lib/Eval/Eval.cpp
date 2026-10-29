@@ -323,9 +323,11 @@ void EvalState::printStats() {
     composite::MutableSeries<RegionInfo *> top;
     for (auto &kv : regionInfos) if (kv.second->calls) top.append(kv.second);
     std::sort(top.begin(), top.end(), [](RegionInfo *a, RegionInfo *b) { return a->calls > b->calls; });
-    llvm::errs() << "== the 40 lambdas that make the most frames (calls, slots, where):\n";
+    size_t keep = 40;
+    if (const char *t = getenv("MLNIX_STATS_TOP")) keep = std::max<size_t>(1, strtoul(t, nullptr, 10));
+    llvm::errs() << "== the " << keep << " lambdas that make the most frames (calls, slots, where):\n";
     uint64_t cum = 0;
-    for (size_t i = 0; i < top.size() && i < 40; ++i) {
+    for (size_t i = 0; i < top.size() && i < keep; ++i) {
       cum += top[i]->calls;
       llvm::errs() << llvm::format("   %9llu %2u slots  cum %5.1f%%  ", (unsigned long long)top[i]->calls, top[i]->numSlots, 100.0 * cum / nFrames)
                    << showPos(nd::posOfOp(top[i]->region->getParentOp())) << "\n";
