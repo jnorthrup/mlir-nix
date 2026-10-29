@@ -265,10 +265,22 @@ void Store::cacheDerivation(const std::string &drvPath, const Derivation &drv) {
 
 std::string Store::writeDerivation(Derivation &&drv) {
   std::string text = drv.unparse(false); // once: its hash names the path, and it is what a store that writes stores
-  std::set<std::string> refs = drvReferences(drv);
-  std::string path = makeTextPath(settings.storeDir, drv.name + ".drv", hashString(HashAlgo::SHA256, text), refs);
+  // The path's type is `text` and its references: the input sources and the input derivations, both sorted, merged here (a path in both
+  // once), as makeTextPath would join drvReferences' set, without building the set.
+  std::string type = "text";
+  auto src = drv.inputSrcs.begin(), srcEnd = drv.inputSrcs.end();
+  auto in = drv.inputDrvs.begin(), inEnd = drv.inputDrvs.end();
+  while (src != srcEnd || in != inEnd) {
+    const std::string *r;
+    if (in == inEnd || (src != srcEnd && *src < in->first)) r = &*src++;
+    else if (src == srcEnd || in->first < *src) r = &(in++)->first;
+    else { r = &*src++; ++in; }
+    type += ':';
+    type += *r;
+  }
+  std::string path = makeStorePath(settings.storeDir, type, hashString(HashAlgo::SHA256, text), drv.name + ".drv");
   const Derivation &kept = drvCache.insert_or_assign(path, std::move(drv)).first->second;
-  if (!settings.readOnly) addTextToStore(kept.name + ".drv", text, refs);
+  if (!settings.readOnly) addTextToStore(kept.name + ".drv", text, drvReferences(kept));
   return path;
 }
 

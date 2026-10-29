@@ -73,6 +73,9 @@ Hash compressHash(const Hash &h, size_t newSize);
 
 std::string base16Encode(const uint8_t *d, size_t n);
 std::string nix32Encode(const uint8_t *d, size_t n);
+/// The same, appended to `out` where it is built: a path or a fingerprint is one string, not a string per piece.
+void appendBase16(std::string &out, const uint8_t *d, size_t n);
+void appendNix32(std::string &out, const uint8_t *d, size_t n);
 std::string base64Encode(std::string_view s);
 std::optional<std::string> base64Decode(std::string_view s);
 std::optional<std::string> nix32Decode(std::string_view s, size_t size);

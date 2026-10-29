@@ -241,27 +241,36 @@ Hash hashFile(HashAlgo a, const std::string &path) {
   return sink.finish();
 }
 
-std::string base16Encode(const uint8_t *d, size_t n) {
+void appendBase16(std::string &out, const uint8_t *d, size_t n) {
   static const char hex[] = "0123456789abcdef";
-  std::string s;
-  s.reserve(n * 2);
+  size_t at = out.size();
+  out.resize(at + n * 2);
   for (size_t i = 0; i < n; i++) {
-    s += hex[d[i] >> 4];
-    s += hex[d[i] & 0xf];
+    out[at + 2 * i] = hex[d[i] >> 4];
+    out[at + 2 * i + 1] = hex[d[i] & 0xf];
   }
+}
+
+std::string base16Encode(const uint8_t *d, size_t n) {
+  std::string s;
+  appendBase16(s, d, n);
   return s;
 }
 
-std::string nix32Encode(const uint8_t *d, size_t n) {
-  size_t len = (n * 8 - 1) / 5 + 1;
-  std::string s;
-  s.reserve(len);
+void appendNix32(std::string &out, const uint8_t *d, size_t n) {
+  size_t len = (n * 8 - 1) / 5 + 1, at = out.size();
+  out.resize(at + len);
   for (int i = (int)len - 1; i >= 0; i--) {
     unsigned b = i * 5;
     unsigned bi = b / 8, bj = b % 8;
     unsigned c = (d[bi] >> bj) | (bi >= n - 1 ? 0 : d[bi + 1] << (8 - bj));
-    s += nix32Chars[c & 0x1f];
+    out[at + len - 1 - i] = nix32Chars[c & 0x1f];
   }
+}
+
+std::string nix32Encode(const uint8_t *d, size_t n) {
+  std::string s;
+  appendNix32(s, d, n);
   return s;
 }
 
@@ -327,8 +336,8 @@ std::string Hash::to_string(HashFormat f, bool includeAlgo) const {
     s += f == HashFormat::SRI ? '-' : ':';
   }
   switch (f) {
-  case HashFormat::Base16: s += base16Encode(bytes, size()); break;
-  case HashFormat::Nix32: s += nix32Encode(bytes, size()); break;
+  case HashFormat::Base16: appendBase16(s, bytes, size()); break;
+  case HashFormat::Nix32: appendNix32(s, bytes, size()); break;
   case HashFormat::Base64:
   case HashFormat::SRI:
     s += base64Encode(std::string_view((const char *)bytes, size()));

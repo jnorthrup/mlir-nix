@@ -431,10 +431,28 @@ void checkName(std::string_view name) {
 std::string makeStorePath(const std::string &storeDir, std::string_view type, const Hash &hash,
                           std::string_view name) {
   checkName(name);
-  std::string s = std::string(type) + ":" + hash.to_string(HashFormat::Base16, true) + ":" +
-                  storeDir + ":" + std::string(name);
+  // The fingerprint `type:algo:hex:storeDir:name` and the path `storeDir/nix32-name`, each built in one string.
+  std::string algo = algoName(hash.algo);
+  std::string s;
+  s.reserve(type.size() + algo.size() + 2 * hash.size() + storeDir.size() + name.size() + 4);
+  s.append(type);
+  s += ':';
+  s += algo;
+  s += ':';
+  appendBase16(s, hash.bytes, hash.size());
+  s += ':';
+  s += storeDir;
+  s += ':';
+  s.append(name);
   Hash h = compressHash(hashString(HashAlgo::SHA256, s), 20);
-  return storeDir + "/" + nix32Encode(h.bytes, 20) + "-" + std::string(name);
+  std::string path;
+  path.reserve(storeDir.size() + 34 + name.size());
+  path += storeDir;
+  path += '/';
+  appendNix32(path, h.bytes, 20);
+  path += '-';
+  path.append(name);
+  return path;
 }
 
 std::string makeType(const std::string &storeDir, std::string type, const std::set<std::string> &refs,
