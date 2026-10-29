@@ -74,3 +74,27 @@ are small. That is the next place to look; it has not been accounted by use.
 `facet<text::Integer<2, false>>` is the C11 `strtoull` reading. glibc 2.38 and later also read a `0b` prefix in base 2 (C23), so the
 random comparison with libc excludes strings that start (after whitespace and a sign) with `0b`; Apple's libc does not read it. The
 evaluator is unaffected, because the TOML path strips `0b`, `0o` and `0x` itself before it asks for the digits.
+
+## What a capture costs, and what a pair costs in the IR
+
+`scripts/capture-cost.cc` copies N bytes of a `CharSeries` four ways: a plain copy, a Series whose index function captured the window's
+pointer **by value**, one that captured `this` (`a j this::get`), and one that captured everything by reference. Every closure is one
+pointer; the cost is what it captured. GB/s at 65,536 bytes:
+
+| | copy (memcpy) | by value | `this` | by reference |
+|---|---:|---:|---:|---:|
+| Mac clang `-O3` | 90 | 90 | 3.8 | 3.8 |
+| Kali clang 22 `-O3` | 39 | 33 | 1.7 | 1.7 |
+| Kali g++ 16 `-O3` | 39 | 30 | 1.5 | 1.5 |
+| Kali g++ 16 `-O2` | 39 | 3.1 | 1.5 | 1.5 |
+
+Capturing the cursor's address is 20 to 60 times slower on every compiler and size: a `char*` store may alias the cursor, so each byte
+reloads `pos` and the base, and nothing hoists or vectorizes. A by-value capture of the derived pointer removes that, but a byte fold is
+still not a memcpy on x86 (and GCC at `-O2` does not vectorize it), so a Series of bytes is for per-character logic; bulk copy of a
+contiguous window should be a `std::copy`.
+
+`scripts/ir-pairs.sh` compiles `scripts/ir-pairs.cc` to LLVM IR and counts what survives at `-O2`. Slicing a window, slicing a slice,
+packing and unpacking a pair of ints: 0 allocas, 0 loads, 0 stores, 0 calls; the window arrives as `[2 x i64]`, two registers. The only
+variant that keeps memory traffic is the closure that captured the cursor's address (11 loads and 5 stores for the loop where the by-value
+capture has 2 and 2). A `CharWindow` is 16 bytes and travels in registers; a `CharSeries` is 24 and goes through a hidden pointer
+(`trimmedLength(CharSeries)` loads its own argument 5 times), so read-only functions take the window and the cursor stays local.
