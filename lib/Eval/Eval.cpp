@@ -650,6 +650,7 @@ void EvalState::printStats() {
                  << llvm::format("%.1f", share(1)) << "% / " << llvm::format("%.1f", share(10)) << "% / " << llvm::format("%.1f", share(100)) << "% / "
                  << llvm::format("%.1f", share(epochEvals.size() / 10)) << "%\n";
   }
+  llvm::errs() << "== slotOf: " << nSlotMisses << " answered by the hash map (" << slotMap.size() << " values indexed), not its cache\n";
   if (nLookups) {
     llvm::errs() << "== lookupImpl: " << nLookups << " calls, " << nLookupHits << " answered by a filled slot ("
                  << llvm::format("%.1f", 100.0 * nLookupHits / nLookups) << "%); frame hops to the defining region: ";

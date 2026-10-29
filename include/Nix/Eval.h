@@ -697,7 +697,7 @@ struct EvalState {
   cp::MutableSeries<Slot> slotStore;
   struct SlotCacheEntry { void *key = nullptr; uint32_t slot = kNoHandle; };
   static constexpr size_t kSlotCache = 8192;
-  SlotCacheEntry slotCache[kSlotCache];
+  alignas(64) SlotCacheEntry slotCache[kSlotCache];
 #ifdef MLNIX_NO_LOOKUP_CACHES
   uint32_t slotOf(void *key) {
     auto it = slotMap.find(key);
@@ -705,12 +705,23 @@ struct EvalState {
   }
 #else
   uint32_t slotOf(void *key) {
-    SlotCacheEntry &e = slotCache[(reinterpret_cast<uintptr_t>(key) >> 4) & (kSlotCache - 1)];
-    if (e.key == key) return e.slot;
+    // Four ways a set (one 64-byte line), the most recent first, in the same 128 KB (L2/2 on Kali): values that map to one set no longer
+    // evict each other.
+    SlotCacheEntry *set = &slotCache[((reinterpret_cast<uintptr_t>(key) >> 4) & (kSlotCache / 4 - 1)) * 4];
+    if (set[0].key == key) return set[0].slot;
+    for (unsigned w = 1; w < 4; w++)
+      if (set[w].key == key) {
+        SlotCacheEntry hit = set[w];
+        for (unsigned k = w; k > 0; k--) set[k] = set[k - 1];
+        set[0] = hit;
+        return hit.slot;
+      }
+    if (statsEnabled) [[unlikely]] ++nSlotMisses;
     auto it = slotMap.find(key);
     if (it == slotMap.end()) return kNoHandle;
-    e = {key, it->second};
-    return e.slot;
+    set[3] = set[2]; set[2] = set[1]; set[1] = set[0];
+    set[0] = {key, it->second};
+    return it->second;
   }
 #endif
   void setSlot(void *key, const Slot &slot) {
@@ -720,6 +731,7 @@ struct EvalState {
   }
   uint64_t nUpdLayered = 0, nUpdMerged = 0, nUpdBase = 0, nUpdTop = 0; // MLNIX_STATS: `//` as a layer / a flat merge, entries not copied / copied
   uint64_t nDemandMinted = 0; // MLNIX_STATS: lambda bodies minted on first call
+  uint64_t nSlotMisses = 0;   // MLNIX_STATS: slotOf answered by the hash map, not its cache
   uint64_t nVT[15] = {}; // MLNIX_STATS: instrumented tag writes, including stack values and repeated retyping;
                          // [14] alone counts allocated Value rows, not tag writes
   uint64_t nFrames = 0, nFrameBytes = 0, nFrameSlots = 0; // requested frame storage, excluding arena overhead
