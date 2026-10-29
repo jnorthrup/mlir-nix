@@ -1200,6 +1200,64 @@ void EvalState::statHops(Frame *f, RegionInfo *ri, bool hit) {
   ++nLookups; nLookupHits += hit; ++nHopHist[h < 5 ? h : 5];
 }
 
+/// MLNIX_STATS: the census of a cell lookup makes (cold, out of line).
+void EvalState::statCell(Frame *f, Node *s, Value *nv, bool eager) {
+  Operation *op = s->def;
+  auto &c = cellsByKind[op->getName().getAsOpaquePointer()]; c.first = op->getName().getStringRef(); ++c.second[eager ? 0 : 1];
+  if (eager || !f) return;
+  if (nv->type == VType::Lambda) markPinned(f);
+  else if (isProjection(op)) ++nProjThunks;          // in the simulated world this thunk holds (base cell, path), not the frame
+  else {
+    ++nHardThunks; markCaptured(f); lastThunk = nv;
+    auto &e = thunksByOp[op->getName().getStringRef()];
+    ++e.first;
+    unsigned inside = 0;                                // operands defined in this very body: cells the thunk would have to create first
+    for (mlir::Value o : op->getOperands()) inside += !isa<mlir::BlockArgument>(o) && o.getParentRegion() == op->getParentRegion();
+    e.second += op->getNumOperands() * 8u + inside;     // packed: total operands in the high part, in-body operands in the low byte below
+  }
+}
+
+/// A literal's or a builtin's one cell, made at its first touch in any frame and kept in the node.
+Value *EvalState::makeFixed(Node *s) {
+  Operation *op = s->def;
+  if (s->how == Node::Builtin) { // the base environment is complete before anything is evaluated
+    auto b = cast<nd::BuiltinOp>(op);
+    Value *bv = baseEnvValue(b.getName().str());
+    if (!bv) throw EvalError("undefined variable '" + b.getName().toString() + "'", nd::posOfOp(op));
+    return s->fixed = bv;
+  }
+  Value *cv = allocValue();
+  if (auto i = dyn_cast<nd::IntOp>(op)) mkInt(*cv, i.getValue());
+  else if (auto fl = dyn_cast<nd::FloatOp>(op)) mkFloat(*cv, fl.getValue().convertToDouble());
+  else if (auto str = dyn_cast<nd::StringOp>(op)) mkStringWindow(*cv, str.getValue().str());
+  else if (auto bl = dyn_cast<nd::BoolOp>(op)) mkBool(*cv, bl.getValue());
+  else if (isa<nd::NullOp>(op)) mkNull(*cv);
+  else mkPath(*cv, cast<nd::PathOp>(op).getValue().str());
+  return s->fixed = cv;
+}
+
+/// The caller forces this value as the very next thing, so it is evaluated now, into its cell: the same work in the same order as making a
+/// thunk and forcing it, with no thunk, no frame captured.  The cell is in its slot first and a blackhole while it is evaluated, so a
+/// reference back to it is infinite recursion, as before; if the evaluation throws, the cell keeps the error (or, for anything but an
+/// evaluation error, becomes the thunk a later force retries).
+Value *EvalState::evalNow(Frame *f, Node *s, Value *nv) {
+  nv->type = VType::Blackhole;
+  try {
+    evalOp(s, f, *nv);
+  } catch (EvalError &) {
+    fail(*nv);
+    throw;
+  } catch (...) {
+    nv->type = VType::Thunk;
+    nv->thunk.node = s;
+    nv->thunk.env = f;
+    if (recycleOn) f->capture();
+    throw;
+  }
+  if (statsEnabled) ++nEager;
+  return nv;
+}
+
 Value *EvalState::makeCell(Frame *f, Node *s, bool forced) {
   if (!s) unindexed();
   if (s->fixed) return s->fixed; // a literal or a builtin: no frame to find, no cell to fill
@@ -1212,66 +1270,20 @@ Value *EvalState::makeCell(Frame *f, Node *s, bool forced) {
   Value *&slot = idx == kNoSlot ? noCell : f->slots[idx];
   if (slot) return slot;
   if (statsEnabled && idx != kNoSlot) [[unlikely]] statTouch(f, ri, idx);
-  Operation *op = s->def;
   if (s->kind == NodeKind::Arg) throw EvalError("internal error: unbound block argument");
-  if (s->how == Node::Const) { // made once, at the first touch in any frame, and kept in the node
-    Value *cv = allocValue();
-    if (auto i = dyn_cast<nd::IntOp>(op)) mkInt(*cv, i.getValue());
-    else if (auto fl = dyn_cast<nd::FloatOp>(op)) mkFloat(*cv, fl.getValue().convertToDouble());
-    else if (auto s = dyn_cast<nd::StringOp>(op)) mkStringWindow(*cv, s.getValue().str());
-    else if (auto bl = dyn_cast<nd::BoolOp>(op)) mkBool(*cv, bl.getValue());
-    else if (isa<nd::NullOp>(op)) mkNull(*cv);
-    else mkPath(*cv, cast<nd::PathOp>(op).getValue().str());
-    s->fixed = cv;
-    return slot = cv;
-  }
-  if (s->how == Node::Builtin) { // the base environment is complete before anything is evaluated: found once, kept in the node
-    auto b = cast<nd::BuiltinOp>(op);
-    Value *bv = baseEnvValue(b.getName().str());
-    if (!bv) throw EvalError("undefined variable '" + b.getName().toString() + "'", nd::posOfOp(op));
-    s->fixed = bv;
-    return slot = bv;
-  }
+  if (s->how == Node::Const || s->how == Node::Builtin) return slot = makeFixed(s);
   Value *nv = allocValue();
   bool eager = forced && s->how == Node::Thunk && (idx != kNoSlot || s->promo == Promotion::Once);
-  if (statsEnabled) [[unlikely]] { auto &e = cellsByKind[op->getName().getAsOpaquePointer()]; e.first = op->getName().getStringRef(); ++e.second[eager ? 0 : 1]; }
   if (eager) {
-    // The caller forces this value as the very next thing, so evaluate it now, into its cell: the same work in the same order as making a
-    // thunk and forcing it, with no thunk, no frame captured.  The cell is in its slot first and a blackhole while it is evaluated, so a
-    // reference back to it is infinite recursion, as before; if the evaluation throws, the cell becomes the thunk a later force retries.
     slot = nv;
-    nv->type = VType::Blackhole;
-    try {
-      evalOp(s, f, *nv);
-    } catch (EvalError &) {
-      fail(*nv);
-      throw;
-    } catch (...) {
-      nv->type = VType::Thunk;
-      nv->thunk.node = s;
-      nv->thunk.env = f;
-      if (recycleOn) f->capture();
-      throw;
-    }
-    if (statsEnabled) ++nEager;
-    return nv;
+    if (statsEnabled) [[unlikely]] statCell(f, s, nv, true);
+    return evalNow(f, s, nv);
   }
-  if (s->how == Node::Lambda) { nv->type = VType::Lambda; nv->thunk.op = op; }
+  if (s->how == Node::Lambda) { nv->type = VType::Lambda; nv->thunk.op = s->def; }
   else { nv->type = VType::Thunk; nv->thunk.node = s; }
   nv->thunk.env = f;
-  if (recycleOn && f) f->capture();
-  if (statsEnabled && f) [[unlikely]] {
-    if (nv->type == VType::Lambda) markPinned(f);
-    else if (isProjection(op)) ++nProjThunks;          // in the simulated world this thunk holds (base cell, path), not the frame
-    else {
-      ++nHardThunks; markCaptured(f); lastThunk = nv;
-      auto &e = thunksByOp[op->getName().getStringRef()];
-      ++e.first;
-      unsigned inside = 0;                                // operands defined in this very body: cells the thunk would have to create first
-      for (mlir::Value o : op->getOperands()) inside += !isa<mlir::BlockArgument>(o) && o.getParentRegion() == op->getParentRegion();
-      e.second += op->getNumOperands() * 8u + inside;     // packed: total operands in the high part, in-body operands in the low byte below
-    }
-  }
+  if (recycleOn) f->capture();
+  if (statsEnabled) [[unlikely]] statCell(f, s, nv, false);
   return slot = nv;
 }
 

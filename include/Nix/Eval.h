@@ -826,6 +826,9 @@ struct EvalState {
     return makeCell(f, v, forced);
   }
   Value *makeCell(Frame *f, Node *v, bool forced);
+  Value *makeFixed(Node *s);
+  Value *evalNow(Frame *f, Node *s, Value *nv);
+  void statCell(Frame *f, Node *s, Value *nv, bool eager);
   uint64_t nEager = 0;   // MLNIX_STATS
   // Frames that returned uncaptured, by slot count: a stack per size, linked through the frame's own first word.  The newest is reused first, so
   // a recycled frame is almost always still in L1 (docs/FRAME-BYTES.md: 97 to 98% of reuses are within 32 KiB of allocation).
