@@ -30,7 +30,8 @@ for pc, s in zip(pcs, out):
     if m: name[pc] = (m.group(1), m.group(2) or "")
 
 # A site is named by its first frame that is the program's own code: not a container or string the library instantiated, not an allocator.
-LIBRARY = re.compile(r"^(std::|llvm::(SmallVector|DenseMap|StringMap|BumpPtr|MallocAllocator|allocate_buffer|SmallPtrSet|DenseSet|StringRef::str|Twine|raw_)|"
+# A closure primop's body runs inside std::function's __func<lambda>: that frame is the program's (atos gives the lambda's line).
+LIBRARY = re.compile(r"^(?!std::__1::__function::__func<)(std::|llvm::(SmallVector|DenseMap|StringMap|BumpPtr|MallocAllocator|allocate_buffer|SmallPtrSet|DenseSet|StringRef::str|Twine|raw_)|"
                      r"composite::(Growable|MutableSeries)|<deduplicated_symbol>|operator new|mlir::detail::|__)")
 def site_of(stack):
     first = None

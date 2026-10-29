@@ -307,16 +307,24 @@ void registerBuiltins(EvalState &state) {
       st.forceValue(*args[0], pos);
       st.forceValue(*args[1], pos);
       Value &a = *args[0], &b = *args[1];
-      const char *opname = op == '+' ? "addition" : op == '-' ? "subtraction" : op == '*' ? "multiplication" : "division";
+      // The error contexts are literals: a message nobody prints is not built (it was two heap strings a call, a ninth of the evaluator's).
+      std::string_view first = op == '+' ? "while evaluating the first argument of the addition"
+                             : op == '-' ? "while evaluating the first argument of the subtraction"
+                             : op == '*' ? "while evaluating the first argument of the multiplication"
+                                         : "while evaluating the first argument of the division";
+      std::string_view second = op == '+' ? "while evaluating the second argument of the addition"
+                              : op == '-' ? "while evaluating the second argument of the subtraction"
+                              : op == '*' ? "while evaluating the second argument of the multiplication"
+                                          : "while evaluating the second argument of the division";
       if (a.type == VType::Float || b.type == VType::Float) {
-        double x = st.forceFloat(a, pos, std::string("while evaluating the first argument of the ") + opname);
-        double y = st.forceFloat(b, pos, std::string("while evaluating the second argument of the ") + opname);
+        double x = st.forceFloat(a, pos, first);
+        double y = st.forceFloat(b, pos, second);
         if (op == '/' && y == 0) throw EvalError("division by zero", pos);
         st.mkFloat(v, op == '+' ? x + y : op == '-' ? x - y : op == '*' ? x * y : x / y);
         return;
       }
-      int64_t x = st.forceInt(a, pos, std::string("while evaluating the first argument of the ") + opname);
-      int64_t y = st.forceInt(b, pos, std::string("while evaluating the second argument of the ") + opname);
+      int64_t x = st.forceInt(a, pos, first);
+      int64_t y = st.forceInt(b, pos, second);
       int64_t r;
       bool of = false;
       const char *verb = "";
@@ -874,17 +882,23 @@ void registerBuiltins(EvalState &state) {
   });
   S.addPrimOp("__filter", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.filter");
-    composite::MutableSeries<Value *> res;
-    bool same = true;
-    for (size_t i = 0; i < args[1]->listSize(); i++) {
+    // The kept cells go into stack scratch when the list is short, and straight into the arena list they will be when it is long (its
+    // tail past the kept ones is left, never copied): no growing heap series.
+    size_t n = args[1]->listSize();
+    Value **elems = args[1]->list.elems;
+    Value *stackKeep[32];
+    Value **keep = n <= 32 ? stackKeep : st.allocList(n);
+    size_t k = 0;
+    for (size_t i = 0; i < n; i++) {
       Value r;
-      st.callFunction(*args[0], *args[1]->list.elems[i], r, pos);
-      if (st.forceBool(r, pos, "while evaluating the return value of the filtering function passed to builtins.filter"))
-        res.append(args[1]->list.elems[i]);
-      else same = false;
+      st.callFunction(*args[0], *elems[i], r, pos);
+      if (st.forceBool(r, pos, "while evaluating the return value of the filtering function passed to builtins.filter")) keep[k++] = elems[i];
     }
-    if (same) { v = *args[1]; return; }
-    st.mkList(v, res);
+    if (k == n) { v = *args[1]; return; }
+    if (n <= 32) return st.mkList(v, cp::series(keep, uint32_t(k)));
+    st.mkList(v, 0);
+    v.aux = uint32_t(k);
+    v.list.elems = keep;
   });
   S.addPrimOp("__any", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.any");
