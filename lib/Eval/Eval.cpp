@@ -210,18 +210,14 @@ Bindings *EvalState::allocBindings(size_t n) {
   return b;
 }
 
+static size_t sortRowsFirstWins(Attr *rows, size_t n);
 Bindings *EvalState::BindingsBuilder::finish() {
   if (st.statsEnabled) { ++st.nBuilders; st.nBuilderRows += attrs.size(); if (attrs.size() > 12) { ++st.nBuildersBig; st.nBuilderBigRows += attrs.size(); } }
   // A set of size 0 is the one constant: nothing is written to it after it is built, so every empty set is the same cell.
   if (attrs.empty()) { if (st.statsEnabled) ++st.nEmptyShared; return st.vEmptyAttrs.attrs; }
-  std::stable_sort(attrs.begin(), attrs.end(), [](const Attr &a, const Attr &b) { return a.name < b.name; });
   Bindings *b = st.allocBindings(attrs.size());
-  size_t n = 0;
-  for (size_t i = 0; i < attrs.size(); i++) {
-    if (n && b->attrs[n - 1].name == attrs[i].name) continue; // first wins
-    b->attrs[n++] = attrs[i];
-  }
-  b->size_ = n;
+  std::copy(attrs.begin(), attrs.end(), b->attrs);
+  b->size_ = sortRowsFirstWins(b->attrs, attrs.size());
   return b;
 }
 
@@ -1733,28 +1729,58 @@ PosIdx EvalState::positionBase(nd::AttrsOp op) {
   return base;
 }
 
+/// Rows by name, in place, first of equal names kept: an insertion sort (stable, no buffer) for the small sets nearly every `{ ... }` is, the
+/// stable sort of the library past that.  Returns the number of rows left.
+static size_t sortRowsFirstWins(Attr *rows, size_t n) {
+  constexpr size_t kInsertion = 24;
+  if (n <= kInsertion) {
+    for (size_t i = 1; i < n; i++) {
+      Attr x = rows[i];
+      size_t j = i;
+      while (j > 0 && x.name < rows[j - 1].name) { rows[j] = rows[j - 1]; --j; }
+      rows[j] = x;
+    }
+  } else {
+    std::stable_sort(rows, rows + n, [](const Attr &a, const Attr &b) { return a.name < b.name; });
+  }
+  size_t m = 0;
+  for (size_t i = 0; i < n; i++) {
+    if (m && rows[m - 1].name == rows[i].name) continue; // first wins
+    rows[m++] = rows[i];
+  }
+  return m;
+}
+
 void EvalState::evalAttrs(nd::AttrsOp op, Frame *env, Value &out) {
+  if (!op.getDynNames().empty()) return evalAttrsDynamic(op, env, out);
+  auto names = op.getNames();
+  size_t n = names.size();
+  if (statsEnabled) [[unlikely]] { ++nBuilders; nBuilderRows += n; if (n > 12) { ++nBuildersBig; nBuilderBigRows += n; } }
+  // A set of size 0 is the one constant: every empty set is the same cell.
+  if (n == 0) { if (statsEnabled) ++nEmptyShared; return mkAttrs(out, vEmptyAttrs.attrs); }
+  auto values = op.getValues();
+  auto positions = op.getPositions(); // one position word per name, or none
+  PosIdx posBase = positionBase(op);
+  // The names are known, so the set is allocated at its size and the rows are written where they stay: no builder, no vector.
+  Bindings *b = allocBindings(n);
+  Attr *rows = b->attrs;
+  for (size_t i = 0; i < n; i++) rows[i] = Attr{symbolOf(names[i]), i < positions.size() ? posBase + PosIdx(i) : PosIdx(0), lookup(env, values[i])};
+  b->size_ = sortRowsFirstWins(rows, n);
+  mkAttrs(out, b);
+}
+
+/// Dynamic attributes are inserted one by one with duplicate checks: out of line, where the std::map lives.
+[[gnu::noinline]] void EvalState::evalAttrsDynamic(nd::AttrsOp op, Frame *env, Value &out) {
   auto names = op.getNames();
   auto values = op.getValues();
   auto dynNames = op.getDynNames();
-  auto positions = op.getPositions(); // one position word per name, or none
+  auto positions = op.getPositions();
   PosIdx posBase = positionBase(op);
   BindingsBuilder bb(*this);
   for (size_t i = 0; i < names.size(); i++) {
     PosIdx p = i < positions.size() ? posBase + i : 0;
     bb.insertIndexed(symbolOf(names[i]), lookup(env, values[i]), p);
   }
-  if (dynNames.empty()) {
-    mkAttrs(out, bb.finish());
-    return;
-  }
-  evalAttrsDynamic(op, env, out, bb);
-}
-
-/// Dynamic attributes are inserted one by one with duplicate checks: out of line, where the std::map lives.
-[[gnu::noinline]] void EvalState::evalAttrsDynamic(nd::AttrsOp op, Frame *env, Value &out, BindingsBuilder &bb) {
-  auto names = op.getNames();
-  auto dynNames = op.getDynNames();
   std::map<Symbol, PosPtr> seen;
   for (size_t i = 0; i < names.size(); i++)
     seen[symbolOf(names[i])] = nullptr;

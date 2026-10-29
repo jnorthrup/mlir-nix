@@ -770,7 +770,7 @@ struct EvalState {
   llvm::DenseMap<mlir::Operation *, Value *> constCache;
   void indexRegion(mlir::Region &r);
   void evalConcatStrings(mlir::nix::ConcatStringsOp op, Frame *env, Value &out);
-  void evalAttrsDynamic(mlir::nix::AttrsOp op, Frame *env, Value &out, BindingsBuilder &bb);
+  void evalAttrsDynamic(mlir::nix::AttrsOp op, Frame *env, Value &out);
   [[noreturn]] void notAFunction(Value &cur, PosPtr pos); // cold: builds the message
   void evalAttrs(mlir::nix::AttrsOp op, Frame *env, Value &out);
   RegionInfo *mintLambda(nixfe::FilePool &p, uint32_t row);
