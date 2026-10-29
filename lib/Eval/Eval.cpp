@@ -111,10 +111,26 @@ Bindings *Bindings::flat() const {
 }
 
 composite::Frozen<const Attr *> Bindings::lexicographicOrder(const SymbolTable &st) const {
+  // Each name's first eight bytes are read once, into the rows sorted (on the stack up to 64 of them): a comparison reads the rows, not the
+  // symbol table's prefix words, which a sort read n log n times at random (the table is larger than Kali's L2); the bytes only on a tie.
+  struct Keyed { uint64_t prefix; const Attr *a; };
+  size_t n = size();
+  Keyed stackRows[64];
+  composite::MutableSeries<Keyed> heapRows;
+  if (n <= 64) {
+    size_t k = 0;
+    for (auto &a : *this) stackRows[k++] = {st.prefix[a.name], &a};
+  } else {
+    heapRows.reserve(n);
+    for (auto &a : *this) heapRows.append({st.prefix[a.name], &a});
+  }
+  Keyed *rows = n <= 64 ? stackRows : heapRows.data();
+  cp::sortRows(rows, n, [&](const Keyed &x, const Keyed &y) {
+    return x.prefix != y.prefix ? x.prefix < y.prefix : composite::lessChars(st.chars(x.a->name), st.chars(y.a->name));
+  });
   composite::MutableSeries<const Attr *> v;
-  v.reserve(size());
-  for (auto &a : *this) v.append(&a);
-  cp::sortRows(v.data(), v.size(), [&](const Attr *a, const Attr *b) { return st.less(a->name, b->name); });
+  v.reserve(n);
+  for (size_t i = 0; i < n; i++) v.append(rows[i].a);
   return std::move(v).freeze();  // sorted once, then only read: the handle's cells move into a const Series
 }
 
