@@ -419,7 +419,7 @@ void toXML(EvalState &st, XMLWriter &doc, Value &v, bool strict, bool location, 
     doc.close();
     break;
   case VType::Lambda: {
-    auto lam = cast<nd::LambdaOp>(v.thunk.op);
+    auto lam = cast<nd::LambdaOp>(v.thunk.node->def);
     XMLWriter::Attrs as;
     if (location) posToXML(st, as, nd::posOfOp(lam));
     doc.open("function", as);

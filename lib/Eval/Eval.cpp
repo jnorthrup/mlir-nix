@@ -1287,8 +1287,8 @@ Value *EvalState::makeCell(Frame *f, Node *s, bool forced) {
     if (statsEnabled) [[unlikely]] statCell(f, s, nv, true);
     return evalNow(f, s, nv);
   }
-  if (s->how == Node::Lambda) { nv->type = VType::Lambda; nv->thunk.op = s->def; }
-  else { nv->type = VType::Thunk; nv->thunk.node = s; }
+  nv->type = s->how == Node::Lambda ? VType::Lambda : VType::Thunk;
+  nv->thunk.node = s;
   nv->thunk.env = f;
   if (recycleOn) f->capture();
   if (statsEnabled) [[unlikely]] statCell(f, s, nv, false);
@@ -1300,7 +1300,7 @@ Value *EvalState::makeCell(Frame *f, Node *s, bool forced) {
 void EvalState::evalDefinition(Node *def, Frame *f, Value &dest) {
   if (def->kind == NodeKind::Lambda) {
     dest.type = VType::Lambda; if (statsEnabled) ++nVT[unsigned(VType::Lambda)];
-    dest.thunk.op = def->def;
+    dest.thunk.node = def;
     dest.thunk.env = f;
     if (recycleOn && f) f->capture();
     if (statsEnabled && f) [[unlikely]] markPinned(f);
@@ -1543,7 +1543,7 @@ RegionInfo *EvalState::infoOfSlow(nd::LambdaOp lam) {
 }
 
 void EvalState::callLambda(Value &fun, Value *arg, Value &out, PosPtr pos) {
-  callLambdaIn(fun, infoOf(cast<nd::LambdaOp>(fun.thunk.op)), arg, out, pos);
+  callLambdaIn(fun, bodyOfNode(fun.thunk.node), arg, out, pos);
 }
 
 //===----------------------------------------------------------------------===//
@@ -1578,7 +1578,7 @@ static std::string lambdaDesc(nd::LambdaOp lam) {
 [[noreturn]] static void throwAttrMissing(llvm::StringRef name, PosPtr pos) { throw EvalError("attribute '" + name.str() + "' missing", pos); }
 
 void EvalState::callLambdaIn(Value &fun, RegionInfo *ri, Value *arg, Value &out, PosPtr pos) {
-  auto lam = cast<nd::LambdaOp>(fun.thunk.op);
+  auto lam = cast<nd::LambdaOp>(fun.thunk.node->def);
   if (ri->hasFormals) { // what the formals are was read once, at indexing: the op's attributes are read here only at a first call and on errors
     try {
       forceAttrs(*arg, pos, "while evaluating the value passed for the lambda argument");
@@ -1791,8 +1791,8 @@ void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out,
     nd::LambdaOp curLam;
     RegionInfo *curRI = nullptr;
     if (cur->type == VType::Lambda) {
-      curLam = cast<nd::LambdaOp>(cur->thunk.op);
-      curRI = infoOf(curLam);  // once per call: the selector check, the JIT check and the call below all use it
+      curLam = cast<nd::LambdaOp>(cur->thunk.node->def);
+      curRI = bodyOfNode(cur->thunk.node); // the selector check, the JIT check and the call below all use it
       if (selectorsOn && nargs - i >= 2 && !curRI->hasFormals) {
         if (unsigned shape = curRI->selShape ? curRI->selShape : selectorShape(curLam, curRI); shape >= 2) {
           Value *dest = (i + 2 == nargs) ? &out : allocValue();
@@ -1883,7 +1883,7 @@ void EvalState::autoCallFunction(const std::map<std::string, Value *> &autoArgs,
     out = fun;
     return;
   }
-  auto lam = cast<nd::LambdaOp>(fun.thunk.op);
+  auto lam = cast<nd::LambdaOp>(fun.thunk.node->def);
   if (!lam.getFormals()) {
     out = fun;
     return;
@@ -2687,7 +2687,7 @@ struct TracePrinter {
       break;
     }
     case VType::Lambda: {
-      auto lam = cast<nd::LambdaOp>(v.thunk.op);
+      auto lam = cast<nd::LambdaOp>(v.thunk.node->def);
       out << "«lambda";
       if (auto n = lam.getName()) out << " " << n->str();
       out << " @ " << st.showPos(nd::posOfOp(lam)) << "»";

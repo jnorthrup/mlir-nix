@@ -64,6 +64,7 @@ struct PlanNode {
   Symbol symbol = 0;
   mlir::Operation *op = nullptr;
   mlir::Operation *target = nullptr;
+  const nixev::Node *targetNode = nullptr; // the node a closure of `target` holds: what a guard compares the callee with
   unsigned context = 0, arity = 0, recipe = 0;
   std::array<StringOperand, 2> strings;
   bool unequal = false;
@@ -433,7 +434,7 @@ struct LazyJITPlan::Impl {
         llvm::SmallVector<unsigned, kMaxArguments> bindings;
         for (mlir::Value arg : call.getArgs()) bindings.push_back(leaf(arg, context));
         Value *callee = specializing && !failed ? observed(n.leaf) : nullptr;
-        auto target = callee && callee->type == VType::Lambda ? mlir::dyn_cast<nd::LambdaOp>(callee->thunk.op) : nd::LambdaOp{};
+        auto target = callee && callee->type == VType::Lambda ? mlir::dyn_cast<nd::LambdaOp>(callee->thunk.node->def) : nd::LambdaOp{};
         if (target && contexts[context].depth < kMaxInlineDepth && contexts.size() < kMaxNodes) {
           Context child(&target.getBody(), context, contexts[context].depth + 1, target);
           child.arguments = std::move(bindings);
@@ -467,6 +468,7 @@ struct LazyJITPlan::Impl {
           if (eligible) {
             n.kind = Kind::Call;
             n.target = target;
+            n.targetNode = callee->thunk.node;
             n.arity = call.getArgs().size();
             n.context = contexts.size();
             contexts.push_back(std::move(child));
@@ -929,8 +931,8 @@ bool LazyJITPlan::emit(mlir::ModuleOp module) {
       Block *miss = newBlock(), *matched = newBlock(), *scoped = newBlock(), *overflow = newBlock(), *enter = newBlock();
       branch(cmp(arith::CmpIPredicate::eq, tag, cst(int(VType::Lambda), 8)), ready, miss);
       b.setInsertionPointToEnd(ready);
-      auto actual = load(ptr, cell, offsetof(nixev::Value, thunk)); // thunk.op is its first member
-      auto expected = LLVM::IntToPtrOp::create(b, loc, ptr, cst(reinterpret_cast<uintptr_t>(n.target)));
+      auto actual = load(ptr, cell, offsetof(nixev::Value, thunk)); // thunk.node is its first member
+      auto expected = LLVM::IntToPtrOp::create(b, loc, ptr, cst(reinterpret_cast<uintptr_t>(n.targetNode)));
       branch(LLVM::ICmpOp::create(b, loc, LLVM::ICmpPredicate::eq, actual, expected), matched, miss);
       b.setInsertionPointToEnd(miss);
       ret((uint64_t(i + 3) << 3) | kGuardMiss);
@@ -1122,7 +1124,7 @@ LazyJITPlan::RunResult LazyJITPlan::observe(EvalState &st, Frame *env, llvm::Arr
     Value *cell = impl->peek(st, envs.data(), active.data(), args, cells.data(), demandLeaf, result);
     if (!cell && leaf.kind == LeafKind::Projection) { result.outcome = Outcome::Deopt; return result; }
     if (c.action == Action::Enter) {
-      if (!cell || cell->type != VType::Lambda || cell->thunk.op != n.target) {
+      if (!cell || cell->type != VType::Lambda || cell->thunk.node != n.targetNode) {
         ++result.guardMisses;
         result.outcome = Outcome::Deopt;
         return result;
@@ -1340,7 +1342,7 @@ LazyJITPlan::RunResult LazyJITPlan::run(EvalState &st, Frame *env, llvm::ArrayRe
     }
     if (c.action == Action::Enter) {
       // Reached callee resolution is a peek, never a speculative force.
-      if (!cell || cell->type != VType::Lambda || cell->thunk.op != n.target) {
+      if (!cell || cell->type != VType::Lambda || cell->thunk.node != n.targetNode) {
         ++result.guardMisses;
         result.outcome = Outcome::Deopt;
         return result;

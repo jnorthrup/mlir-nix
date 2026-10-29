@@ -84,7 +84,7 @@ bool sameValue(const Value &a, const Value &b) {
   case VType::Path: return a.path.s == b.path.s && a.aux == b.aux;
   case VType::Attrs: return a.attrs == b.attrs;
   case VType::List: return a.list.elems == b.list.elems && a.aux == b.aux;
-  case VType::Lambda: return a.thunk.op == b.thunk.op && a.thunk.env == b.thunk.env;
+  case VType::Lambda: return a.thunk.node == b.thunk.node && a.thunk.env == b.thunk.env;
   case VType::PrimOp: return a.primOp == b.primOp;
   case VType::PrimOpApp: return a.app.left == b.app.left && a.app.right == b.app.right;
   default: return false;

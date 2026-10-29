@@ -835,7 +835,7 @@ void registerBuiltins(EvalState &state) {
     st.forceValue(*args[0], pos);
     if (args[0]->type == VType::PrimOp || args[0]->type == VType::PrimOpApp) { st.mkAttrs(v, st.allocBindings(0)); return; }
     if (args[0]->type != VType::Lambda) throw EvalError("'functionArgs' requires a function", pos);
-    auto lam = cast<nd::LambdaOp>(args[0]->thunk.op);
+    auto lam = cast<nd::LambdaOp>(args[0]->thunk.node->def);
     if (!lam.getFormals()) { st.mkAttrs(v, st.allocBindings(0)); return; }
     EvalState::BindingsBuilder bb(st);
     auto defs = *lam.getFormalDefaults();

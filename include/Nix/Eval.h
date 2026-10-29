@@ -228,10 +228,7 @@ struct Value {
       Value **elems;
     } list;
     struct {
-      union {
-        Node *node;          // Thunk: the record of the op it evaluates
-        mlir::Operation *op; // Lambda: the lambda op
-      };
+      Node *node; // Thunk: the record of the op it evaluates; Lambda: the record of the lambda op (which keeps its body, once called)
       Frame *env;
     } thunk; // Thunk and Lambda
     struct {
@@ -360,6 +357,7 @@ struct Node {
     const PrimOp *prim = nullptr;  // Prim: what the op runs
     uint32_t rowGuess;             // Select, HasAttr, Formal: the row its (first) name was found at last (Bindings::getGuess)
     const AttrsShape *attrsShape;  // Attrs: its rows, once worked out (EvalState::attrsShapeOf)
+    RegionInfo *body;              // Lambda: its body's region, once called (EvalState::bodyOfNode)
   };
   EvalFn eval = nullptr;    // what evaluating the op is
   static constexpr uint8_t kDefault = 1, kDynamic = 1, kForceString = 1;
@@ -911,6 +909,12 @@ struct EvalState {
   }
 #endif
   RegionInfo *infoOfSlow(mlir::nix::LambdaOp lam);
+  /// The body of the lambda whose node a closure holds: found once (infoOf: the body is minted at the first call of a deferred lambda) and
+  /// kept in the node, so a call reads one word where it probed a cache keyed by the op.
+  RegionInfo *bodyOfNode(Node *lambda) {
+    if (RegionInfo *ri = lambda->body) return ri;
+    return lambda->body = infoOf(mlir::cast<mlir::nix::LambdaOp>(lambda->def));
+  }
   static constexpr size_t kInfoCache = 4096;
   struct InfoSlot { const void *op = nullptr; RegionInfo *ri = nullptr; };
   InfoSlot infoCache[kInfoCache];
