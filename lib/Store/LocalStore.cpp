@@ -27,6 +27,8 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/wait.h>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
 #include <unistd.h>
 
@@ -280,7 +282,7 @@ std::string Store::writeDerivation(Derivation &&drv) {
   }
   std::string path = makeStorePath(settings.storeDir, type, settings.readOnly ? drv.hashUnparsed(false) : hashString(HashAlgo::SHA256, text),
                                    drv.name + ".drv");
-  const Derivation &kept = drvCache.insert_or_assign(path, std::move(drv)).first->second;
+  const Derivation &kept = drvCache.try_emplace(path, std::move(drv)).first->second; // a path names its text: the first is kept, never rewritten
   if (!settings.readOnly) addTextToStore(kept.name + ".drv", text, drvReferences(kept));
   return path;
 }
@@ -296,7 +298,62 @@ const Derivation &Store::readDerivation(const std::string &drvPath) {
   return drvCache.insert_or_assign(drvPath, parseDerivation(readFile(real), name.substr(0, name.size() - 4))).first->second;
 }
 
-std::map<std::string, Hash> Store::hashDerivationModulo(const Derivation &drv, bool maskOutputs) {
+struct Store::LaterHashes {
+  struct Job { std::string path; const Derivation *drv; DrvInputs inputs; };
+  struct Answer { bool done = false; Hash hash; std::exception_ptr error; };
+  std::mutex m;
+  std::condition_variable cv; // a job queued (the hasher waits for one) or an answer made (a dependent waits for it)
+  composite::MutableSeries<Job> queue;
+  uint32_t head = 0, pending = 0; // pending: queued or being hashed (a store torn down waits for none, as the jobs read its cache)
+  std::map<std::string, Answer> answers; // by path: queued, then done; taken out by the dependent that asks first
+};
+
+Store::~Store() {
+  if (!later) return;
+  std::unique_lock<std::mutex> lk(later->m);
+  later->cv.wait(lk, [&] { return later->pending == 0; });
+}
+
+void Store::hashLater(const std::string &drvPath, DrvInputs &&inputs) {
+  if (drvHashes.count(drvPath)) return;
+  if (!later) {
+    later = std::make_shared<LaterHashes>();
+    std::thread([L = later] {
+      for (;;) {
+        LaterHashes::Job job;
+        {
+          std::unique_lock<std::mutex> lk(L->m);
+          L->cv.wait(lk, [&] { return L->head < L->queue.size(); });
+          job = std::move(L->queue[L->head++]);
+          if (L->head == L->queue.size()) { L->queue.clear(); L->head = 0; }
+        }
+        LaterHashes::Answer a;
+        try {
+          a.hash = job.drv->hashUnparsed(false, &job.inputs);
+        } catch (...) {
+          a.error = std::current_exception();
+        }
+        a.done = true;
+        {
+          std::lock_guard<std::mutex> lk(L->m);
+          L->answers[job.path] = std::move(a);
+          --L->pending;
+        }
+        L->cv.notify_all();
+      }
+    }).detach();
+  }
+  const Derivation &kept = drvCache.at(drvPath);
+  {
+    std::lock_guard<std::mutex> lk(later->m);
+    if (!later->answers.try_emplace(drvPath).second) return; // queued already
+    later->queue.append({drvPath, &kept, std::move(inputs)});
+    ++later->pending;
+  }
+  later->cv.notify_all();
+}
+
+std::map<std::string, Hash> Store::hashDerivationModulo(const Derivation &drv, bool maskOutputs, DrvInputs *inputsOut) {
   if (drv.isFixed()) {
     std::map<std::string, Hash> res;
     for (auto &[name, o] : drv.outputs) {
@@ -314,6 +371,7 @@ std::map<std::string, Hash> Store::hashDerivationModulo(const Derivation &drv, b
     std::map<std::string, Hash> h;
     auto it = drvHashes.find(drvPath);
     if (it != drvHashes.end()) h = it->second;
+    else if (takeLater(drvPath, h)) drvHashes[drvPath] = h;
     else {
       h = hashDerivationModulo(readDerivation(drvPath), false);
       drvHashes[drvPath] = h;
@@ -328,11 +386,31 @@ std::map<std::string, Hash> Store::hashDerivationModulo(const Derivation &drv, b
       }
     }
   }
-  return {{"", drv.hashUnparsed(maskOutputs, &inputs2)}};
+  Hash h = drv.hashUnparsed(maskOutputs, &inputs2);
+  if (inputsOut) *inputsOut = std::move(inputs2);
+  return {{"", h}};
 }
 
-void Store::fillInOutputPaths(Derivation &drv) {
-  auto h = hashDerivationModulo(drv, true);
+/// The hasher's answer for `drvPath`, if it was asked for one: waited for when it is not made yet, and taken out (a path's hash is asked
+/// for once; drvHashes keeps it from then on).
+bool Store::takeLater(const std::string &drvPath, std::map<std::string, Hash> &out) {
+  if (!later) return false;
+  std::exception_ptr error;
+  {
+    std::unique_lock<std::mutex> lk(later->m);
+    auto it = later->answers.find(drvPath);
+    if (it == later->answers.end()) return false;
+    later->cv.wait(lk, [&] { return it->second.done; });
+    if (it->second.error) error = it->second.error;
+    else out = {{"", it->second.hash}};
+    later->answers.erase(it);
+  }
+  if (error) std::rethrow_exception(error);
+  return true;
+}
+
+void Store::fillInOutputPaths(Derivation &drv, DrvInputs *inputsOut) {
+  auto h = hashDerivationModulo(drv, true, inputsOut);
   for (auto &[name, o] : drv.outputs) {
     if (o.kind != DerivationOutput::Deferred) continue;
     std::string p = makeOutputPath(settings.storeDir, name, h.at(""), drv.name);

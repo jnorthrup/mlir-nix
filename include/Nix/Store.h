@@ -288,6 +288,7 @@ struct StoreSettings {
 
 struct Store {
   explicit Store(StoreSettings s);
+  ~Store(); // waits for the hasher's jobs, which read the derivation cache
   const std::string &storeDir() const { return settings.storeDir; }
   const StoreSettings &config() const { return settings; }
   bool readOnly() const { return settings.readOnly; }
@@ -324,9 +325,17 @@ struct Store {
   void cacheDerivation(const std::string &drvPath, const Derivation &drv);
 
   /// hashDerivationModulo; returns per-output hashes for fixed outputs (key
-  /// "out") or a single drv hash (key "").
-  std::map<std::string, Hash> hashDerivationModulo(const Derivation &drv, bool maskOutputs);
-  void fillInOutputPaths(Derivation &drv);
+  /// "out") or a single drv hash (key "").  `inputsOut`, when given, receives the input derivations as the hash saw them (their own
+  /// modulo hashes), for the derivation's next hash (hashLater).
+  std::map<std::string, Hash> hashDerivationModulo(const Derivation &drv, bool maskOutputs, DrvInputs *inputsOut = nullptr);
+  void fillInOutputPaths(Derivation &drv, DrvInputs *inputsOut = nullptr);
+  /// The modulo hash of a derivation this evaluation wrote (its third hash, after the masked one that names its outputs and the one that
+  /// names its path), made off the evaluator's thread from the cached derivation and the inputs its first hash saw, and collected when a
+  /// dependent's hash asks for it.  The cached derivation is never written again (writeDerivation keeps the first of a path).
+  void hashLater(const std::string &drvPath, DrvInputs &&inputs);
+  struct LaterHashes;
+  bool takeLater(const std::string &drvPath, std::map<std::string, Hash> &out);
+  std::shared_ptr<LaterHashes> later; // shared with the hasher thread, which outlives nothing: the process ends with it waiting
 
   std::set<std::string> computeFSClosure(const std::set<std::string> &paths,
                                          bool includeOutputs = false);

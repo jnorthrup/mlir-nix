@@ -58,6 +58,8 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
 
     nixstore::Derivation drv;
     drv.name = drvName;
+    nixstore::DrvInputs moduloInputs; // the input derivations as the output paths' hash saw them, for the derivation's modulo hash
+    bool hashLater = false;
     NixStringContext context;                         // what coercions make: paths copied to the store, and the rarer attributes
     composite::MutableSeries<const StringContext *> owns; // each string attribute's own context, interned: its elements are not copied
     std::string coerced;
@@ -237,7 +239,8 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
         drv.outputs[o] = nixstore::DerivationOutput{};
       }
       try {
-        st.store->fillInOutputPaths(drv);
+        st.store->fillInOutputPaths(drv, &moduloInputs);
+        hashLater = true;
       } catch (nixstore::Error &e) {
         throw EvalError(e.what(), pos);
       }
@@ -246,6 +249,7 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
     std::string drvPath;
     try {
       drvPath = st.store->writeDerivation(std::move(drv));
+      if (hashLater) st.store->hashLater(drvPath, std::move(moduloInputs)); // its modulo hash, for its dependents, made off this thread
     } catch (nixstore::Error &e) {
       throw EvalError(e.what(), pos);
     }
