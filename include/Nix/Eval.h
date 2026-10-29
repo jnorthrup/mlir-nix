@@ -248,6 +248,7 @@ struct RegionInfo {
   uint64_t nEvals = 0;
   llvm::DenseMap<mlir::Operation *, uint32_t> opIdx{};
   std::vector<uint64_t> everRan{};
+  std::vector<uint32_t> opEvals{}; // MLNIX_STATS_USES: evalOp calls per op (indexed like everRan's bits)
 };
 
 struct Frame {
@@ -406,6 +407,13 @@ struct EvalState {
   void mkBool(Value &v, bool b) { if (statsEnabled) ++nVT[unsigned(VType::Bool)];  v.type = VType::Bool; v.boolean = b; }
   void mkNull(Value &v) { if (statsEnabled) ++nVT[unsigned(VType::Null)];  v.type = VType::Null; }
   void mkString(Value &v, std::string_view s, const NixStringContext &ctx = {});
+  /// A string literal: a window on the bytes the lowered op already holds (a Name: a slice of a mapped input or a never-freed arena), no copy.
+  void mkStringWindow(Value &v, llvm::StringRef r) {
+    std::string_view s(r.data(), r.size());
+    if (s.size() > UINT32_MAX) throw EvalError("string of 4 GiB or more");
+    v.type = VType::String; if (statsEnabled) ++nVT[unsigned(VType::String)];
+    v.str.s = s.data(); v.aux = static_cast<uint32_t>(s.size()); v.str.ctx = nullptr;
+  }
   /// A string made of pieces (CharSeries windows over existing bytes), written once into one arena buffer.
   void mkStringOf(Value &v, llvm::ArrayRef<composite::CharWindow> pieces, const StringContext *ctx);
   void mkPath(Value &v, std::string_view p);
@@ -629,6 +637,9 @@ struct EvalState {
   uint64_t nVT[15] = {}; // MLNIX_STATS: instrumented tag writes, including stack values and repeated retyping;
                          // [14] alone counts allocated Value rows, not tag writes
   uint64_t nFrames = 0, nFrameBytes = 0, nFrameSlots = 0; // requested frame storage, excluding arena overhead
+  uint64_t nLookups = 0, nLookupHits = 0, nHopHist[6] = {}; // MLNIX_STATS: lookupImpl calls, those answered by a filled slot, and the frame hops to the defining region (0, 1, 2, 3, 4, 5 or more)
+  llvm::DenseMap<const void *, std::pair<llvm::StringRef, std::array<uint64_t, 2>>> cellsByKind; // MLNIX_STATS: cells lookup made, by defining op: [evaluated at once, left a thunk]
+  llvm::DenseMap<const void *, std::pair<llvm::StringRef, uint64_t>> evalsByKind; // MLNIX_STATS: evalOp calls by op kind
   uint64_t nTouchAt[17] = {}, nFramesBySize[17] = {}; // MLNIX_STATS: first touches by slot index (16 = 16 or more), frames by slot count
   static constexpr unsigned kSrcClasses = 5; // 1 nixpkgs lib, 2 nixos modules, 3 pkgs, 4 other
   uint64_t nClsFrames[kSrcClasses] = {}, nClsSlots[kSrcClasses] = {}, nClsTouched[kSrcClasses] = {};
@@ -681,6 +692,7 @@ struct EvalState {
   void callLambdaIn(Value &fun, RegionInfo *ri, Value *arg, Value &out, PosPtr pos);
   void applySelector(unsigned shape, RegionInfo *ri, Value **a, Value &dest, PosPtr pos);
   void statTouch(Frame *f, RegionInfo *ri, unsigned idx);
+  void statHops(Frame *f, RegionInfo *ri, bool hit);
   // MLNIX_STATS: the select census.  A layout signature is the set's size and three sampled names; a site is mono-, few- or megamorphic
   // by how many distinct signatures it has seen.
   struct SelSite { uint64_t calls = 0, hits = 0, sameAsLast = 0, last = 0; llvm::SmallVector<uint64_t, 6> seen; bool dynamic = false; };

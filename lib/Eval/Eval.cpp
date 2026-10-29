@@ -586,6 +586,65 @@ void EvalState::printStats() {
                  << mTh << " thunk cells).  Finer grain mints a cell: the thunk cells are its rows against lambda grain's "
                  << mR << "\n";
   }
+  if (nLookups) {
+    llvm::errs() << "== lookupImpl: " << nLookups << " calls, " << nLookupHits << " answered by a filled slot ("
+                 << llvm::format("%.1f", 100.0 * nLookupHits / nLookups) << "%); frame hops to the defining region: ";
+    for (unsigned i = 0; i < 6; i++) llvm::errs() << (i == 5 ? "5+" : std::to_string(i)) << " " << llvm::format("%.1f", 100.0 * nHopHist[i] / nLookups) << "%  ";
+    llvm::errs() << '\n';
+    std::vector<std::pair<llvm::StringRef, uint64_t>> ev;
+    uint64_t tot = 0;
+    for (auto &e : evalsByKind) { ev.push_back(e.second); tot += e.second.second; }
+    std::sort(ev.begin(), ev.end(), [](auto &a, auto &b) { return a.second > b.second; });
+    { std::vector<std::pair<llvm::StringRef, std::array<uint64_t, 2>>> cv; uint64_t ct = 0;
+      for (auto &e : cellsByKind) { cv.push_back(e.second); ct += e.second.second[0] + e.second.second[1]; }
+      std::sort(cv.begin(), cv.end(), [](auto &a, auto &b) { return a.second[0] + a.second[1] > b.second[0] + b.second[1]; });
+      llvm::errs() << "== cells made by lookup, by defining op (" << ct << " in all): evaluated at once (forced), left as a thunk\n";
+      for (size_t i = 0; i < cv.size() && i < 14; i++)
+        llvm::errs() << "  " << llvm::format("%-26s", cv[i].first.str().c_str()) << llvm::format("%12llu", (unsigned long long)cv[i].second[0]) << llvm::format("%12llu", (unsigned long long)cv[i].second[1]) << '\n'; }
+    llvm::errs() << "== evalOp calls by op kind (" << tot << " in all)\n";
+    for (size_t i = 0; i < ev.size() && i < 16; i++)
+      llvm::errs() << "  " << llvm::format("%-26s", ev[i].first.str().c_str()) << llvm::format("%12llu", (unsigned long long)ev[i].second) << llvm::format("%7.1f%%", 100.0 * ev[i].second / tot) << '\n';
+  }
+  if (getenv("MLNIX_STATS_USES")) { // single-use census: per op kind, how many results have no use, one use, several (who could move, who must copy)
+    struct U { uint64_t ops = 0, zero = 0, one = 0, many = 0, ranOne = 0; };
+    llvm::StringMap<U> byKind;
+    for (auto &kv : regionInfos) {
+      RegionInfo *ri = kv.second;
+      for (auto &o : ri->opIdx) {
+        mlir::Operation *op = o.first;
+        if (op->getNumResults() != 1) continue;
+        U &u = byKind[op->getName().getStringRef()];
+        u.ops++;
+        unsigned n = std::distance(op->getResult(0).use_begin(), op->getResult(0).use_end());
+        (n == 0 ? u.zero : n == 1 ? u.one : u.many)++;
+        if (n == 1 && (ri->everRan[o.second >> 6] >> (o.second & 63) & 1)) u.ranOne++;
+      }
+    }
+    { // who reads a single-use string, attrs or concatenation: the consumer's kind, and whether it sits in another region (read once per call of that region, not once)
+      llvm::StringMap<std::array<uint64_t, 3>> by; // [same region, nested region, producer evals]
+      for (auto &kv : regionInfos)
+        for (auto &o : kv.second->opIdx) {
+          mlir::Operation *op = o.first;
+          if (op->getNumResults() != 1 || !op->hasOneUse()) continue;
+          mlir::Operation *c = *op->getUsers().begin();
+          { auto &row = by[(op->getName().getStringRef() + " -> " + c->getName().getStringRef()).str()]; row[c->getParentRegion() == op->getParentRegion() ? 0 : 1]++; row[2] += kv.second->opEvals[o.second]; }
+        }
+      std::vector<std::pair<std::string, std::array<uint64_t, 3>>> r2;
+      for (auto &e : by) r2.push_back({e.getKey().str(), e.getValue()});
+      std::sort(r2.begin(), r2.end(), [](auto &a, auto &b) { return a.second[2] > b.second[2]; });
+      llvm::errs() << "== single-use string/attrs/concat producers -> consumer: same region, nested region, producer evals (ranked by evals)\n";
+      for (size_t i = 0; i < r2.size() && i < 30; i++)
+        llvm::errs() << "  " << llvm::format("%-44s", r2[i].first.c_str()) << llvm::format("%9llu", (unsigned long long)r2[i].second[0]) << llvm::format("%9llu", (unsigned long long)r2[i].second[1]) << llvm::format("%11llu", (unsigned long long)r2[i].second[2]) << '\n';
+    }
+    std::vector<std::pair<llvm::StringRef, U>> rows;
+    for (auto &e : byKind) rows.push_back({e.getKey(), e.getValue()});
+    std::sort(rows.begin(), rows.end(), [](auto &a, auto &b) { return a.second.ops > b.second.ops; });
+    llvm::errs() << "== single-use census (one-result ops): kind, ops, no use, one use, several, one-use that ran\n";
+    for (size_t i = 0; i < rows.size() && i < 40; i++)
+      llvm::errs() << "  " << llvm::format("%-26s", rows[i].first.str().c_str()) << llvm::format("%9llu", (unsigned long long)rows[i].second.ops)
+                   << llvm::format("%9llu", (unsigned long long)rows[i].second.zero) << llvm::format("%9llu", (unsigned long long)rows[i].second.one)
+                   << llvm::format("%9llu", (unsigned long long)rows[i].second.many) << llvm::format("%9llu", (unsigned long long)rows[i].second.ranOne) << '\n';
+  }
   if (nSlotsAssigned)
     llvm::errs() << "== frame cells: " << nSlotsAssigned << " assigned, " << nSlotsNoRead
                  << " to a value with no use at all (" << llvm::format("%.1f", 100.0 * nSlotsNoRead / nSlotsAssigned)
@@ -767,6 +826,7 @@ void EvalState::indexRegion(Region &r) {
   if (statsEnabled) {
     ri->nOps = uint32_t(blk.getOperations().size());
     ri->everRan.assign((ri->nOps + 63) / 64, 0);
+    ri->opEvals.assign(ri->nOps, 0);
     uint32_t oi = 0;
     for (Operation &op : blk) ri->opIdx[&op] = oi++;
   }
@@ -917,12 +977,19 @@ static Slot::How howOf(Operation *op) {
   ++nTouchedBy[ri->numSlots <= 1 ? 0 : ri->numSlots <= 3 ? 1 : ri->numSlots <= 8 ? 2 : ri->numSlots <= 16 ? 3 : ri->numSlots <= 64 ? 4 : 5];
 }
 
+[[gnu::noinline, gnu::cold]] void EvalState::statHops(Frame *f, RegionInfo *ri, bool hit) {
+  unsigned h = 0;
+  while (f && f->info != ri) { f = f->up(); ++h; }
+  ++nLookups; nLookupHits += hit; ++nHopHist[h < 5 ? h : 5];
+}
+
 Value *EvalState::lookupImpl(Frame *f, mlir::Value v, bool forced) {
   Slot *sp = slotOf(v.getAsOpaquePointer());
   if (!sp) throw EvalError("internal error: unindexed SSA value");
   Slot &s = *sp;
   RegionInfo *ri = s.ri;
   unsigned idx = s.idx;
+  if (statsEnabled) [[unlikely]] { Frame *g = f; while (g && g->info != ri) g = g->up(); statHops(f, ri, g && idx != kNoSlot && g->slots[idx]); }
   while (f && f->info != ri) f = f->up();
   if (!f) throw EvalError("internal error: SSA value used outside its scope");
   Value *noCell = nullptr; // an in-place value reached through lookup(): its one use gets its own thunk
@@ -938,7 +1005,7 @@ Value *EvalState::lookupImpl(Frame *f, mlir::Value v, bool forced) {
     Value *cv = allocValue();
     if (auto i = dyn_cast<nd::IntOp>(op)) mkInt(*cv, i.getValue());
     else if (auto fl = dyn_cast<nd::FloatOp>(op)) mkFloat(*cv, fl.getValue().convertToDouble());
-    else if (auto s = dyn_cast<nd::StringOp>(op)) mkString(*cv, s.getValue().str());
+    else if (auto s = dyn_cast<nd::StringOp>(op)) mkStringWindow(*cv, s.getValue().str());
     else if (auto bl = dyn_cast<nd::BoolOp>(op)) mkBool(*cv, bl.getValue());
     else if (isa<nd::NullOp>(op)) mkNull(*cv);
     else mkPath(*cv, cast<nd::PathOp>(op).getValue().str());
@@ -952,6 +1019,7 @@ Value *EvalState::lookupImpl(Frame *f, mlir::Value v, bool forced) {
     return slot = bv;
   }
   Value *nv = allocValue();
+  if (statsEnabled) [[unlikely]] { auto &e = cellsByKind[op->getName().getAsOpaquePointer()]; e.first = op->getName().getStringRef(); ++e.second[forced && s.how == Slot::Thunk && idx != kNoSlot ? 0 : 1]; }
   if (forced && s.how == Slot::Thunk && idx != kNoSlot) {
     // The caller forces this value as the very next thing, so evaluate it now, into its cell: the same work in the same order as making a
     // thunk and forcing it, with no thunk, no frame captured.  The cell is in its slot first and a blackhole while it is evaluated, so a
@@ -1670,10 +1738,11 @@ Value *EvalState::selectField(Value &base, Symbol key, PosPtr pos) {
 }
 
 void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
+  if (statsEnabled) [[unlikely]] { auto &e = evalsByKind[op->getName().getAsOpaquePointer()]; e.first = op->getName().getStringRef(); ++e.second; }
   if (statsEnabled && env) {
     ++env->info->nEvals;
     auto it = env->info->opIdx.find(op);
-    if (it != env->info->opIdx.end()) env->info->everRan[it->second >> 6] |= 1ull << (it->second & 63);
+    if (it != env->info->opIdx.end()) { env->info->everRan[it->second >> 6] |= 1ull << (it->second & 63); ++env->info->opEvals[it->second]; }
   }
   PosPtr pos = nd::posOfOp(op);
   auto copyFrom = [&](Value *v) {
@@ -1824,7 +1893,7 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
       .Case<nd::BoolOp>([&](nd::BoolOp b) { mkBool(out, b.getValue()); })
       .Case<nd::NullOp>([&](nd::NullOp) { mkNull(out); })
       .Case<nd::FloatOp>([&](nd::FloatOp fl) { mkFloat(out, fl.getValue().convertToDouble()); })
-      .Case<nd::StringOp>([&](nd::StringOp s) { mkString(out, s.getValue().str()); })
+      .Case<nd::StringOp>([&](nd::StringOp s) { mkStringWindow(out, s.getValue().str()); })
       .Case<nd::PathOp>([&](nd::PathOp p) { mkPath(out, p.getValue().str()); })
       .Case<nd::BuiltinOp>([&](nd::BuiltinOp b) { copyFrom(baseEnvValue(b.getName().str())); })
       .Default([&](Operation *o) {
