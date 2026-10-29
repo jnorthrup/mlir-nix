@@ -28,12 +28,18 @@
 
 namespace mlir { class PassManager; }
 
+#include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <string>
+#include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "Composite/CharSeries.h"
@@ -601,8 +607,36 @@ struct EvalState {
   std::vector<std::shared_ptr<nixfe::Origin>> origins;
   /// MLNIX_DEFER: one pool of deferred lambdas per lowered file.  The `body_index` of a nix.lambda is a
   /// nixfe::BodyIndex (`file j row`) into these.
-  std::vector<std::unique_ptr<nixfe::FilePool>> pools;
+  std::vector<std::unique_ptr<nixfe::FilePool>> pools; // indexed by FilePool::file; a slot is empty while its file is only prelowered
+  std::atomic<uint32_t> nextPoolId{0};
+  void installPool(std::unique_ptr<nixfe::FilePool> p);
   unsigned exprCounter = 0;
+
+  /// MLNIX_PRELOWER_LIST=file (paths in the order a run evaluated them, MLNIX_RECORD_FILES=file writes one): a helper thread lexes, parses
+  /// and builds the IR of those files ahead of the evaluator, which adopts each finished file when evalFile asks for it.  The helper does
+  /// no evaluation and no optimization (the prim folder calls back into the evaluator), only genExpr into a module of its own.
+  struct Prelowered {
+    std::shared_ptr<nixfe::Origin> origin;
+    mlir::OwningOpRef<mlir::ModuleOp> mod;
+    mlir::nix::ExprOp op;
+    std::unique_ptr<nixfe::FilePool> pool;
+    bool done = false, ok = false;
+  };
+  struct PrelowerState {
+    std::mutex m;
+    std::condition_variable cv;
+    std::unordered_map<std::string, std::shared_ptr<Prelowered>> byPath;
+    std::deque<std::string> queue;
+    std::unordered_set<std::string> baseNames;
+    nixfe::ParseOptions po;
+    std::vector<std::thread> workers;
+    bool stop = false;
+    uint64_t adopted = 0, waited = 0, missed = 0;
+  };
+  std::unique_ptr<PrelowerState> pre;
+  void startPrelower();
+  void prelowerLoop();
+  mlir::nix::ExprOp takePrelowered(const std::string &resolved);
   std::function<void(const std::string &)> printTrace;
 
   // Where each SSA value lives.  The slots sit in a deque, at addresses that stay put as the map grows (the demand schedule keeps adding
