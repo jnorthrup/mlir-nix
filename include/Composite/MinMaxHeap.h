@@ -6,7 +6,7 @@
 // enough to keep registers and cache lines on tap: 15 rows of 16 B is 240 B,
 // under two 128 B lines on the Mac's performance cores, four 64 B lines on
 // kali.  The heap is a min-max heap, so the min and the max sit at the edges;
-// every swap settles at an edge.  A ring of spare pegs absorbs what an edge
+// every swap settles at an edge.  A bag of spare pegs absorbs what an edge
 // swap displaces -- the slop cache.  Nothing here allocates.  The size bounds
 // below cover each unit, not the residency of a whole bucket array in L1.
 
@@ -139,32 +139,28 @@ private:
   }
 };
 
-/// The slop cache: a fixed ring of spare pegs, mask indexed, that settles edge
-/// swaps.  A full heap that takes a row swaps its max edge out to a peg; a row
-/// beyond the edge parks on a peg without touching the heap.  Pegs drain back
-/// through the cluster, so a pegged row is ordered with the heap's rows, not
-/// deferred past them.
+/// The slop cache: a fixed bag of spare pegs that settles edge swaps.  A full heap that takes a row swaps its max edge out to
+/// a peg; a row beyond the edge parks on a peg without touching the heap.  Pegs drain back through the cluster, so a pegged row
+/// is ordered with the heap's rows, not deferred past them.  A bag, not a ring: a removal fills its hole with the last peg, so
+/// the cells are always 0..cnt and nothing is indexed through a head or a mask.
 template <class Row, unsigned P>
 struct Pegs {
-  static_assert((P & (P - 1)) == 0, "peg ring is a power of two (mask indexing)");
-  static constexpr uint32_t mask = P - 1;
   std::array<Row, P> a{};
-  uint32_t head = 0, cnt = 0;
+  uint32_t cnt = 0;
 
   constexpr uint32_t size() const { return cnt; }
   constexpr bool full() const { return cnt == P; }
-  constexpr void push(Row r) { a[(head + cnt++) & mask] = r; }
-  /// The pegs oldest first, as a Series over the ring.
-  constexpr auto ring() const { return cnt |j| [this](uint32_t i) -> const Row & { return a[(head + i) & mask]; }; }
+  constexpr void push(Row r) { a[cnt++] = r; }
+  /// The pegs, as a Series over the cells.
+  constexpr auto rows() const { return series(a.data(), cnt); }
 
-  /// The smallest peg: P is register scale, so this is an argMin over the ring.
-  constexpr uint32_t least() const { return argMin(ring(), [](const Row &x, const Row &y) { return x < y; }); }
-  constexpr Row min() const { return ring()[least()]; }
+  /// The smallest peg: P is register scale, so this is an argMin over the cells.
+  constexpr uint32_t least() const { return argMin(rows(), [](const Row &x, const Row &y) { return x < y; }); }
+  constexpr Row min() const { return a[least()]; }
   constexpr Row popMin() {
     uint32_t m = least();
-    Row r = ring()[m];
-    a[(head + m) & mask] = a[(head + cnt - 1) & mask];
-    --cnt;
+    Row r = a[m];
+    a[m] = a[--cnt];
     return r;
   }
 };
@@ -210,8 +206,8 @@ struct Cluster {
       uint32_t k = firstWhere(heap.rows(), is);
       if (k < heap.size()) return &heap.a[k];
     }
-    uint32_t k = firstWhere(pegs.ring(), is);
-    return k < pegs.size() ? &pegs.a[(pegs.head + k) & Pegs<Row, P>::mask] : nullptr;
+    uint32_t k = firstWhere(pegs.rows(), is);
+    return k < pegs.size() ? &pegs.a[k] : nullptr;
   }
 
   /// Emits every row in key order: the min edge of the heap and the min peg
@@ -279,7 +275,7 @@ static_assert(clusterSorts(), "a drained cluster emits the sorted stream, and a 
 
 static_assert(sizeof(MinMaxHeap<InodeRow, 15>) <= 2 * 128,
               "the heap keeps two 128 B lines on tap (register and cache line capacity)");
-static_assert(sizeof(Pegs<InodeRow, 8>) <= 2 * 128, "the peg ring stays in the lines around the heap");
+static_assert(sizeof(Pegs<InodeRow, 8>) <= 2 * 128, "the peg bag stays in the lines around the heap");
 static_assert(sizeof(Cluster<InodeRow, 15, 8>) <= 4 * 128,
               "a cluster is four 128 B lines: the block count keeps cache line capacity on tap");
 

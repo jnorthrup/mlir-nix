@@ -37,7 +37,7 @@ The current code orders synthetic records between those boundaries:
   Both extremes need a fixed number of row reads.
 - A slop cache of spare pegs absorbs what an edge swap displaces.  A full
   cluster that takes a new row swaps its max edge out to a peg; a row beyond the
-  edge parks on a peg without touching the heap.  Pegs are a fixed ring, filled
+  edge parks on a peg without touching the heap.  Pegs are a fixed bag, filled
   and drained. A cluster is 384 B on both tested hosts, including counts.
   No cluster operation allocates. This does not guarantee cache residency:
   the benchmark's 128-cluster array is 49,152 B, larger than Kali's 32 KiB L1d.
@@ -89,7 +89,7 @@ The current code orders synthetic records between those boundaries:
 |---|---|
 | `composite::InodeRow` -- a window-relative 96-bit key plus payload handle | built, `include/Composite/MinMaxHeap.h` |
 | `composite::MinMaxHeap` -- 15 rows, edges settled by swaps, law as static_asserts | built, same header |
-| `composite::Pegs` -- the slop ring of spare rows that settles edge swaps | built, same header |
+| `composite::Pegs` -- the slop bag of spare rows that settles edge swaps | built, same header |
 | dense bucket over the window's tiny address space, fill + drain sort | built, `scripts/inode-bench.cc` |
 | ordered overflow drain | built in the benchmark: bounded cluster runs, merged by a small heap of run heads |
 | `trikeshed.cluster_order` -- stable row indices from one bounded cluster | kernel and native lowering; coroutine execution checked on Mac and Kali |
@@ -216,3 +216,28 @@ timing against a conventional table has been taken. Kali (g++-16, ASan and UBSan
 clang++ -std=c++20 -O2 -g -fsanitize=address,undefined -I include scripts/funnel-check.cc -o build/funnel-check
 build/funnel-check
 ```
+
+## The transform form and the optimizer (Kali, 2026-10-28, one boot)
+
+The heap, the pegs and the table are written as transforms over `Series` (`fold`, `foldN`, `vec<N>`, `argMin`, `firstWhere`): no
+loop is written in `MinMaxHeap.h` or `Funnel.h`. The same algorithm as the loop version runs (65,651,101 comparisons on the same
+200,000 batches, identical output). The peg "ring" was a bag all along: removal fills the hole with the last peg, so `head` never
+moved from 0. It is now a bag, indexed `0..cnt`, with no add and mask on a probe.
+
+Cluster time of `scripts/inode-bench.cc` (default spill 6), min of 5 interleaved, loops against transforms; a negative change
+means the transforms are faster:
+
+| compiler | flags | loops | transforms | change |
+|---|---|---:|---:|---:|
+| clang 22 | `-O2` | 0.081 | 0.083 | +2.5% |
+| clang 22 | `-O3` | 0.080 | 0.075 | -6.3% |
+| clang 22 | `-O3 -flto=thin` | 0.077 | 0.069 | -10.4% |
+| clang 22 | `-O3 -flto` | 0.077 | 0.071 | -7.8% |
+| g++ 16 | `-O2` | 0.075 | 0.081 | +8.0% |
+| g++ 16 | `-O3 -fexpensive-optimizations` | 0.074 | 0.078 | +5.4% |
+| g++ 16 | `-O3 -fexpensive-optimizations -fprofile-use` | 0.073 | 0.077 | +5.5% |
+| g++ 16 | `-O3 -fexpensive-optimizations -flto` | 0.074 | 0.074 | +0.0% |
+
+Without whole-program optimization the transforms stay behind under GCC and cost +2.5% under clang at `-O2`; with `-O3` or LTO
+they are level or faster. The compile flags that did not help alone: unrolling, peeling, ipa-pta, gcse, `-march=native` (slower for
+both) and PGO. Each fold step has to be inlined into its caller, which the attributes in `Series.h` force and LTO completes.
