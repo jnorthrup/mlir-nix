@@ -25,25 +25,36 @@ for line in open(samples_path):
         if m:
             maps.append((int(m.group(1), 16), int(m.group(2), 16), m.group(3), int(m.group(4), 16), m.group(5).strip()))
     else:
-        ip, addr = line.split()
-        samples.append((int(ip, 16), int(addr, 16)))
+        f = line.split()
+        samples.append((int(f[0], 16), int(f[1], 16), int(f[2]) if len(f) > 2 else 0))
 
-# The executable's load segments: file offset -> link-time address.
-loads = []
-for l in subprocess.run(["readelf", "-lW", binary], capture_output=True, text=True).stdout.splitlines():
-    f = l.split()
-    if f and f[0] == "LOAD":
-        loads.append((int(f[1], 16), int(f[2], 16), int(f[4], 16)))  # offset, vaddr, filesz
+# Each object's load segments: file offset -> link-time address.  The binary is given; a shared object is read from its mapping.
+_loads = {}
+def loads_of(path):
+    if path not in _loads:
+        segs = []
+        for l in subprocess.run(["readelf", "-lW", path], capture_output=True, text=True).stdout.splitlines():
+            f = l.split()
+            if f and f[0] == "LOAD":
+                segs.append((int(f[1], 16), int(f[2], 16), int(f[4], 16)))  # offset, vaddr, filesz
+        _loads[path] = segs
+    return _loads[path]
 binname = binary.split("/")[-1]
 
-def link_addr(ip):
+def place(ip):
+    """(object path, link-time address) of an ip, or (None, None) outside every mapped file."""
     for start, end, perms, pgoff, name in maps:
-        if start <= ip < end and name.endswith(binname):
+        if start <= ip < end and name.startswith("/"):
+            path = binary if name.endswith(binname) else name
             off = ip - start + pgoff
-            for o, v, sz in loads:
+            for o, v, sz in loads_of(path):
                 if o <= off < o + sz:
-                    return off - o + v
-    return None
+                    return path, off - o + v
+    return None, None
+
+def link_addr(ip):
+    path, a = place(ip)
+    return a if path == binary else None
 
 def data_class(a):
     if a == 0: return "no data address (not precise)"
@@ -56,8 +67,24 @@ def data_class(a):
             return "arena (anon >= 4 MiB)" if end - start >= (4 << 20) else "anon < 4 MiB (malloc arenas, small maps)"
     return "unmapped at the last map (freed, or mapped late)"
 
-ips = collections.Counter(ip for ip, _ in samples)
+ips = collections.Counter(ip for ip, _, _ in samples)
 la = {ip: link_addr(ip) for ip in ips}
+# Outside the binary: symbolize in the shared object itself, to the function.
+lib_sym = {}
+by_obj = collections.defaultdict(set)
+for ip in ips:
+    if la[ip] is None:
+        path, a = place(ip)
+        if path: by_obj[path].add(a)
+for path, addrs in by_obj.items():
+    addrs = sorted(addrs)
+    p = subprocess.run(["llvm-symbolizer-22", "--obj=" + path, "--functions=linkage", "--demangle", "--no-inlines"],
+                       input="\n".join(hex(a) for a in addrs), capture_output=True, text=True)
+    for a, b in zip(addrs, p.stdout.strip().split("\n\n")):
+        lib_sym[(path, a)] = path.split("/")[-1] + ": " + b.split("\n")[0]
+def outside_name(ip):
+    path, a = place(ip)
+    return lib_sym.get((path, a), "unmapped or anonymous code") if path else "unmapped or anonymous code"
 known = sorted({a for a in la.values() if a is not None})
 sym = {}
 if known:
@@ -72,14 +99,26 @@ if known:
         loc = re.sub(r".*/(lib|include)/", r"\1/", inner_loc)
         sym[a] = (loc, inner_fn, outer_fn)
 
+# The evaluator's thread: the one whose samples fall most in the evaluator (runWithLargeStack's thread; the prelowerers lex, parse, lower).
+def outer_of(ip):
+    a = la[ip]
+    return sym.get(a, ("?", "?", "?"))[2] if a is not None else "outside"
+per_tid = collections.Counter(t for _, _, t in samples)
+eval_tid = collections.Counter(t for ip, _, t in samples if "nixev::EvalState::" in outer_of(ip) or "nixev::Bindings" in outer_of(ip))
+print("== threads (samples):", ", ".join(f"{t}: {n}" for t, n in per_tid.most_common(6)))
+if eval_tid:
+    ev = eval_tid.most_common(1)[0][0]
+    print(f"== the evaluator thread is {ev}: the report below is its samples only ({per_tid[ev]} of {len(samples)})")
+    samples = [s for s in samples if s[2] == ev]
+
 total = len(samples)
 by_site = collections.Counter()
 site_class = collections.defaultdict(collections.Counter)
 by_fn = collections.Counter()
 by_class = collections.Counter()
-for ip, addr in samples:
+for ip, addr, _ in samples:
     a = la[ip]
-    loc, inner, outer = sym.get(a, ("?", "?", "outside the binary (libc, libstdc++, MLIR shared code)" if a is None else "?"))
+    loc, inner, outer = sym.get(a, ("?", "?", outside_name(ip) if a is None else "?"))
     key = (loc, inner[:60], outer[:60])
     by_site[key] += 1
     c = data_class(addr)

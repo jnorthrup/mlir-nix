@@ -1,7 +1,8 @@
 // miss-sample: run a command and sample its loads that miss a cache level, precisely (PEBS), with the address of the load
 // instruction and the data address it read.  No perf binary: perf_event_open directly, which an unprivileged user may do on its
-// own child with kernel.perf_event_paranoid <= 2 (user space only).  Only the child's main thread is sampled (no inherit): with
-// prelowering off that is the evaluator.
+// own child with kernel.perf_event_paranoid <= 2 (user space only).  Every thread of the child is sampled, each sample with its thread
+// id: the evaluator runs on a thread of its own (runWithLargeStack), the prelowerers on others.  An inherited per-task counter cannot be
+// mapped (perf_mmap refuses inherit with cpu -1), so there is one counter per CPU, each with its own buffer, as perf record does.
 //
 //   miss-sample OUT.txt RAWEVENT PERIOD -- cmd args...
 //   RAWEVENT  Skylake MEM_LOAD_RETIRED: 0x20d1 L3 miss, 0x10d1 L2 miss, 0x08d1 L1 miss
@@ -9,7 +10,7 @@
 // MISS_PRECISE (default 2) is perf's precise_ip: under a hypervisor without PEBS (WSL2: cpu/caps/max_precise is 0) it must be 0, and then
 // the ip skids a few instructions past the load (usually onto the first use of what it read) and the data address is 0.
 //
-// OUT.txt gets "ip addr" per sample (hex), then the child's /proc/PID/maps after "== maps" (the newest taken while it ran), to place both.
+// OUT.txt gets "ip addr tid" per sample (hex, hex, decimal), then the child's /proc/PID/maps after "== maps" (the newest taken while it ran), to place both.
 #define _GNU_SOURCE
 #include <linux/perf_event.h>
 #include <poll.h>
@@ -25,7 +26,7 @@
 #include <time.h>
 #include <unistd.h>
 
-enum { kDataPages = 256 }; // a power of two: 1 MiB of samples between drains
+enum { kDataPages = 64, kMaxCpus = 256 }; // a power of two: 256 KiB of samples per CPU between drains
 
 static FILE *out;
 static unsigned long long nSamples, nLost;
@@ -41,9 +42,11 @@ static void drain(struct perf_event_mmap_page *meta) {
     for (size_t i = 0; i < h.size; i++) rec[i] = data[(tail + i) % size];
     if (h.type == PERF_RECORD_SAMPLE) {
       uint64_t ip, addr;
-      memcpy(&ip, rec + sizeof h, 8);
-      memcpy(&addr, rec + sizeof h + 8, 8);
-      fprintf(out, "%llx %llx\n", (unsigned long long)ip, (unsigned long long)addr);
+      uint32_t pidtid[2];
+      memcpy(&ip, rec + sizeof h, 8); // the fields in the order of sample_type's bits: ip, pid and tid, addr
+      memcpy(pidtid, rec + sizeof h + 8, 8);
+      memcpy(&addr, rec + sizeof h + 16, 8);
+      fprintf(out, "%llx %llx %u\n", (unsigned long long)ip, (unsigned long long)addr, pidtid[1]);
       nSamples++;
     } else if (h.type == PERF_RECORD_LOST) {
       uint64_t lost;
@@ -80,18 +83,26 @@ int main(int argc, char **argv) {
   a.type = PERF_TYPE_RAW;
   a.config = strtoull(argv[2], 0, 16);
   a.sample_period = strtoull(argv[3], 0, 10);
-  a.sample_type = PERF_SAMPLE_IP | PERF_SAMPLE_ADDR;
+  a.sample_type = PERF_SAMPLE_IP | PERF_SAMPLE_TID | PERF_SAMPLE_ADDR;
+  a.inherit = 1;
   a.precise_ip = getenv("MISS_PRECISE") ? (unsigned)atoi(getenv("MISS_PRECISE")) & 3 : 2;
   a.disabled = 1;
   a.enable_on_exec = 1;
   a.exclude_kernel = 1;
   a.exclude_hv = 1;
   a.wakeup_events = 64;
-  int fd = (int)syscall(SYS_perf_event_open, &a, child, -1, -1, 0);
-  if (fd < 0) { perror("perf_event_open"); kill(child, SIGKILL); return 2; }
   long page = sysconf(_SC_PAGESIZE);
-  struct perf_event_mmap_page *meta = mmap(0, (size_t)page * (1 + kDataPages), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-  if (meta == MAP_FAILED) { perror("mmap"); kill(child, SIGKILL); return 2; }
+  int ncpu = (int)sysconf(_SC_NPROCESSORS_ONLN);
+  if (ncpu > kMaxCpus) ncpu = kMaxCpus;
+  struct pollfd fds[kMaxCpus];
+  struct perf_event_mmap_page *metas[kMaxCpus];
+  for (int c = 0; c < ncpu; c++) {
+    int fd = (int)syscall(SYS_perf_event_open, &a, child, c, -1, 0);
+    if (fd < 0) { perror("perf_event_open"); kill(child, SIGKILL); return 2; }
+    metas[c] = mmap(0, (size_t)page * (1 + kDataPages), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (metas[c] == MAP_FAILED) { perror("mmap"); kill(child, SIGKILL); return 2; }
+    fds[c] = (struct pollfd){fd, POLLIN, 0};
+  }
   char maps[64];
   snprintf(maps, sizeof maps, "/proc/%d/maps", (int)child);
   if (write(go[1], "g", 1) != 1) { perror("write"); return 2; }
@@ -100,9 +111,8 @@ int main(int argc, char **argv) {
   time_t lastMap = 0;
   int status = 0;
   for (;;) {
-    struct pollfd p = {fd, POLLIN, 0};
-    poll(&p, 1, 200);
-    drain(meta);
+    poll(fds, (nfds_t)ncpu, 200);
+    for (int c = 0; c < ncpu; c++) drain(metas[c]);
     time_t now = time(0);
     if (now != lastMap) { // the newest map before the child exits places every ip and address (arena slabs are mapped as it runs)
       FILE *m = fopen(maps, "r");
@@ -121,7 +131,7 @@ int main(int argc, char **argv) {
     pid_t w = waitpid(child, &status, WNOHANG);
     if (w == child) break;
   }
-  drain(meta);
+  for (int c = 0; c < ncpu; c++) drain(metas[c]);
   fprintf(out, "== maps\n%s", saved ? saved : "");
   fclose(out);
   fprintf(stderr, "miss-sample: %llu samples, %llu lost; child exit %d\n", nSamples, nLost, WIFEXITED(status) ? WEXITSTATUS(status) : -1);
