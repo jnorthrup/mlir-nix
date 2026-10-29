@@ -100,75 +100,28 @@ struct Attr {
 static_assert(sizeof(Attr) == 16, "four attribute cells per 64-byte cache line");
 
 struct Bindings {
-  /// `size_` of a layered set (below).
-  static constexpr uint32_t kLayered = 0xFFFFFFFFu;
   uint32_t size_ = 0;
   PosPtr pos = nullptr;
   Attr attrs[0];
 
-  /// `base // top`: the rows of both in name order, `top` shadowing `base`.  A Series, not a copy: `sel` holds one word a
-  /// row — `(row << 1) | side`, side 1 for `top` — and a row is read where it lies (4 bytes a row of selection, against a
-  /// row apiece for a copy).  `base` may itself be a layer: a `//` of a `//` DEPENDS on the layer before it instead of
-  /// merging into its top, so a chain of layers stays a chain and nothing is copied (`depth` bounds the walk; past it the
-  /// chain is materialised by flat()).
-  struct Layer {
-    Bindings *top, *base, *flat;
-    Arena *alloc; // where flat() allocates
-    cp::Sel sel;                        // `row j side` packed in 32 bits: 4 bytes a row, one load to read
-    uint32_t depth = 1;                 // how many layers the walk from here can pass through
-  };
-  static inline uint64_t flattened = 0; // MLNIX_STATS
   static inline bool countGets = false; // MLNIX_STATS: get() calls and binary-search steps by set size (1, 2-3, 4-7, ... 2^k)
-  static inline uint64_t getCalls[16] = {}, getSteps[16] = {}, getMiss[16] = {}, getLayered = 0;
+  static inline uint64_t getCalls[16] = {}, getSteps[16] = {}, getMiss[16] = {};
   static inline uint64_t merged = 0, mergedCells = 0; // MLNIX_STATS: flat sets made by mergeBindings, and their cells
-  bool layered() const { return size_ == kLayered; }
-  Layer &layer() const { return *reinterpret_cast<Layer *>(const_cast<Attr *>(attrs)); }
-  /// The set as one sorted array: itself, or the union of its layers, built once.
-  Bindings *flat() const;
 
-  /// The rows of the set, flat or layered, as a Series: size j index.  A layered set indexes through its selection and
-  /// copies nothing; a side that is itself layered is read the same way, so a layer of a layer is still a view.
-  struct Rows {
-    const Bindings *b;
-    const Attr &operator()(uint32_t i) const {
-      const Bindings *s = b;
-      if (s->layered()) {
-        const Layer &L = s->layer();
-        join::TwInt w = L.sel.at(i); // `row j side` (Pack.h): the row, and which set it is read from
-        s = w.second() ? L.top : L.base;
-        i = w.first();
-        if (s->layered()) return (*s).rows()[i];
-      }
-      return s->attrs[i];
-    }
-  };
-  cp::Series<Rows> rows() const { return {uint32_t(size()), Rows{this}}; }
-
-  /// A walk over the rows.  The iterator carries the index function itself (eight bytes: the set), not a pointer to a
-  /// Series that a caller made on the way in — a range-for over a set has no Series of its own to keep alive.
-  struct iterator {
-    Rows r;
-    uint32_t i = 0;
-    const Attr &operator*() const { return r(i); }
-    iterator &operator++() {
-      ++i;
-      return *this;
-    }
-    bool operator==(const iterator &o) const { return i == o.i; }
-  };
-
-  size_t size() const { return layered() ? layer().sel.size() : size_; }
-  bool empty() const { return !layered() && size_ == 0; }
-  iterator begin() const { return {Rows{this}, 0}; }
-  iterator end() const { return {Rows{this}, uint32_t(size())}; }
+  /// The rows, in name order: the array itself.  (A `//` merges into one such array: EvalState::updateAttrs.)
+  auto rows() const { return cp::series(attrs, size_); }
+  const Attr *begin() const { return attrs; }
+  const Attr *end() const { return attrs + size_; }
+  size_t size() const { return size_; }
+  bool empty() const { return size_ == 0; }
   const Attr *get(Symbol s) const;
   /// get(), with a guess of the row: the row the asker found the name at last time, in a set of the same layout (62% of the selects of
   /// a NixOS evaluation hit the layout their site saw last).  A right guess is one row read instead of a search; a wrong one costs a
   /// compare, and the search's answer becomes the next guess.
   const Attr *getGuess(Symbol s, uint32_t &guess) const {
-    if (!layered() && guess < size_ && attrs[guess].name == s) return &attrs[guess];
+    if (guess < size_ && attrs[guess].name == s) return &attrs[guess];
     const Attr *r = get(s);
-    if (r && !layered()) guess = uint32_t(r - attrs);
+    if (r) guess = uint32_t(r - attrs);
     return r;
   }
   /// Attributes sorted by name (string order).

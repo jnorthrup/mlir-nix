@@ -1323,9 +1323,11 @@ def main():
                 assert counts["boolean_grace"] >= 3 and counts["boolean_mismatches"] == 0, (name, counts)
             counts = counters(CASES["Boolean needed argument trace once"], demand)
             assert counts["boolean_completions"] > 3 and counts["boolean_demands"] >= 1, counts
-            for name in ("Boolean functor branch deopts after memoization", "Boolean layered hasAttr deopt"):
-                counts = counters(CASES[name], demand)
-                assert counts["boolean_compiled"] >= 1 and counts["boolean_deopts"] >= 1, (name, counts)
+            counts = counters(CASES["Boolean functor branch deopts after memoization"], demand)
+            assert counts["boolean_compiled"] >= 1 and counts["boolean_deopts"] >= 1, counts
+            # `//` merges into one flat set (no layered sets exist), so the guard has nothing to refuse: the native code answers
+            counts = counters(CASES["Boolean layered hasAttr deopt"], demand)
+            assert counts["boolean_compiled"] >= 1 and counts["boolean_mismatches"] == 0, counts
             counts = counters(CASES["Boolean IF tail remains a value"], demand)
             assert counts["lazy_value_compiled"] == 1 and counts["lazy_value_completions"] == 5, counts
             assert counts["lazy_value_grace"] == 3 and counts["boolean_deopts"] == 0, counts
@@ -1455,10 +1457,10 @@ def main():
             for name in ("Projection ignored argument stays lazy", "Projection name-only predicate skips base and field"):
                 counts = counters(CASES[name], demand)
                 assert counts["boolean_saturated_inline_calls"] > 3 and counts["boolean_projection_requests"] == 0, (name, counts)
-            counts = counters(CASES["Projection layered shadowing"], demand)
-            assert counts["boolean_projection_layered"] >= 1, counts
-            counts = counters(CASES["Projection cached flat layer"], demand)
-            assert counts["boolean_projection_cached_flat"] >= 1, counts
+            # a `//` is one flat set now: the shadowing cases read it as such
+            for name in ("Projection layered shadowing", "Projection cached flat layer"):
+                counts = counters(CASES[name], demand)
+                assert counts["boolean_projection_flat"] >= 1 and counts["boolean_projection_layered"] == 0, (name, counts)
             counts = counters(CASES["Projection changed callee precedes selection"], demand)
             assert counts["boolean_projection_compiled"] >= 1 and counts["boolean_guard_misses"] >= 1, counts
             counts = counters(CASES["Projection fallback preserves demands"], demand)
@@ -1680,7 +1682,7 @@ def main():
                 # shared final set then forces base, a, b and c exactly once.
                 assert counts["boolean_projection_forces"] == 7 and counts["string_comparisons"] == 6, counts
                 counts = counters(CASES["String path layered intermediate"], demand)
-                assert counts["boolean_projection_layered"] >= 1, counts
+                assert counts["boolean_projection_flat"] >= 1 and counts["boolean_projection_layered"] == 0, counts
                 counts = counters(CASES["String path changed callee skips projection"], demand)
                 assert counts["path_projection_compiled"] >= 1 and counts["boolean_guard_misses"] >= 1, counts
                 counts = counters(CASES["String path survives active retirement"], demand)

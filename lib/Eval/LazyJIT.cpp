@@ -122,12 +122,7 @@ int predicateTag(llvm::StringRef name) {
       .Case("nixty.is_string", int(VType::String)).Default(-1);
 }
 
-void countProjectionLookup(const Bindings &bindings, LazyJITPlan::RunResult &result) {
-  if (bindings.layered()) {
-    ++result.projectionLayered;
-    result.projectionCachedFlat += bindings.layer().flat != nullptr;
-  } else ++result.projectionFlat;
-}
+void countProjectionLookup(const Bindings &, LazyJITPlan::RunResult &result) { ++result.projectionFlat; }
 } // namespace
 
 // Private per-run ABI. Generated code addresses every member with offsetof;
@@ -1000,13 +995,12 @@ bool LazyJITPlan::emit(mlir::ModuleOp module) {
       branch(value, destinations[c.yes], destinations[c.no]);
     } else {
       Block *attrs = newBlock(), *flat = newBlock(), *loop = newBlock(), *probe = newBlock(), *step = newBlock();
-      // All rows in Bindings are sorted by their interned Symbol. Layered sets
-      // preserve shadowing in C++; refuse them before touching their rows.
+      // All rows in Bindings are sorted by their interned Symbol, in one array (a `//` merges).
       branch(cmp(arith::CmpIPredicate::eq, tag, cst(int(VType::Attrs), 8)), attrs, destinations[c.no]);
       b.setInsertionPointToEnd(attrs);
       mlir::Value bindings = load(ptr, cell, offsetof(nixev::Value, attrs));
       mlir::Value size = load(i32, bindings, offsetof(Bindings, size_));
-      branch(cmp(arith::CmpIPredicate::eq, size, cst(Bindings::kLayered, 32)), destinations[kDeoptDest], flat);
+      cf::BranchOp::create(b, loc, flat);
       b.setInsertionPointToEnd(flat);
       mlir::Value count = arith::ExtUIOp::create(b, loc, i64, size);
       loop->addArgument(i64, loc);
@@ -1163,10 +1157,6 @@ LazyJITPlan::RunResult LazyJITPlan::observe(EvalState &st, Frame *env, llvm::Arr
     } else if (n.kind == Kind::Predicate) {
       value = n.function ? cell->isFunction() : cell->type == n.tag;
     } else if (n.kind == Kind::HasAttr) {
-      if (cell->type == VType::Attrs && cell->attrs->layered()) {
-        result.outcome = Outcome::Deopt;
-        return result;
-      }
       value = cell->type == VType::Attrs && cell->attrs->get(n.symbol);
     } else return result;
     dest = value ? c.yes : c.no;

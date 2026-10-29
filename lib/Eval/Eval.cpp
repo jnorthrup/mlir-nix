@@ -47,7 +47,6 @@ namespace nixev {
 void EvalState::statSelect(const void *site, const Bindings *b, Symbol key, bool dynamic) {
   ++nSelects;
   if (dynamic) ++nSelectDyn;
-  if (b->layered()) { ++nSelectLayered; }
   size_t n = b->size();
   unsigned lg = n ? 64 - __builtin_clzll(n) : 0;
   ++nSelectSizeLog[lg < 17 ? lg : 17];
@@ -55,11 +54,11 @@ void EvalState::statSelect(const void *site, const Bindings *b, Symbol key, bool
   bool hit = b->get(key) != nullptr;
   nSelectHits += hit;
   uint64_t sig = 0x9E3779B97F4A7C15ull * (n + 1);
-  if (!b->layered() && n) {
+  if (n) {
     sig ^= uint64_t(b->attrs[0].name) * 0xBF58476D1CE4E5B9ull;
     sig ^= uint64_t(b->attrs[n / 2].name) * 0x94D049BB133111EBull;
     sig ^= uint64_t(b->attrs[n - 1].name) * 0xD6E8FEB86659FD93ull;
-  } else if (b->layered()) sig = 0x1;     // all layered sets are one class here
+  }
   SelSite &s = selSites[site];
   ++s.calls; s.hits += hit; s.dynamic |= dynamic;
   if (s.calls > 1 && s.last == sig) ++s.sameAsLast;
@@ -70,13 +69,6 @@ void EvalState::statSelect(const void *site, const Bindings *b, Symbol key, bool
 static const auto attrName = [](const Attr &a) { return a.name; };
 
 const Attr *Bindings::get(Symbol s) const {
-  if (layered()) {
-    if (countGets) ++getLayered;
-    const Layer &L = layer();
-    if (L.flat) return L.flat->get(s);
-    if (const Attr *a = L.top->get(s)) return a; // top shadows base
-    return L.base->get(s);                       // and base may be a layer itself: the chain is walked, not flattened
-  }
   const Attr *r = cp::findRow(attrs, size_, s, attrName);
   if (countGets) { unsigned b = size_ ? std::min(15, 63 - std::countl_zero(uint64_t(size_))) : 0; ++getCalls[b]; getSteps[b] += b; getMiss[b] += r == nullptr; }
   return r;
@@ -91,23 +83,6 @@ static Bindings *mergeBindings(Arena &alloc, const Bindings *x, const Bindings *
   auto *r = new (mem) Bindings();
   r->size_ = uint32_t(cp::unionRows(x->attrs, x->size_, y->attrs, y->size_, r->attrs, attrName));
   return r;
-}
-
-Bindings *Bindings::flat() const {
-  if (!layered()) return const_cast<Bindings *>(this);
-  Layer &L = layer();
-  if (!L.flat) {
-    // The rows of the chain ARE the set, so materialising it is a copy of rows() -- no merge, no shadowing left to do.
-    size_t n = size();
-    void *mem = L.alloc->Allocate(sizeof(Bindings) + n * sizeof(Attr), alignof(Bindings));
-    auto *r = new (mem) Bindings();
-    auto rs = rows();
-    for (size_t i = 0; i < n; i++) r->attrs[i] = rs[uint32_t(i)];
-    r->size_ = uint32_t(n);
-    L.flat = r;
-    flattened++;
-  }
-  return L.flat;
 }
 
 composite::Frozen<const Attr *> Bindings::lexicographicOrder(const SymbolTable &st) const {
@@ -134,15 +109,12 @@ composite::Frozen<const Attr *> Bindings::lexicographicOrder(const SymbolTable &
   return std::move(v).freeze();  // sorted once, then only read: the handle's cells move into a const Series
 }
 
-/// `a // b`: the two merged into one flat set, as Nix does.  A set that is a chain of layers over its base (a `//` that copied nothing) was
-/// measured slower to read than it was to copy: every lookup walked the chain, a miss a level, and every `//` over it walked the base's
-/// rows through the chain to build its selection (Mac, same outputs: toplevel -2.5%, nixpkgs-73 -7% when merged flat; peak memory +5% and
-/// +13%).  A set made a layer before this is still read as one, and merged here as one.
+/// `a // b`: the two merged into one flat set, as Nix does.  A set kept as a chain of layers over its base (a `//` that copied nothing)
+/// was measured slower to read than to copy: every lookup walked the chain, a miss a level, and every `//` over a chain walked the base's
+/// rows through it to build its selection (Mac, same outputs: toplevel -2.5%, nixpkgs-73 -7% merged flat; peak memory +5% and +13%).
 Bindings *EvalState::updateAttrs(Bindings *a, Bindings *b) {
-  b = b->flat();
-  if (a->layered() && a->layer().flat) a = a->layer().flat;
-  if (statsEnabled) { nUpdMerged++; nUpdTop += a->size() + b->size_; }
-  return mergeBindings(alloc, a->flat(), b);
+  if (statsEnabled) { nUpdMerged++; nUpdTop += a->size_ + b->size_; }
+  return mergeBindings(alloc, a, b);
 }
 
 Bindings *EvalState::allocBindings(size_t n) {
@@ -577,7 +549,7 @@ void EvalState::printStats() {
   }
   { uint64_t tc = 0, ts = 0; for (int i = 0; i < 16; i++) { tc += Bindings::getCalls[i]; ts += Bindings::getSteps[i]; }
     if (tc) {
-      llvm::errs() << "== Bindings::get on flat sets: " << tc << " calls (+" << Bindings::getLayered << " entered through a layer), " << ts << " binary-search steps; by set size:\n";
+      llvm::errs() << "== Bindings::get: " << tc << " calls, " << ts << " binary-search steps; by set size:\n";
       for (int i = 0; i < 16; i++)
         if (Bindings::getCalls[i])
           llvm::errs() << "  size " << llvm::format("%6u", 1u << i) << "+  calls " << llvm::format("%10llu", (unsigned long long)Bindings::getCalls[i]) << llvm::format("  %5.1f%%", 100.0 * Bindings::getCalls[i] / tc)
@@ -717,7 +689,7 @@ void EvalState::printStats() {
                  << " to a value with no use at all (" << llvm::format("%.1f", 100.0 * nSlotsNoRead / nSlotsAssigned)
                  << "%) -- a value no one reads still costs a cell in every frame of its region\n";
   llvm::errs() << "== mlnix ops lowered: " << total << "\n";
-  llvm::errs() << "== `//`: " << nUpdLayered << " layered (" << nUpdBase << " entries not copied, " << nUpdTop << " top entries incl. merges), " << nUpdMerged << " flat merges, " << Bindings::flattened << " layers flattened later\n";
+  llvm::errs() << "== `//`: " << nUpdMerged << " merges, " << nUpdTop << " entries copied\n";
   llvm::errs() << "== lowering " << llvm::format("%.0f", nsLower / 1e6) << " ms (the analysis of deferred lambdas included), minted on demand "
                << llvm::format("%.0f", nsMint / 1e6) << " ms\n";
   if (!pools.empty()) {
