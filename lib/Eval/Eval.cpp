@@ -891,6 +891,14 @@ void EvalState::throwTypeError(const char *expected, Value &v, PosPtr pos, std::
 static Slot::How howOf(Operation *op);
 void EvalState::indexRegion(Region &r) {
   auto *ri = new RegionInfo{&r, 0, {}};
+  if (auto lam = dyn_cast_or_null<nd::LambdaOp>(r.getParentOp())) {
+    if (auto formals = lam.getFormals()) {
+      ri->hasFormals = 1;
+      ri->nFormals = uint32_t(formals->size());
+      ri->formalDefaults = lam.getFormalDefaults()->data();
+    }
+    ri->ellipsis = lam.getEllipsis();
+  }
   Block &blk = r.front();
   unsigned slot = 0;
   auto *core = ctx.getLoadedDialect<nd::NixDialect>();
@@ -1421,32 +1429,34 @@ static std::string lambdaDesc(nd::LambdaOp lam) {
 
 void EvalState::callLambdaIn(Value &fun, RegionInfo *ri, Value *arg, Value &out, PosPtr pos) {
   auto lam = cast<nd::LambdaOp>(fun.thunk.op);
-  if (auto formals = lam.getFormals()) {
+  if (ri->hasFormals) { // what the formals are was read once, at indexing: the op's attributes are read here only at a first call and on errors
     try {
       forceAttrs(*arg, pos, "while evaluating the value passed for the lambda argument");
     } catch (EvalError &e) {
       e.addTrace(nd::posOfOp(lam), "while calling " + lambdaDesc(lam));
       throw;
     }
-    auto defs = *lam.getFormalDefaults();
     if (ri->formalsOf != lam.getOperation()) {
-      if (statsEnabled) nFormalBytes += formals->size() * sizeof(Symbol);
-      auto *syms = static_cast<Symbol *>(alloc.Allocate(formals->size() * sizeof(Symbol), alignof(Symbol)));
-      for (size_t i = 0; i < formals->size(); i++) syms[i] = symbols.create(cast<StringAttr>((*formals)[i]).getValue());
+      auto formals = *lam.getFormals();
+      if (statsEnabled) nFormalBytes += formals.size() * sizeof(Symbol);
+      auto *syms = static_cast<Symbol *>(alloc.Allocate(formals.size() * sizeof(Symbol), alignof(Symbol)));
+      for (size_t i = 0; i < formals.size(); i++) syms[i] = symbols.create(cast<StringAttr>(formals[i]).getValue());
       ri->formalSyms = syms;
       ri->formalsOf = lam.getOperation();
     }
     const Symbol *formalSyms = ri->formalSyms;
+    const bool *defs = ri->formalDefaults;
     size_t nFound = 0;
-    for (size_t i = 0; i < formals->size(); i++) {
+    for (uint32_t i = 0, n = ri->nFormals; i < n; i++) {
       if (arg->attrs->get(formalSyms[i])) nFound++;
       else if (!defs[i])
-        throwMissingArg(lam, cast<StringAttr>((*formals)[i]).getValue(), pos);
+        throwMissingArg(lam, cast<StringAttr>((*lam.getFormals())[i]).getValue(), pos);
     }
-    if (!lam.getEllipsis() && nFound != arg->attrs->size()) {
+    if (!ri->ellipsis && nFound != arg->attrs->size()) {
+      auto formals = *lam.getFormals();
       for (auto &a : *arg->attrs) {
         bool known = false;
-        for (Attribute fa : *formals)
+        for (Attribute fa : formals)
           if (cast<StringAttr>(fa).getValue() == symbols[a.name]) { known = true; break; }
         if (!known) throwUnexpectedArg(lam, symbols[a.name], pos);
       }
@@ -1633,7 +1643,7 @@ void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out,
     if (cur->type == VType::Lambda) {
       curLam = cast<nd::LambdaOp>(cur->thunk.op);
       curRI = infoOf(curLam);  // once per call: the selector check, the JIT check and the call below all use it
-      if (selectorsOn && nargs - i >= 2 && !curLam.getFormals()) {
+      if (selectorsOn && nargs - i >= 2 && !curRI->hasFormals) {
         if (unsigned shape = curRI->selShape ? curRI->selShape : selectorShape(curLam, curRI); shape >= 2) {
           Value *dest = (i + 2 == nargs) ? &out : allocValue();
           applySelector(shape, curRI, args + i, *dest, pos);
@@ -1644,7 +1654,7 @@ void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out,
         }
       }
     }
-    if (allowCurried && scalarJIT && nargs - i >= 2 && nargs - i <= 4 && curRI && !curLam.getFormals() &&
+    if (allowCurried && scalarJIT && nargs - i >= 2 && nargs - i <= 4 && curRI && !curRI->hasFormals &&
         jitChain(curLam, curRI, *cur, nargs - i, args + i, out, pos))
       return;
     Value *res = (i + 1 == nargs) ? &out : cur == &stackCells[0] ? &stackCells[1] : &stackCells[0];

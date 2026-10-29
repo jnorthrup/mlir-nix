@@ -260,6 +260,11 @@ struct RegionInfo {
   /// they were made from.
   const Symbol *formalSyms = nullptr;
   mlir::Operation *formalsOf = nullptr;
+  /// The lambda's formals as its op states them, read once when the body is indexed (a call reads these, not the op's attributes): whether
+  /// it has any, how many, which have defaults (the attribute's own uniqued storage), and whether `...` accepts the rest.
+  uint8_t hasFormals = 0, ellipsis = 0;
+  uint32_t nFormals = 0;
+  const bool *formalDefaults = nullptr;
   /// Stable entry owned by this evaluator's optional JIT; closure values are resolved at each call.
   void *jitEntry = nullptr;
   /// Optional arity-indexed JIT cache, owned by ScalarJIT and never an environment.
