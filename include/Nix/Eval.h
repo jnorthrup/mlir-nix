@@ -163,6 +163,17 @@ struct StringContext {
   size_t n;
   const char *elems[0];
 };
+struct EvalState;
+/// The contexts of the pieces of a string being built.  A piece that is a string brings its own context, already made: each is kept once,
+/// in an inline series, and the set is touched only to merge.  With at most one and nothing else added, that one is the result's context
+/// as it stands: nothing is joined, so nothing is made.
+struct PieceContexts {
+  composite::MutableSeries<const StringContext *, composite::Inline<const StringContext *, 8>> own;
+  /// Keep c once; past eight distinct ones its elements go to `spill`.
+  void add(const StringContext *c, NixStringContext &spill);
+  bool any(const NixStringContext &ctx) const { return !ctx.empty() || own.size(); }
+  const StringContext *result(EvalState &st, NixStringContext &ctx);
+};
 
 struct PrimOp;
 
@@ -502,8 +513,10 @@ struct EvalState {
                              bool canonicalizePath = true);
   // The same coercion as a window: a string, and a set's __toString result or outPath, is its own bytes (nothing copied); anything else is made
   // in `scratch`, which the window views.
+  // With `own`, a string (and a set's __toString result or outPath) hands its own context back through it instead of copying it into ctx.
   composite::Chars coerceToWindow(Value &v, NixStringContext &ctx, bool coerceMore, bool copyToStore, PosPtr pos,
-                                       std::string_view errorCtx, std::string &scratch, bool canonicalizePath = true);
+                                       std::string_view errorCtx, std::string &scratch, bool canonicalizePath = true,
+                                       const StringContext **own = nullptr);
   std::string coerceToPath(Value &v, NixStringContext &ctx, PosPtr pos, std::string_view errorCtx = "");
   std::string coerceToStorePath(Value &v, NixStringContext &ctx, PosPtr pos, std::string_view errorCtx = "");
   std::string copyPathToStore(NixStringContext &ctx, const std::string &path);

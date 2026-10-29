@@ -271,6 +271,19 @@ void EvalState::mkList(Value &v, size_t n) {
   v.list.elems = allocList(n);
 }
 
+void PieceContexts::add(const StringContext *c, NixStringContext &spill) {
+  if (!c || composite::anyOf(own, [&](const StringContext *o) { return o == c; })) return;
+  if (own.size() < 8) { own.append(c); return; }
+  for (size_t i = 0; i < c->n; i++) spill.insert(c->elems[i]);
+}
+
+const StringContext *PieceContexts::result(EvalState &st, NixStringContext &ctx) {
+  if (ctx.empty() && own.size() <= 1) return own.empty() ? nullptr : own[0];
+  for (const StringContext *c : own)
+    for (size_t i = 0; i < c->n; i++) ctx.insert(c->elems[i]);
+  return st.makeContext(ctx);
+}
+
 void EvalState::copyContext(const Value &v, NixStringContext &ctx) {
   if (v.type == VType::String && v.str.ctx)
     for (size_t i = 0; i < v.str.ctx->n; i++) ctx.insert(v.str.ctx->elems[i]);
@@ -1792,6 +1805,7 @@ void EvalState::evalConcatStrings(nd::ConcatStringsOp op, Frame *env, Value &out
   composite::Chars stackViews[16];
   composite::Chars *views = np <= 16 ? stackViews : static_cast<composite::Chars *>(alloc.Allocate(np * sizeof(composite::Chars), alignof(composite::Chars)));
   std::string scratch;
+  PieceContexts own; // the string pieces' own contexts: shared as the result's when there is one, merged only when there are several
   size_t total = 0;
   int64_t n = 0;
   double nf = 0;
@@ -1817,7 +1831,9 @@ void EvalState::evalConcatStrings(nd::ConcatStringsOp op, Frame *env, Value &out
       else if (v->type == VType::Float) nf += v->fpoint;
       else throwCannotAdd(showType(*v), "a float", ppos);
     } else {
-      composite::Chars w = coerceToWindow(*v, context, false, firstType == VType::String, ppos, "while evaluating a path segment", scratch, !first);
+      const StringContext *pc = nullptr;
+      composite::Chars w = coerceToWindow(*v, context, false, firstType == VType::String, ppos, "while evaluating a path segment", scratch, !first, &pc);
+      own.add(pc, context);
       if (w.size() && w.data() == scratch.data()) { w = composite::chars(copyString(scratch), w.size()); } // text made here lives in the arena
       views[nv++] = w;
       total += w.size();
@@ -1828,14 +1844,14 @@ void EvalState::evalConcatStrings(nd::ConcatStringsOp op, Frame *env, Value &out
   if (firstType == VType::Int) return mkInt(out, n);
   if (firstType == VType::Float) return mkFloat(out, nf);
   if (firstType == VType::Path) {
-    if (!context.empty())
+    if (own.any(context))
       throw EvalError("a string that refers to a store path cannot be appended to a path", pos);
     std::string str;
     str.reserve(total);
     for (size_t k = 0; k < nv; k++) str += composite::view(views[k]);
     return mkPath(out, nixfe::canonPath(str));
   }
-  mkStringOf(out, llvm::ArrayRef<composite::Chars>(views, nv), makeContext(context));
+  mkStringOf(out, llvm::ArrayRef<composite::Chars>(views, nv), own.result(*this, context));
 }
 
 Symbol EvalState::pathSymbol(const nixfe::Name &comp, mlir::OperandRange dyn, unsigned &nextDyn, Frame *env,
@@ -2045,20 +2061,23 @@ std::optional<std::string> EvalState::tryAttrsToString(Value &v, NixStringContex
 
 composite::Chars EvalState::coerceToWindow(Value &v, NixStringContext &ctx, bool coerceMore, bool copyToStore,
                                                  PosPtr pos, std::string_view errorCtx, std::string &scratch,
-                                                 bool canonicalizePath) {
+                                                 bool canonicalizePath, const StringContext **own) {
   forceValue(v, pos);
   if (v.type == VType::String) {
-    copyContext(v, ctx);
+    if (own) *own = v.str.ctx;
+    else copyContext(v, ctx);
     return v.window();
   }
   if (v.type == VType::Attrs) { // a set is the string its __toString returns or its outPath: a string value either way, so a window, not text made here
     if (const Attr *f = v.attrs->get(s.toString)) {
       Value *r = allocValue();
       callFunction(*f->value, v, *r, nullptr);
-      return coerceToWindow(*r, ctx, coerceMore, copyToStore, nullptr, "while evaluating the result of the `__toString` attribute", scratch);
+      return coerceToWindow(*r, ctx, coerceMore, copyToStore, nullptr, "while evaluating the result of the `__toString` attribute", scratch,
+                            true, own);
     }
     if (const Attr *o = v.attrs->get(s.outPath))
-      return coerceToWindow(*o->value, ctx, coerceMore, copyToStore, pos, "while evaluating the `outPath` attribute", scratch, canonicalizePath);
+      return coerceToWindow(*o->value, ctx, coerceMore, copyToStore, pos, "while evaluating the `outPath` attribute", scratch,
+                            canonicalizePath, own);
   }
   scratch = coerceToString(v, ctx, coerceMore, copyToStore, pos, errorCtx, canonicalizePath);
   return composite::chars(std::string_view(scratch));

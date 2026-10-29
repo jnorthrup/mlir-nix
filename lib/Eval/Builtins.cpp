@@ -412,16 +412,19 @@ void registerBuiltins(EvalState &state) {
     composite::Chars stackPieces[32];
     composite::Chars *pieces = np <= 32 ? stackPieces : static_cast<composite::Chars *>(st.alloc.Allocate(np * sizeof(composite::Chars), alignof(composite::Chars)));
     std::string scratch;
+    PieceContexts own; // the elements' own contexts: shared as the result's when there is one, merged only when there are several
     for (size_t i = 0; i < ne; i++) {
       if (i) pieces[nv++] = composite::chars(sep);  // a window on the separator's own arena bytes
       Value &e = *args[1]->list.elems[i];
       st.forceValue(e, pos);
+      const StringContext *pc = nullptr;
       composite::Chars w = st.coerceToWindow(e, ctx, false, true, pos,
-          "while evaluating one element of the list of strings to concat passed to builtins.concatStringsSep", scratch);
+          "while evaluating one element of the list of strings to concat passed to builtins.concatStringsSep", scratch, true, &pc);
+      own.add(pc, ctx);
       if (w.size() && w.data() == scratch.data()) w = composite::chars(st.copyString(scratch), w.size()); // coerced text lives in the arena
       pieces[nv++] = w;
     }
-    st.mkStringOf(v, llvm::ArrayRef<composite::Chars>(pieces, nv), st.makeContext(ctx));
+    st.mkStringOf(v, llvm::ArrayRef<composite::Chars>(pieces, nv), own.result(st, ctx));
   });
   S.addPrimOp("__replaceStrings", 3, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[0], pos, "while evaluating the first argument passed to builtins.replaceStrings");
