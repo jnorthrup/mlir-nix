@@ -676,6 +676,7 @@ struct EvalState {
   std::vector<std::pair<std::string, size_t>> evaluatedFiles; // MLNIX_STATS_IMPORTS: files evalFile'd, with how many path literals had been lowered by then
   std::vector<uint64_t> epochEvals; // MLNIX_STATS: evalOp calls per epoch (one epoch a derivation attribute the driver visits)
   void beginEpoch() { if (statsEnabled) epochEvals.push_back(0); }
+  uint64_t nMaskBytes = 0, nLayerBytes = 0, nMergeBytes = 0, nCtxBytes = 0, nFormalBytes = 0; // MLNIX_STATS: arena bytes the by-use line did not name before
   uint64_t nLookups = 0, nLookupHits = 0, nHopHist[6] = {}; // MLNIX_STATS: lookupImpl calls, those answered by a filled slot, and the frame hops to the defining region (0, 1, 2, 3, 4, 5 or more)
   llvm::DenseMap<const void *, std::pair<llvm::StringRef, std::array<uint64_t, 2>>> cellsByKind; // MLNIX_STATS: cells lookup made, by defining op: [evaluated at once, left a thunk]
   llvm::DenseMap<const void *, std::pair<llvm::StringRef, uint64_t>> evalsByKind; // MLNIX_STATS: evalOp calls by op kind

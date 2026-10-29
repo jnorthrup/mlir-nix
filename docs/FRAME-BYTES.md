@@ -116,3 +116,19 @@ conditionals 5 to 7% (`MLNIX_STATS_DOWNGRADE=` names the families the simulation
 by closures, which nothing collects. The two lines past "every thunk over it has been forced" need reference counting that a copied
 unforced thunk would break, and the last two need thunks that carry their operand cells, which creates those cells eagerly; the simulation
 prices neither, so they are ceilings, not plans.
+
+## What the arena's "other and slack" was (2026-10-29)
+
+`MLNIX_STATS` named values, frames, attribute rows, list cells and string bytes and called the rest of the arena "other and slack": 240 MB of 938 MB
+on nixos-toplevel. It is now named (Mac, demand schedule, stats run):
+
+| | MB |
+|---|---:|
+| the stats census itself (one bitmask a frame, counted only when `MLNIX_STATS` is on) | 140 |
+| `//` flat merges (250,782 merges of two small sets, 4.4M cells; 20,900 other `//` became layers) | 78 |
+| layer headers | 2 |
+| string contexts, formals | 0 |
+| still unnamed (slab tails, alignment) | 19 |
+
+So an ordinary run's arena is about 800 MB, not 938 MB, and the one real unnamed owner was `//` on small sets; layering them was tuned for time
+(`kMinBase` 32, `kRatio` 8) and is not changed here.

@@ -157,6 +157,7 @@ Bindings *EvalState::updateAttrs(Bindings *a, Bindings *b) {
     else { nUpdMerged++; nUpdTop += baseSize + b->size_; }
   }
   if (baseSize >= kMinBase && b->size_ * kRatio <= baseSize && depth < kMaxDepth) {
+    if (statsEnabled) nLayerBytes += sizeof(Bindings) + sizeof(Bindings::Layer);
     void *mem = alloc.Allocate(sizeof(Bindings) + sizeof(Bindings::Layer), alignof(Bindings));
     auto *r = new (mem) Bindings();
     r->size_ = Bindings::kLayered;
@@ -240,6 +241,7 @@ const char *EvalState::copyString(std::string_view s) {
 
 const StringContext *EvalState::makeContext(const NixStringContext &c) {
   if (c.empty()) return nullptr;
+  if (statsEnabled) nCtxBytes += sizeof(StringContext) + c.size() * sizeof(const char *);
   void *mem = alloc.Allocate(sizeof(StringContext) + c.size() * sizeof(const char *), alignof(StringContext));
   auto *ctx = new (mem) StringContext();
   ctx->n = c.size();
@@ -439,11 +441,14 @@ void EvalState::printStats() {
 #else
     double rss = ru.ru_maxrss / 1024.0;
 #endif
-    uint64_t values = nVT[14] * sizeof(Value), named = values + nFrameBytes + nBindingBytes + nListBytes + nStringBytes;
+    uint64_t mergeBytes = Bindings::mergedCells * sizeof(Attr) + Bindings::merged * sizeof(Bindings);
+    uint64_t values = nVT[14] * sizeof(Value), named = values + nFrameBytes + nBindingBytes + nListBytes + nStringBytes + nMaskBytes + nLayerBytes + mergeBytes + nCtxBytes + nFormalBytes;
     uint64_t handed = alloc.getTotalMemory();  // the slabs, which is what the pages are
     llvm::errs() << llvm::format("== arena: %.0f MB of slabs; peak RSS %.0f MB. By use: values %.0f (%llu cells), frames %.0f, attribute rows %.0f, list cells %.0f, string bytes %.0f, other and slack %.0f MB\n",
                                  mb(handed), rss, mb(values), (unsigned long long)nVT[14], mb(nFrameBytes), mb(nBindingBytes), mb(nListBytes),
-                                 mb(nStringBytes), mb(handed > named ? handed - named : 0));
+                                 mb(nStringBytes), mb(handed > named ? handed - named + nMaskBytes + nLayerBytes + mergeBytes + nCtxBytes + nFormalBytes : 0));
+    llvm::errs() << llvm::format("   \"other\" named: stats census masks %.0f MB (a stats run only), `//` flat merges %.0f, layer headers %.0f, string contexts %.0f, formals %.0f; still unnamed (slab tails, alignment) %.0f MB\n",
+                                 mb(nMaskBytes), mb(mergeBytes), mb(nLayerBytes), mb(nCtxBytes), mb(nFormalBytes), mb(handed > named ? handed - named : 0));
   }
   if (nFrames) llvm::errs() << "   of which only the argument slot (no cells at all): " << nStackableOneSlot << " = " << llvm::format("%.1f%%", 100.0 * nStackableOneSlot / nFrames) << " of frames\n";
   if (nSelects) {
@@ -991,6 +996,7 @@ Frame *EvalState::newFrame(RegionInfo *ri, Frame *up) {
   }
   size_t sz = sizeof(Frame) + ri->numSlots * sizeof(Value *);
   size_t maskBytes = statsEnabled ? (((ri->numSlots + 63) / 64) + 3) * sizeof(uint64_t) : 0; // stats only: the mask of slots ever read, after the slots
+  if (statsEnabled) nMaskBytes += maskBytes;
   auto *f = static_cast<Frame *>(alloc.Allocate(sz + maskBytes, alignof(Frame)));
   if (statsEnabled) { ++nFrames; nFrameBytes += sz; nFrameSlots += ri->numSlots; ++nFramesBySize[ri->numSlots < 16 ? ri->numSlots : 16];
     ++ri->calls;
@@ -1340,6 +1346,7 @@ void EvalState::callLambdaIn(Value &fun, RegionInfo *ri, Value *arg, Value &out,
     }
     auto defs = *lam.getFormalDefaults();
     if (ri->formalsOf != lam.getOperation()) {
+      if (statsEnabled) nFormalBytes += formals->size() * sizeof(Symbol);
       auto *syms = static_cast<Symbol *>(alloc.Allocate(formals->size() * sizeof(Symbol), alignof(Symbol)));
       for (size_t i = 0; i < formals->size(); i++) syms[i] = symbols.create(cast<StringAttr>((*formals)[i]).getValue());
       ri->formalSyms = syms;
