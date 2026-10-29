@@ -1,5 +1,8 @@
 # Parallel evaluation: what it would take, and what it could buy
 
+Terminology: this document writes compare-and-swap (the atomic exchange of a cell's tag) in full. In this repository `CAS` means content-addressed
+storage (`docs/BTRFS-COMPRESSOR.md`), which is unrelated.
+
 Written 2026-10-29 as the costed option beside the others (thinner IR, JIT). Nothing here is built. The frontend already runs on other threads
 (`docs/PRELOAD-PIPELINE.md`); this is about the evaluator itself.
 
@@ -19,7 +22,7 @@ Written 2026-10-29 as the costed option beside the others (thinner IR, JIT). Not
 | shared state (`EvalState`) | hazard | fix |
 |---|---|---|
 | `Arena alloc` (values 24 B, frames, rows) | bump pointer | one arena a thread over a shared slab source; nothing is freed, so pointers stay valid across threads |
-| a `Value` cell being forced (`type` Thunk -> Blackhole -> result) | two threads force one cell | CAS the tag Thunk -> Blackhole with an owner; a thread that meets a Blackhole it does not own waits; the cycle check (`InfiniteRecursionError`) must then be by owner, not by tag |
+| a `Value` cell being forced (`type` Thunk -> Blackhole -> result) | two threads force one cell | compare-and-swap the tag Thunk -> Blackhole, with an owner; a thread that meets a Blackhole it does not own waits; the cycle check (`InfiniteRecursionError`) must then be by owner, not by tag |
 | `symbols` (`SymbolTable`: StringMap + names series) | `create` on dynamic keys and formals | lock on create, lock-free reads of an append-only names chunk list |
 | `slotMap`, `slotStore`, the `infoOf`/`slotOf` direct-mapped caches | indexRegion writes while others read | slots immutable once a region is indexed (index under a lock, publish with release); caches thread-local |
 | `regionInfos`, `RegionInfo` fields (`formalSyms`, `selShape`, `calls`, `everRan`) | lazy, written on first call | the same publish rule; counters are stats-only and per-thread or off |
@@ -36,7 +39,11 @@ Purity is what makes this sound: two threads that evaluate the same thunk comput
 
 ## Staged plan, each stage gated like the others
 
-1. **Atomic tags, one thread.** Make forcing CAS-based and measure what the atomics cost a single-threaded run (this is the floor of the price).
+1. **Atomic tags, one thread.** Force by compare-and-swap on the tag, evaluate into a temporary, publish the payload and then the tag with release
+   semantics, and measure the single-threaded price. **Done (Mac, nine interleaved rounds, outputs identical, language suite 487/487):** about
+   0 to 1%: nixos-toplevel 1.588 -> 1.582 s min (median 1.608 -> 1.615), nixpkgs-73 1.373 -> 1.386 s, with two prelowering helpers 1.295 -> 1.290 s and
+   1.165 -> 1.174 s. The thunk protocol is not what makes parallel evaluation expensive. The patch is not kept in the tree (the experiment was a branch
+   in `forceValue` behind an environment switch); it is a few dozen lines and can be redone from this description.
 2. **Per-thread arenas, caches and counters**, still one worker; the A/B against the current build must show the cost of the indirection.
 3. **Attribute-level driver parallelism** (the epochs above: list elements of the top-level result, `getDerivations`), two to four workers,
    measured on nixpkgs-73 and the language suite with outputs byte-identical.

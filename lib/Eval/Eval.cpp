@@ -641,12 +641,12 @@ void EvalState::printStats() {
                  << llvm::format("%.1f", 100.0 * nLookupHits / nLookups) << "%); frame hops to the defining region: ";
     for (unsigned i = 0; i < 6; i++) llvm::errs() << (i == 5 ? "5+" : std::to_string(i)) << " " << llvm::format("%.1f", 100.0 * nHopHist[i] / nLookups) << "%  ";
     llvm::errs() << '\n';
-    std::vector<std::pair<llvm::StringRef, uint64_t>> ev;
+    composite::MutableSeries<std::pair<llvm::StringRef, uint64_t>> ev;
     uint64_t tot = 0;
-    for (auto &e : evalsByKind) { ev.push_back(e.second); tot += e.second.second; }
+    for (auto &e : evalsByKind) { ev.append(e.second); tot += e.second.second; }
     std::sort(ev.begin(), ev.end(), [](auto &a, auto &b) { return a.second > b.second; });
-    { std::vector<std::pair<llvm::StringRef, std::array<uint64_t, 2>>> cv; uint64_t ct = 0;
-      for (auto &e : cellsByKind) { cv.push_back(e.second); ct += e.second.second[0] + e.second.second[1]; }
+    { composite::MutableSeries<std::pair<llvm::StringRef, std::array<uint64_t, 2>>> cv; uint64_t ct = 0;
+      for (auto &e : cellsByKind) { cv.append(e.second); ct += e.second.second[0] + e.second.second[1]; }
       std::sort(cv.begin(), cv.end(), [](auto &a, auto &b) { return a.second[0] + a.second[1] > b.second[0] + b.second[1]; });
       llvm::errs() << "== cells made by lookup, by defining op (" << ct << " in all): evaluated at once (forced), left as a thunk\n";
       for (size_t i = 0; i < cv.size() && i < 14; i++)
@@ -679,15 +679,15 @@ void EvalState::printStats() {
           mlir::Operation *c = *op->getUsers().begin();
           { auto &row = by[(op->getName().getStringRef() + " -> " + c->getName().getStringRef()).str()]; row[c->getParentRegion() == op->getParentRegion() ? 0 : 1]++; row[2] += kv.second->opEvals[o.second]; }
         }
-      std::vector<std::pair<std::string, std::array<uint64_t, 3>>> r2;
-      for (auto &e : by) r2.push_back({e.getKey().str(), e.getValue()});
+      composite::MutableSeries<std::pair<std::string, std::array<uint64_t, 3>>> r2;
+      for (auto &e : by) r2.append({e.getKey().str(), e.getValue()});
       std::sort(r2.begin(), r2.end(), [](auto &a, auto &b) { return a.second[2] > b.second[2]; });
       llvm::errs() << "== single-use string/attrs/concat producers -> consumer: same region, nested region, producer evals (ranked by evals)\n";
       for (size_t i = 0; i < r2.size() && i < 30; i++)
         llvm::errs() << "  " << llvm::format("%-44s", r2[i].first.c_str()) << llvm::format("%9llu", (unsigned long long)r2[i].second[0]) << llvm::format("%9llu", (unsigned long long)r2[i].second[1]) << llvm::format("%11llu", (unsigned long long)r2[i].second[2]) << '\n';
     }
-    std::vector<std::pair<llvm::StringRef, U>> rows;
-    for (auto &e : byKind) rows.push_back({e.getKey(), e.getValue()});
+    composite::MutableSeries<std::pair<llvm::StringRef, U>> rows;
+    for (auto &e : byKind) rows.append({e.getKey(), e.getValue()});
     std::sort(rows.begin(), rows.end(), [](auto &a, auto &b) { return a.second.ops > b.second.ops; });
     llvm::errs() << "== single-use census (one-result ops): kind, ops, no use, one use, several, one-use that ran\n";
     for (size_t i = 0; i < rows.size() && i < 40; i++)
@@ -2433,17 +2433,17 @@ void EvalState::startPrelower() {
     std::ifstream in(list); // one path a line, or a prefetch list (`F path`)
     for (std::string line; std::getline(in, line);) {
       if (line.size() > 2 && line[1] == ' ') {
-        if (line[0] == 'F' && line.compare(line.size() - 4, 4, ".nix") == 0) pre->queue.push_back(line.substr(2));
+        if (line[0] == 'F' && line.compare(line.size() - 4, 4, ".nix") == 0) pre->queue.append(line.substr(2));
       } else if (!line.empty()) {
-        pre->queue.push_back(line);
+        pre->queue.append(line);
       }
     }
   } else {
-    pre->queue.assign(nixprefetch::replayFiles.begin(), nixprefetch::replayFiles.end());
+    for (const std::string &f : nixprefetch::replayFiles) pre->queue.append(f);
   }
   unsigned n = 1;
   if (const char *t = getenv("MLNIX_PRELOWER_THREADS")) n = std::max(1ul, std::min(8ul, strtoul(t, nullptr, 10)));
-  for (unsigned i = 0; i < n; i++) pre->workers.emplace_back([this] { prelowerLoop(); });
+  for (unsigned i = 0; i < n; i++) pre->workers.emplace([this] { prelowerLoop(); });
 }
 
 void EvalState::prelowerLoop() {
@@ -2452,10 +2452,9 @@ void EvalState::prelowerLoop() {
     std::shared_ptr<Prelowered> pl;
     {
       std::unique_lock<std::mutex> lk(pre->m);
-      pre->cv.wait(lk, [&] { return pre->stop || !pre->queue.empty(); });
+      pre->cv.wait(lk, [&] { return pre->stop || pre->head < pre->queue.size(); });
       if (pre->stop) return;
-      path = std::move(pre->queue.front());
-      pre->queue.pop_front();
+      path = pre->queue.drain(pre->head++);
       if (pre->byPath.count(path)) continue; // the evaluator took it first, or a duplicate
       pl = pre->byPath[path] = std::make_shared<Prelowered>();
     }
@@ -2503,7 +2502,7 @@ nd::ExprOp EvalState::takePrelowered(const std::string &resolved) {
   if (!pl->ok) return {};
   ++pre->adopted;
   installPool(std::move(pl->pool));
-  origins.push_back(pl->origin);
+  origins.append(pl->origin);
   nd::ExprOp op = pl->op;
   op->remove();
   op.setSymName("expr" + std::to_string(exprCounter++));
@@ -2648,7 +2647,7 @@ Value *EvalState::evalFile(const std::string &pathIn) {
     origin->path = logical;
     origin->baseDir = nixstore::dirOf(logical);
     nixprefetch::note('F', resolved.c_str());
-    if (nixfe::pathLiterals) evaluatedFiles.push_back({logical, nixfe::pathLiterals->size()});
+    if (nixfe::pathLiterals) evaluatedFiles.append({logical, nixfe::pathLiterals->size()});
     origin->text = settings.mapSources ? nixfe::Source::mapFile(resolved) : nullptr;
     if (!origin->text) origin->text = nixfe::Source::fromString(readSource(resolved));
     nd::ExprOp adopted;
@@ -2659,7 +2658,7 @@ Value *EvalState::evalFile(const std::string &pathIn) {
     if (adopted) {
       result = evalExprOp(adopted);
     } else {
-      origins.push_back(origin);
+      origins.append(origin);
       result = evalExprOp(lowerToMLIR(origin));
     }
   }
@@ -2673,7 +2672,7 @@ Value *EvalState::evalString(const std::string &text, const std::string &baseDir
   origin->name = originName;
   origin->baseDir = baseDir;
   origin->text = nixfe::Source::fromString(text);
-  origins.push_back(origin);
+  origins.append(origin);
   return evalExprOp(lowerToMLIR(origin));
 }
 

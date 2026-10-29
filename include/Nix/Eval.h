@@ -255,8 +255,8 @@ struct RegionInfo {
   uint32_t nOps = 0, nThunks = 0;
   uint64_t nEvals = 0;
   llvm::DenseMap<mlir::Operation *, uint32_t> opIdx{};
-  std::vector<uint64_t> everRan{};
-  std::vector<uint32_t> opEvals{}; // MLNIX_STATS_USES: evalOp calls per op (indexed like everRan's bits)
+  composite::MutableSeries<uint64_t> everRan{};
+  composite::MutableSeries<uint32_t> opEvals{}; // MLNIX_STATS_USES: evalOp calls per op (indexed like everRan's bits)
 };
 
 struct Frame {
@@ -604,10 +604,10 @@ struct EvalState {
   std::map<std::string, std::string> srcToStore;
   std::map<std::string, Value *> fileEvalCache;
   std::map<std::string, Value *> scopedImportCache;
-  std::vector<std::shared_ptr<nixfe::Origin>> origins;
+  composite::MutableSeries<std::shared_ptr<nixfe::Origin>> origins;
   /// MLNIX_DEFER: one pool of deferred lambdas per lowered file.  The `body_index` of a nix.lambda is a
   /// nixfe::BodyIndex (`file j row`) into these.
-  std::vector<std::unique_ptr<nixfe::FilePool>> pools; // indexed by FilePool::file; a slot is empty while its file is only prelowered
+  composite::MutableSeries<std::unique_ptr<nixfe::FilePool>> pools; // indexed by FilePool::file; a slot is empty while its file is only prelowered
   std::atomic<uint32_t> nextPoolId{0};
   void installPool(std::unique_ptr<nixfe::FilePool> p);
   unsigned exprCounter = 0;
@@ -626,10 +626,11 @@ struct EvalState {
     std::mutex m;
     std::condition_variable cv;
     std::unordered_map<std::string, std::shared_ptr<Prelowered>> byPath;
-    std::deque<std::string> queue;
+    composite::MutableSeries<std::string> queue; // paths, appended; the helpers drain them from `head` (a cell leaves, an empty one stays)
+    uint32_t head = 0;
     std::unordered_set<std::string> baseNames;
     nixfe::ParseOptions po;
-    std::vector<std::thread> workers;
+    composite::MutableSeries<std::thread> workers;
     bool stop = false;
     uint64_t adopted = 0, waited = 0, missed = 0;
   };
@@ -673,9 +674,9 @@ struct EvalState {
   uint64_t nVT[15] = {}; // MLNIX_STATS: instrumented tag writes, including stack values and repeated retyping;
                          // [14] alone counts allocated Value rows, not tag writes
   uint64_t nFrames = 0, nFrameBytes = 0, nFrameSlots = 0; // requested frame storage, excluding arena overhead
-  std::vector<std::pair<std::string, size_t>> evaluatedFiles; // MLNIX_STATS_IMPORTS: files evalFile'd, with how many path literals had been lowered by then
-  std::vector<uint64_t> epochEvals; // MLNIX_STATS: evalOp calls per epoch (one epoch a derivation attribute the driver visits)
-  void beginEpoch() { if (statsEnabled) epochEvals.push_back(0); }
+  composite::MutableSeries<std::pair<std::string, size_t>> evaluatedFiles; // MLNIX_STATS_IMPORTS: files evalFile'd, with how many path literals had been lowered by then
+  composite::MutableSeries<uint64_t> epochEvals; // MLNIX_STATS: evalOp calls per epoch (one epoch a derivation attribute the driver visits)
+  void beginEpoch() { if (statsEnabled) epochEvals.append(0); }
   uint64_t nMaskBytes = 0, nLayerBytes = 0, nMergeBytes = 0, nCtxBytes = 0, nFormalBytes = 0; // MLNIX_STATS: arena bytes the by-use line did not name before
   uint64_t nLookups = 0, nLookupHits = 0, nHopHist[6] = {}; // MLNIX_STATS: lookupImpl calls, those answered by a filled slot, and the frame hops to the defining region (0, 1, 2, 3, 4, 5 or more)
   llvm::DenseMap<const void *, std::pair<llvm::StringRef, std::array<uint64_t, 2>>> cellsByKind; // MLNIX_STATS: cells lookup made, by defining op: [evaluated at once, left a thunk]

@@ -404,7 +404,7 @@ int runEvalCommandIn(Options &o, bool build, EvalState &st, std::shared_ptr<nixs
     origin->path = path;
     origin->baseDir = baseDir;
     origin->text = nixfe::Source::fromString(text);
-    st.origins.push_back(origin);
+    st.origins.append(origin);
     if (o.parseOnly) {
       st.lowerToMLIR(origin); // static checks (undefined variables), like bindVars
       nixfe::ParseOptions po = st.parseOptions();

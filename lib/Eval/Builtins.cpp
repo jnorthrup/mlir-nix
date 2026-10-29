@@ -1037,7 +1037,7 @@ void registerBuiltins(EvalState &state) {
       origin->path = real;
       origin->baseDir = nixstore::dirOf(real);
       origin->text = nixfe::Source::fromString(text);
-      st.origins.push_back(origin);
+      st.origins.append(origin);
       fn = st.evalExprOp(st.lowerToMLIR(origin, &names));
       st.scopedImportCache[key] = fn;
     }
