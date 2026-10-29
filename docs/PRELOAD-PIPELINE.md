@@ -27,6 +27,21 @@ Kali, one boot, five interleaved rounds, list from a previous run (warm start):
 CPU time rises about 5-10% (toplevel 4.00 -> 4.39 s) for the speculative and handoff work; the wall time falls 14-21%. Mac: 1.56 -> 1.27 s
 (toplevel), 1.35 -> 1.14 s (nixpkgs-73). With one helper the evaluator waited for 1,152 of 2,888 files on toplevel; two helpers close most of it.
 
+## Against Nix and Lix, one boot (Kali after the 29 October reboot)
+
+One `vs-nix.py --demand` invocation per row, so Nix, Lix and mlnix run interleaved in the same window (five rounds); the prefetch trace was recorded by
+a warm-up run first. Outputs identical in every arm. The host was noisy after the reboot (Nix's own median swung 4.11 s to 4.70 s between invocations),
+so the minimum is the steadier column.
+
+| mlnix demand | min / median | Nix 2.35.4 min / median | ratio, median | ratio, min |
+|---|---|---|---:|---:|
+| nixos-toplevel, plain | 3.78 / 3.81 s | 3.93 / 4.11 s | 0.93 | 0.96 |
+| nixos-toplevel, prelowering (2 helpers) | 2.98 / 3.36 s | 3.79 / 4.70 s | 0.71 | 0.79 |
+| nixpkgs-73, plain | 3.33 / 3.77 s | 3.96 / 4.25 s | 0.89 | 0.84 |
+| nixpkgs-73, prelowering (2 helpers) | 2.87 / 2.92 s | 3.50 / 3.88 s | 0.75 | 0.82 |
+
+Warm start only. The ratio of 0.79-0.82 on the minimum is not 0.5.
+
 ## Peak memory
 
 Mac, nixos-toplevel, three runs each: peak RSS 1,182 MB plain, 1,208 MB with one helper, 1,210 MB with two (+27 MB, +2.3%).
