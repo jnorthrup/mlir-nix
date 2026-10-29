@@ -621,6 +621,16 @@ void EvalState::printStats() {
                  << nix << " end in .nix), " << litHit << " of them led to an evaluated file (precision "
                  << llvm::format("%.1f", 100.0 * litHit / std::max<size_t>(1, nixfe::pathLiterals->size())) << "%, of the .nix ones' neighbours not separated)\n";
   }
+  if (epochEvals.size() > 1) { // how the work divides among the attributes the driver visited: a serial prefix or a flat spread
+    uint64_t tot = 0, mx = 0;
+    for (uint64_t e : epochEvals) { tot += e; mx = std::max(mx, e); }
+    auto sorted = epochEvals; std::sort(sorted.begin(), sorted.end());
+    auto share = [&](size_t n) { uint64_t c = 0; for (size_t i = 0; i < n && i < epochEvals.size(); i++) c += epochEvals[i]; return 100.0 * c / tot; };
+    llvm::errs() << "== epochs (attributes visited): " << epochEvals.size() << ", " << tot << " evalOp calls; median " << sorted[sorted.size() / 2] << ", p90 " << sorted[sorted.size() * 9 / 10]
+                 << ", max " << mx << " (" << llvm::format("%.1f", 100.0 * mx / tot) << "%); share of the work in the first 1 / 10 / 100 / 10% of the epochs: "
+                 << llvm::format("%.1f", share(1)) << "% / " << llvm::format("%.1f", share(10)) << "% / " << llvm::format("%.1f", share(100)) << "% / "
+                 << llvm::format("%.1f", share(epochEvals.size() / 10)) << "%\n";
+  }
   if (nLookups) {
     llvm::errs() << "== lookupImpl: " << nLookups << " calls, " << nLookupHits << " answered by a filled slot ("
                  << llvm::format("%.1f", 100.0 * nLookupHits / nLookups) << "%); frame hops to the defining region: ";
@@ -1783,6 +1793,7 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
   if (statsEnabled) [[unlikely]] { auto &e = evalsByKind[op->getName().getAsOpaquePointer()]; e.first = op->getName().getStringRef(); ++e.second; }
   if (statsEnabled && env) {
     ++env->info->nEvals;
+    if (!epochEvals.empty()) ++epochEvals.back();
     auto it = env->info->opIdx.find(op);
     if (it != env->info->opIdx.end()) { env->info->everRan[it->second >> 6] |= 1ull << (it->second & 63); ++env->info->opEvals[it->second]; }
   }

@@ -315,6 +315,7 @@ void getDerivations(EvalState &st, Value &vIn, const std::string &prefix, const 
     if (!done.insert(v.attrs).second) return;
     for (const Attr *a : v.attrs->lexicographicOrder(st.symbols)) {
       std::string p2 = prefix.empty() ? st.symbols[a->name].str() : prefix + "." + st.symbols[a->name].str();
+      st.beginEpoch();
       if (getDerivation(st, *a->value, p2, drvs, done)) {
         if (a->value->type == VType::Attrs) {
           const Attr *r = a->value->attrs->get(st.symbols.create("recurseForDerivations"));

@@ -106,6 +106,7 @@ void EvalState::printValueAsJSON(std::ostream &out, Value &v, bool strict, NixSt
     out << "[";
     for (size_t i = 0; i < v.listSize(); i++) {
       if (i) out << ",";
+      if (callDepth <= 2) beginEpoch(); // MLNIX_STATS: an element of the top-level list is an epoch
       try {
         printValueAsJSON(out, *v.list.elems[i], strict, ctx, copyToStore, pos);
       } catch (EvalError &e) {
