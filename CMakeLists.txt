@@ -41,3 +41,6 @@ add_subdirectory(include/Composite)
 add_subdirectory(include/NixDialect)
 add_subdirectory(lib)
 add_subdirectory(tools)
+
+# The hot set of the algebra is pure and small: `ninja hot-check`.
+add_custom_target(hot-check COMMAND bash ${PROJECT_SOURCE_DIR}/scripts/hot-check.sh WORKING_DIRECTORY ${PROJECT_SOURCE_DIR} VERBATIM)

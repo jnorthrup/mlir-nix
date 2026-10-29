@@ -13,7 +13,8 @@
 #ifndef NIX_EVAL_H
 #define NIX_EVAL_H
 
-#include "Composite/Series.h"
+#include "Composite/Pool.h"
+#include "Composite/Views.h"
 #include "Nix/MLIRGen.h"
 #include "Nix/Store.h"
 #include "NixDialect/NixDialect.h"
@@ -43,6 +44,7 @@ namespace mlir { class PassManager; }
 #include <vector>
 
 #include "Composite/CharSeries.h"
+#include "Composite/StdBind.h"
 #include "Nix/Arena.h"
 
 namespace nixev {
@@ -299,9 +301,13 @@ struct EvalError : std::exception {
   composite::MutableSeries<Trace> traces;
   EvalError(std::string m, PosPtr p = nullptr) : msg(std::move(m)), pos(p) {}
   const char *what() const noexcept override { return msg.c_str(); }
-  EvalError &addTrace(PosPtr p, std::string m) {
+  EvalError &addTrace(PosPtr p, std::string m) & {
     traces.append({p, std::move(m)});
     return *this;
+  }
+  EvalError &&addTrace(PosPtr p, std::string m) && { // `throw EvalError(...).addTrace(...)`: the temporary is moved into the exception
+    traces.append({p, std::move(m)});
+    return std::move(*this);
   }
 };
 struct AssertionError : EvalError { using EvalError::EvalError; };

@@ -1,6 +1,6 @@
 // MutableSeries has one algorithm and several bodies.  This checks the algorithm on each body against the stdlib (the oracle
 // only), that a fixed body cannot do what only a growable one can (it is not there to call), and that a full fixed body says TODO.
-#include "Composite/Series.h"
+#include "Composite/Mutable.h"
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -35,7 +35,7 @@ template <class M> static void algorithm(const char *name) {
       for (uint32_t i = 0; i < m.size(); i++) require(m[i] == ref[i], "cells");
       require(m.empty() == ref.empty(), "empty");
     }
-    M copy = m; require(copy == m, "copies are equal");
+    { M moved = static_cast<M &&>(m); require(moved.size() == ref.size(), "a move keeps the cells"); m = static_cast<M &&>(moved); } // a series is move-only: a copy does not compile
     m.clear(); require(m.empty(), "clear");
   }
   std::printf("  %-18s the algorithm agrees with the stdlib on 20,000 random op sequences\n", name);

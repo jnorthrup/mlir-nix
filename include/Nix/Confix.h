@@ -15,7 +15,7 @@
 #define NIX_CONFIX_H
 
 #include "Composite/Pack.h"
-#include "Composite/Series.h"
+#include "Composite/Pool.h"
 #include "Nix/Source.h"
 #include "mlir/Support/LLVM.h"
 #include "llvm/Support/raw_ostream.h"
@@ -57,7 +57,7 @@ struct Bands {
   /// Empty the table for the source `s` and keep its storage.
   void clear(std::string_view s = {}) {
     rows.clear();
-    ends.cells.clear();
+    ends.clear();
     opening.clear();
     src = s;
   }
@@ -66,7 +66,7 @@ struct Bands {
   /// The ends of the statements of band i, in order: a view of `ends`.
   auto stmts(uint32_t i) const {
     join::TwInt s = rows.col<BandCol::Stmts>()[i];
-    return composite::series(ends.cells.data() + s.first(), s.second());
+    return composite::series(ends.data() + s.first(), s.second());
   }
   /// The band that opens at `off`, or kNone when no scan has met one there.
   uint32_t at(uint32_t off) const {
@@ -94,7 +94,7 @@ struct Layers {
     stack.pop();
     out.rows.col<BandCol::Span>()[o.row] = join::TwInt(out.span(o.row).first(), uint32_t(at));
     out.rows.col<BandCol::Stmts>()[o.row] = join::TwInt(out.ends.size(), uint32_t(pend.size() - o.from));
-    out.ends.cells.insert(out.ends.cells.end(), pend.begin() + o.from, pend.end());
+    for (uint32_t k = o.from; k < pend.size(); k++) out.ends.append(pend[k]);
     pend.resize(o.from);
     return true;
   }

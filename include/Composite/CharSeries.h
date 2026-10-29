@@ -19,9 +19,9 @@
 // <cctype>, and running past the limit is TODO().
 
 #include "Composite/Pack.h"
-#include "Composite/Series.h"
+#include "Composite/Folds.h"
+#include "Composite/Mutable.h"
 
-#include <string_view>
 
 namespace composite {
 
@@ -35,13 +35,11 @@ struct CharWindow {
 
   constexpr CharWindow() = default;
   constexpr CharWindow(const char *b, uint32_t n) : base(b), len(n) {}
-  constexpr explicit CharWindow(std::string_view s) : base(s.data()), len(uint32_t(s.size())) {}
 
   constexpr uint32_t size() const { return len; }
   constexpr char operator[](uint32_t i) const { return base[i]; }
   constexpr const char *data() const { return base; }
   constexpr auto series() const { return len |j| [b = base](uint32_t i) { return b[i]; }; }
-  constexpr std::string_view view() const { return {base, len}; }
   /// A window of this window: the same bytes, from + base.
   constexpr CharWindow operator[](join::TwInt r) const {
     if (r.first() > r.second() || r.second() > len) TODO("CharWindow outside its bounds");
@@ -56,8 +54,6 @@ struct CharSeries : CharWindow {
   constexpr CharSeries() = default;
   constexpr CharSeries(CharWindow w) : CharWindow(w), limit(w.len) {}
   constexpr CharSeries(const char *b, uint32_t n) : CharSeries(CharWindow(b, n)) {}
-  /// Any contiguous characters, viewed: the conversion is the window.
-  constexpr explicit CharSeries(std::string_view s) : CharSeries(CharWindow(s)) {}
 
   /// A window of this window, as a fresh cursor over it.
   constexpr CharSeries operator[](join::TwInt r) const { return CharSeries(CharWindow::operator[](r)); }
@@ -126,8 +122,6 @@ struct CharSeries : CharWindow {
     return firstWhere(iota(a.rem()), [&](uint32_t i) { return ra[i] != rb[i]; }) == a.rem();
   }
 
-  /// The gate: the characters between pos and limit, as a std::string_view for an API that wants one.
-  constexpr std::string_view view() const { return {data() + pos, rem()}; }
   /// The window between pos and limit, without the cursor.
   constexpr CharWindow window() const { return CharWindow(data() + pos, rem()); }
 };
@@ -137,7 +131,7 @@ inline auto split(const CharSeries &s, char delim) {
   MutableSeries<uint32_t> cuts;
   fold(iota(s.size()), 0u, [&](uint32_t, uint32_t i) { if (s[i] == delim) cuts.append(i); return 0u; });
   uint32_t parts = cuts.size() + 1;
-  return parts |j| [s, cuts = std::move(cuts)](uint32_t k) {
+  return parts |j| [s, cuts = mv(cuts)](uint32_t k) {
     uint32_t from = k == 0 ? 0 : cuts[k - 1] + 1, to = k == cuts.size() ? s.size() : cuts[k];
     return s[join::TwInt(from, to)];
   };
@@ -208,8 +202,13 @@ template <> constexpr text::Counts facet<text::Evidence>(const CharSeries &s) {
 }
 template <> constexpr text::Memento facet<text::Deduced>(const CharSeries &s) {
   if (s.rem() == 0) return text::Memento::Empty;
-  std::string_view v = s.view();
-  if (v == "true" || v == "false") return text::Memento::Bool;
+  const char *v = s.data() + s.pos;
+  auto is = [&](const char *word, uint32_t n) {
+    if (s.rem() != n) return false;
+    for (uint32_t i = 0; i < n; i++) if (v[i] != word[i]) return false;
+    return true;
+  };
+  if (is("true", 4) || is("false", 5)) return text::Memento::Bool;
   text::Counts k = facet<text::Evidence>(s);
   uint32_t lead = v[0] == '+' || v[0] == '-' ? 1 : 0;
   if (k.digits == 0 || k.whitespace || k.quotes || k.other || k.alpha > k.exponent) return text::Memento::String;

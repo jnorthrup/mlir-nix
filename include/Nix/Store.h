@@ -11,7 +11,7 @@
 
 #include <cstdint>
 
-#include "Composite/Series.h"
+#include "Composite/Mutable.h"
 #include <functional>
 #include <map>
 #include <optional>
@@ -149,6 +149,18 @@ struct Derivation {
   composite::MutableSeries<std::string> args;
   std::map<std::string, std::string> env;
   std::optional<std::string> structuredAttrs; // JSON text (env "__json")
+
+  Derivation() = default;
+  Derivation(Derivation &&) = default;
+  Derivation &operator=(Derivation &&) = default;
+  /// A derivation is cached and read back by value, so a copy is part of its meaning; the arguments are copied cell by cell, spelled out.
+  Derivation(const Derivation &o)
+      : name(o.name), outputs(o.outputs), inputDrvs(o.inputDrvs), inputSrcs(o.inputSrcs), platform(o.platform), builder(o.builder),
+        env(o.env), structuredAttrs(o.structuredAttrs) { for (const std::string &a : o.args) args.append(a); }
+  Derivation &operator=(const Derivation &o) {
+    if (this != &o) { Derivation t(o); *this = static_cast<Derivation &&>(t); }
+    return *this;
+  }
 
   bool isFixed() const;
   std::string unparse(bool maskOutputs,

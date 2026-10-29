@@ -1,5 +1,5 @@
 //===- ScalarJIT.cpp - Nix sea of nodes -> typed MLIR -> LLVM -> native -------===//
-#include "Composite/Series.h"
+#include "Composite/Mutable.h"
 #include "Nix/ScalarJIT.h"
 #include "Nix/Eval.h"
 #include "Nix/LazyJIT.h"

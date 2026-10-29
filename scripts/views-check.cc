@@ -1,6 +1,9 @@
 // take/drop/takeLast/dropLast/reversed/erased/inserted are O(1) views: they equal what the stdlib's mutation would produce, they
 // compose, the original is untouched, and the constant-size forms carry their size in the type.  The stdlib is the oracle only.
-#include "Composite/Series.h"
+#include "Composite/Folds.h"
+#include "Composite/Mutable.h"
+#include "Composite/Views.h"
+#include "Composite/Laws.h" // the self-tests of the algebra
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -25,7 +28,7 @@ int main() {
   for (int round = 0; round < 20000; round++) {
     uint32_t n = rng() % 9, k = rng() % 12, at = rng() % 12; int v = int(rng() % 1000);
     MutableSeries<int> m; for (uint32_t i = 0; i < n; i++) m.append(int(rng() % 1000));
-    std::vector<int> ref(m.cells);
+    std::vector<int> ref(m.begin(), m.end());
     auto view = m.view();
     auto eq = [&](const std::vector<int> &want, const auto &got, const char *what) { require(list(got) == want, what); };
     { auto w = ref; w.resize(std::min<size_t>(k, w.size())); eq(w, take(view, k), "take"); }
@@ -38,7 +41,7 @@ int main() {
     // views compose: the middle of a list, reversed, with a row spliced out and another in
     { auto w = ref; if (w.size() > 2) { w.erase(w.begin()); w.pop_back(); } else w.clear(); std::reverse(w.begin(), w.end());
       auto c = reversed(dropLast(drop(view, 1), 1)); if (ref.size() > 2) eq(w, c, "composition"); }
-    require(m.cells == ref, "the original is untouched");
+    require(std::vector<int>(m.begin(), m.end()) == ref, "the original is untouched");
   }
   std::puts("PASS views: take/drop/takeLast/dropLast/reversed/erased/inserted vs the stdlib on 20,000 random cuts; constant sizes in the type");
 }

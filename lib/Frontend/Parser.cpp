@@ -12,7 +12,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "Composite/Series.h"
+#include "Composite/Views.h"
 #include "Composite/Pack.h"
 #include "Nix/Confix.h"
 #include "Nix/LexRules.h"
@@ -670,7 +670,13 @@ struct Parser {
     minting = true;
     topBlock = &lam.getBody().front(); // anchored constants (builtins, true/false/null) head the body
     mlir::OperandRange caps = lam.getCaptures();
-    auto [at, pos, op, withs, names, anchor] = pool.rows.row(row); // copied: the pool grows while the body mints
+    // read out of the columns, by value: the pool grows while the body mints
+    uint32_t at = pool.rows.col<PoolCol::At>()[row];
+    Pos pos = pool.rows.col<PoolCol::AtPos>()[row];
+    mlir::Operation *op = pool.rows.col<PoolCol::Op>()[row];
+    uint32_t withs = pool.rows.col<PoolCol::Withs>()[row];
+    ::join::TwInt names = pool.rows.col<PoolCol::Names>()[row];
+    nixev::RegionInfo *anchor = pool.rows.col<PoolCol::Body>()[row];
     Scope lex;
     for (uint32_t i = 0; i < names.second(); i++) bindTo(lex, Name::of(pool.nameCol[names.first() + i]), caps[withs + i]);
     // `with` never binds lexically and a lexical binding beats every `with`, so the flat map plus the with-chain
@@ -871,10 +877,10 @@ struct Parser {
   }
   /// The cell of `n` (hash h) in scope s, or null.
   Value *lookup(Scope &s, const Name &n, uint32_t h) {
-    const auto &hs = binds.col<BindCol::Hash>().cells;
-    const auto &ks = binds.col<BindCol::Key>().cells;
+    const auto &hs = binds.col<BindCol::Hash>();
+    const auto &ks = binds.col<BindCol::Key>();
     for (uint32_t i = s.rows.first(), e = i + s.rows.second(); i < e; i++)
-      if (hs[i] == h && sameName(ks[i], n)) return &binds.col<BindCol::Val>().cells[i];
+      if (hs[i] == h && sameName(ks[i], n)) return &binds.col<BindCol::Val>()[i];
     return nullptr;
   }
   /// Bind `n` in s to v, again if s binds it already.  The rows of a scope are one run: a scope is bound before the

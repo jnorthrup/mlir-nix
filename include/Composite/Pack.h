@@ -23,16 +23,13 @@
 #ifndef COMPOSITE_PACK_H
 #define COMPOSITE_PACK_H
 
-#include <bit>
-#include <compare>
-#include <concepts>
-#include <cstdint>
-#include <cstddef>
-#include <tuple>
-#include <type_traits>
-#include <utility>
+#include "Composite/Core.h"
 
 namespace join {
+COMPOSITE_TYPES
+using composite::Enum;
+using composite::SignedInteger;
+using composite::UnsignedInteger;
 
 template <unsigned N> struct Bits {
   static_assert(N >= 1 && N <= 64, "a field is one machine word at most");
@@ -40,18 +37,18 @@ template <unsigned N> struct Bits {
   uint64_t v = 0;
   constexpr Bits() = default;
   constexpr explicit Bits(uint64_t x) : v(x & mask) {}
-  constexpr auto operator<=>(const Bits &) const = default;
+  COMPOSITE_ORDER(Bits, v)
 };
 
 template <class T> struct Width;
-template <std::unsigned_integral T> struct Width<T> {
+template <UnsignedInteger T> struct Width<T> {
   static constexpr unsigned value = sizeof(T) * 8;
 };
 template <unsigned N> struct Width<Bits<N>> {
   static constexpr unsigned value = N;
 };
 /// A signed integer is its own width; its field order is the numeric order (see Field).
-template <std::signed_integral T> struct Width<T> {
+template <SignedInteger T> struct Width<T> {
   static constexpr unsigned value = sizeof(T) * 8;
 };
 /// A bool is one bit.
@@ -59,8 +56,8 @@ template <> struct Width<bool> {
   static constexpr unsigned value = 1;
 };
 /// An enum is its underlying integer; a pointer is a machine word.
-template <class E> requires std::is_enum_v<E> struct Width<E> {
-  static constexpr unsigned value = Width<std::underlying_type_t<E>>::value;
+template <Enum E> struct Width<E> {
+  static constexpr unsigned value = Width<composite::underlying_t<E>>::value;
 };
 template <class T> struct Width<T *> {
   static constexpr unsigned value = 64;
@@ -80,11 +77,11 @@ template <class A, class B> struct Width<Dense<A, B>> {
 
 namespace detail {
 using u128 = unsigned __int128;
-template <unsigned W> using RawOf = std::conditional_t<(W <= 64), uint64_t, u128>;
+template <unsigned W> using RawOf = composite::pick_t<(W <= 64), uint64_t, u128>;
 
 /// How a field goes into a raw word and comes back out of it.
 template <class T> struct Field;
-template <std::unsigned_integral T> struct Field<T> {
+template <UnsignedInteger T> struct Field<T> {
   template <class R> static constexpr R put(T x) { return R(x); }
   template <class R> static constexpr T get(R r) { return T(r); }
 };
@@ -94,14 +91,14 @@ template <unsigned N> struct Field<Bits<N>> {
 };
 /// A signed integer travels with its sign bit flipped, so the unsigned compare of the packed word is the numeric compare of
 /// the field (-1 sorts below 0), and a Dense of signed fields orders as the tuple does.
-template <std::signed_integral T> struct Field<T> {
-  using U = std::make_unsigned_t<T>;
+template <SignedInteger T> struct Field<T> {
+  using U = composite::unsigned_of_t<T>;
   static constexpr U sign = U(U(1) << (sizeof(T) * 8 - 1));
   template <class R> static constexpr R put(T x) { return R(U(U(x) ^ sign)); }
   template <class R> static constexpr T get(R r) { return T(U(U(r) ^ sign)); }
 };
-template <class E> requires std::is_enum_v<E> struct Field<E> {
-  using U = std::underlying_type_t<E>;
+template <Enum E> struct Field<E> {
+  using U = composite::underlying_t<E>;
   template <class R> static constexpr R put(E x) { return Field<U>::template put<R>(U(x)); }
   template <class R> static constexpr E get(R r) { return E(Field<U>::template get<R>(r)); }
 };
@@ -111,12 +108,12 @@ template <class T> struct Field<T *> {
 };
 /// Floats travel as their bits.
 template <> struct Field<float> {
-  template <class R> static constexpr R put(float x) { return R(std::bit_cast<uint32_t>(x)); }
-  template <class R> static constexpr float get(R r) { return std::bit_cast<float>(uint32_t(r)); }
+  template <class R> static constexpr R put(float x) { return R(__builtin_bit_cast(uint32_t, x)); }
+  template <class R> static constexpr float get(R r) { return __builtin_bit_cast(float, uint32_t(r)); }
 };
 template <> struct Field<double> {
-  template <class R> static constexpr R put(double x) { return R(std::bit_cast<uint64_t>(x)); }
-  template <class R> static constexpr double get(R r) { return std::bit_cast<double>(uint64_t(r)); }
+  template <class R> static constexpr R put(double x) { return R(__builtin_bit_cast(uint64_t, x)); }
+  template <class R> static constexpr double get(R r) { return __builtin_bit_cast(double, uint64_t(r)); }
 };
 template <class A, class B> struct Field<Dense<A, B>> {
   template <class R> static constexpr R put(Dense<A, B> x) { return R(x.raw); }
@@ -137,7 +134,7 @@ template <class A, class B> struct Dense {
   constexpr explicit Dense(Raw r) : raw(r & mask) {}
   constexpr A first() const { return detail::Field<A>::template get<Raw>(raw >> width<B>); }
   constexpr B second() const { return detail::Field<B>::template get<Raw>(raw); }
-  constexpr auto operator<=>(const Dense &) const = default;
+  COMPOSITE_ORDER(Dense, raw)
 };
 
 /// The constructor combinator: the fields in order, the first in the high bits, nested to the right.
@@ -158,7 +155,7 @@ template <class T> concept Packable = requires { Width<T>::value; };
 template <class A, class B> concept PacksInARegister = Packable<A> && Packable<B> && (width<A> + width<B> <= 64);
 
 /// Structured bindings, as a Join has: `auto [x, y] = a |j| b` reads both sides whether the pair was packed or not.
-template <std::size_t I, class A, class B> constexpr auto get(const Dense<A, B> &d) {
+template <size_t I, class A, class B> constexpr auto get(const Dense<A, B> &d) {
   if constexpr (I == 0) return d.first(); else return d.second();
 }
 
@@ -189,9 +186,5 @@ static_assert(dense(Bits<1>(1), Bits<19>(7), Bits<24>(11), Bits<20>(13)).second(
 
 } // namespace join
 
-namespace std {
-template <class A, class B> struct tuple_size<join::Dense<A, B>> : integral_constant<size_t, 2> {};
-template <size_t I, class A, class B> struct tuple_element<I, join::Dense<A, B>> { using type = conditional_t<I == 0, A, B>; };
-} // namespace std
 
 #endif

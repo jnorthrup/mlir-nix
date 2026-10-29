@@ -6,7 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "Composite/Series.h"
+#include "Composite/Mutable.h"
 #include "Nix/Confix.h"
 #include "Nix/LexRules.h"
 

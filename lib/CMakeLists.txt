@@ -48,13 +48,17 @@ if(URING_INCLUDE_DIR AND URING_LIBRARY)
   target_link_libraries(NixStore PUBLIC ${URING_LIBRARY} pthread)
 endif()
 llvm_update_compile_flags(NixStore)
+# The hot set of the TrikeShed algebra (include/Composite/Hot.h) is the one precompiled package; scripts/hot-check.sh holds it pure.
+target_precompile_headers(NixStore PRIVATE ${PROJECT_SOURCE_DIR}/include/Composite/Hot.h)
 
 add_library(NixFrontend STATIC Frontend/Parser.cpp Frontend/Source.cpp Frontend/Confix.cpp)
 add_dependencies(NixFrontend MLIRNixOpsIncGen TrikeShedIncGen)
 target_link_libraries(NixFrontend PUBLIC MLIRNix MLIRIR)
 llvm_update_compile_flags(NixFrontend)
+target_precompile_headers(NixFrontend PRIVATE ${PROJECT_SOURCE_DIR}/include/Composite/Hot.h)
 
 add_library(NixEval STATIC Eval/Eval.cpp Eval/Builtins.cpp Eval/StoreBuiltins.cpp Eval/Formats.cpp Eval/EvalModels.cpp Eval/ScalarJIT.cpp Eval/LazyJIT.cpp)
+target_precompile_headers(NixEval PRIVATE ${PROJECT_SOURCE_DIR}/include/Composite/Hot.h)
 add_dependencies(NixEval MLIRNixOpsIncGen TrikeShedIncGen)
 target_link_libraries(NixEval PUBLIC NixFrontend NixStore MLIRNix MLIRIR MLIRParser MLIRPass)
 target_link_libraries(NixEval PRIVATE MLIRArithDialect MLIRControlFlowDialect MLIRFuncDialect MLIRLLVMDialect

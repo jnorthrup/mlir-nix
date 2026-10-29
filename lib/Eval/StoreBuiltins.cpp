@@ -1,6 +1,6 @@
 //===- StoreBuiltins.cpp - Builtins that touch the store / file system ----===//
 
-#include "Composite/Series.h"
+#include "Composite/Mutable.h"
 #include "Nix/Prefetch.h"
 #include "Nix/Eval.h"
 

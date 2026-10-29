@@ -1,9 +1,11 @@
 // MutableSeries::freeze: the handle is promoted to a const Series by a move (same buffer, source left empty); a copy of the frozen
 // body and the freeze of a named series are compile errors; a known-size array freezes with no heap.  Build like minmax-check.cc.
-#include "Composite/Series.h"
+#include "Composite/Folds.h"
+#include "Composite/Mutable.h"
 #include <cstdio>
 #include <cstdlib>
 #include <type_traits>
+#include <utility>
 using namespace composite;
 static_assert(!std::is_copy_constructible_v<Cells<int>>, "a frozen body must not be copyable");
 static_assert(std::is_move_constructible_v<Cells<int>>, "a frozen body moves");

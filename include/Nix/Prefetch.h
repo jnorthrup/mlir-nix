@@ -15,7 +15,7 @@
 #ifndef NIX_PREFETCH_H
 #define NIX_PREFETCH_H
 
-#include "Composite/Series.h"
+#include "Composite/Mutable.h"
 
 #include <string>
 

@@ -1,6 +1,6 @@
 //===- StorePaths.cpp - NAR, store paths, ATerm derivations, utilities ----===//
 
-#include "Composite/Series.h"
+#include "Composite/Mutable.h"
 #include "Nix/Prefetch.h"
 #include "Nix/Store.h"
 

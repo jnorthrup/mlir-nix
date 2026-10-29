@@ -3,7 +3,7 @@
 #include <sys/resource.h>
 #include <deque>
 #include <map>
-#include "Composite/Series.h"
+#include "Composite/Mutable.h"
 #include "Nix/Prefetch.h"
 #include <bit>
 #include <fstream>
@@ -170,7 +170,7 @@ Bindings *EvalState::updateAttrs(Bindings *a, Bindings *b) {
     auto rb = a->rows();
     auto rt = b->rows();
     uint32_t nb = uint32_t(baseSize), nt = uint32_t(b->size_);
-    L->sel.words.cells.reserve(size_t(nb) + nt);
+    L->sel.words.reserve(size_t(nb) + nt);
     uint32_t i = 0, j = 0;
     bool haveB = nb > 0, haveT = nt > 0;
     Symbol bn{}, tn{};
@@ -350,7 +350,7 @@ void EvalState::printStats() {
   if (scalarJIT) scalarJIT->printStats();
   llvm::errs() << "attribute cells: bytes=" << sizeof(Attr)
                << " position_rows=" << attributePositions.size()
-               << " position_bytes=" << attributePositions.cells.capacity() * sizeof(PosPtr) << "\n";
+               << " position_bytes=" << attributePositions.capacity() * sizeof(PosPtr) << "\n";
   llvm::errs() << "frame allocations: count=" << nFrames << " bytes=" << nFrameBytes
                << " slots=" << nFrameSlots << " touched=" << nSlotsTouched
                << llvm::format(" (%.1f%% of the slots a frame carries are ever read)", nFrameSlots ? 100.0 * nSlotsTouched / nFrameSlots : 0.0) << '\n';
@@ -633,7 +633,9 @@ void EvalState::printStats() {
   if (epochEvals.size() > 1) { // how the work divides among the attributes the driver visited: a serial prefix or a flat spread
     uint64_t tot = 0, mx = 0;
     for (uint64_t e : epochEvals) { tot += e; mx = std::max(mx, e); }
-    auto sorted = epochEvals; std::sort(sorted.begin(), sorted.end());
+    composite::MutableSeries<uint64_t> sorted;
+    for (uint64_t e : epochEvals) sorted.append(e);
+    std::sort(sorted.begin(), sorted.end());
     auto share = [&](size_t n) { uint64_t c = 0; for (size_t i = 0; i < n && i < epochEvals.size(); i++) c += epochEvals[i]; return 100.0 * c / tot; };
     llvm::errs() << "== epochs (attributes visited): " << epochEvals.size() << ", " << tot << " evalOp calls; median " << sorted[sorted.size() / 2] << ", p90 " << sorted[sorted.size() * 9 / 10]
                  << ", max " << mx << " (" << llvm::format("%.1f", 100.0 * mx / tot) << "%); share of the work in the first 1 / 10 / 100 / 10% of the epochs: "
@@ -1707,7 +1709,7 @@ PosIdx EvalState::positionIndex(PosPtr pos) {
   if (!pos) return 0;
   auto it = dynamicPositions.find(pos);
   if (it != dynamicPositions.end()) return it->second;
-  if (attributePositions.cells.size() >= std::numeric_limits<PosIdx>::max())
+  if (attributePositions.size() >= std::numeric_limits<PosIdx>::max())
     throw EvalError("attribute position table exhausted");
   PosIdx index = attributePositions.append(pos);
   dynamicPositions.emplace(pos, index);
@@ -1720,7 +1722,7 @@ PosIdx EvalState::positionBase(nd::AttrsOp op) {
   if (!count) return 0;
   auto it = attrPositionBases.find(op.getOperation());
   if (it != attrPositionBases.end()) return it->second;
-  if (count > std::numeric_limits<PosIdx>::max() - attributePositions.cells.size())
+  if (count > std::numeric_limits<PosIdx>::max() - attributePositions.size())
     throw EvalError("attribute position table exhausted");
   PosIdx base = attributePositions.size();
   for (size_t i = 0; i < count; ++i)
@@ -1855,7 +1857,7 @@ void EvalState::evalConcatStrings(nd::ConcatStringsOp op, Frame *env, Value &out
       throw EvalError("a string that refers to a store path cannot be appended to a path", pos);
     std::string str;
     str.reserve(total);
-    for (size_t k = 0; k < nv; k++) str += views[k].view();
+    for (size_t k = 0; k < nv; k++) str += composite::view(views[k]);
     return mkPath(out, nixfe::canonPath(str));
   }
   mkStringOf(out, llvm::ArrayRef<composite::CharWindow>(views, nv), makeContext(context));
@@ -2075,7 +2077,7 @@ composite::CharWindow EvalState::coerceToWindow(Value &v, NixStringContext &ctx,
     return v.window();
   }
   scratch = coerceToString(v, ctx, coerceMore, copyToStore, pos, errorCtx, canonicalizePath);
-  return composite::CharWindow(std::string_view(scratch));
+  return composite::window(std::string_view(scratch));
 }
 
 std::string EvalState::coerceToString(Value &v, NixStringContext &ctx, bool coerceMore, bool copyToStore,
@@ -2476,7 +2478,7 @@ nd::ExprOp EvalState::lowerToMLIR(std::shared_ptr<nixfe::Origin> origin, const c
   }
   if (scopeNames) {
     go.scoped = true;
-    go.scopeNames = *scopeNames;
+    for (const std::string &nm : *scopeNames) go.scopeNames.append(nm);
   }
   std::string sym = "expr" + std::to_string(exprCounter++);
   auto t0 = std::chrono::steady_clock::now();
@@ -2889,7 +2891,8 @@ std::string formatError(EvalState *state, const EvalError &e) {
   std::string out;
   // Traces are printed outermost first.
   if (state && state->settings.showTrace) {
-    for (auto it = e.traces.rbegin(); it != e.traces.rend(); ++it) {
+    for (auto *it = e.traces.end(); it != e.traces.begin();) {
+      --it;
       out += "\n       … " + it->msg;
       if (auto f = nd::decodePos(it->pos)) {
         appendPos(out, state, f->file, f->line, f->col);

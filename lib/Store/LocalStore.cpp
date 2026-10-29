@@ -13,7 +13,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "Composite/Series.h"
+#include "Composite/Mutable.h"
 #include "Nix/Store.h"
 
 #include <algorithm>
@@ -325,7 +325,8 @@ void Store::fillInOutputPaths(Derivation &drv) {
 
 std::set<std::string> Store::computeFSClosure(const std::set<std::string> &paths, bool includeOutputs) {
   std::set<std::string> res;
-  composite::MutableSeries<std::string> todo(paths.begin(), paths.end());
+  composite::MutableSeries<std::string> todo;
+  for (const auto &pth : paths) todo.append(pth);
   while (!todo.empty()) {
     std::string p = todo.back();
     todo.pop();
@@ -502,7 +503,8 @@ void Store::runBuilder(const std::string &drvPath, const Derivation &drv,
   const char *tmp = getenv("TMPDIR");
   std::string tmpBase = tmp && *tmp ? tmp : "/tmp";
   std::string tmpl = tmpBase + "/nix-build-" + drv.name + "-XXXXXX";
-  composite::MutableSeries<char> buf(tmpl.begin(), tmpl.end());
+  composite::MutableSeries<char> buf;
+  for (char ch : tmpl) buf.append(ch);
   buf.append('\0');
   if (!mkdtemp(buf.data())) throw Error("creating build directory: " + std::string(strerror(errno)));
   std::string top = buf.data();

@@ -7,7 +7,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "Composite/Series.h"
+#include "Composite/Mutable.h"
 #include "Nix/Prefetch.h"
 #include "Nix/Eval.h"
 #include "Nix/MLIRGen.h"
@@ -193,7 +193,8 @@ void finishOptions(Options &o) {
     o.eval.currentSystem = sys ? sys : defaultSystem();
   }
   // NIX_PATH and -I.
-  for (auto it = o.includes.rbegin(); it != o.includes.rend(); ++it) {
+  for (auto *it = o.includes.end(); it != o.includes.begin();) {
+    --it;
     auto v = parseNixPath(*it);
     o.eval.nixPath.insert(o.eval.nixPath.begin(), v.begin(), v.end());
   }
@@ -803,7 +804,8 @@ int realMain(int argc, char **argv) {
   if (cmd == "instantiate") return cmdInstantiate(argc, argv, 2, false);
   if (cmd == "build") return cmdInstantiate(argc, argv, 2, true);
   if (cmd == "eval" || cmd == "parse" || cmd == "emit-mlir" || cmd == "run-mlir") {
-    composite::MutableSeries<char *> args(argv, argv + argc);
+    composite::MutableSeries<char *> args;
+    for (int ai = 0; ai < argc; ai++) args.append(argv[ai]);
     std::vector<std::string> extra;
     if (cmd == "eval") extra = {"--eval", "--strict"};
     if (cmd == "parse") extra = {"--parse"};

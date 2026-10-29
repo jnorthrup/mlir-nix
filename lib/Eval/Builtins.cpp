@@ -1,7 +1,7 @@
 //===- Builtins.cpp - The Nix builtins (language-level) -------------------===//
 
 #include <deque>
-#include "Composite/Series.h"
+#include "Composite/Mutable.h"
 #include "Nix/Eval.h"
 
 #include "mlir/IR/BuiltinAttributes.h"
@@ -92,7 +92,7 @@ static std::regex &getRegex(EvalState &st, const std::string &re, PosPtr pos) {
 /// A string result that is `w`, a window on the bytes of `arg` when the argument was a string: those bytes and its context are shared,
 /// nothing is copied.  Any other argument was coerced into text of its own, so the result is made from it with `ctx`.
 static void mkSharedString(EvalState &st, Value &v, const Value &arg, composite::CharWindow w, const NixStringContext &ctx) {
-  if (arg.type != VType::String) return st.mkString(v, w.view(), ctx);
+  if (arg.type != VType::String) return st.mkString(v, composite::view(w), ctx);
   v.type = VType::String;
   v.str.s = w.data();
   v.aux = w.size();
@@ -398,7 +398,7 @@ void registerBuiltins(EvalState &state) {
     }
     NixStringContext ctx;
     std::string scratch;  // only a coerced argument (a path, a set) gets here: a string was shared above
-    std::string_view s = st.coerceToWindow(*args[2], ctx, false, true, pos, "while evaluating the third argument (the string) passed to builtins.substring", scratch).view();
+    std::string_view s = composite::view(st.coerceToWindow(*args[2], ctx, false, true, pos, "while evaluating the third argument (the string) passed to builtins.substring", scratch));
     size_t l = len < 0 ? std::string::npos : (size_t)len;
     st.mkString(v, (uint64_t)start >= s.size() ? "" : s.substr(start, l), ctx);
   });
@@ -411,7 +411,7 @@ void registerBuiltins(EvalState &state) {
     llvm::SmallVector<composite::CharWindow, 16> pieces;
     std::deque<std::string> owned;
     for (size_t i = 0; i < args[1]->listSize(); i++) {
-      if (i) pieces.push_back(composite::CharWindow(sep));  // a window on the separator's own arena bytes
+      if (i) pieces.push_back(composite::window(sep));  // a window on the separator's own arena bytes
       Value &e = *args[1]->list.elems[i];
       st.forceValue(e, pos);
       owned.emplace_back();
@@ -465,7 +465,7 @@ void registerBuiltins(EvalState &state) {
     std::regex &regex = getRegex(st, re, pos);
     NixStringContext ctx;
     std::string scratch;
-    auto s = st.coerceToWindow(*args[1], ctx, false, true, pos, "while evaluating the second argument passed to builtins.match", scratch).view();
+    auto s = composite::view(st.coerceToWindow(*args[1], ctx, false, true, pos, "while evaluating the second argument passed to builtins.match", scratch));
     std::cmatch m;
     if (!std::regex_match(s.data(), s.data() + s.size(), m, regex)) { st.mkNull(v); return; }
     st.mkList(v, uint32_t(m.size() - 1) |cp::j| [&](uint32_t i) { return groupValue(st, m[i + 1]); });
@@ -475,7 +475,7 @@ void registerBuiltins(EvalState &state) {
     std::regex &regex = getRegex(st, re, pos);
     NixStringContext ctx;
     std::string scratch;
-    auto s = st.coerceToWindow(*args[1], ctx, false, true, pos, "while evaluating the second argument passed to builtins.split", scratch).view();
+    auto s = composite::view(st.coerceToWindow(*args[1], ctx, false, true, pos, "while evaluating the second argument passed to builtins.split", scratch));
     auto begin = std::cregex_iterator(s.data(), s.data() + s.size(), regex);
     auto end = std::cregex_iterator();
     composite::MutableSeries<Value *> out;
@@ -529,7 +529,7 @@ void registerBuiltins(EvalState &state) {
     NixStringContext ctx;
     std::string scratch;
     auto w = st.coerceToWindow(*args[0], ctx, false, false, pos, "while evaluating the first argument passed to builtins.baseNameOf", scratch);
-    std::string_view p = w.view();
+    std::string_view p = composite::view(w);
     uint32_t from = 0, to = 0;
     if (!p.empty()) {
       size_t last = p.size() - 1;
@@ -550,7 +550,7 @@ void registerBuiltins(EvalState &state) {
     NixStringContext ctx;
     std::string scratch;
     auto w = st.coerceToWindow(*args[0], ctx, false, false, pos, "while evaluating the first argument passed to 'builtins.dirOf'", scratch);
-    auto slash = w.view().rfind('/');
+    auto slash = composite::view(w).rfind('/');
     if (slash == std::string_view::npos) return st.mkString(v, ".", ctx);
     mkSharedString(st, v, *args[0], w.CharWindow::operator[](join::TwInt(0, slash == 0 ? 1 : uint32_t(slash))), ctx);
   });
@@ -572,7 +572,7 @@ void registerBuiltins(EvalState &state) {
     std::string scratch;
     auto w = st.coerceToWindow(*args[0], ctx, false, true, pos, "", scratch);
     for (auto &c : ctx) out.insert(c[0] == '=' ? c.substr(1) : c);
-    st.mkString(v, w.view(), out);
+    st.mkString(v, composite::view(w), out);
   });
   S.addPrimOp("__addDrvOutputDependencies", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
     NixStringContext ctx;
@@ -973,7 +973,8 @@ void registerBuiltins(EvalState &state) {
     composite::MutableSeries<Value *> res;
     auto cmp = [&](Value *a, Value *b) { return st.lessThan(*a, *b, pos); };
     std::set<Value *, decltype(cmp)> done(cmp);
-    composite::MutableSeries<Value *> queue(ss->value->list.elems, ss->value->list.elems + ss->value->listSize());
+    composite::MutableSeries<Value *> queue;
+    for (size_t k = 0, nk = ss->value->listSize(); k < nk; k++) queue.append(ss->value->list.elems[k]);
     size_t qi = 0;
     while (qi < queue.size()) {
       Value *e = queue[qi++];
@@ -994,10 +995,10 @@ void registerBuiltins(EvalState &state) {
 
   // -- Environment -----------------------------------------------------------
   S.addPrimOp("__getEnv", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
-    composite::CharSeries name{st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.getEnv")};
+    composite::CharSeries name = composite::cseries(st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.getEnv"));
     // A whole arena string is its own C string (copyString terminates it); only a window that is not followed by its NUL is copied.
     std::string copy;
-    const char *cname = composite::facet<composite::text::Terminated>(name) ? name.data() : (copy = std::string(name.view())).c_str();
+    const char *cname = composite::facet<composite::text::Terminated>(name) ? name.data() : (copy = std::string(composite::view(name))).c_str();
     const char *e = st.settings.pureEval ? nullptr : getenv(cname);
     st.mkString(v, e ? e : "");
   });

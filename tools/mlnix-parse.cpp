@@ -77,8 +77,8 @@ int main(int argc, char **argv) {
       origin->baseDir = ".";
       origin->text = text;
       nixfe::confix::Bands viaScan, viaLex;
-      viaScan.rows.col<0>().cells.reserve(text->view().size() / 48 + 16); // as the scan would, outside its time
-      viaScan.rows.col<1>().cells.reserve(text->view().size() / 48 + 16);
+      viaScan.rows.col<0>().reserve(text->view().size() / 48 + 16); // as the scan would, outside its time
+      viaScan.rows.col<1>().reserve(text->view().size() / 48 + 16);
       auto t0 = clock::now();
       bool okScan = nixfe::confix::scan(text->view(), viaScan);
       auto t1 = clock::now();

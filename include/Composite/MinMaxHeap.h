@@ -10,11 +10,8 @@
 // swap displaces -- the slop cache.  Nothing here allocates.  The size bounds
 // below cover each unit, not the residency of a whole bucket array in L1.
 
-#include <array>
-#include <bit>
-#include <cstdint>
-
-#include "Composite/Series.h"
+#include "Composite/Folds.h"
+#include "Composite/Mutable.h"
 
 // COMPOSITE_PEDANTIC selects how the kernels below are written; the algorithm, its comparisons and its output are the same.
 //   1  pedantic: every walk is a transform over a Series (fold, foldN, argMin, vec<N>): PRELOAD's form, no loop written.
@@ -64,7 +61,7 @@ static_assert(sizeof(InodeRow) == 16);
 template <class Row, unsigned N>
 struct MinMaxHeap {
   static_assert((N & (N + 1)) == 0, "N is one less than a power of two (level-clean)");
-  static constexpr uint32_t kLevels = std::bit_width(N);
+  static constexpr uint32_t kLevels = (N ? 32 - __builtin_clz(N) : 0);
   MutableSeries<Row, Inline<Row, N>> a;  // the rows in heap order: an inline body, no heap
 
   constexpr uint32_t size() const { return a.size(); }

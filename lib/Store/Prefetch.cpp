@@ -1,6 +1,6 @@
 //===- Prefetch.cpp - Record and replay the file accesses of an evaluation ---------===//
 
-#include "Composite/Series.h"
+#include "Composite/Mutable.h"
 #include "Nix/Prefetch.h"
 
 #include <atomic>

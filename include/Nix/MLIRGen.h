@@ -8,7 +8,7 @@
 #define NIX_MLIRGEN_H
 
 #include "Composite/Pack.h"
-#include "Composite/Series.h"
+#include "Composite/Pool.h"
 #include "Nix/Confix.h"
 #include "Nix/Source.h"
 #include "NixDialect/NixDialect.h"

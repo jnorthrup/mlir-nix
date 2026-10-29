@@ -5,7 +5,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "Composite/Series.h"
+#include "Composite/Mutable.h"
 #include "Nix/Store.h"
 
 #include <cmath>
@@ -23,6 +23,15 @@ struct JV {
   std::string raw; // number text or string value
   composite::MutableSeries<JV> arr;
   std::map<std::string, JV> obj;
+  JV() = default;
+  JV(JV &&) = default;
+  JV &operator=(JV &&) = default;
+  /// A JSON value is copied into its parent; the array is copied cell by cell, spelled out.
+  JV(const JV &o) : t(o.t), b(o.b), raw(o.raw), obj(o.obj) { for (const JV &x : o.arr) arr.append(x); }
+  JV &operator=(const JV &o) {
+    if (this != &o) { JV c(o); *this = static_cast<JV &&>(c); }
+    return *this;
+  }
 };
 
 struct P {
