@@ -798,7 +798,6 @@ struct EvalState {
   uint64_t nMatchCalls = 0; llvm::StringMap<uint64_t> matchPairs; // MLNIX_STATS: builtins.match calls, by (regex, input)
   llvm::StringMap<Value> matchMemo; // builtins.match's answers, keyed by the pattern's length and bytes, then the input's
   std::string matchKey;             // the key of the call at hand, built here so a lookup allocates nothing
-  bool regexCheck = getenv("MLNIX_REGEX_CHECK") != nullptr; // builtins.match asks std::regex too and aborts if the answers differ
   uint64_t nSelects = 0, nSelectHits = 0, nSelectDyn = 0, nSelectLayered = 0, nSelectProbes = 0, nSelectSizeLog[18] = {};
   void statSelect(const void *site, const Bindings *b, Symbol key, bool dynamic);
   // MLNIX_STATS: a recycling allocator for frames, simulated.  A frame that returns with nothing made over it (no thunk, no closure) can never be

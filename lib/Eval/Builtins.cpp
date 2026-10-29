@@ -13,7 +13,6 @@
 #include <ctime>
 #include <dirent.h>
 #include <iostream>
-#include <regex>
 #include <sstream>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -73,23 +72,6 @@ static int compareVersions(std::string_view v1, std::string_view v2) {
   return 0;
 }
 
-//===----------------------------------------------------------------------===//
-// Regex cache
-//===----------------------------------------------------------------------===//
-
-static std::regex &getRegex(EvalState &st, std::string_view re, PosPtr pos) {
-  static llvm::StringMap<std::regex> cache; // looked up by the pattern's bytes as they lie: a call copies nothing
-  auto it = cache.find(llvm::StringRef(re.data(), re.size()));
-  if (it != cache.end()) return it->second;
-  try {
-    return cache.try_emplace(llvm::StringRef(re.data(), re.size()), std::string(re), std::regex::extended).first->second;
-  } catch (std::regex_error &e) {
-    if (e.code() == std::regex_constants::error_space)
-      throw EvalError("memory limit exceeded by regular expression '" + str(re) + "'", pos);
-    throw EvalError("invalid regular expression '" + str(re) + "'", pos);
-  }
-}
-
 /// A string result that is `w`, a window on the bytes of `arg` when the argument was a string: those bytes and its context are shared,
 /// nothing is copied.  Any other argument was coerced into text of its own, so the result is made from it with `ctx`.
 static void mkSharedString(EvalState &st, Value &v, const Value &arg, composite::Chars w, const NixStringContext &ctx) {
@@ -100,48 +82,71 @@ static void mkSharedString(EvalState &st, Value &v, const Value &arg, composite:
   v.str.ctx = arg.str.ctx;
 }
 
-/// A group of a regex match as Nix gives it: its text, or null where the group took no part.
-static Value *groupValue(EvalState &st, const std::csub_match &g) {
-  if (!g.matched) { Value *e = st.allocValue(); st.mkNull(*e); return e; }
-  return st.newString(std::string_view(g.first, g.length()));
-}
-
 //===----------------------------------------------------------------------===//
-// Kursive: a pattern compiled once into a program of steps (Composite/Kursive.h), std::regex only for what it does not take
+// Regular expressions: Kursive (Composite/Kursive.h), TrikeShed's parsers over a cursor, as libstdc++'s std::regex::extended answers
 //===----------------------------------------------------------------------===//
 
 namespace ku = composite::kursive;
 
-/// A pattern's program, in arena memory of exactly its size; null when Kursive does not take the pattern (std::regex answers).  At its first
-/// sight a pattern is also compiled by std::regex, which stays the judge of what is a valid pattern: its errors are thrown as before.
-static const ku::Program *kursiveOf(EvalState &st, std::string_view re, PosPtr pos) {
+/// A pattern's program, compiled at its first sight into arena memory of exactly its size and kept for the run.  A pattern libstdc++ would
+/// reject throws the error Nix gives for it, every time it is met, before the input is evaluated.
+static const ku::Program &kursiveOf(EvalState &st, std::string_view re, PosPtr pos) {
   static llvm::StringMap<const ku::Program *> cache;
   auto it = cache.find(llvm::StringRef(re.data(), re.size()));
-  if (it != cache.end()) return it->second;
-  getRegex(st, re, pos);
-  static ku::Step steps[4096];
-  static ku::Set sets[512];
-  static ku::detail::Node pool[4096];
-  ku::Program scratch{steps, 0, 4096, sets, 0, 512};
-  ku::compile(re.data(), uint32_t(re.size()), scratch, pool, 4096);
-  ku::Program *prog = nullptr;
-  if (scratch.ok && scratch.groups < 31) {
-    prog = static_cast<ku::Program *>(st.alloc.Allocate(sizeof(ku::Program), alignof(ku::Program)));
-    auto *s = static_cast<ku::Step *>(st.alloc.Allocate(scratch.nSteps * sizeof(ku::Step), alignof(ku::Step)));
-    auto *t = static_cast<ku::Set *>(st.alloc.Allocate(scratch.nSets * sizeof(ku::Set), alignof(ku::Set)));
-    for (uint32_t i = 0; i < scratch.nSteps; i++) s[i] = steps[i];
-    for (uint32_t i = 0; i < scratch.nSets; i++) t[i] = sets[i];
-    *prog = ku::Program{s, scratch.nSteps, scratch.nSteps, t, scratch.nSets, scratch.nSets, scratch.groups, true};
-  }
+  if (it != cache.end()) return *it->second;
+  static ku::Step steps[1 << 16];
+  static ku::Set sets[4096];
+  static ku::detail::Node pool[1 << 16];
+  ku::Program scratch{steps, 0, 1 << 16, sets, 0, 4096};
+  ku::compile(re.data(), uint32_t(re.size()), scratch, pool, 1 << 16);
+  if (scratch.error == ku::Error::Space) throw EvalError("memory limit exceeded by regular expression '" + str(re) + "'", pos);
+  if (scratch.error != ku::Error::None) throw EvalError("invalid regular expression '" + str(re) + "'", pos);
+  auto *prog = static_cast<ku::Program *>(st.alloc.Allocate(sizeof(ku::Program), alignof(ku::Program)));
+  auto *t = static_cast<ku::Step *>(st.alloc.Allocate(scratch.nSteps * sizeof(ku::Step), alignof(ku::Step)));
+  auto *u = static_cast<ku::Set *>(st.alloc.Allocate(scratch.nSets * sizeof(ku::Set), alignof(ku::Set)));
+  for (uint32_t i = 0; i < scratch.nSteps; i++) t[i] = steps[i];
+  for (uint32_t i = 0; i < scratch.nSets; i++) u[i] = sets[i];
+  *prog = ku::Program{t, scratch.nSteps, scratch.nSteps, u, scratch.nSets, scratch.nSets, scratch.groups, scratch.loops, ku::Error::None};
   cache.try_emplace(llvm::StringRef(re.data(), re.size()), prog);
-  return prog;
+  return *prog;
 }
 
-/// The checkpoints of a walk: one buffer for the run, reused by every match.
-static ku::Entry *kursiveStack(uint32_t &cap) {
-  static ku::Entry stack[1 << 15];
-  cap = 1 << 15;
-  return stack;
+/// The memory walks work in, kept for the run: the groups' marks, the loops' states, the checkpoints (doubled when a walk runs out).
+struct KursiveScratch {
+  cp::MutableSeries<uint32_t> caps, best;
+  cp::MutableSeries<ku::LoopState> loops;
+  cp::MutableSeries<ku::Entry> stack;
+};
+static KursiveScratch &kursiveScratch() {
+  static KursiveScratch s;
+  return s;
+}
+
+/// A walk (a match or a search) run with checkpoints enough: one that runs out of them runs again with twice as many.  The marks of its
+/// answer are kursiveScratch().best.
+template <class Walk> static ku::Result kursiveRun(const ku::Program &p, std::string_view re, PosPtr pos, Walk walk) {
+  KursiveScratch &k = kursiveScratch();
+  uint32_t slots = 2 * (p.groups + 1);
+  if (k.caps.size() < slots) { k.caps.resize(slots); k.best.resize(slots); }
+  if (k.loops.size() < p.loops) k.loops.resize(p.loops);
+  if (k.stack.size() == 0) k.stack.resize(1 << 12);
+  for (;;) {
+    ku::Scratch s{k.caps.data(), k.best.data(), k.loops.data(), k.stack.data(), k.stack.size(), uint64_t(1) << 34};
+    ku::Result r = walk(s);
+    if (r != ku::Result::GaveUp) return r;
+    if (s.budget == 0 || k.stack.size() >= (1u << 26)) throw EvalError("memory limit exceeded by regular expression '" + str(re) + "'", pos);
+    k.stack.resize(k.stack.size() * 2);
+  }
+}
+
+/// The groups of a walk's answer as Nix gives them: each group's text, or null where it took no part.
+static void kursiveGroups(EvalState &st, Value &v, const ku::Program &p, std::string_view s) {
+  const uint32_t *best = kursiveScratch().best.data();
+  st.mkList(v, p.groups |cp::j| [&](uint32_t i) -> Value * {
+    uint32_t b = best[2 * (i + 1)], e = best[2 * (i + 1) + 1];
+    if (b == ~0u || e == ~0u) { Value *n = st.allocValue(); st.mkNull(*n); return n; }
+    return st.newString(s.substr(b, e - b));
+  });
 }
 
 //===----------------------------------------------------------------------===//
@@ -515,7 +520,7 @@ void registerBuiltins(EvalState &state) {
   });
   S.addPrimOp("__match", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     auto re = st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.match");
-    kursiveOf(st, re, pos); // first sight: std::regex judges the pattern (its errors, before the input is evaluated, as before)
+    const ku::Program &prog = kursiveOf(st, re, pos); // an invalid pattern throws before the input is evaluated
     NixStringContext ctx;
     std::string scratch;
     auto s = composite::view(st.coerceToWindow(*args[1], ctx, false, true, pos, "while evaluating the second argument passed to builtins.match", scratch));
@@ -530,69 +535,43 @@ void registerBuiltins(EvalState &state) {
     key.append(s.data(), s.size());
     auto memo = st.matchMemo.find(key);
     if (memo != st.matchMemo.end()) { v = memo->second; return; }
-    // Kursive walks the pattern's program over the input's bytes where they lie: the groups are marks in an array on the stack, and nothing
-    // is allocated; std::regex answers only for a pattern Kursive does not take, or a walk that gave up (out of checkpoints or steps).
-    ku::Result kr = ku::Result::GaveUp;
-    uint32_t caps[64];
-    const ku::Program *prog = kursiveOf(st, re, pos);
-    if (prog) {
-      uint32_t cap;
-      ku::Entry *stack = kursiveStack(cap);
-      kr = ku::matchAll(*prog, s.data(), uint32_t(s.size()), caps, stack, cap);
-    }
-    if (kr == ku::Result::GaveUp || st.regexCheck) {
-      std::regex &regex = getRegex(st, re, pos);
-      std::cmatch m;
-      bool hit = std::regex_match(s.data(), s.data() + s.size(), m, regex);
-      if (kr != ku::Result::GaveUp) { // MLNIX_REGEX_CHECK: the two answers must agree, groups and all
-        bool same = hit == (kr == ku::Result::Match);
-        for (uint32_t g = 1; same && hit && g <= prog->groups; g++) {
-          bool took = caps[2 * g] != ~0u && caps[2 * g + 1] != ~0u;
-          same = took == m[g].matched && (!took || (uint32_t(m.position(g)) == caps[2 * g] && uint32_t(m.length(g)) == caps[2 * g + 1] - caps[2 * g]));
-        }
-        if (!same) {
-          llvm::errs() << "kursive and std::regex disagree on builtins.match \"" << re << "\" \"" << s << "\"\n";
-          abort();
-        }
-      }
-      if (kr == ku::Result::GaveUp) {
-        if (!hit) st.mkNull(v);
-        else st.mkList(v, uint32_t(m.size() - 1) |cp::j| [&](uint32_t i) { return groupValue(st, m[i + 1]); });
-        st.matchMemo.try_emplace(key, v);
-        return;
-      }
-    }
-    if (kr == ku::Result::NoMatch) st.mkNull(v);
-    else st.mkList(v, prog->groups |cp::j| [&](uint32_t i) -> Value * {
-      uint32_t b = caps[2 * (i + 1)], e = caps[2 * (i + 1) + 1];
-      if (b == ~0u || e == ~0u) { Value *n = st.allocValue(); st.mkNull(*n); return n; }
-      return st.newString(s.substr(b, e - b));
-    });
+    // Kursive walks the pattern's program over the input's bytes where they lie: the groups are marks, and nothing is allocated.
+    ku::Result r = kursiveRun(prog, re, pos, [&](ku::Scratch &k) { return ku::matchAll(prog, s.data(), uint32_t(s.size()), k); });
+    if (r == ku::Result::NoMatch) st.mkNull(v);
+    else kursiveGroups(st, v, prog, s);
     st.matchMemo.try_emplace(key, v);
   });
   S.addPrimOp("__split", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     auto re = st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.split");
-    std::regex &regex = getRegex(st, re, pos);
+    const ku::Program &prog = kursiveOf(st, re, pos);
     NixStringContext ctx;
     std::string scratch;
     auto s = composite::view(st.coerceToWindow(*args[1], ctx, false, true, pos, "while evaluating the second argument passed to builtins.split", scratch));
-    auto begin = std::cregex_iterator(s.data(), s.data() + s.size(), regex);
-    auto end = std::cregex_iterator();
+    // std::cregex_iterator's walk: each match at the leftmost start that has one, the longest there; after an empty match, a non-empty one
+    // at the same place, else the search goes on one byte later.  Between matches the text in between, and each match's groups.
+    uint32_t n = uint32_t(s.size()), lastEnd = 0, from = 0;
+    bool afterEmpty = false;
     composite::MutableSeries<Value *> out;
-    size_t lastEnd = 0;
-    bool any = false;
-    for (auto i = begin; i != end; ++i) {
-      any = true;
-      const std::cmatch &m = *i;
-      Value *pre = st.newString(s.substr(lastEnd, m.position(0) - lastEnd));
-      out.append(pre);
+    for (;;) {
+      ku::Result r = kursiveRun(prog, re, pos, [&](ku::Scratch &k) { return ku::search(prog, s.data(), n, from, afterEmpty, afterEmpty, k); });
+      if (r == ku::Result::NoMatch) {
+        if (!afterEmpty) break;
+        afterEmpty = false;
+        from++; // the empty match was not followed by a non-empty one at its place: one byte on
+        continue;
+      }
+      const uint32_t *best = kursiveScratch().best.data();
+      uint32_t ms = best[0], me = best[1];
+      out.append(st.newString(s.substr(lastEnd, ms - lastEnd)));
       Value *groups = st.allocValue();
-      st.mkList(*groups, uint32_t(m.size() - 1) |cp::j| [&](uint32_t g) { return groupValue(st, m[g + 1]); });
+      kursiveGroups(st, *groups, prog, s);
       out.append(groups);
-      lastEnd = m.position(0) + m.length(0);
+      lastEnd = me;
+      from = me;
+      afterEmpty = ms == me;
+      if (afterEmpty && me == n) break;
     }
-    Value *rest = st.newString(any ? s.substr(lastEnd) : s);
-    out.append(rest);
+    out.append(st.newString(s.substr(lastEnd)));
     st.mkList(v, out);
   });
   S.addPrimOp("__compareVersions", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
