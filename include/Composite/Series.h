@@ -48,17 +48,26 @@ namespace composite {
 // Join, and Series as the Join whose first side is a size
 //===----------------------------------------------------------------------===//
 
+/// A size that is a type: Join<Size<N>, F> is a Series whose length is a compile-time fact.  The algorithms read it through
+/// Marks (below) and take the straight-line path; a Join<uint32_t, F> keeps the loop.
+template <uint32_t N> using Size = std::integral_constant<uint32_t, N>;
+/// The domains that are a count: a runtime one (uint32_t) or a constant one (Size<N>).
+template <class A> inline constexpr bool kSized = std::same_as<A, uint32_t>;
+template <uint32_t N> inline constexpr bool kSized<Size<N>> = true;
+
 template <class A, class B> struct Join {
   A a;
   B b;
 
   // A Join<uint32_t, F> is a Series (PRELOAD: typealias Series<T> = Join<Int, (Int) -> T>).  The domain is `a` and the
   // oracle `b`, for ANY domain: a count, a span (TwInt), a line and column, an enum case -- Join.kt's MetaSeries<I, T>.
-  constexpr uint32_t size() const requires std::same_as<A, uint32_t> { return a; }
+  constexpr uint32_t size() const requires kSized<A> { return uint32_t(a); }
   constexpr const A &domain() const { return a; }
   constexpr decltype(auto) operator[](const A &k) const requires std::invocable<const B &, const A &> {
     return b(k);
   }
+  /// A constant-size Series is indexed by a plain integer, as a Series is.
+  constexpr decltype(auto) operator[](uint32_t i) const requires(kSized<A> && !std::same_as<A, uint32_t>) { return b(i); }
 
   // The `.view` bridge: range-for, and every loop op of the STL (std::ranges::copy, any_of, find_if, ...) over a Series.
   // A std::forward_iterator whose operator* is the index function: a value, not a cell.
@@ -75,11 +84,13 @@ template <class A, class B> struct Join {
     constexpr iterator operator++(int) { return {s, i++}; }
     constexpr bool operator==(const iterator &o) const { return i == o.i; }
   };
-  constexpr iterator begin() const requires std::same_as<A, uint32_t> { return {this, 0}; }
-  constexpr iterator end() const requires std::same_as<A, uint32_t> { return {this, a}; }
+  constexpr iterator begin() const requires kSized<A> { return {this, 0}; }
+  constexpr iterator end() const requires kSized<A> { return {this, uint32_t(a)}; }
 };
 template <class A, class B> Join(A, B) -> Join<A, B>;
 template <class F> using Series = Join<uint32_t, F>;
+/// The constant-size Series: the size is in the type.
+template <uint32_t N, class F> using SeriesN = Join<Size<N>, F>;
 
 struct JoinTag {};
 inline constexpr JoinTag j{};
@@ -116,17 +127,38 @@ template <class S, class G> constexpr auto operator|(Held<S> l, G g) {
 // fold: the one loop.  Everything that walks a Series is a transform over it.
 //===----------------------------------------------------------------------===//
 
+/// Marks<S>: what a Series is known to be at compile time, the premark an algorithm dispatches on (the shape of the Series
+/// against the operation: fold, argMin and firstWhere ask, and a constant size takes the straight-line path).  A new shape
+/// is one specialization, and an algorithm that does not ask gets the loop.
+template <class S> struct Marks {
+  static constexpr bool constant = false;
+  static constexpr uint32_t size = 0;
+};
+template <uint32_t N, class F> struct Marks<Join<Size<N>, F>> {
+  static constexpr bool constant = true;
+  static constexpr uint32_t size = N;
+};
+
 /// A transform over a handful of registers must dissolve into its caller: a call per fold step costs more than the step.
 #define COMPOSITE_INLINE [[gnu::always_inline]] inline
 
 /// iota(n): the Series 0..n-1, the domain every index transform ranges over.
 COMPOSITE_INLINE constexpr auto iota(uint32_t n) { return n |j| [](uint32_t i) { return i; }; }
+/// iotaN<N>(): the indices 0..N-1 as a constant-size Series.
+template <uint32_t N> COMPOSITE_INLINE constexpr auto iotaN() { return Size<N>{} |j| [](uint32_t i) { return i; }; }
 
 /// fold(xs, init, f, halt): left reduction, f(state, x) -> state, stopping once halt(state).  This is the only loop the
 /// algebra owns; first-match, contains, argmin, drain and the level walks of the funnel are folds with a state.
 template <class S, class T, class F, class H>
 COMPOSITE_INLINE constexpr T fold(const S &xs, T init, F f, H halt) {
-  for (uint32_t i = 0, n = uint32_t(xs.size()); i < n && !halt(init); ++i) init = f(std::move(init), xs[i]);
+  if constexpr (Marks<S>::constant) {
+    // a constant size: the walk is straight-line code, halted step by step
+    [&]<uint32_t... K>(std::integer_sequence<uint32_t, K...>) __attribute__((always_inline)) {
+      ((halt(init) ? void() : void(init = f(std::move(init), xs[K]))), ...);
+    }(std::make_integer_sequence<uint32_t, Marks<S>::size>{});
+  } else {
+    for (uint32_t i = 0, n = uint32_t(xs.size()); i < n && !halt(init); ++i) init = f(std::move(init), xs[i]);
+  }
   return init;
 }
 template <class S, class T, class F> COMPOSITE_INLINE constexpr T fold(const S &xs, T init, F f) {
@@ -141,10 +173,10 @@ template <uint32_t N, class F> COMPOSITE_INLINE constexpr auto vec(F f) {
   }(std::make_integer_sequence<uint32_t, N>{});
 }
 
-/// foldN<N>(init, f): the fold of f over the indices 0..N-1 with N a constant, so the whole walk is straight-line code.
+/// foldN<N>(init, f): the fold of f over the indices 0..N-1, with N a constant.  It is the fold of iotaN<N>(), so the premark
+/// (Marks) sends it down the straight-line path: there is one unroller, in fold.
 template <uint32_t N, class T, class F> COMPOSITE_INLINE constexpr T foldN(T init, F f) {
-  [&]<uint32_t... K>(std::integer_sequence<uint32_t, K...>) __attribute__((always_inline)) { ((init = f(std::move(init), K)), ...); }(std::make_integer_sequence<uint32_t, N>{});
-  return init;
+  return fold(iotaN<N>(), std::move(init), [&](T state, uint32_t k) __attribute__((always_inline)) -> T { return f(std::move(state), k); });
 }
 
 /// The index of the first element satisfying p, or size when none does (the Series' own bisect convention).
@@ -161,6 +193,66 @@ template <class S, class P> constexpr bool anyOf(const S &xs, P p) { return firs
 template <class S, class L> COMPOSITE_INLINE constexpr uint32_t argMin(const S &xs, L less) {
   uint32_t n = uint32_t(xs.size());
   return fold(iota(n ? n - 1 : 0), 0u, [&](uint32_t m, uint32_t k) { return less(xs[k + 1], xs[m]) ? k + 1 : m; });
+}
+
+//===----------------------------------------------------------------------===//
+// Surgery without mutation: take, drop and their kin are views, and views compose
+//===----------------------------------------------------------------------===//
+
+// Each is O(1) and copies nothing: a Series whose index function reads the Series it was cut from, as `α` does (a named
+// Series is read in place and must outlive the view; a temporary is kept).  take/drop/takeLast/dropLast are Kotlin's and
+// range-v3's, `reversed` is the dialect's, and `erased` and `inserted` are the splice: the Series with one row skipped or one
+// row added, which is what an erase or an insert on a list is when nothing needs to change in place.
+
+/// The first n rows (fewer if the Series is shorter).
+template <class S> constexpr auto take(S &&s, uint32_t n) {
+  uint32_t m = n < uint32_t(s.size()) ? n : uint32_t(s.size());
+  return m |j| [h = Held<S>{std::forward<S>(s)}](uint32_t i) -> decltype(auto) { return h.s[i]; };
+}
+/// All but the first n rows.
+template <class S> constexpr auto drop(S &&s, uint32_t n) {
+  uint32_t sz = uint32_t(s.size()), m = n < sz ? sz - n : 0u, k = n < sz ? n : sz;
+  return m |j| [h = Held<S>{std::forward<S>(s)}, k](uint32_t i) -> decltype(auto) { return h.s[i + k]; };
+}
+/// The last n rows.
+template <class S> constexpr auto takeLast(S &&s, uint32_t n) {
+  uint32_t sz = uint32_t(s.size()), m = n < sz ? n : sz, off = sz - m;
+  return m |j| [h = Held<S>{std::forward<S>(s)}, off](uint32_t i) -> decltype(auto) { return h.s[i + off]; };
+}
+/// All but the last n rows.
+template <class S> constexpr auto dropLast(S &&s, uint32_t n) {
+  uint32_t sz = uint32_t(s.size()), m = n < sz ? sz - n : 0u;
+  return m |j| [h = Held<S>{std::forward<S>(s)}](uint32_t i) -> decltype(auto) { return h.s[i]; };
+}
+/// The rows in the opposite order.
+template <class S> constexpr auto reversed(S &&s) {
+  uint32_t sz = uint32_t(s.size());
+  return sz |j| [h = Held<S>{std::forward<S>(s)}, sz](uint32_t i) -> decltype(auto) { return h.s[sz - 1 - i]; };
+}
+/// The Series with row `at` skipped (all of it if `at` is past the end).
+template <class S> constexpr auto erased(S &&s, uint32_t at) {
+  uint32_t sz = uint32_t(s.size()), m = at < sz ? sz - 1 : sz;
+  return m |j| [h = Held<S>{std::forward<S>(s)}, at](uint32_t i) -> decltype(auto) { return h.s[i < at ? i : i + 1]; };
+}
+/// The Series with `v` as its row `at` (the rows from `at` on move one place up; `at` past the end appends).
+template <class S, class V> constexpr auto inserted(S &&s, uint32_t at, V v) {
+  uint32_t sz = uint32_t(s.size()), pos = at < sz ? at : sz;
+  using Row = std::remove_cvref_t<decltype(s[0u])>;
+  return (sz + 1) |j| [h = Held<S>{std::forward<S>(s)}, pos, v = Row(std::move(v))](uint32_t i) -> Row {
+    return i < pos ? Row(h.s[i]) : i == pos ? v : Row(h.s[i - 1]);
+  };
+}
+
+/// The constant-size forms: N rows, with N in the type, so the result is premarked and takes the straight-line paths.  The
+/// caller's word is that the Series has the rows (a constant-size Series is checked).
+template <uint32_t N, class S> constexpr auto take(S &&s) {
+  if constexpr (Marks<std::remove_cvref_t<S>>::constant) static_assert(N <= Marks<std::remove_cvref_t<S>>::size, "take<N> of fewer rows");
+  return Size<N>{} |j| [h = Held<S>{std::forward<S>(s)}](uint32_t i) -> decltype(auto) { return h.s[i]; };
+}
+template <uint32_t N, class S> constexpr auto drop(S &&s) {
+  static_assert(Marks<std::remove_cvref_t<S>>::constant && N <= Marks<std::remove_cvref_t<S>>::size,
+                "drop<N> needs a constant-size Series of at least N rows");
+  return Size<Marks<std::remove_cvref_t<S>>::size - N>{} |j| [h = Held<S>{std::forward<S>(s)}](uint32_t i) -> decltype(auto) { return h.s[i + N]; };
 }
 
 //===----------------------------------------------------------------------===//
@@ -230,7 +322,7 @@ template <class T, size_t N> struct Slab {
   constexpr const T &operator()(uint32_t i) const { return a[i]; }
 };
 /// freeze(array): the handle for a body whose size is a constant.  vec<N>(f) builds one, freeze keeps it as a Series.
-template <class T, size_t N> constexpr auto freeze(std::array<T, N> a) { return uint32_t(N) |j| Slab<T, N>{std::move(a)}; }
+template <class T, size_t N> constexpr auto freeze(std::array<T, N> a) { return Size<uint32_t(N)>{} |j| Slab<T, N>{std::move(a)}; }
 
 template <class T> struct MutableSeries {
   std::vector<T> cells;

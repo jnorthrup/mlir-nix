@@ -8,7 +8,8 @@
 // combinator: `dense(a, b, c)` is `Dense<A, Dense<B, C>>(a, Dense<B, C>(b, c))`, built from the types
 // of its arguments, so no record of scalars needs hand-written packing.
 //
-//   Dense<A, B>   A and B are unsigned integers, float, double, `Bits<N>`, or a Dense; at most 128 bits in all.
+//   Dense<A, B>   A and B are integers (signed ones order numerically), bool (one bit), enums, pointers, float, double,
+//                 `Bits<N>`, or a Dense; at most 128 bits in all.
 //                 Ordering and equality are those of the integer, so a float orders by its bits.
 //   TwInt         Twin<Int> collapsed to a Long: Dense<uint32_t, uint32_t>, the frontend's currency
 //                 for segments of an immutable buffer (the lexer stores (start, end) and never
@@ -46,6 +47,21 @@ template <std::unsigned_integral T> struct Width<T> {
 template <unsigned N> struct Width<Bits<N>> {
   static constexpr unsigned value = N;
 };
+/// A signed integer is its own width; its field order is the numeric order (see Field).
+template <std::signed_integral T> struct Width<T> {
+  static constexpr unsigned value = sizeof(T) * 8;
+};
+/// A bool is one bit.
+template <> struct Width<bool> {
+  static constexpr unsigned value = 1;
+};
+/// An enum is its underlying integer; a pointer is a machine word.
+template <class E> requires std::is_enum_v<E> struct Width<E> {
+  static constexpr unsigned value = Width<std::underlying_type_t<E>>::value;
+};
+template <class T> struct Width<T *> {
+  static constexpr unsigned value = 64;
+};
 template <> struct Width<float> {
   static constexpr unsigned value = 32;
 };
@@ -72,6 +88,23 @@ template <std::unsigned_integral T> struct Field<T> {
 template <unsigned N> struct Field<Bits<N>> {
   template <class R> static constexpr R put(Bits<N> x) { return R(x.v); }
   template <class R> static constexpr Bits<N> get(R r) { return Bits<N>(uint64_t(r)); }
+};
+/// A signed integer travels with its sign bit flipped, so the unsigned compare of the packed word is the numeric compare of
+/// the field (-1 sorts below 0), and a Dense of signed fields orders as the tuple does.
+template <std::signed_integral T> struct Field<T> {
+  using U = std::make_unsigned_t<T>;
+  static constexpr U sign = U(U(1) << (sizeof(T) * 8 - 1));
+  template <class R> static constexpr R put(T x) { return R(U(U(x) ^ sign)); }
+  template <class R> static constexpr T get(R r) { return T(U(U(r) ^ sign)); }
+};
+template <class E> requires std::is_enum_v<E> struct Field<E> {
+  using U = std::underlying_type_t<E>;
+  template <class R> static constexpr R put(E x) { return Field<U>::template put<R>(U(x)); }
+  template <class R> static constexpr E get(R r) { return E(Field<U>::template get<R>(r)); }
+};
+template <class T> struct Field<T *> {
+  template <class R> static R put(T *x) { return R(reinterpret_cast<uintptr_t>(x)); }
+  template <class R> static T *get(R r) { return reinterpret_cast<T *>(uintptr_t(r)); }
 };
 /// Floats travel as their bits.
 template <> struct Field<float> {

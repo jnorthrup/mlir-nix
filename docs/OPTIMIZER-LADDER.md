@@ -4,7 +4,7 @@
 `vec<N>`, `argMin`, `firstWhere`, `iota`; [PRELOAD](../../TrikeShed/PRELOAD.md)'s "loops become projections"). The question this
 page answers is what the C++ optimizers charge for that, and which flags make the charge go away.
 
-## The chart
+## The chart (the header before the premark)
 
 Cluster time of `scripts/inode-bench.cc` (default spill 6, 2,195,456 rows), in seconds. Minimum of five runs, loop version and
 transform version interleaved, on Kali (Intel i7-6820HK under WSL2), one boot (`ca6157df`), the working tree on ext4. A negative
@@ -31,19 +31,42 @@ compilers).
 | g++ 16 | `-O3 -fexpensive-optimizations -flto` | 0.074 | 0.074 | **+0.0%** |
 | g++ 16 | `-O3` with every option above, `-flto -march=native` | 0.084 | 0.081 | -3.6% |
 
+## The same ladder after the premark (`Marks`) went in
+
+`fold` now dispatches on a compile-time premark (`Join<Size<N>, F>` is a constant-size Series; `Marks` says so and `fold` takes
+the straight-line path). Re-running `scripts/optimizer-ladder.sh` on the same host and boot with that header, minimum of five:
+
+| compiler | flags | loops | transforms | change |
+|---|---|---:|---:|---:|
+| clang 22 | `-O2` | 0.081 | 0.084 | +3.7% |
+| clang 22 | `-O3` | 0.080 | 0.076 | -5.0% |
+| clang 22 | `-O3 -flto=thin` | 0.077 | 0.069 | -10.4% |
+| clang 22 | `-O3 -flto` | 0.077 | 0.072 | -6.5% |
+| clang 22 | `-O3 -flto -mllvm -inline-threshold=2000` | 0.076 | 0.074 | -2.6% |
+| g++ 16 | `-O2` | 0.076 | 0.080 | +5.3% |
+| g++ 16 | `-O3` | 0.074 | 0.078 | +5.4% |
+| g++ 16 | `-O3 -fexpensive-optimizations` | 0.075 | 0.078 | +4.0% |
+| g++ 16 | `-O3 -fexpensive-optimizations -flto` | 0.075 | 0.079 | **+5.3%** |
+| g++ 16 | `-O3` with every option above, `-flto -march=native` | 0.085 | 0.079 | -7.1% |
+
+Clang agrees with the first chart. **GCC does not reproduce the earlier parity**: `-O3 -fexpensive-optimizations -flto` was 0.074 against
+0.074 with the previous header and is 0.075 against 0.079 now. Either that earlier row was inside the run-to-run spread, or the
+dispatching `fold` costs GCC a few percent; one boot and five runs cannot tell them apart. The only GCC row where the transforms win
+is the largest combination (unroll, peel, ipa-pta, gcse, native, LTO), where both versions are slower than their `-O3` rows. So the
+supported statements are: **clang 22 at `-O3` or better runs the transforms 5 to 10% faster than the loops; GCC 16 runs them 4 to 7%
+slower except with the full combination.**
+
 ## What it says
 
-- **Under clang, the compiler the project builds with, transforms win** once `-O3` is on, by 6 to 10%, and ThinLTO is best. At
-  `-O2` they are 2.5% behind.
-- **Under GCC, only link-time optimization closes the gap**, to parity. Every other expensive option (`-fexpensive-optimizations`
-  is already on at `-O2` in GCC, so the row differs only by noise; unrolling, peeling, ipa-pta, gcse, PGO) leaves the transforms
-  4 to 7% behind. `-march=native` is slower for both versions.
+- **Under clang, the compiler the project builds with, transforms win** once `-O3` is on, and ThinLTO is best. At `-O2` they are
+  2.5 to 3.7% behind.
+- **Under GCC, no single flag closes the gap.** `-fexpensive-optimizations` is already on at `-O2`; unrolling, peeling, ipa-pta, gcse,
+  PGO and LTO each leave the transforms 4 to 7% behind; `-march=native` is slower for both versions.
 - **The cost is inlining, not work.** A fold step is a lambda; unless it is inlined into its caller each heap level pays a call
-  and a by-value state copy. `Series.h` forces `fold`, `foldN`, `argMin`, `firstWhere` and `iota` inline, and the step lambdas in
-  `MinMaxHeap.h` carry `always_inline`; LTO finishes the job across the benchmark's call sites.
-- **Two structural thinnings did what no flag did.** Seeding `argMin` from element 1 removed one self-comparison per sift level
-  (+9% to +5% at the time), and the peg "ring" turned out to be a bag (nothing ever moved its `head`), which removed an add and a
-  mask from every peg probe (+9% to +2.5% at clang `-O2`).
+  and a by-value state copy. `Series.h` forces `fold`, `argMin`, `firstWhere` and `iota` inline, and the step lambdas in
+  `MinMaxHeap.h` carry `always_inline`.
+- **Two structural thinnings did what no flag did.** Seeding `argMin` from element 1 removed one self-comparison per sift level, and
+  the peg "ring" turned out to be a bag (nothing ever moved its `head`), which removed an add and a mask from every peg probe.
 
 ## What it does not say
 
