@@ -75,13 +75,14 @@ const Attr *Bindings::get(Symbol s) const {
 }
 
 /// The union of two flat sorted sets, `y` winning on equal names, as a new flat set of exactly its size.
+/// One pass: the set is allocated with room for both (a name in both is one row, so a few rows may stay unused) and written by unionInto.
 static Bindings *mergeBindings(Arena &alloc, const Bindings *x, const Bindings *y) {
-  size_t n = cp::unionSize(x->attrs, x->size_, y->attrs, y->size_, attrName);
-  Bindings::merged++;
-  Bindings::mergedCells += n;
-  void *mem = alloc.Allocate(sizeof(Bindings) + n * sizeof(Attr), alignof(Bindings));
+  size_t room = size_t(x->size_) + y->size_;
+  void *mem = alloc.Allocate(sizeof(Bindings) + room * sizeof(Attr), alignof(Bindings));
   auto *r = new (mem) Bindings();
-  r->size_ = uint32_t(cp::unionRows(x->attrs, x->size_, y->attrs, y->size_, r->attrs, attrName));
+  r->size_ = uint32_t(cp::unionInto(x->attrs, x->size_, y->attrs, y->size_, r->attrs, attrName));
+  Bindings::merged++;
+  Bindings::mergedCells += r->size_;
   return r;
 }
 

@@ -92,6 +92,27 @@ template <class Row, class Key> constexpr size_t unionRows(const Row *x, size_t 
   return k;
 }
 
+/// unionRows in one pass, into room for nx + ny rows: the rows written.  When `y` is much the smaller (an override over a large set), each
+/// of its rows finds its place in `x` by a search and the run of `x` before it is copied whole, not compared row by row.
+template <class Row, class Key> constexpr size_t unionInto(const Row *x, size_t nx, const Row *y, size_t ny, Row *out, Key key) {
+  if (ny * 16 >= nx) return unionRows(x, nx, y, ny, out, key);
+  size_t i = 0, k = 0;
+  for (size_t j = 0; j < ny; j++) {
+    auto b = key(y[j]);
+    size_t lo = i, hi = nx; // the first row of x from i on whose key is not below b
+    while (lo < hi) {
+      size_t mid = lo + (hi - lo) / 2;
+      if (key(x[mid]) < b) lo = mid + 1;
+      else hi = mid;
+    }
+    for (; i < lo; i++) out[k++] = x[i];
+    out[k++] = y[j];
+    if (i < nx && key(x[i]) == b) i++; // the row y shadows
+  }
+  for (; i < nx; i++) out[k++] = x[i];
+  return k;
+}
+
 } // namespace composite
 
 #endif

@@ -63,6 +63,16 @@ int main() {
     std::sort(want.begin(), want.end(), less);
     require(want.size() == un, "union count");
     for (size_t i = 0; i < un; i++) require(out[i].key == want[i].key && out[i].tag == want[i].tag, "union rows, y wins");
+    // unionInto, one pass into room for both: a y of every size against x, so both its ways run (the merge walk, and the search of each
+    // y row's place in x with the runs between copied whole when y is a sixteenth of x or less)
+    for (size_t keep : {yu.size(), yu.size() / 4, size_t(3), size_t(1), size_t(0)}) {
+      if (keep > yu.size()) continue;
+      std::vector<Row> ys(yu.begin(), yu.begin() + keep), byWalk(m + keep), byInto(m + keep);
+      size_t nw = unionRows(mine.data(), m, ys.data(), keep, byWalk.data(), key);
+      size_t ni = unionInto(mine.data(), m, ys.data(), keep, byInto.data(), key);
+      require(ni == nw, "unionInto writes the union's rows");
+      for (size_t i = 0; i < nw; i++) require(byInto[i].key == byWalk[i].key && byInto[i].tag == byWalk[i].tag, "unionInto is the union, y wins");
+    }
   }
   // lessChars over Series<char> (Series.h) against std::string's order: memcmp's, unsigned bytes, then the shorter first
   for (int round = 0; round < 20000; round++) {
@@ -72,6 +82,6 @@ int main() {
     auto sa = series(a.data(), uint32_t(a.size())), sb = series(b.data(), uint32_t(b.size()));
     require(lessChars(sa, sb) == (a < b) && lessChars(sb, sa) == (b < a), "lessChars is std::string's order");
   }
-  std::printf("PASS rows: findRow, stable sortRows (in place, into, and unwound by a throwing comparator with nothing left allocated), uniqueFirst, union and lessChars against the standard library on 4000 random runs of up to 300 rows\n");
+  std::printf("PASS rows: findRow, stable sortRows (in place, into, and unwound by a throwing comparator with nothing left allocated), uniqueFirst, union (walked and in one pass) and lessChars against the standard library on 4000 random runs of up to 300 rows\n");
   return 0;
 }
