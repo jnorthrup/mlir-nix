@@ -68,7 +68,7 @@ struct FileTable {
 
   mutable std::mutex m;
   std::unordered_map<std::string, uint32_t> ids;
-  composite::MutableSeries<std::string, composite::Chunked<std::string>> names;
+  composite::MutableSeries<std::string> names; // read by value under the lock: nothing holds a name by address
 };
 
 } // namespace nixfe

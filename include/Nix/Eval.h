@@ -652,30 +652,32 @@ struct EvalState {
   // values); slotOf() answers from a direct-mapped cache in front of the hash map, a load and a compare on a hit, where every operand access
   // paid a hash probe (lookup, operand and evalTail were 16.6% of the CPU of a NixOS evaluation on Kali).  A slot is rewritten in place
   // when a value's address is indexed again, so the cache never holds a stale one.
-  llvm::DenseMap<void *, Slot *> slotMap;
-  cp::MutableSeries<Slot, cp::Chunked<Slot>> slotStore; // a Slot never moves: the slots are held by address
-  struct SlotCacheEntry { void *key = nullptr; Slot *slot = nullptr; };
+  // A slot is named by a handle, its index in slotStore, and read by value: nothing holds a Slot by address, so the store is a plain series.
+  static constexpr uint32_t kNoHandle = 0xFFFFFFFFu;
+  llvm::DenseMap<void *, uint32_t> slotMap;
+  cp::MutableSeries<Slot> slotStore;
+  struct SlotCacheEntry { void *key = nullptr; uint32_t slot = kNoHandle; };
   static constexpr size_t kSlotCache = 8192;
   SlotCacheEntry slotCache[kSlotCache];
 #ifdef MLNIX_NO_LOOKUP_CACHES
-  Slot *slotOf(void *key) {
+  uint32_t slotOf(void *key) {
     auto it = slotMap.find(key);
-    return it == slotMap.end() ? nullptr : it->second;
+    return it == slotMap.end() ? kNoHandle : it->second;
   }
 #else
-  Slot *slotOf(void *key) {
+  uint32_t slotOf(void *key) {
     SlotCacheEntry &e = slotCache[(reinterpret_cast<uintptr_t>(key) >> 4) & (kSlotCache - 1)];
     if (e.key == key) return e.slot;
     auto it = slotMap.find(key);
-    if (it == slotMap.end()) return nullptr;
+    if (it == slotMap.end()) return kNoHandle;
     e = {key, it->second};
     return e.slot;
   }
 #endif
   void setSlot(void *key, const Slot &slot) {
-    Slot *&p = slotMap[key];
-    if (!p) { slotStore.append(slot); p = &slotStore.back(); }
-    else *p = slot;
+    auto [it, fresh] = slotMap.try_emplace(key, kNoHandle);
+    if (it->second == kNoHandle) it->second = slotStore.append(slot);
+    else slotStore[it->second] = slot;
   }
   uint64_t nUpdLayered = 0, nUpdMerged = 0, nUpdBase = 0, nUpdTop = 0; // MLNIX_STATS: `//` as a layer / a flat merge, entries not copied / copied
   uint64_t nDemandMinted = 0; // MLNIX_STATS: lambda bodies minted on first call

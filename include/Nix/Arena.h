@@ -76,7 +76,7 @@ struct Prefaulter {
   const bool disabled = getenv("MLNIX_NO_PREFAULT") != nullptr;
   std::mutex m;
   std::condition_variable_any cv;
-  composite::MutableSeries<std::pair<char *, size_t>, composite::Chunked<std::pair<char *, size_t>>> queue; // appended; the helper drains from `head`
+  composite::MutableSeries<std::pair<char *, size_t>> queue; // appended; the helper drains from `head`, a job by value
   uint32_t head = 0;
   std::jthread worker = disabled ? std::jthread() : std::jthread([this](std::stop_token st) { run(st); }); // last: built last, stopped first
 };

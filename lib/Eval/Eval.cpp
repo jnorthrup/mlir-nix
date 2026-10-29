@@ -1049,9 +1049,9 @@ static Slot::How howOf(Operation *op) {
 }
 
 Value *EvalState::lookupImpl(Frame *f, mlir::Value v, bool forced) {
-  Slot *sp = slotOf(v.getAsOpaquePointer());
-  if (!sp) throw EvalError("internal error: unindexed SSA value");
-  Slot &s = *sp;
+  uint32_t sh = slotOf(v.getAsOpaquePointer());
+  if (sh == kNoHandle) throw EvalError("internal error: unindexed SSA value");
+  Slot s = slotStore[sh]; // by value: the store grows while this evaluates (a nested body is indexed)
   RegionInfo *ri = s.ri;
   unsigned idx = s.idx;
   if (statsEnabled) [[unlikely]] { Frame *g = f; while (g && g->info != ri) g = g->up(); statHops(f, ri, g && idx != kNoSlot && g->slots[idx]); }
@@ -1063,7 +1063,7 @@ Value *EvalState::lookupImpl(Frame *f, mlir::Value v, bool forced) {
   if (statsEnabled && idx != kNoSlot) [[unlikely]] statTouch(f, ri, idx);
   Operation *op = s.def;
   if (!op) throw EvalError("internal error: unbound block argument");
-  if (s.how == Slot::Unknown) s.how = howOf(op);
+  if (s.how == Slot::Unknown) { s.how = howOf(op); slotStore[sh].how = s.how; }
   if (s.how == Slot::Const) {
     auto c = constCache.find(op);
     if (c != constCache.end()) return slot = c->second;
@@ -1137,19 +1137,25 @@ void EvalState::evalDefinition(mlir::Operation *def, Frame *f, Value &dest) {
 }
 
 Value &EvalState::operand(Frame *f, mlir::Value v, Value &tmp) {
-  Slot *sp = slotOf(v.getAsOpaquePointer());
-  if (sp && sp->inPlace && f && f->info == sp->ri) {
-    evalDefinition(sp->def, f, tmp);
-    return tmp;
+  uint32_t sh = slotOf(v.getAsOpaquePointer());
+  if (sh != kNoHandle) {
+    const Slot s = slotStore[sh];
+    if (s.inPlace && f && f->info == s.ri) {
+      evalDefinition(s.def, f, tmp);
+      return tmp;
+    }
   }
   return *lookupImpl(f, v, true);  // every caller of operand() forces what it gets
 }
 
 void EvalState::evalTail(Frame *f, mlir::Value v, Value &out, PosPtr pos) {
-  Slot *sp = slotOf(v.getAsOpaquePointer());
-  if (sp && sp->inPlace && f && f->info == sp->ri) {
-    evalDefinition(sp->def, f, out);
-    return;
+  uint32_t sh = slotOf(v.getAsOpaquePointer());
+  if (sh != kNoHandle) {
+    const Slot s = slotStore[sh];
+    if (s.inPlace && f && f->info == s.ri) {
+      evalDefinition(s.def, f, out);
+      return;
+    }
   }
   Value *p = lookupImpl(f, v, true);
   forceValue(*p, pos);
