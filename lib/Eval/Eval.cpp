@@ -668,6 +668,32 @@ void EvalState::printStats() {
     for (size_t i = 0; i < ev.size() && i < 16; i++)
       llvm::errs() << "  " << llvm::format("%-26s", ev[i]->second.first.str().c_str()) << llvm::format("%12llu", (unsigned long long)ev[i]->second.second) << llvm::format("%7.1f%%", 100.0 * ev[i]->second.second / tot) << '\n';
   }
+  { // The IR the evaluator reads: ops evaluated, and how many bytes of MLIR operations hold the hottest of them (what a compact form would shrink).
+    struct Hot { uint32_t evals; uint32_t bytes; };
+    cp::MutableSeries<Hot> hot;
+    uint64_t evals = 0, irBytes = 0;
+    for (auto &kv : regionInfos)
+      for (auto &o : kv.second->opIdx) {
+        uint32_t e = o.second < kv.second->opEvals.size() ? kv.second->opEvals[o.second] : 0;
+        mlir::Operation *op = o.first;
+        // an Operation's header, its operands, results and properties: what a read of the op may touch
+        uint32_t b = uint32_t(sizeof(mlir::Operation) + op->getNumOperands() * sizeof(mlir::OpOperand) + op->getNumResults() * 16 +
+                              op->getPropertiesStorageSize());
+        irBytes += b;
+        if (e) { hot.append({e, b}); evals += e; }
+      }
+    cp::sortRows(hot.data(), hot.size(), [](const Hot &a, const Hot &b) { return a.evals > b.evals; });
+    uint64_t cum = 0, bytes = 0;
+    double marks[] = {0.5, 0.9, 0.99};
+    unsigned m = 0;
+    llvm::errs() << llvm::format("== IR read: %u indexed ops ran (of %.1f MB of indexed operations), %llu evaluations; the ops of the hottest",
+                                 hot.size(), irBytes / 1048576.0, (unsigned long long)evals);
+    for (const Hot &h : hot) {
+      cum += h.evals; bytes += h.bytes;
+      while (m < 3 && cum >= marks[m] * evals) { llvm::errs() << llvm::format(" %.0f%%: %.2f MB", marks[m] * 100, bytes / 1048576.0); ++m; }
+    }
+    llvm::errs() << llvm::format(" (all that ran: %.1f MB)\n", bytes / 1048576.0);
+  }
   if (getenv("MLNIX_STATS_USES")) { // single-use census: per op kind, how many results have no use, one use, several (who could move, who must copy)
     struct U { uint64_t ops = 0, zero = 0, one = 0, many = 0, ranOne = 0; };
     llvm::StringMap<U> byKind;
