@@ -943,7 +943,9 @@ static void describe(Node *n, Operation *op, const nd::NixDialect *core) {
 
 void EvalState::unindexed() { throw EvalError("internal error: unindexed SSA value"); }
 
-void EvalState::indexRegion(Region &r) {
+void EvalState::indexRegion(Region &r) { indexer.index(r); }
+
+void EvalState::Indexer::index(Region &r) {
   auto *ri = new RegionInfo{&r, 0, {}};
   if (auto lam = dyn_cast_or_null<nd::LambdaOp>(r.getParentOp())) {
     if (auto formals = lam.getFormals()) {
@@ -955,21 +957,22 @@ void EvalState::indexRegion(Region &r) {
   }
   Block &blk = r.front();
   unsigned slot = 0;
-  auto *core = ctx.getLoadedDialect<nd::NixDialect>();
-  auto newNode = [&] { return ::new (alloc.Allocate(sizeof(Node), alignof(Node))) Node{}; };
+  auto *core = st.ctx.getLoadedDialect<nd::NixDialect>();
+  bool stats = st.statsEnabled && !helper;
+  auto newNode = [&] { return ::new (allocate(sizeof(Node), alignof(Node))) Node{}; };
   // A value is found in blockNodes by the ops of its block and of the bodies nested in it that are indexed with it, in this recursion.  A
   // body indexed later (a deferred lambda, minted at its first call) reads the values around it through its lambda's capture list, so the
   // captures are what goes into the map of every value (below, with the operands); and every value does when a JIT, which reads any value
   // by its address, is on.  (An op evaluated through the interface model puts its operands there itself: evalOther.)
-  ++indexDepth;
-  bool everyValue = scalarJIT != nullptr;
+  ++depth;
+  bool everyValue = st.scalarJIT != nullptr;
   auto publish = [&](mlir::Value v, Node *n) {
     void *key = v.getAsOpaquePointer();
     blockNodes[key] = n;
-    if (everyValue) setNode(key, n);
+    if (everyValue) st.setNode(key, n);
   };
   for (BlockArgument a : blk.getArguments()) {
-    if (statsEnabled) { ++nSlotsAssigned; if (a.use_empty()) ++nSlotsNoRead; }
+    if (stats) { ++st.nSlotsAssigned; if (a.use_empty()) ++st.nSlotsNoRead; }
     Node *n = newNode();
     n->kind = NodeKind::Arg;
     n->how = Node::Unknown;
@@ -991,9 +994,9 @@ void EvalState::indexRegion(Region &r) {
       // one use (which runs once per frame: nothing to keep) or fixed (a literal or a builtin, one cell for every frame, kept in its Slot);
       // otherwise a cell in each frame of the region.
       Promotion p = core->promotionOf(res);
-      if (statsEnabled) {
-        ++nSlotsAssigned;
-        if (res.use_empty()) ++nSlotsNoRead;
+      if (stats) {
+        ++st.nSlotsAssigned;
+        if (res.use_empty()) ++st.nSlotsNoRead;
         // A cell that starts as a thunk is finer grain's row: an attribute value, a let binding, an argument,
         // minted when it is forced instead of when its body is.
         if (p == Promotion::Shared || p == Promotion::Distinct || p == Promotion::Once) ++ri->nThunks;
@@ -1015,22 +1018,27 @@ void EvalState::indexRegion(Region &r) {
     auto lam = dyn_cast<nd::LambdaOp>(op);
     if (lam && lam.getBodyIndex()) continue;
     for (Region &nested : op.getRegions())
-      if (!nested.empty()) indexRegion(nested);
+      if (!nested.empty()) index(nested);
   }
   // Then each op's operands, as the records of the values they name (an operand not indexed stays null: its use is an internal error).
-  auto recordOf = [&](mlir::Value v) {
+  // A helper indexes a whole file, which reads nothing from outside it: what is not in blockNodes is nowhere.
+  auto recordOf = [&](mlir::Value v) -> Node * {
     void *key = v.getAsOpaquePointer();
     auto it = blockNodes.find(key);
-    return it != blockNodes.end() ? it->second : nodeOf(key);
+    return it != blockNodes.end() ? it->second : helper ? nullptr : st.nodeOf(key);
   };
   for (Operation &op : blk) {
     unsigned k = op.getNumOperands();
     if (op.getNumResults() == 0 || k == 0) continue;
-    auto **ops = static_cast<Node **>(alloc.Allocate(k * sizeof(Node *), alignof(Node *)));
+    auto **ops = static_cast<Node **>(allocate(k * sizeof(Node *), alignof(Node *)));
     for (unsigned i = 0; i < k; i++) ops[i] = recordOf(op.getOperand(i));
     if (auto lam = dyn_cast<nd::LambdaOp>(op); lam && lam.getBodyIndex() && !everyValue)
       for (unsigned i = 0; i < k; i++)
-        if (ops[i]) setNode(op.getOperand(i).getAsOpaquePointer(), ops[i]); // the captures of a body minted later
+        if (ops[i]) { // the captures of a body minted later
+          void *key = op.getOperand(i).getAsOpaquePointer();
+          if (helper) captures.append({key, ops[i]});
+          else st.setNode(key, ops[i]);
+        }
     for (mlir::Value res : op.getResults()) {
       Node *n = recordOf(res);
       n->operands = ops;
@@ -1038,15 +1046,16 @@ void EvalState::indexRegion(Region &r) {
     }
   }
   if (ri->result) ri->resultNode = recordOf(ri->result);
-  if (--indexDepth == 0) blockNodes.clear();
-  if (statsEnabled) {
+  if (--depth == 0) blockNodes.clear();
+  if (stats) {
     ri->nOps = uint32_t(blk.getOperations().size());
     ri->everRan.assign((ri->nOps + 63) / 64, 0);
     ri->opEvals.assign(ri->nOps, 0);
     uint32_t oi = 0;
     for (Operation &op : blk) ri->opIdx[&op] = oi++;
   }
-  regionInfos[&r] = ri;
+  if (helper) regions.append({&r, ri});
+  else st.regionInfos[&r] = ri;
 }
 
 RegionInfo *EvalState::regionInfo(Region *r) {
@@ -2840,6 +2849,12 @@ void EvalState::prelowerLoop() {
         if (settings.optimize && pipelineText(settings) == "nix-prims") {
           nd::devirtualizePrims(pl->op);
           pl->optimized = true;
+          // Indexed here too, while this thread's caches hold the IR it just built: a file reads nothing from outside it.  Not when the
+          // census counts indexing or a JIT reads every value by its address: the evaluator indexes then.
+          if (!statsEnabled && !scalarJIT) {
+            pl->index = std::make_unique<Indexer>(*this, true);
+            pl->index->index(pl->op.getBody());
+          }
         }
         pl->origin = origin;
         pl->ok = true;
@@ -2880,6 +2895,11 @@ nd::ExprOp EvalState::takePrelowered(const std::string &resolved) {
   if (settings.optimize && !pl->optimized) {
     if (!optimizer) optimizer = makeOptimizer(ctx, settings);
     if (mlir::failed(optimizer->run(op))) throw EvalError("the optimization pipeline failed");
+  }
+  if (pl->index) { // indexed by the helper: its regions and the captures of the bodies minted later become the evaluator's
+    for (auto &[r, ri] : pl->index->regions) regionInfos[r] = ri;
+    for (auto &[key, n] : pl->index->captures) setNode(key, n);
+    helperIndexers.append(std::move(pl->index));
   }
   return op;
 }

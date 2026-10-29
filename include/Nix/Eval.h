@@ -746,6 +746,7 @@ struct EvalState {
   /// MLNIX_PRELOWER=1 with MLNIX_PREFETCH=auto (the files a previous run of this invocation evaluated; the first run records them), or MLNIX_PRELOWER_LIST=file (such a list): a helper thread lexes, parses
   /// and builds the IR of those files ahead of the evaluator, which adopts each finished file when evalFile asks for it.  The helper does
   /// no evaluation and no optimization (the prim folder calls back into the evaluator), only genExpr into a module of its own.
+  struct Indexer;
   struct Prelowered {
     std::shared_ptr<nixfe::Origin> origin;
     mlir::OwningOpRef<mlir::ModuleOp> mod;
@@ -753,6 +754,7 @@ struct EvalState {
     std::unique_ptr<nixfe::FilePool> pool;
     bool done = false, ok = false;
     bool optimized = false; // devirtualized by the helper (the demand schedule's whole pipeline): adoption runs no pass
+    std::unique_ptr<Indexer> index; // the file's body indexed by the helper: adoption installs its regions and captures
   };
   struct PrelowerState {
     std::mutex m;
@@ -788,10 +790,25 @@ struct EvalState {
     e = {key, it->second};
     return e.node;
   }
-  /// indexRegion: the records of the values of the blocks being indexed (an operand in its own block is found here, in a map the size of the
-  /// block, not in the map of every value); emptied when the outermost body is done.
-  llvm::DenseMap<void *, Node *> blockNodes;
-  unsigned indexDepth = 0;
+  /// Indexing a body: its RegionInfo and a node for each of its values.  The evaluator's indexer allocates in the evaluator's arena and
+  /// writes its maps; a prelowering helper's allocates in an arena of its own and lists what the evaluator takes over with the file (the
+  /// regions it indexed, the captures of the deferred bodies in it), so a file arrives indexed, by the thread whose caches hold its IR.
+  struct Indexer {
+    EvalState &st;
+    bool helper;
+    llvm::BumpPtrAllocator arena;                 // a helper's: the nodes live as long as the evaluator keeps this indexer
+    /// The records of the values of the blocks being indexed: an operand in its own block (or in a block around it, indexed in the same
+    /// recursion) is found here, in a map the size of those blocks; emptied when the outermost body is done.
+    llvm::DenseMap<void *, Node *> blockNodes;
+    unsigned depth = 0;
+    composite::MutableSeries<std::pair<void *, Node *>> captures;           // a helper's: for the evaluator's map of every value
+    composite::MutableSeries<std::pair<mlir::Region *, RegionInfo *>> regions; // a helper's: for regionInfos
+    Indexer(EvalState &st, bool helper) : st(st), helper(helper) {}
+    void *allocate(size_t n, size_t a) { return helper ? arena.Allocate(n, llvm::Align(a)) : st.alloc.Allocate(n, a); }
+    void index(mlir::Region &r);
+  };
+  Indexer indexer{*this, false};
+  composite::MutableSeries<std::unique_ptr<Indexer>> helperIndexers; // adopted with their files: their arenas hold those files' nodes
   void setNode(void *key, Node *n) {
     nodeMap[key] = n;
     NodeCacheEntry &e = nodeCache[(reinterpret_cast<uintptr_t>(key) >> 4) & (kNodeCache - 1)];
