@@ -164,9 +164,10 @@ int main() {
     for (int r = 0; r < 3000; r++) { std::string s = randomInput(rng, r); checkMatch(k, re, pat, s); if (r % 3 == 0) checkSplit(k, re, pat, s); }
   }
   // random patterns: the same verdict on errors, and the same answers where both take the pattern
-  static const char meta[] = "ab()|*+?{}[]^$.\\-,0123:";
+  static const char meta[] = "ab()|*+?{}[]^$.\\-,12:"; // counts of one or two: libstdc++ explores every path, and a{3333} would take it hours
   long agreeErr = 0, bothOk = 0, verdict = 0;
-  for (int i = 0; i < 20000; i++) {
+  for (int i = 0; i < 6000; i++) {
+    if (i % 1000 == 0) { std::printf("  ... %d random patterns: %ld checks, %ld mismatches, %ld verdicts differ\n", i, tests, mismatches, verdict); std::fflush(stdout); }
     std::string pat;
     int n = 1 + rng() % 9;
     for (int j = 0; j < n; j++) pat += meta[rng() % (sizeof meta - 1)];

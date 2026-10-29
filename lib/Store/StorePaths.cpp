@@ -563,24 +563,31 @@ bool Derivation::isFixed() const {
 
 /// Appends `s` in quotes with ATerm escapes.  The bytes between two escapes are copied whole: the values of an
 /// environment are scripts of kilobytes, and a byte-at-a-time push_back was a fiftieth of a NixOS evaluation.
-static void appendEscaped(std::string &out, std::string_view s) {
-  // Every byte writes either itself or a backslash and its escape letter, chosen by a table and advanced by one or two with no branch on
-  // the byte: a script full of newlines and quotes costs no mispredicted branch per line.  Room for the worst case first, the size after.
+/// The ATerm escape of `s` (no quotes) written at `w`, which has room for 2 * s.size() bytes; the end of what was written.  Every byte writes
+/// either itself or a backslash and its escape letter, chosen by a table and advanced by one or two with no branch on the byte: a script full
+/// of newlines and quotes costs no mispredicted branch per line.
+static char *escapeInto(char *w, std::string_view s) {
   struct Escapes {
     char e[256] = {};
     constexpr Escapes() { e[uint8_t('"')] = '"'; e[uint8_t('\\')] = '\\'; e[uint8_t('\n')] = 'n'; e[uint8_t('\r')] = 'r'; e[uint8_t('\t')] = 't'; }
   };
   static constexpr Escapes kEsc;
-  size_t at = out.size();
-  out.resize(at + 2 * s.size() + 2);
-  char *w = out.data() + at;
-  *w++ = '"';
   for (unsigned char c : s) {
     char e = kEsc.e[c];
     w[0] = e ? '\\' : char(c);
     w[1] = e;
     w += 1 + (e != 0);
   }
+  return w;
+}
+
+/// Appends `s` in quotes with ATerm escapes: room for the worst case first, the size after.
+static void appendEscaped(std::string &out, std::string_view s) {
+  size_t at = out.size();
+  out.resize(at + 2 * s.size() + 2);
+  char *w = out.data() + at;
+  *w++ = '"';
+  w = escapeInto(w, s);
   *w++ = '"';
   out.resize(size_t(w - out.data()));
 }
@@ -592,107 +599,148 @@ std::string escapeATermString(std::string_view s) {
   return r;
 }
 
-static void unquoted(std::string &s, std::string_view v) {
-  s += '"';
-  s += v;
-  s += '"';
-}
+namespace {
+/// The ATerm text, made into a string.
+struct TextOut {
+  std::string &s;
+  void c(char x) { s += x; }
+  void lit(std::string_view v) { s.append(v); }
+  void quoted(std::string_view v) { s += '"'; s.append(v); s += '"'; }
+  void escaped(std::string_view v) { appendEscaped(s, v); }
+  void reserve(size_t n) { s.reserve(s.size() + n); }
+};
+/// The ATerm text fed to a hash as it is made, through a buffer: a derivation's text (its whole environment) is never kept to be hashed.
+struct HashOut {
+  HashSink &h;
+  char buf[16384];
+  size_t n = 0;
+  void flush() { if (n) h.update(std::string_view(buf, n)); n = 0; }
+  void room(size_t k) { if (n + k > sizeof buf) flush(); }
+  void c(char x) { room(1); buf[n++] = x; }
+  void lit(std::string_view v) {
+    if (v.size() > sizeof buf / 2) { flush(); h.update(v); return; }
+    room(v.size());
+    std::memcpy(buf + n, v.data(), v.size());
+    n += v.size();
+  }
+  void quoted(std::string_view v) { c('"'); lit(v); c('"'); }
+  void escaped(std::string_view v) {
+    c('"');
+    constexpr size_t kChunk = (sizeof buf) / 2 - 1; // escaping doubles a byte at most
+    for (size_t at = 0; at < v.size(); at += kChunk) {
+      std::string_view part = v.substr(at, kChunk);
+      room(2 * part.size());
+      n = size_t(escapeInto(buf + n, part) - buf);
+    }
+    c('"');
+  }
+  void reserve(size_t) {}
+};
 
-std::string Derivation::unparse(bool maskOutputs,
-                                const std::map<std::string, std::set<std::string>> *actualInputs) const {
+template <class Out>
+void unparseTo(const Derivation &d, Out &out, bool maskOutputs, const std::map<std::string, std::set<std::string>> *actualInputs) {
+  const auto &outputs = d.outputs;
+  const auto &inputDrvs = d.inputDrvs;
+  const auto &inputSrcs = d.inputSrcs;
+  const auto &platform = d.platform;
+  const auto &builder = d.builder;
+  const auto &args = d.args;
+  const auto &env = d.env;
+  const auto &structuredAttrs = d.structuredAttrs;
+
   // Note: the store dir is embedded in paths already.
-  std::string s = "Derive([";
+  out.lit("Derive([");
   bool first = true;
   for (auto &[name, o] : outputs) {
-    if (!first) s += ',';
+    if (!first) out.c(',');
     first = false;
-    s += '(';
-    unquoted(s, name);
-    s += ',';
+    out.c('(');
+    out.quoted(name);
+    out.c(',');
     switch (o.kind) {
     case DerivationOutput::InputAddressed:
-      unquoted(s, maskOutputs ? "" : o.path);
-      s += ",\"\",\"\"";
+      out.quoted(maskOutputs ? "" : o.path);
+      out.lit(",\"\",\"\"");
       break;
     case DerivationOutput::CAFixed:
-      unquoted(s, maskOutputs ? "" : o.path);
-      s += ',';
-      unquoted(s, o.methodAlgo());
-      s += ',';
-      unquoted(s, o.hash.to_string(HashFormat::Base16, false));
+      out.quoted(maskOutputs ? "" : o.path);
+      out.c(',');
+      out.quoted(o.methodAlgo());
+      out.c(',');
+      out.quoted(o.hash.to_string(HashFormat::Base16, false));
       break;
     case DerivationOutput::CAFloating:
-      s += "\"\",";
-      unquoted(s, o.methodAlgo());
-      s += ",\"\"";
+      out.lit("\"\",");
+      out.quoted(o.methodAlgo());
+      out.lit(",\"\"");
       break;
     case DerivationOutput::Deferred:
-      s += "\"\",\"\",\"\"";
+      out.lit("\"\",\"\",\"\"");
       break;
     case DerivationOutput::Impure:
-      s += "\"\",";
-      unquoted(s, o.methodAlgo());
-      s += ",\"impure\"";
+      out.lit("\"\",");
+      out.quoted(o.methodAlgo());
+      out.lit(",\"impure\"");
       break;
     }
-    s += ')';
+    out.c(')');
   }
-  s += "],[";
+  out.lit("],[");
   first = true;
   const auto &inputs = actualInputs ? *actualInputs : inputDrvs;
   for (auto &[path, outs] : inputs) {
-    if (!first) s += ',';
+    if (!first) out.c(',');
     first = false;
-    s += '(';
-    unquoted(s, path);
-    s += ",[";
+    out.c('(');
+    out.quoted(path);
+    out.lit(",[");
     bool f2 = true;
     for (auto &o : outs) {
-      if (!f2) s += ',';
+      if (!f2) out.c(',');
       f2 = false;
-      unquoted(s, o);
+      out.quoted(o);
     }
-    s += "])";
+    out.lit("])");
   }
-  s += "],[";
+  out.lit("],[");
   first = true;
   for (auto &p : inputSrcs) {
-    if (!first) s += ',';
+    if (!first) out.c(',');
     first = false;
-    unquoted(s, p);
+    out.quoted(p);
   }
-  s += "],";
-  unquoted(s, platform);
-  s += ',';
-  appendEscaped(s, builder);
-  s += ",[";
+  out.lit("],");
+  out.quoted(platform);
+  out.c(',');
+  out.escaped(builder);
+  out.lit(",[");
   first = true;
   for (auto &a : args) {
-    if (!first) s += ',';
+    if (!first) out.c(',');
     first = false;
-    appendEscaped(s, a);
+    out.escaped(a);
   }
-  s += "],[";
+  out.lit("],[");
   first = true;
   // The environment in key order, with `__json` (the structured attributes, which win over an env entry of that name) at its place in
   // that order: env is a sorted map, so the walk slots it in; nothing is copied and no map is built.
   size_t envBytes = 0;
   for (auto &[k, v] : env) envBytes += k.size() + v.size() + 8;
   if (structuredAttrs) envBytes += structuredAttrs->size() + 16;
-  s.reserve(s.size() + envBytes);
+  out.reserve(envBytes);
   auto isOutput = [&](std::string_view k) {
     for (auto &[name, o] : outputs)
       if (name == k) return true;
     return false;
   };
   auto entry = [&](std::string_view k, std::string_view v) {
-    if (!first) s += ',';
+    if (!first) out.c(',');
     first = false;
-    s += '(';
-    appendEscaped(s, k);
-    s += ',';
-    appendEscaped(s, maskOutputs && isOutput(k) ? std::string_view() : v);
-    s += ')';
+    out.c('(');
+    out.escaped(k);
+    out.c(',');
+    out.escaped(maskOutputs && isOutput(k) ? std::string_view() : v);
+    out.c(')');
   };
   constexpr std::string_view kJson = "__json";
   bool json = structuredAttrs.has_value();
@@ -702,8 +750,23 @@ std::string Derivation::unparse(bool maskOutputs,
     entry(k, v);
   }
   if (json) entry(kJson, *structuredAttrs);
-  s += "])";
+  out.lit("])");
+}
+} // namespace
+
+std::string Derivation::unparse(bool maskOutputs, const std::map<std::string, std::set<std::string>> *actualInputs) const {
+  std::string s;
+  TextOut out{s};
+  unparseTo(*this, out, maskOutputs, actualInputs);
   return s;
+}
+
+Hash Derivation::hashUnparsed(bool maskOutputs, const std::map<std::string, std::set<std::string>> *actualInputs) const {
+  HashSink h(HashAlgo::SHA256);
+  HashOut out{h};
+  unparseTo(*this, out, maskOutputs, actualInputs);
+  out.flush();
+  return h.finish();
 }
 
 namespace {

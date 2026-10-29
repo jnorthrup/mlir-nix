@@ -168,6 +168,8 @@ struct Derivation {
   bool isFixed() const;
   std::string unparse(bool maskOutputs,
                       const std::map<std::string, std::set<std::string>> *actualInputs = nullptr) const;
+  /// SHA-256 of unparse(...), the text fed to the hash as it is made and never kept.
+  Hash hashUnparsed(bool maskOutputs, const std::map<std::string, std::set<std::string>> *actualInputs = nullptr) const;
 };
 
 Derivation parseDerivation(std::string_view text, std::string name);

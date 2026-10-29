@@ -255,8 +255,7 @@ static std::set<std::string> drvReferences(const Derivation &drv) {
 }
 
 std::string Store::computeDerivationPath(const Derivation &drv) const {
-  return makeTextPath(settings.storeDir, drv.name + ".drv",
-                      hashString(HashAlgo::SHA256, drv.unparse(false)), drvReferences(drv));
+  return makeTextPath(settings.storeDir, drv.name + ".drv", drv.hashUnparsed(false), drvReferences(drv));
 }
 
 void Store::cacheDerivation(const std::string &drvPath, const Derivation &drv) {
@@ -264,7 +263,8 @@ void Store::cacheDerivation(const std::string &drvPath, const Derivation &drv) {
 }
 
 std::string Store::writeDerivation(Derivation &&drv) {
-  std::string text = drv.unparse(false); // once: its hash names the path, and it is what a store that writes stores
+  // The text's hash names the path; a store that writes keeps the text too, made once, and a read-only one only feeds the hash with it.
+  std::string text = settings.readOnly ? std::string() : drv.unparse(false);
   // The path's type is `text` and its references: the input sources and the input derivations, both sorted, merged here (a path in both
   // once), as makeTextPath would join drvReferences' set, without building the set.
   std::string type = "text";
@@ -278,7 +278,8 @@ std::string Store::writeDerivation(Derivation &&drv) {
     type += ':';
     type += *r;
   }
-  std::string path = makeStorePath(settings.storeDir, type, hashString(HashAlgo::SHA256, text), drv.name + ".drv");
+  std::string path = makeStorePath(settings.storeDir, type, settings.readOnly ? drv.hashUnparsed(false) : hashString(HashAlgo::SHA256, text),
+                                   drv.name + ".drv");
   const Derivation &kept = drvCache.insert_or_assign(path, std::move(drv)).first->second;
   if (!settings.readOnly) addTextToStore(kept.name + ".drv", text, drvReferences(kept));
   return path;
@@ -327,7 +328,7 @@ std::map<std::string, Hash> Store::hashDerivationModulo(const Derivation &drv, b
       }
     }
   }
-  return {{"", hashString(HashAlgo::SHA256, drv.unparse(maskOutputs, &inputs2))}};
+  return {{"", drv.hashUnparsed(maskOutputs, &inputs2)}};
 }
 
 void Store::fillInOutputPaths(Derivation &drv) {
