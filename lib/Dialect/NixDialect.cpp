@@ -5,6 +5,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassRegistry.h"
@@ -108,6 +109,28 @@ bool NixDialect::evaluatesInPlace(Value v) const {
   unsigned i = use.getOperandNumber();
   OperandModes m = modesOf(user->getName());
   return i < 32 && (((m.strict | m.tail) >> i) & 1);
+}
+
+NixDialect::Promotion NixDialect::promotionOf(Value v) const {
+  Operation *def = v.getDefiningOp();
+  if (!def) return Promotion::Argument;
+  if (evaluatesInPlace(v)) return Promotion::InPlace;
+  if (def->hasTrait<OpTrait::ConstantLike>() || isa<PathOp, BuiltinOp>(def)) return Promotion::Fixed;
+  if (isa<LambdaOp>(def)) return Promotion::Closure;
+  if (isMemoryEffectFree(def)) return Promotion::Shared;
+  return Promotion::Distinct;
+}
+
+StringRef NixDialect::promotionName(Promotion p) {
+  switch (p) {
+  case Promotion::InPlace: return "in_place";
+  case Promotion::Fixed: return "fixed";
+  case Promotion::Shared: return "shared";
+  case Promotion::Distinct: return "distinct";
+  case Promotion::Closure: return "closure";
+  case Promotion::Argument: return "argument";
+  }
+  return "";
 }
 
 Operation *NixDialect::materializeConstant(OpBuilder &b, Attribute value,
@@ -487,6 +510,24 @@ struct NixInlineValuesPass : public PassWrapper<NixInlineValuesPass, OperationPa
   }
 };
 
+// `nix-promotions` marks each single-result op with what its value is promoted to (nix.promote), as the evaluator, the JITs and
+// the optimizer read it per value with NixDialect::promotionOf: visible and testable.
+struct NixPromotionsPass : public PassWrapper<NixPromotionsPass, OperationPass<>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(NixPromotionsPass)
+  StringRef getArgument() const override { return "nix-promotions"; }
+  StringRef getDescription() const override {
+    return "Mark what each value is promoted to (nix.promote): in_place, fixed, shared, distinct, closure";
+  }
+  void getDependentDialects(DialectRegistry &registry) const override { registerNixDialects(registry); }
+  void runOnOperation() override {
+    auto *core = getContext().getLoadedDialect<NixDialect>();
+    getOperation()->walk([&](Operation *op) {
+      if (op->getNumResults() == 1)
+        op->setAttr("nix.promote", StringAttr::get(&getContext(), NixDialect::promotionName(core->promotionOf(op->getResult(0)))));
+    });
+  }
+};
+
 struct NixDcePass : public PassWrapper<NixDcePass, OperationPass<>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(NixDcePass)
   StringRef getArgument() const override { return "nix-dce"; }
@@ -504,6 +545,7 @@ void mlir::nix::registerNixPasses() {
     PassRegistration<NixFoldPass>();
     PassRegistration<NixDcePass>();
     PassRegistration<NixInlineValuesPass>();
+    PassRegistration<NixPromotionsPass>();
     PassPipelineRegistration<>("nix-simplify",
                                "Devirtualize primops, fold constants, remove dead (cyclic) bindings",
                                [](OpPassManager &pm) {

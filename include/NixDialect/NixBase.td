@@ -117,6 +117,19 @@ def Nix_Dialect : Dialect {
     /// can evaluate the definition in place instead of allocating a thunk for it.
     bool evaluatesInPlace(::mlir::Value v) const;
 
+    /// What a value is promoted to: decided once, here, and read by the evaluator (which cell, if any), the JITs (what they may read
+    /// back or replay) and the optimizer (what may be merged).  The sea of nodes says which abstraction each value gets.
+    enum class Promotion : uint8_t {
+      InPlace,  ///< one strict or tail use in the same body (evaluatesInPlace): evaluated into its consumer, no cell
+      Fixed,    ///< a literal or a builtin: the same value in every frame, one cell for all of them; value-numbered
+      Shared,   ///< any other value of an op with no memory effect: a cell per frame, made lazily; value-numbered
+      Distinct, ///< every evaluation is its own (an allocation with observable identity, or effects): a cell per frame, never merged
+      Closure,  ///< a lambda: a cell per frame, made at its first touch, which keeps the frame it captures
+      Argument, ///< a block argument: the frame's own cell, filled by the call
+    };
+    Promotion promotionOf(::mlir::Value v) const;
+    static ::llvm::StringRef promotionName(Promotion p);
+
     /// How a primop may interact with the world (`nix.fx` of each op in
     /// NixPrims.irdl.mlir; drives the memory-effect interface).
     enum class PrimFx : uint8_t { Pure, User, FS, Env, Store, Import };

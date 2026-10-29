@@ -697,7 +697,7 @@ void ScalarJIT::evaluate(EvalState &st, mlir::Operation *lambda, mlir::Value res
     entry->pointer = pointerPlan(lam, result);
     if (entry->pointer.capture) {
       uint32_t slot = st.slotOf(entry->pointer.capture.getAsOpaquePointer());
-      if (slot == EvalState::kNoHandle || (st.slotStore[slot].idx == kNoSlot && !st.slotStore[slot].fixedKind())) {
+      if (slot == EvalState::kNoHandle || !st.slotStore[slot].persists()) {
         // lookup() of an in-place value makes a temporary cell. It cannot be forced and then replayed safely.
         cache = &p.refused; ++p.rejected; interpret(); return;
       }

@@ -12,8 +12,10 @@
 using namespace composite;
 static long live = 0; // blocks from operator new not yet given back: the unwind of a throwing comparator must leave it where it was
 void *operator new(std::size_t n) { ++live; if (void *p = std::malloc(n ? n : 1)) return p; throw std::bad_alloc(); }
+void *operator new(std::size_t n, const std::nothrow_t &) noexcept { ++live; return std::malloc(n ? n : 1); } // the oracle's stable_sort buffer
 void operator delete(void *p) noexcept { if (p) { --live; std::free(p); } }
 void operator delete(void *p, std::size_t) noexcept { operator delete(p); }
+void operator delete(void *p, const std::nothrow_t &) noexcept { operator delete(p); }
 struct Row { uint32_t key; uint32_t tag; };
 static void require(bool ok, const char *what) { if (!ok) { std::printf("FAIL %s\n", what); std::exit(1); } }
 int main() {

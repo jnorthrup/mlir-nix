@@ -842,7 +842,7 @@ void EvalState::indexRegion(Region &r) {
   auto *core = ctx.getLoadedDialect<nd::NixDialect>();
   for (BlockArgument a : blk.getArguments()) {
     if (statsEnabled) { ++nSlotsAssigned; if (a.use_empty()) ++nSlotsNoRead; }
-    setSlot(a.getAsOpaquePointer(), {ri, nullptr, slot++, Slot::Unknown, false});
+    setSlot(a.getAsOpaquePointer(), {ri, nullptr, slot++, Slot::Unknown, Promotion::Argument});
   }
   for (Operation &op : blk) {
     if (auto ret = dyn_cast<nd::ReturnOp>(op)) {
@@ -850,20 +850,18 @@ void EvalState::indexRegion(Region &r) {
       continue;
     }
     for (mlir::Value res : op.getResults()) {
-      // A value evaluated in place has exactly one use, strict or tail: it needs no cell that outlives that use.
-      bool inPlace = core->evaluatesInPlace(res);
+      // What the dialect promotes the value to decides its cell: none when it is evaluated in place (one strict or tail use) or fixed
+      // (a literal or a builtin, one cell for every frame, kept in its Slot); otherwise a cell in each frame of the region.
+      Promotion p = core->promotionOf(res);
       if (statsEnabled) {
         ++nSlotsAssigned;
         if (res.use_empty()) ++nSlotsNoRead;
         // A cell that starts as a thunk is finer grain's row: an attribute value, a let binding, an argument,
-        // minted when it is forced instead of when its body is (howOf's Thunk case, spelled out -- it sits below).
-        if (!inPlace && !isa<nd::IntOp, nd::FloatOp, nd::StringOp, nd::PathOp, nd::BoolOp, nd::NullOp,
-                                nd::BuiltinOp, nd::LambdaOp>(&op)) ++ri->nThunks;
+        // minted when it is forced instead of when its body is.
+        if (p == Promotion::Shared || p == Promotion::Distinct) ++ri->nThunks;
       }
-      // A literal or a builtin is the same value in every frame: one cell, kept in its Slot, and no frame cell.
-      Slot::How how = howOf(&op);
-      bool fixed = !inPlace && (how == Slot::Const || how == Slot::Builtin);
-      setSlot(res.getAsOpaquePointer(), {ri, &op, inPlace || fixed ? kNoSlot : slot++, fixed ? how : Slot::Unknown, inPlace});
+      bool cell = p != Promotion::InPlace && p != Promotion::Fixed;
+      setSlot(res.getAsOpaquePointer(), {ri, &op, cell ? slot++ : kNoSlot, howOf(&op), p});
     }
     // A deferred lambda's region is a shell until its first call; it is indexed when it is minted.
     auto lam = dyn_cast<nd::LambdaOp>(op);
@@ -1049,7 +1047,6 @@ Value *EvalState::lookupImpl(Frame *f, mlir::Value v, bool forced) {
   if (statsEnabled && idx != kNoSlot) [[unlikely]] statTouch(f, ri, idx);
   Operation *op = s.def;
   if (!op) throw EvalError("internal error: unbound block argument");
-  if (s.how == Slot::Unknown) { s.how = howOf(op); slotStore[sh].how = s.how; }
   if (s.how == Slot::Const) { // made once, at the first touch in any frame, and kept in the Slot
     Value *cv = allocValue();
     if (auto i = dyn_cast<nd::IntOp>(op)) mkInt(*cv, i.getValue());
@@ -1125,7 +1122,7 @@ Value &EvalState::operand(Frame *f, mlir::Value v, Value &tmp) {
   uint32_t sh = slotOf(v.getAsOpaquePointer());
   if (sh != kNoHandle) {
     const Slot s = slotStore[sh];
-    if (s.inPlace && f && f->info == s.ri) {
+    if (s.inPlace() && f && f->info == s.ri) {
       evalDefinition(s.def, f, tmp);
       return tmp;
     }
@@ -1137,7 +1134,7 @@ void EvalState::evalTail(Frame *f, mlir::Value v, Value &out, PosPtr pos) {
   uint32_t sh = slotOf(v.getAsOpaquePointer());
   if (sh != kNoHandle) {
     const Slot s = slotStore[sh];
-    if (s.inPlace && f && f->info == s.ri) {
+    if (s.inPlace() && f && f->info == s.ri) {
       evalDefinition(s.def, f, out);
       return;
     }

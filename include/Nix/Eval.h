@@ -272,21 +272,23 @@ struct Frame {
   void capture() { upBits |= 1; }
 };
 
-/// Where an SSA value lives: its region, its frame slot, and whether its single
-/// strict/tail consumer evaluates it in place (NixDialect::evaluatesInPlace).
+/// What the dialect promotes a value to (NixDialect::promotionOf): which cell it gets, if any, and what may read it back.
+using Promotion = mlir::nix::NixDialect::Promotion;
+
+/// Where an SSA value lives: its region, its frame slot, and what the dialect promoted it to.
 inline constexpr unsigned kNoSlot = ~0u;
 struct Slot {
-  /// What the first touch of a value's cell makes; worked out from the defining op once, at the first touch of the value in any
-  /// frame, and kept here.
+  /// What the first touch of a value's cell makes, from the defining op (Unknown for a block argument).
   enum How : uint8_t { Unknown, Thunk, Lambda, Const, Builtin };
   RegionInfo *ri;
   mlir::Operation *def; // the op that defines the value, null for a block argument (Value::getDefiningOp() is a call into MLIR)
   unsigned idx;         // kNoSlot: the value has no frame cell (it is evaluated in place, or it is fixed)
   How how;
-  bool inPlace;
+  Promotion promo;
   Value *fixed = nullptr; // a literal or a builtin: its one cell, the same in every frame, made at its first touch
-  /// A literal or a builtin that is not evaluated in place: no frame cell, and its lookup is `fixed`.
-  bool fixedKind() const { return !inPlace && (how == Const || how == Builtin); }
+  bool inPlace() const { return promo == Promotion::InPlace; }
+  /// A value with a cell to read back: its frame cell, or its fixed one.  Not one evaluated in place, whose lookup makes a temporary.
+  bool persists() const { return promo != Promotion::InPlace; }
 };
 
 //===----------------------------------------------------------------------===//

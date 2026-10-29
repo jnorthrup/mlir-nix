@@ -254,7 +254,7 @@ struct LazyJITPlan::Impl {
     for (auto *chainRegion : eliminated)
       if (v.getParentRegion() == chainRegion) return false;
     uint32_t found = state.slotOf(v.getAsOpaquePointer());
-    return found != EvalState::kNoHandle && (state.slotStore[found].idx != kNoSlot || state.slotStore[found].fixedKind());
+    return found != EvalState::kNoHandle && state.slotStore[found].persists();
   }
   bool projection(mlir::Value v, unsigned context) const {
     auto select = v.getDefiningOp<nd::SelectOp>();
