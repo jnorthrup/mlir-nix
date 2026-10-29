@@ -58,7 +58,9 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
 
     nixstore::Derivation drv;
     drv.name = drvName;
-    NixStringContext context;
+    NixStringContext context;                         // what coercions make: paths copied to the store, and the rarer attributes
+    composite::MutableSeries<const StringContext *> owns; // each string attribute's own context, interned: its elements are not copied
+    std::string coerced;
     bool contentAddressed = false, isImpure = false;
     std::optional<std::string> outputHash;
     std::optional<nixstore::HashAlgo> outputHashAlgo;
@@ -140,7 +142,9 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
               st.warn("In a derivation named '" + drvName + "', 'structuredAttrs' disables the effect of the derivation attribute '" +
                       key + "'; use 'outputChecks.<output>." + key + "' instead");
         } else {
-          std::string s = st.coerceToString(*i->value, context, true, true, pos);
+          const StringContext *own = nullptr;
+          std::string s(composite::view(st.coerceToWindow(*i->value, context, true, true, pos, "", coerced, true, &own)));
+          if (own) owns.append(own);
           if (i->name == st.s.json) {
             st.warn("In derivation '" + drvName + "': setting structured attributes via '__json' is deprecated, and may be disallowed in future versions of Nix. Set '__structuredAttrs = true' instead.");
             drv.structuredAttrs = s;
@@ -169,9 +173,18 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
     }
     if (structured) drv.structuredAttrs = jsonObj + "}";
 
-    for (auto &c : context) {
+    // The derivation's context: the string attributes' own (arena C strings, read where they lie) and what coercions made, sorted and made
+    // unique once, in the order the set gave them.
+    composite::MutableSeries<std::string_view> elems;
+    for (const StringContext *c : owns)
+      for (size_t k = 0; k < c->n; k++) elems.append(c->elems[k]);
+    for (auto &c : context) elems.append(c);
+    cp::sortRows(elems.data(), elems.size(), [](std::string_view a, std::string_view b) { return a < b; });
+    size_t nElems = cp::uniqueFirst(elems.data(), elems.size(), [](std::string_view e) { return e; });
+    for (size_t ei = 0; ei < nElems; ei++) {
+      std::string_view c = elems[uint32_t(ei)];
       if (c[0] == '=') {
-        std::string d = c.substr(1);
+        std::string d(c.substr(1));
         auto refs = st.store->computeFSClosure({d});
         for (auto &j : refs) {
           drv.inputSrcs.insert(j);
