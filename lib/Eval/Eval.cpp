@@ -957,20 +957,16 @@ void EvalState::indexRegion(Region &r) {
   unsigned slot = 0;
   auto *core = ctx.getLoadedDialect<nd::NixDialect>();
   auto newNode = [&] { return ::new (alloc.Allocate(sizeof(Node), alignof(Node))) Node{}; };
-  // A value is found by the ops of its own block in blockNodes.  Only a value read from somewhere else (a nested body, a lambda's capture list,
-  // whose body may not be minted yet, or an op evaluated through the interface model) is in the map of every value, and every value is when
-  // a JIT, which reads any value by its address, is on.
+  // A value is found in blockNodes by the ops of its block and of the bodies nested in it that are indexed with it, in this recursion.  A
+  // body indexed later (a deferred lambda, minted at its first call) reads the values around it through its lambda's capture list, so the
+  // captures are what goes into the map of every value (below, with the operands); and every value does when a JIT, which reads any value
+  // by its address, is on.  (An op evaluated through the interface model puts its operands there itself: evalOther.)
   ++indexDepth;
   bool everyValue = scalarJIT != nullptr;
   auto publish = [&](mlir::Value v, Node *n) {
     void *key = v.getAsOpaquePointer();
     blockNodes[key] = n;
-    bool elsewhere = everyValue;
-    for (mlir::OpOperand &u : v.getUses()) {
-      Operation *o = u.getOwner();
-      if (elsewhere || o->getBlock() != &blk || o->getNumRegions() || (o->getDialect() != core && !core->primOf(o))) { elsewhere = true; break; }
-    }
-    if (elsewhere) setNode(key, n);
+    if (everyValue) setNode(key, n);
   };
   for (BlockArgument a : blk.getArguments()) {
     if (statsEnabled) { ++nSlotsAssigned; if (a.use_empty()) ++nSlotsNoRead; }
@@ -1032,6 +1028,9 @@ void EvalState::indexRegion(Region &r) {
     if (op.getNumResults() == 0 || k == 0) continue;
     auto **ops = static_cast<Node **>(alloc.Allocate(k * sizeof(Node *), alignof(Node *)));
     for (unsigned i = 0; i < k; i++) ops[i] = recordOf(op.getOperand(i));
+    if (auto lam = dyn_cast<nd::LambdaOp>(op); lam && lam.getBodyIndex() && !everyValue)
+      for (unsigned i = 0; i < k; i++)
+        if (ops[i]) setNode(op.getOperand(i).getAsOpaquePointer(), ops[i]); // the captures of a body minted later
     for (mlir::Value res : op.getResults()) {
       Node *n = recordOf(res);
       n->operands = ops;
