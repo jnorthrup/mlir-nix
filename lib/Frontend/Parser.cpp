@@ -12,6 +12,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "Composite/Series.h"
 #include "Composite/Pack.h"
 #include "Nix/Confix.h"
 #include "Nix/LexRules.h"
@@ -102,7 +103,7 @@ struct Lexer : public lex::Rules {
 
   /// Produce the next token (T_EOF at end, repeatedly).
   Token nextToken() {
-    if (stack.empty()) stack.push_back(S_INITIAL);
+    if (stack.empty()) stack.append(S_INITIAL);
     Token t;
     if (!next(t)) {
       t = Token();
@@ -162,15 +163,15 @@ struct Lexer : public lex::Rules {
     if (seg.find_first_of("\\\r") == std::string_view::npos) setSlice(t, from, to);
     else setDerived(t, unescapeStr(seg));
   }
-  std::vector<State> stack;
+  composite::MutableSeries<State> stack;
   size_t p = 0;
   uint32_t line = 1;
   size_t lineStart = 0;          // the offset where `line` starts
   size_t nextNl = newlineFrom(0); // the first newline at or after lineStart
 
   State top() { return stack.back(); }
-  void push(State s) { stack.push_back(s); }
-  void pop() { if (stack.size() > 1) stack.pop_back(); }
+  void push(State s) { stack.append(s); }
+  void pop() { if (stack.size() > 1) stack.pop(); }
   static std::string unescapeStr(std::string_view s) {
     std::string t;
     t.reserve(s.size());
@@ -585,9 +586,9 @@ struct Dyn {
 };
 /// An attribute set while it is bound: a literal, a set a path makes, the bindings of a `let`.
 struct Set {
-  std::vector<Def> defs; // in the order written until the set is made, then ordered by name
-  std::vector<Dyn> dyns;
-  std::vector<Node> froms;     // the sources of `inherit (e) ...`
+  composite::MutableSeries<Def> defs; // in the order written until the set is made, then ordered by name
+  composite::MutableSeries<Dyn> dyns;
+  composite::MutableSeries<Node> froms;     // the sources of `inherit (e) ...`
   std::vector<uint32_t> index; // over a handful of defs: open addressing over positions in `defs`, plus one
   bool rec = false, ordered = true;
   Pos pos;
@@ -710,7 +711,7 @@ struct Parser {
   /// at the import and parsed again at the call.
   uint32_t eagerAt = ~0u;
   std::deque<Set> sets;
-  std::vector<uint32_t> freeSets;
+  composite::MutableSeries<uint32_t> freeSets;
   std::deque<Scope> recScopes; // a rec set's scope lives until the set is made
   /// Every binding of the parse: the scopes' rows, a fixed buffer that only grows while the parse runs.
   composite::Cursor<Name, uint32_t, Value> binds{BindCol{}};
@@ -1286,7 +1287,7 @@ struct Parser {
     uint32_t si;
     if (!freeSets.empty()) {
       si = freeSets.back();
-      freeSets.pop_back();
+      freeSets.pop();
     } else {
       si = uint32_t(sets.size());
       sets.emplace_back();
@@ -1307,7 +1308,7 @@ struct Parser {
     s.ordered = true;
     s.scope = s.values = s.outer = nullptr;
     s.into = nullptr;
-    freeSets.push_back(si);
+    freeSets.append(si);
   }
   static Node setNode(uint32_t si, Pos p) {
     Node n = mk(K_SET, p);
@@ -1349,7 +1350,7 @@ struct Parser {
     s.index[h] = k;
   }
   void appendDef(Set &s, Def d) {
-    s.defs.push_back(std::move(d));
+    s.defs.append(std::move(d));
     uint32_t n = uint32_t(s.defs.size());
     s.ordered = n <= 1;
     if (!s.index.empty() && n * 2 <= s.index.size()) {
@@ -1399,12 +1400,12 @@ struct Parser {
         }
       } else {
         nested = newSet(Pos{}, sets[si].values, sets[si].values);
-        sets[si].dyns.push_back(Dyn{std::move(path[i].expr), setNode(nested, Pos{}), pos});
+        sets[si].dyns.append(Dyn{std::move(path[i].expr), setNode(nested, Pos{}), pos});
       }
       si = nested;
     }
     if (path[i].computed()) {
-      sets[si].dyns.push_back(Dyn{std::move(path[i].expr), std::move(e), pos});
+      sets[si].dyns.append(Dyn{std::move(path[i].expr), std::move(e), pos});
       return;
     }
     Def d;
@@ -1427,8 +1428,8 @@ struct Parser {
         addAttrSym(into, full, std::move(ad));
         full.pop_back();
       }
-      for (Dyn &x : ae.dyns) sets[into].dyns.push_back(std::move(x));
-      for (Node &x : ae.froms) sets[into].froms.push_back(std::move(x));
+      for (Dyn &x : ae.dyns) sets[into].dyns.append(std::move(x));
+      for (Node &x : ae.froms) sets[into].froms.append(std::move(x));
       release(from);
       return;
     }
@@ -1522,7 +1523,7 @@ struct Parser {
           Node f = parseExpr();
           sc = s0;
           expectChar(')');
-          sets[si].froms.push_back(std::move(f));
+          sets[si].froms.append(std::move(f));
           from = int(sets[si].froms.size()) - 1;
         }
         while (!atChar(';')) {
@@ -2219,16 +2220,16 @@ struct Parser {
     }
     case T_IND_STRING_OPEN: {
       take();
-      std::vector<std::pair<Pos, std::variant<Node, Token>>> parts;
+      composite::MutableSeries<std::pair<Pos, std::variant<Node, Token>>> parts;
       while (true) {
         if (cur().t == T_IND_STR) {
           Token tk = take();
-          parts.emplace_back(tk.pos, tk);
+          parts.emplace(tk.pos, tk);
         } else if (cur().t == T_DOLLAR_CURLY) {
           Pos p = take().pos;
           Node e = parseExpr();
           expectChar('}');
-          parts.emplace_back(p, std::move(e));
+          parts.emplace(p, std::move(e));
         } else {
           break;
         }
@@ -2367,7 +2368,7 @@ struct Parser {
     return mk(K_EXPR, pos, mode == Mode::Gen ? Value(nd::PathOp::create(b, noLoc(), valTy(), Name::persist(path))) : Value());
   }
 
-  Node stripIndentation(Pos pos, std::vector<std::pair<Pos, std::variant<Node, Token>>> &es) {
+  Node stripIndentation(Pos pos, composite::MutableSeries<std::pair<Pos, std::variant<Node, Token>>> &es) {
     if (es.empty()) return strLit(Name::of(""), Pos{});
     bool atStartOfLine = true;
     size_t minIndent = 1000000, curIndent = 0;

@@ -1,5 +1,6 @@
 //===- StorePaths.cpp - NAR, store paths, ATerm derivations, utilities ----===//
 
+#include "Composite/Series.h"
 #include "Nix/Prefetch.h"
 #include "Nix/Store.h"
 
@@ -83,10 +84,10 @@ void deletePathRecursive(const std::string &path) {
   if (S_ISDIR(st.st_mode)) {
     chmod(path.c_str(), st.st_mode | S_IRWXU);
     if (DIR *d = opendir(path.c_str())) {
-      std::vector<std::string> names;
+      composite::MutableSeries<std::string> names;
       while (auto *e = readdir(d)) {
         std::string n = e->d_name;
-        if (n != "." && n != "..") names.push_back(n);
+        if (n != "." && n != "..") names.append(n);
       }
       closedir(d);
       for (auto &n : names) deletePathRecursive(path + "/" + n);
@@ -201,10 +202,10 @@ int runProgram(const std::string &prog, const std::vector<std::string> &args, st
       int nul = open("/dev/null", O_RDONLY);
       dup2(nul, 0);
     }
-    std::vector<char *> argv;
-    argv.push_back(const_cast<char *>(prog.c_str()));
-    for (auto &a : args) argv.push_back(const_cast<char *>(a.c_str()));
-    argv.push_back(nullptr);
+    composite::MutableSeries<char *> argv;
+    argv.append(const_cast<char *>(prog.c_str()));
+    for (auto &a : args) argv.append(const_cast<char *>(a.c_str()));
+    argv.append(nullptr);
     execvp(prog.c_str(), argv.data());
     _exit(127);
   }
@@ -702,11 +703,11 @@ struct ATermParser {
     expect("\"");
     return r;
   }
-  std::vector<std::string> strs() {
-    std::vector<std::string> v;
+  composite::MutableSeries<std::string> strs() {
+    composite::MutableSeries<std::string> v;
     expect("[");
     while (!peek(']')) {
-      v.push_back(str());
+      v.append(str());
       if (peek(',')) p++;
     }
     expect("]");

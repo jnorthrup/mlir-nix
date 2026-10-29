@@ -7,6 +7,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "Composite/Series.h"
 #include "Nix/Prefetch.h"
 #include "Nix/Eval.h"
 #include "Nix/MLIRGen.h"
@@ -60,8 +61,8 @@ std::string absPath(const std::string &p) {
   return nixfe::canonPath(cwd + "/" + p);
 }
 
-std::vector<SearchPathElem> parseNixPath(const std::string &s) {
-  std::vector<SearchPathElem> res;
+composite::MutableSeries<SearchPathElem> parseNixPath(const std::string &s) {
+  composite::MutableSeries<SearchPathElem> res;
   size_t i = 0;
   while (i < s.size()) {
     size_t j = i;
@@ -78,7 +79,7 @@ std::vector<SearchPathElem> parseNixPath(const std::string &s) {
       auto eq = elem.find('=');
       if (eq != std::string::npos) { e.prefix = elem.substr(0, eq); e.path = elem.substr(eq + 1); }
       else e.path = elem;
-      res.push_back(e);
+      res.append(e);
     }
     i = j + 1;
   }
@@ -86,10 +87,10 @@ std::vector<SearchPathElem> parseNixPath(const std::string &s) {
 }
 
 struct Options {
-  std::vector<std::string> files;
-  std::vector<std::string> attrPaths;
+  composite::MutableSeries<std::string> files;
+  composite::MutableSeries<std::string> attrPaths;
   std::vector<std::pair<std::string, std::string>> argExprs, argStrs;
-  std::vector<std::string> includes;
+  composite::MutableSeries<std::string> includes;
   bool fromArgs = false, readStdin = false, evalOnly = false, parseOnly = false, strict = false;
   bool json = false, xml = false, raw = false, location = true, findFile = false;
   bool readWrite = false, readOnly = false, dryRun = false, noOutLink = false, showTrace = false;
@@ -109,9 +110,9 @@ bool parseCommon(Options &o, const std::string &arg, int &i, int argc, char **ar
   };
   if (arg == "-I" || arg == "--include") {
     std::string v = next();
-    o.includes.push_back(v);
+    o.includes.append(v);
   } else if (arg.rfind("-I", 0) == 0 && arg.size() > 2) {
-    o.includes.push_back(arg.substr(2));
+    o.includes.append(arg.substr(2));
   } else if (arg == "--arg") {
     std::string n = next(), v = next();
     o.argExprs.push_back({n, v});
@@ -119,7 +120,7 @@ bool parseCommon(Options &o, const std::string &arg, int &i, int argc, char **ar
     std::string n = next(), v = next();
     o.argStrs.push_back({n, v});
   } else if (arg == "-A" || arg == "--attr") {
-    o.attrPaths.push_back(next());
+    o.attrPaths.append(next());
   } else if (arg == "-E" || arg == "--expr") {
     o.fromArgs = true;
   } else if (arg == "--show-trace") {
@@ -244,17 +245,17 @@ std::map<std::string, Value *> buildAutoArgs(EvalState &st, const Options &o) {
 /// findAlongAttrPath
 Value *findAlongAttrPath(EvalState &st, const std::string &path, const std::map<std::string, Value *> &autoArgs,
                          Value &root) {
-  std::vector<std::string> comps;
+  composite::MutableSeries<std::string> comps;
   {
     std::string cur;
     bool quoted = false;
     for (char c : path) {
       if (c == '"') { quoted = !quoted; continue; }
-      if (c == '.' && !quoted) { comps.push_back(cur); cur.clear(); continue; }
+      if (c == '.' && !quoted) { comps.append(cur); cur.clear(); continue; }
       cur += c;
     }
     if (quoted) throw EvalError("missing closing quote in selection path '" + path + "'");
-    if (!path.empty()) comps.push_back(cur);
+    if (!path.empty()) comps.append(cur);
   }
   Value *v = &root;
   for (auto &c : comps) {
@@ -288,7 +289,7 @@ struct DrvInfo {
   std::map<std::string, std::string> outputs;
 };
 
-bool getDerivation(EvalState &st, Value &v, const std::string &attrPath, std::vector<DrvInfo> &drvs,
+bool getDerivation(EvalState &st, Value &v, const std::string &attrPath, composite::MutableSeries<DrvInfo> &drvs,
                    std::set<const void *> &done) {
   st.forceValue(v);
   if (!st.isDerivation(v)) return true;
@@ -301,12 +302,12 @@ bool getDerivation(EvalState &st, Value &v, const std::string &attrPath, std::ve
   d.drvPath = st.coerceToString(*dp->value, ctx, false, false);
   d.outputName = "out";
   if (const Attr *on = v.attrs->get(st.s.outputName)) d.outputName = std::string(st.forceStringNoCtx(*on->value));
-  drvs.push_back(d);
+  drvs.append(d);
   return false;
 }
 
 void getDerivations(EvalState &st, Value &vIn, const std::string &prefix, const std::map<std::string, Value *> &autoArgs,
-                    std::vector<DrvInfo> &drvs, std::set<const void *> &done) {
+                    composite::MutableSeries<DrvInfo> &drvs, std::set<const void *> &done) {
   Value v;
   st.autoCallFunction(autoArgs, vIn, v);
   if (!getDerivation(st, v, prefix, drvs, done)) return;
@@ -391,7 +392,7 @@ int runEvalCommand(Options &o, bool build) {
 
 int runEvalCommandIn(Options &o, bool build, EvalState &st, std::shared_ptr<nixstore::Store> store) {
   auto autoArgs = buildAutoArgs(st, o);
-  if (o.attrPaths.empty()) o.attrPaths.push_back("");
+  if (o.attrPaths.empty()) o.attrPaths.append("");
 
   std::vector<std::pair<std::string, std::function<Value *()>>> exprs;
 
@@ -431,7 +432,7 @@ int runEvalCommandIn(Options &o, bool build, EvalState &st, std::shared_ptr<nixs
   } else if (o.fromArgs) {
     for (auto &f : o.files) roots.push_back([&, f]() { return handleParsed(f, cwdPath(), "«string»", ""); });
   } else {
-    if (o.files.empty()) o.files.push_back("./default.nix");
+    if (o.files.empty()) o.files.append("./default.nix");
     for (auto &f : o.files)
       roots.push_back([&, f]() -> Value * {
         std::string p = lookupFileArg(st, f);
@@ -447,7 +448,7 @@ int runEvalCommandIn(Options &o, bool build, EvalState &st, std::shared_ptr<nixs
   }
 
   int rootNr = 0;
-  std::vector<std::string> buildOutputs;
+  composite::MutableSeries<std::string> buildOutputs;
   for (auto &r : roots) {
     Value *root = r();
     if (!root) continue;
@@ -473,7 +474,7 @@ int runEvalCommandIn(Options &o, bool build, EvalState &st, std::shared_ptr<nixs
           std::cout << std::endl;
         }
       } else {
-        std::vector<DrvInfo> drvs;
+        composite::MutableSeries<DrvInfo> drvs;
         std::set<const void *> done;
         getDerivations(st, v, "", autoArgs, drvs, done);
         for (auto &d : drvs) {
@@ -499,7 +500,7 @@ int runEvalCommandIn(Options &o, bool build, EvalState &st, std::shared_ptr<nixs
               if (d.outputName != "out") link += "-" + d.outputName;
               store->addPermRoot(outPath, absPath(link));
             }
-            buildOutputs.push_back(outPath);
+            buildOutputs.append(outPath);
           }
         }
       }
@@ -530,7 +531,7 @@ int cmdInstantiate(int argc, char **argv, int start, bool build) {
     else if (a == "--no-out-link") o.noOutLink = true;
     else if (a == "-") o.readStdin = true;
     else if (a.size() > 1 && a[0] == '-' && !o.fromArgs) usage("unrecognised flag '" + a + "'");
-    else o.files.push_back(a);
+    else o.files.append(a);
   }
   if (o.parseOnly && o.files.empty() && !o.fromArgs) o.readStdin = true;
   return runEvalCommand(o, build);
@@ -539,7 +540,7 @@ int cmdInstantiate(int argc, char **argv, int start, bool build) {
 int cmdStore(int argc, char **argv, int start) {
   Options o;
   std::string op;
-  std::vector<std::string> args;
+  composite::MutableSeries<std::string> args;
   bool queryRefs = false, queryReqs = false, queryReferrers = false, queryDeriver = false, queryOutputs = false,
        queryHash = false, querySize = false, includeOutputs = false, printInvalid = false;
   for (int i = start; i < argc; i++) {
@@ -559,7 +560,7 @@ int cmdStore(int argc, char **argv, int start) {
     else if (a == "--include-outputs") includeOutputs = true;
     else if (a == "--print-dead" || a == "--print-live") printInvalid = true;
     else if (a == "--recursive") {}
-    else args.push_back(a);
+    else args.append(a);
   }
   finishOptions(o);
   nixstore::Store store(o.store);
@@ -600,7 +601,7 @@ int cmdStore(int argc, char **argv, int start) {
       }
     } else if (op == "--query") {
       std::set<std::string> out;
-      std::vector<std::string> ordered;
+      composite::MutableSeries<std::string> ordered;
       for (auto &a : args) {
         std::string p = toStore(a);
         if (queryRefs) {
@@ -615,17 +616,17 @@ int cmdStore(int argc, char **argv, int start) {
           out.insert(r.begin(), r.end());
         } else if (queryDeriver) {
           auto info = store.queryPathInfo(p);
-          ordered.push_back(info && !info->deriver.empty() ? info->deriver : "unknown-deriver");
+          ordered.append(info && !info->deriver.empty() ? info->deriver : "unknown-deriver");
         } else if (queryOutputs) {
           auto d = store.readDerivation(p);
-          for (auto &[n, o2] : d.outputs) ordered.push_back(o2.path);
+          for (auto &[n, o2] : d.outputs) ordered.append(o2.path);
         } else if (queryHash || querySize) {
           auto info = store.queryPathInfo(p);
           if (!info) throw nixstore::Error("path '" + p + "' is not valid");
-          ordered.push_back(queryHash ? info->narHash.to_string(nixstore::HashFormat::Nix32, true)
+          ordered.append(queryHash ? info->narHash.to_string(nixstore::HashFormat::Nix32, true)
                                       : std::to_string(info->narSize));
         } else {
-          ordered.push_back(p);
+          ordered.append(p);
         }
       }
       for (auto &p : out) std::cout << p << "\n";
@@ -648,8 +649,8 @@ int cmdStore(int argc, char **argv, int start) {
       }
     } else if (op == "--verify-path" || op == "--verify") {
       int bad = 0;
-      std::vector<std::string> paths = args.empty() ? store.allValidPaths() : std::vector<std::string>{};
-      for (auto &a : args) paths.push_back(toStore(a));
+      composite::MutableSeries<std::string> paths = args.empty() ? store.allValidPaths() : composite::MutableSeries<std::string>{};
+      for (auto &a : args) paths.append(toStore(a));
       for (auto &p : paths) {
         auto info = store.queryPathInfo(p);
         if (!info) { std::cerr << "path '" << p << "' is not valid\n"; bad++; continue; }
@@ -807,10 +808,10 @@ int realMain(int argc, char **argv) {
     if (cmd == "parse") extra = {"--parse"};
     if (cmd == "emit-mlir") extra = {"--emit-mlir"};
     if (cmd == "run-mlir") extra = {"--eval", "--strict"};
-    std::vector<char *> nargs;
-    nargs.push_back(argv[0]);
-    for (auto &e : extra) nargs.push_back(const_cast<char *>(e.c_str()));
-    for (int i = 2; i < argc; i++) nargs.push_back(argv[i]);
+    composite::MutableSeries<char *> nargs;
+    nargs.append(argv[0]);
+    for (auto &e : extra) nargs.append(const_cast<char *>(e.c_str()));
+    for (int i = 2; i < argc; i++) nargs.append(argv[i]);
     return cmdInstantiate(nargs.size(), nargs.data(), 1, false);
   }
   if (cmd == "primops") {
@@ -822,9 +823,9 @@ int realMain(int argc, char **argv) {
     o.store.readOnly = true;
     auto store = std::make_shared<nixstore::Store>(o.store);
     EvalState st(o.eval, store);
-    std::vector<std::pair<std::string, unsigned>> v;
+    composite::MutableSeries<std::pair<std::string, unsigned>> v;
     for (auto &e : st.baseEnv)
-      if (e.getValue()->type == VType::PrimOp) v.push_back({e.getKey().str(), e.getValue()->primOp->arity});
+      if (e.getValue()->type == VType::PrimOp) v.append({e.getKey().str(), e.getValue()->primOp->arity});
     std::sort(v.begin(), v.end());
     for (auto &[k, a] : v) std::cout << k << " " << a << "\n";
     return 0;

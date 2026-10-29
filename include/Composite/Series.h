@@ -226,6 +226,10 @@ template <class T> struct MutableSeries {
   constexpr auto end() { return cells.end(); }
   constexpr auto begin() const { return cells.begin(); }
   constexpr auto end() const { return cells.end(); }
+  constexpr auto rbegin() { return cells.rbegin(); }
+  constexpr auto rend() { return cells.rend(); }
+  constexpr auto rbegin() const { return cells.rbegin(); }
+  constexpr auto rend() const { return cells.rend(); }
   constexpr bool empty() const { return cells.empty(); }
   constexpr T &back() { return cells.back(); }
   constexpr const T &back() const { return cells.back(); }

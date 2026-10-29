@@ -13,6 +13,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "Composite/Series.h"
 #include "Nix/Store.h"
 
 #include <algorithm>
@@ -91,15 +92,15 @@ void Store::registerValidPath(const PathInfo &info) {
   rename(tmp.c_str(), infoFile(info.path).c_str());
 }
 
-std::vector<std::string> Store::allValidPaths() {
-  std::vector<std::string> res;
+composite::MutableSeries<std::string> Store::allValidPaths() {
+  composite::MutableSeries<std::string> res;
   DIR *d = opendir((settings.stateDir + "/info").c_str());
   if (!d) return res;
   while (auto *e = readdir(d)) {
     std::string n = e->d_name;
     if (n == "." || n == ".." || n.size() < 34 || n.find(".tmp") != std::string::npos) continue;
     std::string p = settings.storeDir + "/" + n;
-    if (pathExists(toReal(p))) res.push_back(p);
+    if (pathExists(toReal(p))) res.append(p);
   }
   closedir(d);
   std::sort(res.begin(), res.end());
@@ -121,10 +122,10 @@ static void canonicalisePathMetaData(const std::string &path) {
   if (S_ISDIR(st.st_mode)) {
     DIR *d = opendir(path.c_str());
     if (d) {
-      std::vector<std::string> names;
+      composite::MutableSeries<std::string> names;
       while (auto *e = readdir(d)) {
         std::string n = e->d_name;
-        if (n != "." && n != "..") names.push_back(n);
+        if (n != "." && n != "..") names.append(n);
       }
       closedir(d);
       for (auto &n : names) canonicalisePathMetaData(path + "/" + n);
@@ -549,18 +550,18 @@ void Store::runBuilder(const std::string &drvPath, const Derivation &drv,
     env["NIX_ATTRS_SH_FILE"] = top + "/.attrs.sh";
   }
 
-  std::vector<std::string> envStrs;
-  for (auto &[k, v] : env) envStrs.push_back(k + "=" + v);
-  std::vector<char *> envp;
-  for (auto &s : envStrs) envp.push_back(const_cast<char *>(s.c_str()));
-  envp.push_back(nullptr);
-  std::vector<char *> argv;
+  composite::MutableSeries<std::string> envStrs;
+  for (auto &[k, v] : env) envStrs.append(k + "=" + v);
+  composite::MutableSeries<char *> envp;
+  for (auto &s : envStrs) envp.append(const_cast<char *>(s.c_str()));
+  envp.append(nullptr);
+  composite::MutableSeries<char *> argv;
   std::string builderBase = baseNameOf(drv.builder);
-  argv.push_back(const_cast<char *>(builderBase.c_str()));
-  std::vector<std::string> args;
-  for (auto &a : drv.args) args.push_back(rewrite(a));
-  for (auto &a : args) argv.push_back(const_cast<char *>(a.c_str()));
-  argv.push_back(nullptr);
+  argv.append(const_cast<char *>(builderBase.c_str()));
+  composite::MutableSeries<std::string> args;
+  for (auto &a : drv.args) args.append(rewrite(a));
+  for (auto &a : args) argv.append(const_cast<char *>(a.c_str()));
+  argv.append(nullptr);
 
   pid_t pid = fork();
   if (pid < 0) throw Error("fork failed");
@@ -675,9 +676,9 @@ bool Store::collectGarbage(bool dryRun, std::vector<std::string> &deleted) {
   };
   scanRoots(settings.stateDir + "/gcroots");
   auto live = computeFSClosure(roots, true);
-  std::vector<std::string> dead;
+  composite::MutableSeries<std::string> dead;
   for (auto &p : allValidPaths())
-    if (!live.count(p)) dead.push_back(p);
+    if (!live.count(p)) dead.append(p);
   // Delete in referrer-safe order: repeat until no progress.
   bool progress = true;
   std::set<std::string> remaining(dead.begin(), dead.end());

@@ -113,7 +113,7 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
         } else if (i->name == st.s.args) {
           st.forceList(*i->value, pos, "");
           for (size_t k = 0; k < i->value->listSize(); k++)
-            drv.args.push_back(st.coerceToString(*i->value->list.elems[k], context, true, true, pos,
+            drv.args.append(st.coerceToString(*i->value->list.elems[k], context, true, true, pos,
                                                  "while evaluating an element of the argument list"));
         } else if (structured) {
           if (i->name == st.s.structuredAttrs) continue;

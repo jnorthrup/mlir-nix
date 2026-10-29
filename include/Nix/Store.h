@@ -10,6 +10,8 @@
 #define NIX_STORE_H
 
 #include <cstdint>
+
+#include "Composite/Series.h"
 #include <functional>
 #include <map>
 #include <optional>
@@ -144,7 +146,7 @@ struct Derivation {
   std::map<std::string, std::set<std::string>> inputDrvs;
   std::set<std::string> inputSrcs;
   std::string platform, builder;
-  std::vector<std::string> args;
+  composite::MutableSeries<std::string> args;
   std::map<std::string, std::string> env;
   std::optional<std::string> structuredAttrs; // JSON text (env "__json")
 
@@ -198,7 +200,7 @@ struct Store {
   std::optional<PathInfo> queryPathInfo(const std::string &path);
   void registerValidPath(const PathInfo &info);
   std::set<std::string> queryReferrers(const std::string &path);
-  std::vector<std::string> allValidPaths();
+  composite::MutableSeries<std::string> allValidPaths();
 
   /// Copy a file system object into the store (content-addressed).
   std::string addToStore(std::string name, const std::string &srcPath,
