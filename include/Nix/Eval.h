@@ -612,7 +612,7 @@ struct EvalState {
   void installPool(std::unique_ptr<nixfe::FilePool> p);
   unsigned exprCounter = 0;
 
-  /// MLNIX_PRELOWER_LIST=file (paths in the order a run evaluated them, MLNIX_RECORD_FILES=file writes one): a helper thread lexes, parses
+  /// MLNIX_PRELOWER=1 with MLNIX_PREFETCH=auto (the files a previous run of this invocation evaluated; the first run records them), or MLNIX_PRELOWER_LIST=file (such a list): a helper thread lexes, parses
   /// and builds the IR of those files ahead of the evaluator, which adopts each finished file when evalFile asks for it.  The helper does
   /// no evaluation and no optimization (the prim folder calls back into the evaluator), only genExpr into a module of its own.
   struct Prelowered {

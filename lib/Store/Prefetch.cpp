@@ -26,6 +26,7 @@
 namespace nixprefetch {
 
 bool recording = false;
+std::vector<std::string> replayFiles;
 
 namespace {
 
@@ -205,7 +206,10 @@ void init(int argc, char **argv) {
     composite::MutableSeries<Entry> es;
     std::ifstream in(spec.substr(spec.find(':') + 1));
     for (std::string l; std::getline(in, l);)
-      if (l.size() > 2 && l[1] == ' ') es.append({l[0], l.substr(2)});
+      if (l.size() > 2 && l[1] == ' ') {
+        es.append({l[0], l.substr(2)});
+        if (l[0] == 'F' && l.size() > 6 && l.compare(l.size() - 4, 4, ".nix") == 0) replayFiles.push_back(l.substr(2));
+      }
     // replay-wait: the evaluation starts when the whole list has been replayed (the best a prefetch can do)
     bool wait = spec.rfind("replay-wait:", 0) == 0;
     if (!es.empty()) {

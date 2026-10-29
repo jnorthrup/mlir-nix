@@ -15,6 +15,9 @@
 #ifndef NIX_PREFETCH_H
 #define NIX_PREFETCH_H
 
+#include <string>
+#include <vector>
+
 namespace nixprefetch {
 
 /// Reads MLNIX_PREFETCH: record:FILE | replay:FILE | replay-wait:FILE (finish the replay before
@@ -24,6 +27,8 @@ namespace nixprefetch {
 void init(int argc = 0, char **argv = nullptr);
 
 extern bool recording;
+/// The files (`.nix`, kind F) a replayed list names, in order: what the evaluator will ask evalFile for (MLNIX_PRELOWER lowers them ahead).
+extern std::vector<std::string> replayFiles;
 void noteSlow(char kind, const char *path);
 /// Remember that the evaluation is touching `path` (kinds above).  One branch when not recording.
 inline void note(char kind, const char *path) {

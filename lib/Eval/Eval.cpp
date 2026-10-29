@@ -308,7 +308,7 @@ EvalState::EvalState(EvalSettings st, std::shared_ptr<nixstore::Store> store)
   // The evaluator is single-threaded.  With threading enabled every attribute
   // and location is uniqued through sharded, locked, thread-cached tables --
   // a quarter of the run time (measured) for no benefit.
-  if (!getenv("MLNIX_MT") && !getenv("MLNIX_PRELOWER_LIST")) ctx.disableMultithreading();
+  if (!getenv("MLNIX_MT") && !getenv("MLNIX_PRELOWER_LIST") && !getenv("MLNIX_PRELOWER")) ctx.disableMultithreading();
   nd::loadNixDialects(ctx);
   registerEvalModels(ctx);
   ctx.getLoadedDialect<nd::NixDialect>()->primFolder = [this](llvm::StringRef key,
@@ -2404,15 +2404,25 @@ void EvalState::installPool(std::unique_ptr<nixfe::FilePool> p) {
 
 void EvalState::startPrelower() {
   const char *list = getenv("MLNIX_PRELOWER_LIST");
-  if (pre || !list || !settings.deferBodies) return;
+  bool replayed = getenv("MLNIX_PRELOWER") && !nixprefetch::replayFiles.empty(); // MLNIX_PREFETCH=auto|replay:FILE supplies the list
+  if (pre || !settings.deferBodies || (!list && !replayed)) return;
   pre = std::make_unique<PrelowerState>();
   for (auto &e : baseEnv) pre->baseNames.insert(e.getKey().str());
   pre->po = parseOptions();
   pre->po.lintAbsolutePaths = pre->po.lintShortPaths = pre->po.lintUrls = nixfe::Lint::Ignore;
   pre->po.onWarning = nullptr;
-  std::ifstream in(list);
-  for (std::string line; std::getline(in, line);)
-    if (!line.empty()) pre->queue.push_back(line);
+  if (list) {
+    std::ifstream in(list); // one path a line, or a prefetch list (`F path`)
+    for (std::string line; std::getline(in, line);) {
+      if (line.size() > 2 && line[1] == ' ') {
+        if (line[0] == 'F' && line.compare(line.size() - 4, 4, ".nix") == 0) pre->queue.push_back(line.substr(2));
+      } else if (!line.empty()) {
+        pre->queue.push_back(line);
+      }
+    }
+  } else {
+    pre->queue.assign(nixprefetch::replayFiles.begin(), nixprefetch::replayFiles.end());
+  }
   unsigned n = 1;
   if (const char *t = getenv("MLNIX_PRELOWER_THREADS")) n = std::max(1ul, std::min(8ul, strtoul(t, nullptr, 10)));
   for (unsigned i = 0; i < n; i++) pre->workers.emplace_back([this] { prelowerLoop(); });
@@ -2625,7 +2635,6 @@ Value *EvalState::evalFile(const std::string &pathIn) {
     if (!origin->text) origin->text = nixfe::Source::fromString(readSource(resolved));
     nd::ExprOp adopted;
     if (logical == resolved) {
-      if (const char *rec = getenv("MLNIX_RECORD_FILES")) { static std::ofstream f(rec, std::ios::app); f << resolved << '\n'; f.flush(); }
       startPrelower();
       adopted = takePrelowered(resolved);
     }
