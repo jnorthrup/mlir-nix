@@ -59,9 +59,9 @@ On the benchmark host, from the repository root, with the loop version of the he
 
 ```sh
 mkdir -p /tmp/old/Composite
-for f in MinMaxHeap.h Series.h Pack.h; do git show 46182e5:include/Composite/$f > /tmp/old/Composite/$f; done
+for f in MinMaxHeap.h Series.h Pack.h; do git show cd60c69:include/Composite/$f > /tmp/old/Composite/$f; done
 bash scripts/optimizer-ladder.sh /tmp/old
 ```
 
-The first commit with the loop heap is `46182e5` (Pack.h, Series.h and MinMaxHeap.h as they were before the transform rewrite
-`d2fbbe2`). `CLANG=` and `GCC=` select the compilers.
+`cd60c69` is the last commit with the loop heap (the transform rewrite is `d2fbbe2`; the earlier `46182e5` lacks `Cluster::min`, which
+the benchmark uses). `CLANG=` and `GCC=` select the compilers.
