@@ -369,20 +369,20 @@ std::map<std::string, Hash> Store::hashDerivationModulo(const Derivation &drv, b
       throw Error("content-addressed and impure derivations are not supported (derivation '" + drv.name + "')");
   DrvInputs inputs2;
   for (auto &[drvPath, outs] : drv.inputDrvs) {
-    std::map<std::string, Hash> h;
     auto it = drvHashes.find(drvPath);
-    if (it != drvHashes.end()) h = it->second;
-    else if (takeLater(drvPath, h)) drvHashes[drvPath] = h;
-    else {
-      h = hashDerivationModulo(readDerivation(drvPath), false);
-      drvHashes[drvPath] = h;
+    if (it == drvHashes.end()) { // an input's modulo hash: the hasher's, or made here; kept, with its base 16, for every later dependent
+      DrvModulo m;
+      if (!takeLater(drvPath, m.hashes)) m.hashes = hashDerivationModulo(readDerivation(drvPath), false);
+      if (auto e = m.hashes.find(""); e != m.hashes.end()) m.hex = e->second.to_string(HashFormat::Base16, false);
+      it = drvHashes.emplace(drvPath, std::move(m)).first;
     }
-    if (h.count("")) {
-      inputs2[h[""].to_string(HashFormat::Base16, false)].insert(outs.begin(), outs.end());
+    const DrvModulo &m = it->second;
+    if (!m.hex.empty()) {
+      inputs2[m.hex].insert(outs.begin(), outs.end());
     } else {
       for (auto &o : outs) {
-        auto j = h.find(o);
-        if (j == h.end()) throw Error("no hash for output '" + o + "' of derivation '" + drv.name + "'");
+        auto j = m.hashes.find(o);
+        if (j == m.hashes.end()) throw Error("no hash for output '" + o + "' of derivation '" + drv.name + "'");
         inputs2[j->second.to_string(HashFormat::Base16, false)].insert("out");
       }
     }

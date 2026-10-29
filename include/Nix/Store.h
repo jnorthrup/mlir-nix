@@ -355,7 +355,13 @@ struct Store {
   std::function<void(const std::string &)> log;
 
   StoreSettings settings;
-  std::map<std::string, std::map<std::string, Hash>> drvHashes;
+  /// A derivation's modulo hashes as its dependents read them: hashDerivationModulo's answer, and for an input-addressed derivation (one
+  /// hash, key "") that hash in base 16 already, as a dependent's text names the input.
+  struct DrvModulo {
+    std::map<std::string, Hash> hashes;
+    std::string hex;
+  };
+  std::map<std::string, DrvModulo> drvHashes;
   std::map<std::string, Derivation> drvCache;
   std::string infoFile(const std::string &path) const;
   void makeStoreWritable();
