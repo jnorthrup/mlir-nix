@@ -742,7 +742,7 @@ void registerBuiltins(EvalState &state) {
   S.addPrimOp("__getAttr", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     auto name = st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.getAttr");
     st.forceAttrs(*args[1], pos, "while evaluating the second argument passed to builtins.getAttr");
-    const Attr *a = args[1]->attrs->get(st.symbols.create(name));
+    const Attr *a = args[1]->attrs->get(st.symbolOfString(name));
     if (!a) throw EvalError("attribute '" + str(name) + "' missing", pos);
     st.forceValue(*a->value, pos);
     v = *a->value;
@@ -750,7 +750,7 @@ void registerBuiltins(EvalState &state) {
   S.addPrimOp("__unsafeGetAttrPos", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     auto name = st.forceStringNoCtx(*args[0], pos);
     st.forceAttrs(*args[1], pos);
-    const Attr *a = args[1]->attrs->get(st.symbols.create(name));
+    const Attr *a = args[1]->attrs->get(st.symbolOfString(name));
     if (!a || !a->pos) { st.mkNull(v); return; }
     auto f = nd::decodePos(st.positionOf(*a));
     if (!f) { st.mkNull(v); return; }
@@ -763,7 +763,7 @@ void registerBuiltins(EvalState &state) {
   S.addPrimOp("__hasAttr", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     auto name = st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.hasAttr");
     st.forceAttrs(*args[1], pos, "while evaluating the second argument passed to builtins.hasAttr");
-    st.mkBool(v, args[1]->attrs->get(st.symbols.create(name)) != nullptr);
+    st.mkBool(v, args[1]->attrs->get(st.symbolOfString(name)) != nullptr);
   });
   S.addPrimOp("removeAttrs", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceAttrs(*args[0], pos, "while evaluating the first argument passed to builtins.removeAttrs");
@@ -773,7 +773,7 @@ void registerBuiltins(EvalState &state) {
     Symbol stackRm[16];
     Symbol *rm = nr <= 16 ? stackRm : static_cast<Symbol *>(st.alloc.Allocate(nr * sizeof(Symbol), alignof(Symbol)));
     for (size_t i = 0; i < nr; i++)
-      rm[i] = st.symbols.create(st.forceStringNoCtx(*args[1]->list.elems[i], pos, "while evaluating the values of the second argument passed to builtins.removeAttrs"));
+      rm[i] = st.symbolOfString(st.forceStringNoCtx(*args[1]->list.elems[i], pos, "while evaluating the values of the second argument passed to builtins.removeAttrs"));
     cp::sortRows(rm, nr, [](Symbol x, Symbol y) { return x < y; });
     Bindings *b = st.allocBindings(args[0]->attrs->size());
     size_t n = 0, k = 0;
@@ -797,7 +797,7 @@ void registerBuiltins(EvalState &state) {
       const Attr *val = e.attrs->get(st.s.value);
       if (!val) throw EvalError("attribute 'value' missing", pos)
                     .addTrace(pos, "in a {name=...; value=...;} pair");
-      bb.insertIndexed(st.symbols.create(name), val->value, val->pos);
+      bb.insertIndexed(st.symbolOfString(name), val->value, val->pos);
     }
     st.mkAttrs(v, bb.finish());
   });
@@ -822,7 +822,7 @@ void registerBuiltins(EvalState &state) {
     st.mkAttrs(v, b);
   });
   S.addPrimOp("__catAttrs", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
-    Symbol name = st.symbols.create(st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.catAttrs"));
+    Symbol name = st.symbolOfString(st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.catAttrs"));
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.catAttrs");
     composite::MutableSeries<Value *> res;
     for (Value &e : args[1]->values()) {
@@ -1069,7 +1069,7 @@ void registerBuiltins(EvalState &state) {
     for (Value *e : args[1]->items()) {
       Value r;
       st.callFunction(*args[0], *e, r, pos);
-      kv.append({st.symbols.create(st.forceStringNoCtx(r, pos, "while evaluating the return value of the grouping function passed to builtins.groupBy")), e});
+      kv.append({st.symbolOfString(st.forceStringNoCtx(r, pos, "while evaluating the return value of the grouping function passed to builtins.groupBy")), e});
     }
     cp::sortRows(kv.data(), kv.size(), [](const KV &x, const KV &y) { return x.key < y.key; });
     EvalState::BindingsBuilder bb(st);

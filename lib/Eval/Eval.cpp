@@ -2008,7 +2008,7 @@ void EvalState::evalAttrsDynamic(Node *node, Frame *env, Value &out) {
     forceValue(*nv, p);
     if (nv->type == VType::Null) continue;
     auto name = forceStringNoCtx(*nv, p, "while evaluating the name of a dynamic attribute");
-    Symbol sym = symbols.create(name);
+    Symbol sym = symbolOfString(name);
     if (seen.count(sym))
       throw EvalError("dynamic attribute '" + std::string(name) + "' already defined at " +
                           showPos(seen[sym] ? seen[sym] : nd::posOfOp(op)),
@@ -2084,7 +2084,7 @@ void EvalState::evalConcatStrings(Node *node, Frame *env, Value &out) {
 Symbol EvalState::pathSymbol(const nixfe::Name &comp, Node *const *dyn, unsigned &nextDyn, Frame *env,
                              PosPtr pos) {
   if (!comp.isNull()) return symbolOf(comp);
-  return symbols.create(forceStringNoCtx(*lookup(env, dyn[nextDyn++]), pos, "while evaluating an attribute name"));
+  return symbolOfString(forceStringNoCtx(*lookup(env, dyn[nextDyn++]), pos, "while evaluating an attribute name"));
 }
 
 Value *EvalState::selectField(Value &base, Symbol key, PosPtr pos) {

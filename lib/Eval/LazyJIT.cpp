@@ -1302,7 +1302,7 @@ LazyJITPlan::RunResult LazyJITPlan::run(EvalState &st, Frame *env, llvm::ArrayRe
             Value *key = persistentCell(leaf.key);
             if (!key) return result;
             forcing(*key);
-            symbol = st.symbols.create(st.forceStringNoCtx(*key, pos, "while evaluating an attribute name"));
+            symbol = st.symbolOfString(st.forceStringNoCtx(*key, pos, "while evaluating an attribute name"));
           }
           Value *current = persistentCell(leaf.base);
           if (!current) return result;

@@ -686,6 +686,20 @@ struct EvalState {
     return it->second;
   }
   llvm::DenseMap<const void *, Symbol> attrSymbols;
+  /// The symbol of a string value's bytes.  A string value's bytes never change and never move (an arena, a mapped source, an op's
+  /// property, the symbol table's own entries), so their address and length name them for the whole run: a string met before (the literal
+  /// list of a removeAttrs called a hundred thousand times, a name attrNames handed out) is answered by its address, not hashed and probed.
+  /// Only for the bytes of a string value: a temporary's address would name other bytes later.
+  Symbol symbolOfString(std::string_view s) {
+    StrSymEntry &e = strSymCache[((reinterpret_cast<uintptr_t>(s.data()) >> 3) ^ (s.size() * 0x9E3779B1u)) & (kStrSymCache - 1)];
+    if (e.p == s.data() && e.n == s.size()) return e.sym;
+    Symbol sym = symbols.create(s);
+    e = {s.data(), uint32_t(s.size()), sym};
+    return sym;
+  }
+  struct StrSymEntry { const char *p = nullptr; uint32_t n = 0; Symbol sym = 0; };
+  static constexpr size_t kStrSymCache = 4096; // 64 KB
+  StrSymEntry strSymCache[kStrSymCache];
   /// Symbol of one select/has_attr path component: literal (a name) or the
   /// next computed key (operand), forced to a string.
   Symbol pathSymbol(const nixfe::Name &comp, Node *const *dyn, unsigned &nextDyn, Frame *env, PosPtr pos);
