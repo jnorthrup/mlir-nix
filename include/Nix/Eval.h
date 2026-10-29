@@ -14,6 +14,7 @@
 #define NIX_EVAL_H
 
 #include "Composite/Pool.h"
+#include "Composite/Rows.h"
 #include "Composite/Views.h"
 #include "Nix/MLIRGen.h"
 #include "Nix/Store.h"

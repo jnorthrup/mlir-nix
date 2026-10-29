@@ -67,6 +67,8 @@ void EvalState::statSelect(const void *site, const Bindings *b, Symbol key, bool
   if (std::find(s.seen.begin(), s.seen.end(), sig) == s.seen.end()) { if (s.seen.size() < 6) s.seen.push_back(sig); else s.seen[5] = sig ^ 1; }
 }
 
+static const auto attrName = [](const Attr &a) { return a.name; };
+
 const Attr *Bindings::get(Symbol s) const {
   if (layered()) {
     if (countGets) ++getLayered;
@@ -75,46 +77,19 @@ const Attr *Bindings::get(Symbol s) const {
     if (const Attr *a = L.top->get(s)) return a; // top shadows base
     return L.base->get(s);                       // and base may be a layer itself: the chain is walked, not flattened
   }
-  size_t lo = 0, hi = size_;
-  unsigned steps = 0;
-  while (lo < hi) {
-    size_t mid = (lo + hi) / 2;
-    if (attrs[mid].name < s) lo = mid + 1;
-    else hi = mid;
-    ++steps;
-  }
-  bool found = lo < size_ && attrs[lo].name == s;
-  if (countGets) { unsigned b = size_ ? std::min(15, 63 - std::countl_zero(uint64_t(size_))) : 0; ++getCalls[b]; getSteps[b] += steps; getMiss[b] += !found; }
-  if (found) return &attrs[lo];
-  return nullptr;
+  const Attr *r = cp::findRow(attrs, size_, s, attrName);
+  if (countGets) { unsigned b = size_ ? std::min(15, 63 - std::countl_zero(uint64_t(size_))) : 0; ++getCalls[b]; getSteps[b] += b; getMiss[b] += r == nullptr; }
+  return r;
 }
 
 /// The union of two flat sorted sets, `y` winning on equal names, as a new flat set of exactly its size.
 static Bindings *mergeBindings(Arena &alloc, const Bindings *x, const Bindings *y) {
-  size_t i = 0, j = 0, n = 0;
-  while (i < x->size_ && j < y->size_) {
-    Symbol a = x->attrs[i].name, b = y->attrs[j].name;
-    if (a == b) { i++; j++; }
-    else if (a < b) i++;
-    else j++;
-    n++;
-  }
-  n += (x->size_ - i) + (y->size_ - j);
+  size_t n = cp::unionSize(x->attrs, x->size_, y->attrs, y->size_, attrName);
   Bindings::merged++;
   Bindings::mergedCells += n;
   void *mem = alloc.Allocate(sizeof(Bindings) + n * sizeof(Attr), alignof(Bindings));
   auto *r = new (mem) Bindings();
-  i = j = 0;
-  size_t k = 0;
-  while (i < x->size_ && j < y->size_) {
-    const Attr &a = x->attrs[i], &b = y->attrs[j];
-    if (a.name == b.name) { r->attrs[k++] = b; i++; j++; }
-    else if (a.name < b.name) { r->attrs[k++] = a; i++; }
-    else { r->attrs[k++] = b; j++; }
-  }
-  while (i < x->size_) r->attrs[k++] = x->attrs[i++];
-  while (j < y->size_) r->attrs[k++] = y->attrs[j++];
-  r->size_ = uint32_t(k);
+  r->size_ = uint32_t(cp::unionRows(x->attrs, x->size_, y->attrs, y->size_, r->attrs, attrName));
   return r;
 }
 
@@ -1736,26 +1711,10 @@ PosIdx EvalState::positionBase(nd::AttrsOp op) {
   return base;
 }
 
-/// Rows by name, in place, first of equal names kept: an insertion sort (stable, no buffer) for the small sets nearly every `{ ... }` is, the
-/// stable sort of the library past that.  Returns the number of rows left.
+/// Rows by name, in place, the first of equal names kept (Composite/Rows.h): the rows left.
 static size_t sortRowsFirstWins(Attr *rows, size_t n) {
-  constexpr size_t kInsertion = 24;
-  if (n <= kInsertion) {
-    for (size_t i = 1; i < n; i++) {
-      Attr x = rows[i];
-      size_t j = i;
-      while (j > 0 && x.name < rows[j - 1].name) { rows[j] = rows[j - 1]; --j; }
-      rows[j] = x;
-    }
-  } else {
-    std::stable_sort(rows, rows + n, [](const Attr &a, const Attr &b) { return a.name < b.name; });
-  }
-  size_t m = 0;
-  for (size_t i = 0; i < n; i++) {
-    if (m && rows[m - 1].name == rows[i].name) continue; // first wins
-    rows[m++] = rows[i];
-  }
-  return m;
+  cp::sortRows(rows, n, [](const Attr &a, const Attr &b) { return a.name < b.name; });
+  return cp::uniqueFirst(rows, n, attrName);
 }
 
 void EvalState::evalAttrs(nd::AttrsOp op, Frame *env, Value &out) {

@@ -42,6 +42,15 @@ so the minimum is the steadier column.
 
 Warm start only. The ratio of 0.79-0.82 on the minimum is not 0.5.
 
+### The same comparison at HEAD ce2cf11 (Kali, 7 interleaved rounds, outputs identical)
+
+| mlnix demand | min / median | Nix 2.35.4 min / median | ratio, median | ratio, min |
+|---|---|---|---:|---:|
+| nixos-toplevel, plain | 3.57 / 3.59 s | 3.76 / 3.89 s | 0.92 | 0.95 |
+| nixos-toplevel, prelowering (2 helpers) | 2.92 / 3.12 s | 3.71 / 3.97 s | 0.79 | 0.79 |
+| nixpkgs-73, plain | 3.39 / 3.51 s | 3.48 / 3.97 s | 0.88 | 0.97 |
+| nixpkgs-73, prelowering (2 helpers) | 2.80 / 2.91 s | 3.48 / 3.55 s | 0.82 | 0.80 |
+
 ## Peak memory
 
 Mac, nixos-toplevel, three runs each: peak RSS 1,182 MB plain, 1,208 MB with one helper, 1,210 MB with two (+27 MB, +2.3%).
