@@ -188,8 +188,11 @@ struct PieceContexts {
 
 struct PrimOp;
 
+/// Failed: a thunk whose evaluation threw an evaluation error.  Forcing it again throws a fresh copy of that error as it stands then (the
+/// first throw may still be gathering traces on its way out), not the evaluation again: Nix 2.34's memoised errors.  The tags up to
+/// Blackhole are the cells that are not values yet (isThunk; the JITs test `tag <= Blackhole`).
 enum class VType : uint8_t {
-  Thunk, App, Blackhole, Int, Float, Bool, Null, String, Path, Attrs, List,
+  Thunk, App, Failed, Blackhole, Int, Float, Bool, Null, String, Path, Attrs, List,
   Lambda, PrimOp, PrimOpApp
 };
 
@@ -222,11 +225,12 @@ struct Value {
       Value *left, *right;
     } app; // App thunk and PrimOpApp
     const PrimOp *primOp;
+    const std::exception_ptr *failed; // Failed: the error its evaluation threw
   };
 
   Value() : integer(0) {}
 
-  bool isThunk() const { return type == VType::Thunk || type == VType::App || type == VType::Blackhole; }
+  bool isThunk() const { return type <= VType::Blackhole; }
   bool isFunction() const { return type == VType::Lambda || type == VType::PrimOp || type == VType::PrimOpApp; }
   std::string_view sv() const { return {str.s, aux}; }
   /// The string's characters as a window over its arena bytes (Series<char>, no cursor), never a copy: the weight of a string_view.
@@ -314,8 +318,9 @@ struct Slot {
   Promotion promo;
   Value *fixed = nullptr; // a literal or a builtin: its one cell, the same in every frame, made at its first touch
   bool inPlace() const { return promo == Promotion::InPlace; }
-  /// A value with a cell to read back: its frame cell, or its fixed one.  Not one evaluated in place, whose lookup makes a temporary.
-  bool persists() const { return promo != Promotion::InPlace; }
+  /// A value with a cell to read back: its frame cell, or its fixed one.  Not one evaluated in place, whose lookup makes a temporary, nor
+  /// one made by its one use, whose cell the frame does not keep.
+  bool persists() const { return promo != Promotion::InPlace && promo != Promotion::Once; }
 };
 
 //===----------------------------------------------------------------------===//
@@ -427,7 +432,7 @@ struct EvalState {
 
   // -- Allocation --------------------------------------------------------
   Value *allocValue() {
-    if (statsEnabled) ++nVT[14];
+    if (statsEnabled) ++nVT[kAllocated];
     return new (alloc.Allocate<Value>()) Value();
   }
   Bindings *allocBindings(size_t n);
@@ -505,6 +510,9 @@ struct EvalState {
 
   // -- Forcing -------------------------------------------------------------
   void forceValue(Value &v, PosPtr pos = nullptr);
+  /// The cell's evaluation threw this evaluation error, now in flight: the cell keeps it (VType::Failed).
+  void fail(Value &v);
+  [[noreturn]] void rethrowFailed(const Value &v);
   void forceValueDeep(Value &v);
   int64_t forceInt(Value &v, PosPtr pos, std::string_view errorCtx = "");
   double forceFloat(Value &v, PosPtr pos, std::string_view errorCtx = "");
@@ -724,7 +732,8 @@ struct EvalState {
   uint64_t nUpdLayered = 0, nUpdMerged = 0, nUpdBase = 0, nUpdTop = 0; // MLNIX_STATS: `//` as a layer / a flat merge, entries not copied / copied
   uint64_t nDemandMinted = 0; // MLNIX_STATS: lambda bodies minted on first call
   uint64_t nSlotMisses = 0;   // MLNIX_STATS: slotOf answered by the hash map, not its cache
-  uint64_t nVT[15] = {}; // MLNIX_STATS: instrumented tag writes, including stack values and repeated retyping;
+  static constexpr unsigned kAllocated = unsigned(VType::PrimOpApp) + 1; // nVT's last row: cells allocated
+  uint64_t nVT[kAllocated + 1] = {}; // MLNIX_STATS: instrumented tag writes, including stack values and repeated retyping;
                          // [14] alone counts allocated Value rows, not tag writes
   uint64_t nFrames = 0, nFrameBytes = 0, nFrameSlots = 0; // requested frame storage, excluding arena overhead
   composite::MutableSeries<std::pair<std::string, size_t>> evaluatedFiles; // MLNIX_STATS_IMPORTS: files evalFile'd, with how many path literals had been lowered by then
@@ -803,7 +812,7 @@ struct EvalState {
   // MLNIX_STATS: a recycling allocator for frames, simulated.  A frame that returns with nothing made over it (no thunk, no closure) can never be
   // reached again, so its storage could serve the next frame of the same slot count; simFree counts those, per slot count.
   composite::MutableSeries<composite::MutableSeries<uint64_t>> simFree;   // per slot count: the allocation clock at each release (a stack: the newest is reused first)
-  uint64_t allocClock() const { return nFrameBytes + nVT[14] * sizeof(Value) + nBindingBytes + nListBytes + nStringBytes; }
+  uint64_t allocClock() const { return nFrameBytes + nVT[kAllocated] * sizeof(Value) + nBindingBytes + nListBytes + nStringBytes; }
   uint64_t nSimReuseDist[5] = {};               // reuse distance in bytes allocated since the release: < 32 KiB, < 256 KiB, < 2 MiB, < 32 MiB, more
   uint64_t nSimHit = 0, nSimHitBytes = 0, nSimReleased = 0, nSimReleasedBytes = 0, nSimCaptured = 0;
   uint64_t nBuilders = 0, nBuilderRows = 0, nBuildersBig = 0, nBuilderBigRows = 0; // MLNIX_STATS: attribute-set builders, and those past the 12 inline rows (a malloc)

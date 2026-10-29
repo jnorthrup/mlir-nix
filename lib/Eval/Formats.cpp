@@ -117,7 +117,7 @@ void EvalState::printValueAsJSON(std::ostream &out, Value &v, bool strict, NixSt
     out << "]";
     break;
   case VType::Float: out << nixstore::jsonFloat(v.fpoint); break;
-  case VType::Thunk: case VType::App: case VType::Blackhole:
+  case VType::Thunk: case VType::App: case VType::Failed: case VType::Blackhole:
     out << "null";
     break;
   default:

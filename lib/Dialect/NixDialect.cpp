@@ -111,11 +111,20 @@ bool NixDialect::evaluatesInPlace(Value v) const {
   return i < 32 && (((m.strict | m.tail) >> i) & 1);
 }
 
+bool NixDialect::madeByItsUse(Value v) const {
+  if (!v.hasOneUse()) return false;
+  Operation *user = v.use_begin()->getOwner(), *def = v.getDefiningOp();
+  // An op with a body (a lambda) lists what the body captures as its operands: reads from inside the body, once per call of it, and a
+  // deferred body's own uses do not exist until it is minted.  Such a value needs its frame cell.
+  return def && user != def && user->getBlock() == def->getBlock() && user->getNumRegions() == 0;
+}
+
 NixDialect::Promotion NixDialect::promotionOf(Value v) const {
   Operation *def = v.getDefiningOp();
   if (!def) return Promotion::Argument;
   if (evaluatesInPlace(v)) return Promotion::InPlace;
   if (def->hasTrait<OpTrait::ConstantLike>() || isa<PathOp, BuiltinOp>(def)) return Promotion::Fixed;
+  if (madeByItsUse(v)) return Promotion::Once;
   if (isa<LambdaOp>(def)) return Promotion::Closure;
   if (isMemoryEffectFree(def)) return Promotion::Shared;
   return Promotion::Distinct;
@@ -124,6 +133,7 @@ NixDialect::Promotion NixDialect::promotionOf(Value v) const {
 StringRef NixDialect::promotionName(Promotion p) {
   switch (p) {
   case Promotion::InPlace: return "in_place";
+  case Promotion::Once: return "once";
   case Promotion::Fixed: return "fixed";
   case Promotion::Shared: return "shared";
   case Promotion::Distinct: return "distinct";
@@ -516,7 +526,7 @@ struct NixPromotionsPass : public PassWrapper<NixPromotionsPass, OperationPass<>
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(NixPromotionsPass)
   StringRef getArgument() const override { return "nix-promotions"; }
   StringRef getDescription() const override {
-    return "Mark what each value is promoted to (nix.promote): in_place, fixed, shared, distinct, closure";
+    return "Mark what each value is promoted to (nix.promote): in_place, once, fixed, shared, distinct, closure";
   }
   void getDependentDialects(DialectRegistry &registry) const override { registerNixDialects(registry); }
   void runOnOperation() override {

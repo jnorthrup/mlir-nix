@@ -116,11 +116,15 @@ def Nix_Dialect : Dialect {
     /// runs at most once per frame, right when it needs the value, so the evaluator
     /// can evaluate the definition in place instead of allocating a thunk for it.
     bool evaluatesInPlace(::mlir::Value v) const;
+    /// True when the value has exactly one use, in the same body, by another op: that consumer runs at most once per frame, so the cell it
+    /// makes when it runs is the only one the frame would ever hold for the value, and the frame needs no slot to keep it.
+    bool madeByItsUse(::mlir::Value v) const;
 
     /// What a value is promoted to: decided once, here, and read by the evaluator (which cell, if any), the JITs (what they may read
     /// back or replay) and the optimizer (what may be merged).  The sea of nodes says which abstraction each value gets.
     enum class Promotion : uint8_t {
       InPlace,  ///< one strict or tail use in the same body (evaluatesInPlace): evaluated into its consumer, no cell
+      Once,     ///< one lazy use in the same body: the consumer runs at most once per frame and makes the cell then; no frame slot
       Fixed,    ///< a literal or a builtin: the same value in every frame, one cell for all of them; value-numbered
       Shared,   ///< any other value of an op with no memory effect: a cell per frame, made lazily; value-numbered
       Distinct, ///< every evaluation is its own (an allocation with observable identity, or effects): a cell per frame, never merged

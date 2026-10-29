@@ -450,10 +450,10 @@ void EvalState::printStats() {
     double rss = ru.ru_maxrss / 1024.0;
 #endif
     uint64_t mergeBytes = Bindings::mergedCells * sizeof(Attr) + Bindings::merged * sizeof(Bindings);
-    uint64_t values = nVT[14] * sizeof(Value), named = values + nFrameBytes + nBindingBytes + nListBytes + nStringBytes + nMaskBytes + nLayerBytes + mergeBytes + nCtxBytes + nFormalBytes;
+    uint64_t values = nVT[kAllocated] * sizeof(Value), named = values + nFrameBytes + nBindingBytes + nListBytes + nStringBytes + nMaskBytes + nLayerBytes + mergeBytes + nCtxBytes + nFormalBytes;
     uint64_t handed = alloc.getTotalMemory();  // the slabs, which is what the pages are
     llvm::errs() << llvm::format("== arena: %.0f MB of slabs; peak RSS %.0f MB. By use: values %.0f (%llu cells), frames %.0f, attribute rows %.0f, list cells %.0f, string bytes %.0f, other and slack %.0f MB\n",
-                                 mb(handed), rss, mb(values), (unsigned long long)nVT[14], mb(nFrameBytes), mb(nBindingBytes), mb(nListBytes),
+                                 mb(handed), rss, mb(values), (unsigned long long)nVT[kAllocated], mb(nFrameBytes), mb(nBindingBytes), mb(nListBytes),
                                  mb(nStringBytes), mb(handed > named ? handed - named + nMaskBytes + nLayerBytes + mergeBytes + nCtxBytes + nFormalBytes : 0));
     llvm::errs() << llvm::format("   \"other\" named: stats census masks %.0f MB (a stats run only), `//` flat merges %.0f, layer headers %.0f, string contexts %.0f, formals %.0f; still unnamed (slab tails, alignment) %.0f MB\n",
                                  mb(nMaskBytes), mb(mergeBytes), mb(nLayerBytes), mb(nCtxBytes), mb(nFormalBytes), mb(handed > named ? handed - named : 0));
@@ -555,7 +555,7 @@ void EvalState::printStats() {
   llvm::errs() << "selector calls with no frame (lib.optional, lib.optionalAttrs shapes): " << nSelectorCalls << "\n";
   llvm::errs() << "curried intermediates held by value: " << nStackCells << " (" << nStackCells * sizeof(Value) << " bytes of heap cells not allocated)\n";
   llvm::errs() << "empty attribute sets: " << nEmptyShared << " shared as one constant (" << nEmptyShared * (sizeof(Bindings)) << " bytes not allocated)\n";
-  llvm::errs() << "value allocations: count=" << nVT[14] << " bytes=" << nVT[14] * sizeof(Value) << '\n';
+  llvm::errs() << "value allocations: count=" << nVT[kAllocated] << " bytes=" << nVT[kAllocated] * sizeof(Value) << '\n';
   // How many ops of real programs live where: per tier of the dialect hierarchy
   // (scope > continent > dialect), read from the IRDL declaration.
   auto *core = ctx.getLoadedDialect<nd::NixDialect>();
@@ -576,10 +576,10 @@ void EvalState::printStats() {
   // These writes include stack temporaries and repeated mutations of a cell. They
   // describe evaluator work, not a live-heap census or a per-facet allocation count.
   {
-    static const char *nm[] = {"thunk", "app", "blackhole", "int", "float", "bool", "null", "string", "path",
-                               "attrs", "list", "lambda", "primop", "primopapp"};
+    static const char *nm[kAllocated] = {"thunk", "app", "failed", "blackhole", "int", "float", "bool", "null", "string", "path",
+                                         "attrs", "list", "lambda", "primop", "primopapp"};
     llvm::errs() << "== instrumented value-tag writes (including stack temporaries; not live heap rows)\n";
-    for (int i = 0; i < 14; i++)
+    for (unsigned i = 0; i < kAllocated; i++)
       if (nVT[i]) {
         llvm::errs() << "  " << llvm::format("%-11s", nm[i]) << llvm::format("%10llu", (unsigned long long)nVT[i]) << '\n';
       }
@@ -862,7 +862,7 @@ const char *EvalState::showType(const Value &v) {
   case VType::PrimOp: return "a built-in function";
   case VType::PrimOpApp: return "a partially applied built-in function";
   case VType::Float: return "a float";
-  case VType::Thunk: case VType::App: return "a thunk";
+  case VType::Thunk: case VType::App: case VType::Failed: return "a thunk";
   case VType::Blackhole: return "a thunk";
   }
   return "?";
@@ -919,17 +919,18 @@ void EvalState::indexRegion(Region &r) {
       continue;
     }
     for (mlir::Value res : op.getResults()) {
-      // What the dialect promotes the value to decides its cell: none when it is evaluated in place (one strict or tail use) or fixed
-      // (a literal or a builtin, one cell for every frame, kept in its Slot); otherwise a cell in each frame of the region.
+      // What the dialect promotes the value to decides its cell: none when it is evaluated in place (one strict or tail use), made by its
+      // one use (which runs once per frame: nothing to keep) or fixed (a literal or a builtin, one cell for every frame, kept in its Slot);
+      // otherwise a cell in each frame of the region.
       Promotion p = core->promotionOf(res);
       if (statsEnabled) {
         ++nSlotsAssigned;
         if (res.use_empty()) ++nSlotsNoRead;
         // A cell that starts as a thunk is finer grain's row: an attribute value, a let binding, an argument,
         // minted when it is forced instead of when its body is.
-        if (p == Promotion::Shared || p == Promotion::Distinct) ++ri->nThunks;
+        if (p == Promotion::Shared || p == Promotion::Distinct || p == Promotion::Once) ++ri->nThunks;
       }
-      bool cell = p != Promotion::InPlace && p != Promotion::Fixed;
+      bool cell = p != Promotion::InPlace && p != Promotion::Fixed && p != Promotion::Once;
       setSlot(res.getAsOpaquePointer(), {ri, &op, cell ? slot++ : kNoSlot, howOf(&op), p});
     }
     // A deferred lambda's region is a shell until its first call; it is indexed when it is minted.
@@ -1110,7 +1111,7 @@ Value *EvalState::lookupImpl(Frame *f, mlir::Value v, bool forced) {
   if (statsEnabled) [[unlikely]] { Frame *g = f; while (g && g->info != ri) g = g->up(); statHops(f, ri, g && idx != kNoSlot && g->slots[idx]); }
   while (f && f->info != ri) f = f->up();
   if (!f) throw EvalError("internal error: SSA value used outside its scope");
-  Value *noCell = nullptr; // an in-place value reached through lookup(): its one use gets its own thunk
+  Value *noCell = nullptr; // a value made by its one use, or an in-place one reached through lookup(): the cell is not kept in the frame
   Value *&slot = idx == kNoSlot ? noCell : f->slots[idx];
   if (slot) return slot;
   if (statsEnabled && idx != kNoSlot) [[unlikely]] statTouch(f, ri, idx);
@@ -1135,8 +1136,9 @@ Value *EvalState::lookupImpl(Frame *f, mlir::Value v, bool forced) {
     return slot = bv;
   }
   Value *nv = allocValue();
-  if (statsEnabled) [[unlikely]] { auto &e = cellsByKind[op->getName().getAsOpaquePointer()]; e.first = op->getName().getStringRef(); ++e.second[forced && s.how == Slot::Thunk && idx != kNoSlot ? 0 : 1]; }
-  if (forced && s.how == Slot::Thunk && idx != kNoSlot) {
+  bool eager = forced && s.how == Slot::Thunk && (idx != kNoSlot || s.promo == Promotion::Once);
+  if (statsEnabled) [[unlikely]] { auto &e = cellsByKind[op->getName().getAsOpaquePointer()]; e.first = op->getName().getStringRef(); ++e.second[eager ? 0 : 1]; }
+  if (eager) {
     // The caller forces this value as the very next thing, so evaluate it now, into its cell: the same work in the same order as making a
     // thunk and forcing it, with no thunk, no frame captured.  The cell is in its slot first and a blackhole while it is evaluated, so a
     // reference back to it is infinite recursion, as before; if the evaluation throws, the cell becomes the thunk a later force retries.
@@ -1144,6 +1146,9 @@ Value *EvalState::lookupImpl(Frame *f, mlir::Value v, bool forced) {
     nv->type = VType::Blackhole;
     try {
       evalOp(op, f, *nv);
+    } catch (EvalError &) {
+      fail(*nv);
+      throw;
     } catch (...) {
       nv->type = VType::Thunk;
       nv->thunk.op = op;
@@ -1245,6 +1250,9 @@ void EvalState::forceValue(Value &v, PosPtr pos) {
     try {
       evalOp(op, env, v);
       if (statsEnabled && env && !isProjection(op)) [[unlikely]] statUnref(env);
+    } catch (EvalError &) {
+      fail(v);
+      throw;
     } catch (...) {
       v.type = VType::Thunk; if (statsEnabled) ++nVT[unsigned(VType::Thunk)];
       v.thunk.op = op;
@@ -1262,9 +1270,35 @@ void EvalState::forceValue(Value &v, PosPtr pos) {
       v.app.right = r;
       throw;
     }
+  } else if (v.type == VType::Failed) {
+    rethrowFailed(v);
   } else if (v.type == VType::Blackhole) {
     throw InfiniteRecursionError("infinite recursion encountered", pos);
   }
+}
+
+void EvalState::fail(Value &v) {
+  v.failed = new (alloc.Allocate(sizeof(std::exception_ptr), alignof(std::exception_ptr))) std::exception_ptr(std::current_exception());
+  v.type = VType::Failed; if (statsEnabled) ++nVT[unsigned(VType::Failed)];
+}
+
+template <class E> [[noreturn]] static void throwCopy(const E &e) {
+  E c(e.msg, e.pos);
+  for (const Trace &t : e.traces) c.traces.append(t);
+  throw c;
+}
+
+/// A copy of the kept error, of its own type: the traces this throw gathers on its way out are its own, not the kept one's.
+void EvalState::rethrowFailed(const Value &v) {
+  try {
+    std::rethrow_exception(*v.failed);
+  } catch (ThrownError &e) { throwCopy(e); }
+  catch (AssertionError &e) { throwCopy(e); }
+  catch (Abort &e) { throwCopy(e); }
+  catch (TypeError &e) { throwCopy(e); }
+  catch (InfiniteRecursionError &e) { throwCopy(e); }
+  catch (StackOverflowError &e) { throwCopy(e); }
+  catch (EvalError &e) { throwCopy(e); }
 }
 
 void EvalState::forceValueDeep(Value &v) {
@@ -2392,7 +2426,7 @@ void EvalState::printValue(std::ostream &str, Value &v, std::set<const void *> *
       str << "]";
     }
     break;
-  case VType::Thunk: case VType::App: str << "<CODE>"; break;
+  case VType::Thunk: case VType::App: case VType::Failed: str << "<CODE>"; break;
   case VType::Blackhole: str << "«potential infinite recursion»"; break;
   case VType::Lambda: str << "<LAMBDA>"; break;
   case VType::PrimOp: str << "<PRIMOP>"; break;
@@ -2514,7 +2548,7 @@ struct TracePrinter {
       out << "«partially applied primop " << (p->type == VType::PrimOp ? p->primOp->name : "?") << "»";
       break;
     }
-    case VType::Thunk: case VType::App: out << "«thunk»"; break;
+    case VType::Thunk: case VType::App: case VType::Failed: out << "«thunk»"; break;
     case VType::Blackhole: out << "«potential infinite recursion»"; break;
     }
   }
