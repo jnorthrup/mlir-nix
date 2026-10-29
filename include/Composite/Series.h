@@ -33,7 +33,10 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <initializer_list>
+#include <iterator>
 #include <ranges>
 #include <tuple>
 #include <type_traits>
@@ -63,6 +66,8 @@ template <class A, class B> struct Join {
   // oracle `b`, for ANY domain: a count, a span (TwInt), a line and column, an enum case -- Join.kt's MetaSeries<I, T>.
   constexpr uint32_t size() const requires kSized<A> { return uint32_t(a); }
   constexpr const A &domain() const { return a; }
+  constexpr const A &first() const { return a; }   // the accessors a packed Dense has, so a pair reads the same either way
+  constexpr const B &second() const { return b; }
   constexpr decltype(auto) operator[](const A &k) const requires std::invocable<const B &, const A &> {
     return b(k);
   }
@@ -98,8 +103,12 @@ template <class A> struct JoinLeft {
   A a;
 };
 template <class A> constexpr JoinLeft<A> operator|(A a, JoinTag) { return {std::move(a)}; }
-template <class A, class B> constexpr Join<A, B> operator|(JoinLeft<A> l, B b) {
+template <class A, class B> requires(!join::PacksInARegister<A, B>) constexpr Join<A, B> operator|(JoinLeft<A> l, B b) {
   return {std::move(l.a), std::move(b)};
+}
+/// Two scalars that fit one register are the packed word (Pack.h): `7u |j| 9u` is a TwInt, one integer, ordered as the pair is.
+template <class A, class B> requires(join::PacksInARegister<A, B>) constexpr auto operator|(JoinLeft<A> l, B b) {
+  return join::Dense<A, B>(l.a, b);
 }
 
 /// A Series over contiguous memory.  The pointer must outlive the Series, and `n` is the caller's word.
@@ -324,58 +333,96 @@ template <class T, size_t N> struct Slab {
 /// freeze(array): the handle for a body whose size is a constant.  vec<N>(f) builds one, freeze keeps it as a Series.
 template <class T, size_t N> constexpr auto freeze(std::array<T, N> a) { return Size<uint32_t(N)>{} |j| Slab<T, N>{std::move(a)}; }
 
-template <class T> struct MutableSeries {
+/// TrikeShed's TODO(): the operation a body cannot do yet, said out loud instead of done wrongly.
+[[noreturn, gnu::cold, gnu::noinline]] inline void TODO(const char *what) {
+  std::fprintf(stderr, "TODO: %s\n", what);
+  std::abort();
+}
+
+// The bodies of a MutableSeries: where the cells live.  Each is a handful of lines and gives the same five primitives
+// (base, count, room, put, dropLast); the one algorithm below is written against those, and what a body cannot do (grow, be
+// reserved, be frozen) is not there to call.
+
+/// The growable body: the one std::vector.
+template <class T> struct Growable {
+  static constexpr bool growable = true;
   std::vector<T> cells;
-  MutableSeries() = default;
-  explicit MutableSeries(size_t n) : cells(n) {}
-  MutableSeries(size_t n, const T &v) : cells(n, v) {}
-  template <class It> requires(!std::is_integral_v<It>) MutableSeries(It b, It e) : cells(b, e) {}
-  MutableSeries(std::initializer_list<T> il) : cells(il) {}
-  bool operator==(const MutableSeries &) const = default;
-  constexpr uint32_t size() const { return uint32_t(cells.size()); }
-  T &operator[](uint32_t i) { return cells[i]; }
-  constexpr const T &operator[](uint32_t i) const { return cells[i]; }
-  /// Accumulate.  The result is the index of the new cell: the `b` of whatever refers back to it.
+  constexpr T *base() { return cells.data(); }
+  constexpr const T *base() const { return cells.data(); }
+  constexpr uint32_t count() const { return uint32_t(cells.size()); }
+  constexpr bool room() const { return true; }
+  constexpr void put(T v) { cells.push_back(std::move(v)); }
+  constexpr void dropLast() { cells.pop_back(); }
+};
+/// The inline body: N cells and a count, on the stack, no heap.  Full is full.
+template <class T, uint32_t N> struct Inline {
+  static constexpr bool growable = false;
+  std::array<T, N> cells{};
+  uint32_t n = 0;
+  constexpr T *base() { return cells.data(); }
+  constexpr const T *base() const { return cells.data(); }
+  constexpr uint32_t count() const { return n; }
+  constexpr bool room() const { return n < N; }
+  constexpr void put(T v) { cells[n++] = std::move(v); }
+  constexpr void dropLast() { --n; }
+};
+
+template <class T, class Body = Growable<T>> struct MutableSeries : Body {
+  constexpr MutableSeries() = default;
+  explicit MutableSeries(size_t n) requires Body::growable : Body{std::vector<T>(n)} {}
+  MutableSeries(size_t n, const T &v) requires Body::growable : Body{std::vector<T>(n, v)} {}
+  template <class It> requires(!std::is_integral_v<It> && Body::growable) MutableSeries(It b, It e) : Body{std::vector<T>(b, e)} {}
+  constexpr MutableSeries(std::initializer_list<T> il) { for (const T &x : il) append(x); }
+  constexpr bool operator==(const MutableSeries &o) const {
+    if (size() != o.size()) return false;
+    for (uint32_t i = 0; i < size(); ++i) if (!((*this)[i] == o[i])) return false;
+    return true;
+  }
+  constexpr uint32_t size() const { return this->count(); }
+  constexpr T &operator[](uint32_t i) { return this->base()[i]; }
+  constexpr const T &operator[](uint32_t i) const { return this->base()[i]; }
+  /// Accumulate.  The result is the index of the new cell: the `b` of whatever refers back to it.  A body with no room says TODO.
   constexpr uint32_t append(T v) {
-    cells.push_back(std::move(v));
+    if (!this->room()) [[unlikely]] TODO("append past the capacity of a fixed body");
+    this->put(std::move(v));
     return size() - 1;
   }
+  /// Accumulate a cell built in place.
+  template <class... A> constexpr uint32_t emplace(A &&...a) { return append(T(std::forward<A>(a)...)); }
+  constexpr void pop() { this->dropLast(); }
+  constexpr void clear() { while (size()) pop(); }
+  /// Remove cell i by moving the last cell into its place: the order of the others is not kept.  A bag's algorithm, for any body.
+  constexpr void removeSwap(uint32_t i) { (*this)[i] = std::move((*this)[size() - 1]); pop(); }
+  /// Drain a cell: its value leaves and a default cell stays, so the indices of the others do not move.
+  constexpr T drain(uint32_t i) { return std::exchange((*this)[i], T{}); }
   // The container surface of a list that is built and then read: iteration, the ends, the raw cells.
-  constexpr auto begin() { return cells.begin(); }
-  constexpr auto end() { return cells.end(); }
-  constexpr auto begin() const { return cells.begin(); }
-  constexpr auto end() const { return cells.end(); }
-  constexpr auto rbegin() { return cells.rbegin(); }
-  constexpr auto rend() { return cells.rend(); }
-  constexpr auto rbegin() const { return cells.rbegin(); }
-  constexpr auto rend() const { return cells.rend(); }
-  constexpr bool empty() const { return cells.empty(); }
-  constexpr T &back() { return cells.back(); }
-  constexpr const T &back() const { return cells.back(); }
-  constexpr T &front() { return cells.front(); }
-  constexpr const T &front() const { return cells.front(); }
-  constexpr T *data() { return cells.data(); }
-  constexpr const T *data() const { return cells.data(); }
-  constexpr void clear() { cells.clear(); }
-  constexpr void reserve(size_t n) { cells.reserve(n); }
-  constexpr void resize(size_t n) { cells.resize(n); }
-  constexpr void pop() { cells.pop_back(); }
-  constexpr void assign(size_t n, const T &v) { cells.assign(n, v); }
+  constexpr T *begin() { return this->base(); }
+  constexpr T *end() { return this->base() + size(); }
+  constexpr const T *begin() const { return this->base(); }
+  constexpr const T *end() const { return this->base() + size(); }
+  constexpr auto rbegin() { return std::reverse_iterator<T *>(end()); }
+  constexpr auto rend() { return std::reverse_iterator<T *>(begin()); }
+  constexpr auto rbegin() const { return std::reverse_iterator<const T *>(end()); }
+  constexpr auto rend() const { return std::reverse_iterator<const T *>(begin()); }
+  constexpr bool empty() const { return size() == 0; }
+  constexpr T &back() { return (*this)[size() - 1]; }
+  constexpr const T &back() const { return (*this)[size() - 1]; }
+  constexpr T &front() { return (*this)[0]; }
+  constexpr const T &front() const { return (*this)[0]; }
+  constexpr T *data() { return this->base(); }
+  constexpr const T *data() const { return this->base(); }
+  // Only a growable body can be sized, reserved or frozen: for the others these are not there.
+  constexpr void reserve(size_t n) requires Body::growable { this->cells.reserve(n); }
+  constexpr void resize(size_t n) requires Body::growable { this->cells.resize(n); }
+  constexpr void assign(size_t n, const T &v) requires Body::growable { this->cells.assign(n, v); }
   /// The promotion of the handle to its body: the cells move into a const Series.  Only an rvalue can be frozen, so the hand-over
   /// is written out (`std::move(x).freeze()`), costs a pointer, and leaves this series valid and empty.
-  Frozen<T> freeze() && { uint32_t n = size(); return n |j| Cells<T>(std::move(cells)); }
+  Frozen<T> freeze() && requires Body::growable { uint32_t n = size(); return n |j| Cells<T>(std::move(this->cells)); }
   Frozen<T> freeze() & = delete;
-  /// Accumulate a cell built in place.
-  template <class... A> constexpr uint32_t emplace(A &&...a) {
-    cells.emplace_back(std::forward<A>(a)...);
-    return size() - 1;
-  }
-  /// Drain a cell: its value leaves and a default cell stays, so the indices of the others do not move.
-  T drain(uint32_t i) { return std::exchange(cells[i], T{}); }
   /// The Series over the cells, as many as there are now.  It indexes through this series and holds no
   /// pointer into the cells, so an append that moves them does not leave it dangling.
   auto view() const {
-    return size() |j| [this](uint32_t i) -> const T & { return cells[i]; };
+    return size() |j| [this](uint32_t i) -> const T & { return (*this)[i]; };
   }
 };
 

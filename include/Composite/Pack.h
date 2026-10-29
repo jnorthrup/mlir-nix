@@ -27,7 +27,10 @@
 #include <compare>
 #include <concepts>
 #include <cstdint>
+#include <cstddef>
+#include <tuple>
 #include <type_traits>
+#include <utility>
 
 namespace join {
 
@@ -148,6 +151,17 @@ template <class A, class B, class... Rest> constexpr auto dense(A a, B b, Rest..
   }
 }
 
+/// A type a Dense can hold, and a pair that fits one register: `a |j| b` is the packed word exactly when both sides are Packable and
+/// together they are at most 64 bits.  Wider pairs stay a two-field Join (packing two pointers into an i128 would add shifts and
+/// masks to what is already two registers).
+template <class T> concept Packable = requires { Width<T>::value; };
+template <class A, class B> concept PacksInARegister = Packable<A> && Packable<B> && (width<A> + width<B> <= 64);
+
+/// Structured bindings, as a Join has: `auto [x, y] = a |j| b` reads both sides whether the pair was packed or not.
+template <std::size_t I, class A, class B> constexpr auto get(const Dense<A, B> &d) {
+  if constexpr (I == 0) return d.first(); else return d.second();
+}
+
 using TwInt = Dense<uint32_t, uint32_t>;
 
 // The layout TrikeShed.td states: (7 j 9) : !trikeshed.join<i32, i32> is this i64.
@@ -174,5 +188,10 @@ static_assert(dense(Bits<1>(1), Bits<19>(7), Bits<24>(11), Bits<20>(13)).raw ==
 static_assert(dense(Bits<1>(1), Bits<19>(7), Bits<24>(11), Bits<20>(13)).second().second().second().v == 13);
 
 } // namespace join
+
+namespace std {
+template <class A, class B> struct tuple_size<join::Dense<A, B>> : integral_constant<size_t, 2> {};
+template <size_t I, class A, class B> struct tuple_element<I, join::Dense<A, B>> { using type = conditional_t<I == 0, A, B>; };
+} // namespace std
 
 #endif

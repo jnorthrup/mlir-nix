@@ -56,6 +56,34 @@ is the largest combination (unroll, peel, ipa-pta, gcse, native, LTO), where bot
 supported statements are: **clang 22 at `-O3` or better runs the transforms 5 to 10% faster than the loops; GCC 16 runs them 4 to 7%
 slower except with the full combination.**
 
+## Pedantic and pragmatic: `COMPOSITE_PEDANTIC`
+
+`MinMaxHeap.h` has two spellings of the same kernels, selected by `-DCOMPOSITE_PEDANTIC=1|0` (default 1). Pedantic is the transform
+form (`foldN`, `argMin`, `fold`; no loop written). Pragmatic is the plain loop each transform replaces. They make the same 65,651,101
+comparisons with identical output, and both pass `minmax-check` and `funnel-check`. The heap and the pegs now sit on `Inline` bodies of
+`MutableSeries`, and `TODO()` is cold and out of line. Kali, one boot, minimum of five (`scripts/optimizer-ladder.sh`), loops =
+`cd60c69`:
+
+| compiler | flags | loops | pedantic | pragmatic |
+|---|---|---:|---:|---:|
+| clang 22 | `-O2` | 0.081 | 0.083 (+2.5%) | 0.083 (+2.5%) |
+| clang 22 | `-O3` | 0.080 | 0.076 (**-5.0%**) | 0.077 (-3.8%) |
+| clang 22 | `-O3 -flto=thin` | 0.077 | 0.076 (-1.3%) | 0.071 (**-7.8%**) |
+| clang 22 | `-O3 -flto` | 0.077 | 0.072 (**-6.5%**) | 0.077 (+0.0%) |
+| clang 22 | `-O3 -flto -inline-threshold=2000` | 0.076 | 0.072 (-5.3%) | 0.073 (-3.9%) |
+| g++ 16 | `-O2` | 0.076 | 0.081 (+6.6%) | 0.078 (+2.6%) |
+| g++ 16 | `-O3` | 0.075 | 0.079 (+5.3%) | 0.082 (+9.3%) |
+| g++ 16 | `-O3 -fexpensive-optimizations -flto` | 0.075 | 0.080 (+6.7%) | 0.081 (+8.0%) |
+| g++ 16 | `-O3 -fexpensive-optimizations -march=native` | 0.082 | 0.090 (+9.8%) | 0.093 (+13.4%) |
+| g++ 16 | everything, `-flto -march=native` | 0.085 | 0.084 (-1.2%) | 0.093 (+9.4%) |
+
+What this supports: neither mode wins everywhere. Under clang at `-O3` or with full LTO the transforms win (pedantic); under ThinLTO
+the loop spelling wins by a wide margin (-7.8% against -1.3%); under GCC at `-O3` the pedantic form is the closer of the two but
+both are 5 to 9% behind the loops. The default is pedantic because the project builds with clang `-O3`. Two earlier rows should be
+read as noise or as superseded: the GCC parity under `-flto` (0.074 against 0.074) did not reproduce, and ThinLTO's -10.4% was for the
+heap on a `std::array` and a count, before `Inline` bodies. With 3 to 4 points of run-to-run spread, differences under about 3% are
+not distinguishable from noise.
+
 ## What it says
 
 - **Under clang, the compiler the project builds with, transforms win** once `-O3` is on, and ThinLTO is best. At `-O2` they are

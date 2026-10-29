@@ -1,5 +1,6 @@
 //===- Eval.cpp - Lazy evaluator over the nix dialect ---------------------===//
 
+#include <map>
 #include "Composite/Series.h"
 #include "Nix/Prefetch.h"
 #include <bit>
@@ -334,6 +335,81 @@ void EvalState::printStats() {
                    << showPos(nd::posOfOp(top[i]->region->getParentOp())) << "\n";
     }
   }
+  if (nFrames && getenv("MLNIX_STATS_SHAPES")) {
+    struct Group { uint64_t frames = 0, lambdas = 0; std::string example, shape; };
+    std::map<std::string, Group> byShape;
+    for (auto &kv : regionInfos) {
+      RegionInfo *ri = kv.second;
+      if (!ri->calls || !ri->region->getParentOp()) continue;
+      if (!isa<nd::LambdaOp>(ri->region->getParentOp())) continue;
+      std::string sh = shapeOf(ri);
+      if (sh.size() > 400) sh = "(large)";
+      Group &g = byShape[sh];
+      if (g.frames == 0 || ri->calls > g.frames) {}
+      if (g.example.empty()) g.example = showPos(nd::posOfOp(ri->region->getParentOp()));
+      g.frames += ri->calls; ++g.lambdas; g.shape = sh;
+    }
+    std::vector<Group> gs;
+    for (auto &kv : byShape) gs.push_back(kv.second);
+    std::sort(gs.begin(), gs.end(), [](const Group &a, const Group &b) { return a.frames > b.frames; });
+    size_t keep = 30;
+    if (const char *t = getenv("MLNIX_STATS_SHAPES")) keep = std::max<size_t>(1, strtoul(t, nullptr, 10));
+    llvm::errs() << "== lambda shapes by the frames they make (" << gs.size() << " shapes, " << nFrames << " frames):\n";
+    uint64_t cum = 0;
+    for (size_t i = 0; i < gs.size() && i < keep; ++i) {
+      cum += gs[i].frames;
+      llvm::errs() << llvm::format("   %9llu frames in %5llu lambdas  cum %5.1f%%  ", (unsigned long long)gs[i].frames, (unsigned long long)gs[i].lambdas, 100.0 * cum / nFrames)
+                   << gs[i].shape << "   e.g. " << gs[i].example << "\n";
+    }
+  }
+  if (nFrames) llvm::errs() << llvm::format("== frames that cannot leak (strict ops only, nothing built over the frame): %llu = %.1f%% of frames, %.1f MB of %.1f MB of frame storage\n",
+                                          (unsigned long long)nStackable, 100.0 * nStackable / nFrames, nStackableBytes / 1048576.0, nFrameBytes / 1048576.0);
+  if (nFrames) {
+    uint64_t bytes[6] = {}, frames[6] = {}, slotsBy[6] = {};   // 1, 2-3, 4-8, 9-16, 17-64, 65+ slots
+    for (auto &kv : regionInfos) {
+      RegionInfo *ri = kv.second;
+      unsigned b = ri->numSlots <= 1 ? 0 : ri->numSlots <= 3 ? 1 : ri->numSlots <= 8 ? 2 : ri->numSlots <= 16 ? 3 : ri->numSlots <= 64 ? 4 : 5;
+      frames[b] += ri->calls; bytes[b] += ri->calls * (sizeof(Frame) + ri->numSlots * sizeof(Value *)); slotsBy[b] += ri->calls * ri->numSlots;
+    }
+    static const char *names[6] = {"1 slot", "2-3 slots", "4-8 slots", "9-16 slots", "17-64 slots", "65+ slots"};
+    llvm::errs() << "== frame storage by slots per frame (bytes of frame headers + slot words):\n";
+    for (unsigned b = 0; b < 6; ++b)
+      llvm::errs() << llvm::format("   %-12s frames %9llu (%5.1f%%)   %7.1f MB (%5.1f%% of frame storage)   slot words %6.1f MB   read %5.1f%%   dead %6.1f MB\n", names[b], (unsigned long long)frames[b],
+                                   100.0 * frames[b] / nFrames, bytes[b] / 1048576.0, 100.0 * bytes[b] / nFrameBytes, slotsBy[b] * 8 / 1048576.0,
+                                   slotsBy[b] ? 100.0 * nTouchedBy[b] / slotsBy[b] : 0.0, (slotsBy[b] - nTouchedBy[b]) * 8 / 1048576.0);
+  }
+  if (nFrames) {
+    // Frames of 9+ slots: what a chunked frame (a table of chunks, a chunk made on its first read) would hold against the flat frame, for
+    // chunks of 8, 4, 2 and 1 slots.  Each chunk costs its slots; the table costs a pointer a chunk; the header is one pointer more.
+    unsigned sizes[4] = {8, 4, 2, 1};
+    uint64_t flat = 0, big = 0, slotsRead = 0, slotsTotal = 0, chunkedBy[4] = {}, touchedBy[4] = {}, totalBy[4] = {};
+    for (Frame *f : statFrames) {
+      unsigned n = f->info->numSlots;
+      if (n < 9) continue;
+      ++big;
+      const uint64_t *m = reinterpret_cast<const uint64_t *>(f->slots + n);
+      auto bit = [&](unsigned i) { return (m[i / 64] >> (i % 64)) & 1; };
+      for (unsigned i = 0; i < n; ++i) slotsRead += bit(i);
+      slotsTotal += n;
+      flat += sizeof(Frame) + n * sizeof(Value *);
+      for (unsigned k = 0; k < 4; ++k) {
+        unsigned cs = sizes[k], nc = (n + cs - 1) / cs, used = 0;
+        for (unsigned c = 0; c < nc; ++c) {
+          bool any = false;
+          for (unsigned i = c * cs; i < n && i < (c + 1) * cs; ++i) any |= bit(i);
+          used += any;
+        }
+        totalBy[k] += nc; touchedBy[k] += used;
+        chunkedBy[k] += sizeof(Frame) + sizeof(void *) + nc * sizeof(void *) + uint64_t(used) * cs * sizeof(Value *);
+      }
+    }
+    llvm::errs() << llvm::format("== chunked frames (frames of 9+ slots: %llu; slots read %.1f%%; flat storage %.1f MB):\n", (unsigned long long)big,
+                                 slotsTotal ? 100.0 * slotsRead / slotsTotal : 0.0, flat / 1048576.0);
+    for (unsigned k = 0; k < 4; ++k)
+      llvm::errs() << llvm::format("   %u-slot chunks: %5.1f%% touched, storage %7.1f MB  (saves %6.1f MB = %5.1f%% of those frames)\n", sizes[k],
+                                   totalBy[k] ? 100.0 * touchedBy[k] / totalBy[k] : 0.0, chunkedBy[k] / 1048576.0,
+                                   (double(flat) - double(chunkedBy[k])) / 1048576.0, flat ? 100.0 * (double(flat) - double(chunkedBy[k])) / double(flat) : 0.0);
+  }
   llvm::errs() << "selector calls with no frame (lib.optional, lib.optionalAttrs shapes): " << nSelectorCalls << "\n";
   llvm::errs() << "curried intermediates held by value: " << nStackCells << " (" << nStackCells * sizeof(Value) << " bytes of heap cells not allocated)\n";
   llvm::errs() << "empty attribute sets: " << nEmptyShared << " shared as one constant (" << nEmptyShared * (sizeof(Bindings)) << " bytes not allocated)\n";
@@ -600,15 +676,31 @@ unsigned EvalState::srcClassOf(RegionInfo *ri) {
 
 Frame *EvalState::newFrame(RegionInfo *ri, Frame *up) {
   size_t sz = sizeof(Frame) + ri->numSlots * sizeof(Value *);
-  auto *f = static_cast<Frame *>(alloc.Allocate(sz, alignof(Frame)));
+  size_t maskBytes = statsEnabled ? ((ri->numSlots + 63) / 64) * sizeof(uint64_t) : 0; // stats only: the mask of slots ever read, after the slots
+  auto *f = static_cast<Frame *>(alloc.Allocate(sz + maskBytes, alignof(Frame)));
   if (statsEnabled) { ++nFrames; nFrameBytes += sz; nFrameSlots += ri->numSlots; ++nFramesBySize[ri->numSlots < 16 ? ri->numSlots : 16];
     ++ri->calls;
     if (ri->chainOuter == 2) ri->chainOuter = isa_and_nonnull<nd::LambdaOp>(ri->result.getDefiningOp());
     if (ri->chainOuter == 1) { ++nChainOuter; nChainOuterSlots += ri->numSlots; }
+    if (ri->stackable == 2) {
+      // Conservative: only strict ops whose operands are read in place, never ones that build a thunk, a closure, a list or a set over
+      // the frame (a lazy operand is a thunk whose env is this frame, and the callee or the result may keep it).
+      ri->stackable = 1;
+      for (mlir::Operation &op : ri->region->front()) {
+        llvm::StringRef n = op.getName().getStringRef();
+        bool ok = n == "nix.return" || n == "nix.if" || n == "nix.not" || n == "nix.and" || n == "nix.or" || n == "nix.impl" ||
+                  n == "nix.eq" || n == "nix.neq" || n == "nix.has_attr" || n == "nix.int" || n == "nix.bool" || n == "nix.null" ||
+                  n.starts_with("nixty.");
+        if (auto sel = dyn_cast<nd::SelectOp>(op)) ok = sel.getDynKeys().empty() && !sel.getDefaultValue();
+        if (!ok) { ri->stackable = 0; break; }
+      }
+    }
+    if (ri->stackable == 1) { ++nStackable; nStackableBytes += sizeof(Frame) + ri->numSlots * sizeof(Value *); if (ri->numSlots <= 1) ++nStackableOneSlot; }
     unsigned c = srcClassOf(ri); ++nClsFrames[c]; nClsSlots[c] += ri->numSlots; }
   f->up = up;
   f->info = ri;
-  memset(f->slots, 0, ri->numSlots * sizeof(Value *));
+  memset(f->slots, 0, ri->numSlots * sizeof(Value *) + maskBytes);
+  if (statsEnabled) { statFrames.push_back(f); if (ri->numSlots) reinterpret_cast<uint64_t *>(f->slots + ri->numSlots)[0] |= 1; } // slot 0 is the argument
   return f;
 }
 
@@ -630,7 +722,7 @@ Value *EvalState::lookup(Frame *f, mlir::Value v) {
   Value *noCell = nullptr; // an in-place value reached through lookup(): its one use gets its own thunk
   Value *&slot = idx == kNoSlot ? noCell : f->slots[idx];
   if (slot) return slot;
-  if (statsEnabled && idx != kNoSlot) { ++nSlotsTouched; ++nTouchAt[idx < 16 ? idx : 16]; ++nClsTouched[srcClassOf(ri)]; }
+  if (statsEnabled && idx != kNoSlot) { ++nSlotsTouched; ++nTouchAt[idx < 16 ? idx : 16]; ++nClsTouched[srcClassOf(ri)]; reinterpret_cast<uint64_t *>(f->slots + ri->numSlots)[idx / 64] |= uint64_t(1) << (idx % 64); ++nTouchedBy[ri->numSlots <= 1 ? 0 : ri->numSlots <= 3 ? 1 : ri->numSlots <= 8 ? 2 : ri->numSlots <= 16 ? 3 : ri->numSlots <= 64 ? 4 : 5]; }
   Operation *op = s.def;
   if (!op) throw EvalError("internal error: unbound block argument");
   if (s.how == Slot::Unknown) s.how = howOf(op);
@@ -989,6 +1081,41 @@ unsigned EvalState::selectorShape(nd::LambdaOp outerLam, RegionInfo *outer) {
     if (none && none.getNames().empty() && none.getDynNames().empty()) return outer->selShape = 3;
   }
   return 1;
+}
+
+/// The shape of a lambda: its ops in order with the names, positions and file taken out, so two lambdas that compute the same thing
+/// the same way have the same string.  Operands are `aN` (the Nth argument of this body), `rN` (the Nth op of this body), `cK` (a
+/// value captured from outside, by distance K), and a returned lambda's body is written inline.  Constants keep their value.
+std::string EvalState::shapeOf(RegionInfo *ri, unsigned depth) {
+  if (depth == 0 && !ri->shape.empty()) return ri->shape;
+  std::string out;
+  llvm::DenseMap<const void *, std::string> ids;
+  mlir::Block &blk = ri->region->front();
+  for (unsigned i = 0; i < blk.getNumArguments(); ++i) ids[blk.getArgument(i).getAsOpaquePointer()] = "a" + std::to_string(i) + (depth ? "'" : "");
+  unsigned n = 0;
+  auto ref = [&](mlir::Value v) { auto it = ids.find(v.getAsOpaquePointer()); return it == ids.end() ? std::string("c") : it->second; };
+  for (mlir::Operation &op : blk) {
+    std::string id = "r" + std::to_string(n++) + (depth ? "'" : "");
+    out += op.getName().getStringRef().str();
+    if (auto iv = dyn_cast<nd::IntOp>(op)) out += "=" + std::to_string(iv.getValue());
+    else if (auto bv = dyn_cast<nd::BoolOp>(op)) out += bv.getValue() ? "=true" : "=false";
+    else if (auto sv = dyn_cast<nd::StringOp>(op)) { out += "=\""; out += sv.getValue().str().substr(0, 12); out += "\""; }
+    out += "(";
+    if (auto lam = dyn_cast<nd::LambdaOp>(op)) {
+      if (depth < 4) {
+        std::optional<uint64_t> deferred = lam.getBodyIndex();
+        RegionInfo *inner = deferred ? bodyOf(nixfe::BodyIndex(*deferred)) : regionInfo(&lam.getBody());
+        out += (lam.getFormals() ? "formals" : "arg") + std::string(": ") + shapeOf(inner, depth + 1);
+      }
+    } else {
+      bool first = true;
+      for (mlir::Value v : op.getOperands()) { out += (first ? "" : ",") + ref(v); first = false; }
+    }
+    out += ") ";
+    for (mlir::Value r : op.getResults()) ids[r.getAsOpaquePointer()] = id;
+  }
+  if (depth == 0) ri->shape = out;
+  return out;
 }
 
 void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out, PosPtr pos, bool allowCurried) {

@@ -1,0 +1,60 @@
+# Where the frame bytes are
+
+`MLNIX_STATS=1` (demand schedule, counts independent of the machine) accounts for the call frames. Frames are never freed, so their
+storage is part of the peak: about 300 MB of mlnix's 1.2 GB on both workloads (Nix peaks at 0.6 GB). Frame time is not the issue:
+removing 5.4% and 11.5% of the frames (the selector recognition) changed no wall time.
+
+## What the frames are
+
+- 5.1M frames on nixos-toplevel, 3.3M on nixpkgs-drvs (after the selector recognition); 28.4M slots, of which 32% are ever read.
+- `MLNIX_STATS_SHAPES=n` groups lambdas by a name-free canonical form of their IR. The largest group is the unique module-system
+  bodies (22% of frames in 3,532 lambdas); next come `x: x` (4.3%), `x: x.a` (2.5%), `lib.warnIf` (4.6%, a three-lambda chain),
+  `lib.isFunction` (1.9%), `!(pred x)` (1.7%), `imap1`, `hasPrefix`, `filterAttrs`, and curried selections.
+
+## Non-escaping frames are not the lever
+
+A frame can live on the C++ stack only if no op of its body can make a thunk, closure, list or set over it. With a conservative
+whitelist of strict ops, that is **9.3%** of nixos-toplevel's frames (5.9% on nixpkgs-drvs) and 10.9 MB of 294 MB of frame storage
+(4.5 MB of 260 MB). Not worth building: it saves under 1% of peak memory.
+
+## Big frames are the lever
+
+nixos-toplevel, frame storage by slots per frame (the 1-slot row's "read" share is an artifact: the argument cell is filled at call
+time, so it counts as unread; every row's read share is understated by about one slot per frame):
+
+| slots | frames | frame storage | slot words | read | dead |
+|---|---:|---:|---:|---:|---:|
+| 1 | 49.4% | 57.6 MB (19.6%) | 19.2 MB | n/a | n/a |
+| 2-3 | 28.0% | 48.7 MB (16.6%) | 27.0 MB | 45.4% | 14.7 MB |
+| 4-8 | 8.7% | 24.9 MB (8.5%) | 18.1 MB | 48.6% | 9.3 MB |
+| 9-16 | 8.0% | 42.1 MB (14.3%) | 35.8 MB | 34.1% | 23.6 MB |
+| 17-64 | 5.1% | 71.5 MB (24.3%) | 67.6 MB | 25.1% | 50.6 MB |
+| 65+ | 0.9% | 49.3 MB (16.8%) | 48.6 MB | 39.6% | 29.3 MB |
+
+On nixpkgs-drvs the 17-64 row reads **7.5%** of its slots and holds 88.6 MB of dead slot words (100.3 MB of 260 MB frame storage).
+Frames of 9 or more slots are 14% of frames and 55% of frame storage; their dead slot words are 104 MB on nixos-toplevel and 132 MB
+on nixpkgs-drvs, 8 to 11% of peak memory as an upper bound.
+
+## Sparse frames do not pay
+
+The idea: allocate a big frame's slots as they are first read. It works only if the slots a call reads are clustered, so
+`MLNIX_STATS=1` keeps a mask of the slots read in each frame and, at the end of the run, prices a frame made of a table of chunks
+(a chunk made on its first read; the table costs a pointer a chunk, the header one pointer more) against the flat frame, for every
+frame of 9 or more slots:
+
+| chunk | nixos-toplevel (712,892 frames, 35.5% of slots read) | nixpkgs-drvs (528,132 frames, 25.1% read) |
+|---|---|---|
+| 8 slots | 70.9% touched, saves -0.3 MB | 60.7% touched, saves 30.5 MB (17.0%) |
+| 4 slots | 58.3% touched, saves 10.5 MB (6.4%) | 46.6% touched, saves 38.7 MB (21.6%) |
+| 2 slots | 44.7% touched, saves -0.3 MB | 33.8% touched, saves 22.6 MB (12.6%) |
+| 1 slot | 35.5% touched, saves -59.4 MB (-36.4%) | 25.1% touched, saves -47.0 MB (-26.2%) |
+
+The reads are scattered: a quarter to a third of the slots are read but half to three quarters of the 8-slot chunks are touched.
+The best chunking (4 slots) saves 10.5 MB of nixos-toplevel's 1.2 GB peak (0.9%) and 38.7 MB of nixpkgs-drvs (about 3%), and every
+read of a slot would pay the table indirection. It is not worth building.
+
+## What is left
+
+Frames are about a quarter of the peak and neither stack frames (under 1%) nor sparse frames (1 to 3%) take much of it. The other
+three quarters are value cells (12.2M of 24 bytes on nixos-toplevel), attribute rows, the IR of the lowered files and the parsed
+sources; none of those has been accounted this way yet.

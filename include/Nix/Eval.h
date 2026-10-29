@@ -230,6 +230,8 @@ struct RegionInfo {
   /// Optional arity-indexed JIT cache, owned by ScalarJIT and never an environment.
   void *curriedEntry = nullptr;
   uint64_t calls = 0; // MLNIX_STATS: frames made for this region
+  uint8_t stackable = 2; // MLNIX_STATS: 1 when no op of the body can make a thunk or closure over the frame, so it could live on the C++ stack; 2 unclassified
+  std::string shape = {}; // MLNIX_STATS_SHAPES: the name-free canonical form of this lambda and the lambdas it returns (EvalState::shapeOf)
   PosPtr selPos = nullptr; // where the recognized selector's `if` is: the position a non-Boolean condition is reported at
   uint8_t selShape = 0; // 0 unclassified, 1 none, 2 `c: x: if c then [x] else []`, 3 `c: x: if c then x else {}` (EvalState::selectorShape)
   uint8_t chainOuter = 2; // MLNIX_STATS: 1 when the body's result is itself a lambda (a curried chain's outer half), 2 unclassified
@@ -590,9 +592,13 @@ struct EvalState {
   uint64_t nClsFrames[kSrcClasses] = {}, nClsSlots[kSrcClasses] = {}, nClsTouched[kSrcClasses] = {};
   unsigned srcClassOf(RegionInfo *ri);
   uint64_t nChainOuter = 0, nChainOuterSlots = 0; // MLNIX_STATS: frames (and their slots) that exist only to capture an argument for an inner lambda
+  uint64_t nStackable = 0, nStackableBytes = 0, nStackableOneSlot = 0; // MLNIX_STATS: frames (and their bytes) of bodies that cannot leak their frame
+  uint64_t nTouchedBy[6] = {}; // MLNIX_STATS: slots ever read, by the slot count of their frame (1, 2-3, 4-8, 9-16, 17-64, 65+)
+  std::vector<Frame *> statFrames; // MLNIX_STATS: every frame made, each followed by a mask of the slots ever read (bit i = slot i)
   uint64_t nSelectorCalls = 0; // MLNIX_STATS: saturated calls of a recognized selector, made with no frame and no closure
   bool selectorsOn = true;     // MLNIX_NOSELECTORS turns the recognition off
   unsigned selectorShape(mlir::nix::LambdaOp outerLam, RegionInfo *outer);
+  std::string shapeOf(RegionInfo *ri, unsigned depth = 0); // MLNIX_STATS_SHAPES
   uint64_t nStackCells = 0; // MLNIX_STATS: curried-call intermediates held by value instead of in a heap cell
   uint64_t nEmptyShared = 0; // MLNIX_STATS: empty attribute sets that were the shared constant instead of a fresh 16-byte cell
   uint64_t nSlotsTouched = 0; // MLNIX_STATS: frame slots that were ever read (a cell made on first touch), of nFrameSlots allocated
