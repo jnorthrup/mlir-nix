@@ -33,8 +33,6 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
 #include <initializer_list>
 #include <iterator>
 #include <ranges>
@@ -333,10 +331,14 @@ template <class T, size_t N> struct Slab {
 /// freeze(array): the handle for a body whose size is a constant.  vec<N>(f) builds one, freeze keeps it as a Series.
 template <class T, size_t N> constexpr auto freeze(std::array<T, N> a) { return Size<uint32_t(N)>{} |j| Slab<T, N>{std::move(a)}; }
 
-/// TrikeShed's TODO(): the operation a body cannot do yet, said out loud instead of done wrongly.
+/// TrikeShed's TODO(): the operation a body cannot do yet, said out loud instead of done wrongly.  The algebra owns no I/O and no libc: the
+/// host installs a sink that says it (the evaluator prints through LLVM's stream; a test prints through stdio), and the trap that follows is a
+/// compiler builtin.  With no sink it traps silently.
+using TodoSink = void (*)(const char *what);
+inline TodoSink todoSink = nullptr;
 [[noreturn, gnu::cold, gnu::noinline]] inline void TODO(const char *what) {
-  std::fprintf(stderr, "TODO: %s\n", what);
-  std::abort();
+  if (todoSink) todoSink(what);
+  __builtin_trap();
 }
 
 // The bodies of a MutableSeries: where the cells live.  Each is a handful of lines and gives the same five primitives

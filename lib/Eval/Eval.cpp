@@ -42,6 +42,29 @@ namespace nixev {
 // Bindings
 //===----------------------------------------------------------------------===//
 
+void EvalState::statSelect(const void *site, const Bindings *b, Symbol key, bool dynamic) {
+  ++nSelects;
+  if (dynamic) ++nSelectDyn;
+  if (b->layered()) { ++nSelectLayered; }
+  size_t n = b->size();
+  unsigned lg = n ? 64 - __builtin_clzll(n) : 0;
+  ++nSelectSizeLog[lg < 17 ? lg : 17];
+  nSelectProbes += lg + 1;                 // a binary search over n rows looks at about log2(n)+1 of them
+  bool hit = b->get(key) != nullptr;
+  nSelectHits += hit;
+  uint64_t sig = 0x9E3779B97F4A7C15ull * (n + 1);
+  if (!b->layered() && n) {
+    sig ^= uint64_t(b->attrs[0].name) * 0xBF58476D1CE4E5B9ull;
+    sig ^= uint64_t(b->attrs[n / 2].name) * 0x94D049BB133111EBull;
+    sig ^= uint64_t(b->attrs[n - 1].name) * 0xD6E8FEB86659FD93ull;
+  } else if (b->layered()) sig = 0x1;     // all layered sets are one class here
+  SelSite &s = selSites[site];
+  ++s.calls; s.hits += hit; s.dynamic |= dynamic;
+  if (s.calls > 1 && s.last == sig) ++s.sameAsLast;
+  s.last = sig;
+  if (std::find(s.seen.begin(), s.seen.end(), sig) == s.seen.end()) { if (s.seen.size() < 6) s.seen.push_back(sig); else s.seen[5] = sig ^ 1; }
+}
+
 const Attr *Bindings::get(Symbol s) const {
   if (layered()) {
     const Layer &L = layer();
@@ -180,6 +203,7 @@ Bindings *EvalState::allocBindings(size_t n) {
 }
 
 Bindings *EvalState::BindingsBuilder::finish() {
+  if (st.statsEnabled) { ++st.nBuilders; st.nBuilderRows += attrs.size(); if (attrs.size() > 12) { ++st.nBuildersBig; st.nBuilderBigRows += attrs.size(); } }
   // A set of size 0 is the one constant: nothing is written to it after it is built, so every empty set is the same cell.
   if (attrs.empty()) { if (st.statsEnabled) ++st.nEmptyShared; return st.vEmptyAttrs.attrs; }
   std::stable_sort(attrs.begin(), attrs.end(), [](const Attr &a, const Attr &b) { return a.name < b.name; });
@@ -253,6 +277,9 @@ EvalState::EvalState(EvalSettings st, std::shared_ptr<nixstore::Store> store)
   statsEnabled = getenv("MLNIX_STATS") != nullptr;
   scalarJIT = ScalarJIT::create();
   settings.mapSources = !getenv("MLNIX_NOMMAP"); // ablation switch: read and copy every file, as before
+  stackFramesOn = !getenv("MLNIX_NOSTACKFRAMES"); // ablation switch: every call's frame is in the arena, as before
+  composite::todoSink = [](const char *what) { llvm::errs() << "TODO: " << what << "\n"; };
+  recycleOn = !getenv("MLNIX_NORECYCLE"); // ablation switch: every frame is fresh arena memory, as before
   selectorsOn = !getenv("MLNIX_NOSELECTORS"); // ablation switch: every curried selector runs as two calls, as before
   inPlaceEnabled = !getenv("MLNIX_NOINPLACE"); // ablation switch: every operand gets a thunk, as before
   settings.deferBodies = getenv("MLNIX_DEFER") != nullptr; // sea-of-nodes schedule: mint bodies on first call
@@ -428,6 +455,53 @@ void EvalState::printStats() {
                                  mb(handed), rss, mb(values), (unsigned long long)nVT[14], mb(nFrameBytes), mb(nBindingBytes), mb(nListBytes),
                                  mb(nStringBytes), mb(handed > named ? handed - named : 0));
   }
+  if (nFrames) llvm::errs() << "   of which only the argument slot (no cells at all): " << nStackableOneSlot << " = " << llvm::format("%.1f%%", 100.0 * nStackableOneSlot / nFrames) << " of frames\n";
+  if (nSelects) {
+    uint64_t sites[4] = {}, siteCalls[4] = {}, sameLast = 0, dynSites = 0;
+    for (auto &kv : selSites) {
+      const SelSite &x = kv.second;
+      unsigned k = x.seen.size() <= 1 ? 0 : x.seen.size() <= 4 ? 1 : x.seen.size() <= 5 ? 2 : 3;   // 1, 2-4, 5, 6+ layouts
+      ++sites[k]; siteCalls[k] += x.calls; sameLast += x.sameAsLast; dynSites += x.dynamic;
+    }
+    llvm::errs() << llvm::format("== selects: %llu (%.1f%% found, %.1f%% on a layered set, %.1f%% with a dynamic key); mean search %.1f probes\n", (unsigned long long)nSelects,
+                                 100.0 * nSelectHits / nSelects, 100.0 * nSelectLayered / nSelects, 100.0 * nSelectDyn / nSelects, double(nSelectProbes) / nSelects);
+    llvm::errs() << "   set size at the select (log2 buckets):";
+    for (unsigned i = 0; i < 18; ++i) if (nSelectSizeLog[i]) llvm::errs() << llvm::format(" <2^%u:%.1f%%", i, 100.0 * nSelectSizeLog[i] / nSelects);
+    llvm::errs() << "\n";
+    static const char *nm[4] = {"monomorphic (1 layout)", "2-4 layouts", "5 layouts", "6+ layouts (megamorphic)"};
+    for (unsigned k = 0; k < 4; ++k)
+      llvm::errs() << llvm::format("   %-26s %6llu sites, %5.1f%% of selects\n", nm[k], (unsigned long long)sites[k], 100.0 * siteCalls[k] / nSelects);
+    llvm::errs() << llvm::format("   a one-entry cache per site (same layout as the site's last select) would hit %.1f%% of selects\n", 100.0 * sameLast / nSelects);
+  }
+  if (!thunksByOp.empty()) {
+    std::vector<std::pair<std::string, std::pair<uint64_t, uint64_t>>> v;
+    for (auto &kv : thunksByOp) v.push_back({kv.getKey().str(), kv.getValue()});
+    std::sort(v.begin(), v.end(), [](auto &a, auto &b) { return a.second.first > b.second.first; });
+    llvm::errs() << "== thunks that need the frame, by operation (share of those; mean operands, of which defined in the same body):\n";
+    uint64_t cum = 0;
+    for (size_t i = 0; i < v.size() && i < 14; ++i) {
+      cum += v[i].second.first;
+      uint64_t n = v[i].second.first, packed = v[i].second.second, ops = 0, inside = 0;
+      ops = packed / 8; inside = 0;   // the in-body count is accumulated separately below
+      (void)inside;
+      llvm::errs() << llvm::format("   %-22s %9llu  %5.1f%%  cum %5.1f%%   %.1f operands\n", v[i].first.c_str(), (unsigned long long)n, 100.0 * n / nHardThunks, 100.0 * cum / nHardThunks, double(ops) / n);
+    }
+  }
+  if (nProjThunks + nHardThunks) llvm::errs() << llvm::format("== thunks made over a frame: %llu, of which %llu (%.1f%%) are projections of the body's argument or a captured value (the rest %llu need the frame)\n",
+                                                              (unsigned long long)(nProjThunks + nHardThunks), (unsigned long long)nProjThunks, 100.0 * nProjThunks / (nProjThunks + nHardThunks), (unsigned long long)nHardThunks);
+  if (nFrames) llvm::errs() << llvm::format("== a recycling allocator for frames (simulated, projection thunks holding no frame): %llu calls returned with their frame captured (kept), %llu uncaptured (%.1f MB released); %llu of %llu new frames (%.1f%%) would reuse released storage, %.1f MB of the %.1f MB of frame storage\n",
+                                          (unsigned long long)nSimCaptured, (unsigned long long)nSimReleased, nSimReleasedBytes / 1048576.0, (unsigned long long)nSimHit, (unsigned long long)nFrames,
+                                          100.0 * nSimHit / nFrames, nSimHitBytes / 1048576.0, nFrameBytes / 1048576.0);
+  if (nSimHit) {
+    llvm::errs() << "   reuse distance (bytes allocated between a frame's release and its reuse):";
+    static const char *nm[5] = {"< 32 KiB (Kali L1d)", "< 256 KiB (L2)", "< 2 MiB", "< 32 MiB (L3)", "farther"};
+    for (unsigned i = 0; i < 5; ++i) llvm::errs() << llvm::format("  %s %.1f%%", nm[i], 100.0 * nSimReuseDist[i] / nSimHit);
+    llvm::errs() << "\n";
+  }
+  if (nBuilders) llvm::errs() << llvm::format("== attribute-set builders: %llu, %.1f rows each on average; %llu (%.2f%%) outgrow the 12 inline rows and use malloc, holding %.1f%% of all rows built (%.1f MB of rows through a std heap vector and then copied)\n",
+                                              (unsigned long long)nBuilders, double(nBuilderRows) / nBuilders, (unsigned long long)nBuildersBig, 100.0 * nBuildersBig / nBuilders,
+                                              100.0 * nBuilderBigRows / nBuilderRows, nBuilderBigRows * sizeof(Attr) / 1048576.0);
+  llvm::errs() << "calls run on a stack frame (strict bodies over their one argument): " << nStackFrames << "\n";
   llvm::errs() << "selector calls with no frame (lib.optional, lib.optionalAttrs shapes): " << nSelectorCalls << "\n";
   llvm::errs() << "curried intermediates held by value: " << nStackCells << " (" << nStackCells * sizeof(Value) << " bytes of heap cells not allocated)\n";
   llvm::errs() << "empty attribute sets: " << nEmptyShared << " shared as one constant (" << nEmptyShared * (sizeof(Bindings)) << " bytes not allocated)\n";
@@ -638,7 +712,7 @@ void EvalState::indexRegion(Region &r) {
   auto *core = ctx.getLoadedDialect<nd::NixDialect>();
   for (BlockArgument a : blk.getArguments()) {
     if (statsEnabled) { ++nSlotsAssigned; if (a.use_empty()) ++nSlotsNoRead; }
-    slotMap[a.getAsOpaquePointer()] = {ri, nullptr, slot++, Slot::Unknown, false};
+    setSlot(a.getAsOpaquePointer(), {ri, nullptr, slot++, Slot::Unknown, false});
   }
   for (Operation &op : blk) {
     if (auto ret = dyn_cast<nd::ReturnOp>(op)) {
@@ -656,7 +730,7 @@ void EvalState::indexRegion(Region &r) {
         if (!inPlace && !isa<nd::IntOp, nd::FloatOp, nd::StringOp, nd::PathOp, nd::BoolOp, nd::NullOp,
                                 nd::BuiltinOp, nd::LambdaOp>(&op)) ++ri->nThunks;
       }
-      slotMap[res.getAsOpaquePointer()] = {ri, &op, inPlace ? kNoSlot : slot++, Slot::Unknown, inPlace};
+      setSlot(res.getAsOpaquePointer(), {ri, &op, inPlace ? kNoSlot : slot++, Slot::Unknown, inPlace});
     }
     // A deferred lambda's region is a shell until its first call; it is indexed when it is minted.
     auto lam = dyn_cast<nd::LambdaOp>(op);
@@ -692,33 +766,111 @@ unsigned EvalState::srcClassOf(RegionInfo *ri) {
   return ri->srcClass = uint8_t(c);
 }
 
+/// Can a call of this body run on a stack frame?  Yes when nothing in it can make a thunk, a closure, a list or a set over the frame (a
+/// lazy operand is a thunk whose env is the frame, and the callee or the result may keep it) and it holds no cell but its argument: only
+/// strict ops, whose operands are read in place.  Such a call allocates nothing in the never-freed arena.
+bool EvalState::stackFrameOK(RegionInfo *ri) {
+  if (ri->stackable != 2) return ri->stackable == 1;
+  ri->stackable = 0;
+  if (ri->numSlots > 1) return false;
+  for (mlir::Operation &op : ri->region->front()) {
+    llvm::StringRef n = op.getName().getStringRef();
+    bool ok = n == "nix.return" || n == "nix.if" || n == "nix.not" || n == "nix.and" || n == "nix.or" || n == "nix.impl" ||
+              n == "nix.eq" || n == "nix.neq" || n == "nix.has_attr" || n == "nix.int" || n == "nix.bool" || n == "nix.null" ||
+              n.starts_with("nixty.");
+    if (auto sel = dyn_cast<nd::SelectOp>(op)) ok = sel.getDynKeys().empty() && !sel.getDefaultValue();
+    // A call whose callee and arguments are this body's argument or values captured from outside: those are cells that already exist,
+    // so no thunk is made over this frame, and the callee gets pointers to cells that outlive it.
+    if (auto ap = dyn_cast<nd::ApplyOp>(op)) {
+      ok = true;
+      auto outsideOrArg = [&](mlir::Value v) { return v.getParentRegion() != ri->region || isa<mlir::BlockArgument>(v); };
+      ok = outsideOrArg(ap.getCallee());
+      for (mlir::Value a : ap.getArgs()) ok = ok && outsideOrArg(a);
+    }
+    if (!ok) return false;
+  }
+  ri->stackable = 1;
+  return true;
+}
+
+/// MLNIX_STATS: would this thunk need its frame?  Not if it is a projection: a select with static keys and no default, or a has_attr, of this body's
+/// argument or of a value captured from outside.  Its inputs are cells that already exist, so it could be a thunk of (base cell, path).
+static const char *downgradeSet() { static const char *e = getenv("MLNIX_STATS_DOWNGRADE"); return e; }
+static bool isProjection(mlir::Operation *op) {
+  if (const char *d = downgradeSet()) {            // the experiment: these families would hold their operand cells, not the frame
+    std::string name = op->getName().getStringRef().str();
+    if (std::string(d) == "all") return true;
+    for (const char *p = d; *p;) {
+      const char *q = strchr(p, ',');
+      std::string tok = q ? std::string(p, q) : std::string(p);
+      if (name.find(tok) != std::string::npos) return true;
+      if (!q) break;
+      p = q + 1;
+    }
+  }
+  mlir::Value base;
+  if (auto sel = dyn_cast<nd::SelectOp>(op)) { if (!sel.getDynKeys().empty() || sel.getDefaultValue()) return false; base = sel.getBase(); }
+  else if (auto h = dyn_cast<nd::HasAttrOp>(op)) { base = h.getOperand(0); }
+  else return false;
+  return isa<mlir::BlockArgument>(base) || base.getParentRegion() != op->getParentRegion();
+}
+
+/// MLNIX_STATS: the frame's bookkeeping words, after its slots and read-mask: pinned, unforced thunks over it, state (1 = a call is running in it, 2 = released).
+static inline uint64_t *frameWords(Frame *f) { unsigned n = f->info->numSlots; return reinterpret_cast<uint64_t *>(f->slots + n) + (n + 63) / 64; }
+/// A frame is released to the simulated free list when no call runs in it, nothing pins it (a closure) and every thunk over it has been forced.
+static void trySimRelease(EvalState &st, Frame *f) {
+  uint64_t *w = frameWords(f);
+  if (w[0] || w[1] || (w[2] & 3) != 0) return;   // pinned, thunks left, still running, or already released
+  w[2] |= 2;
+  unsigned n = f->info->numSlots;
+  if (n >= st.simFree.size()) st.simFree.resize(n + 1);
+  st.simFree[n].push_back(st.allocClock()); ++st.nSimReleased; st.nSimReleasedBytes += sizeof(Frame) + n * sizeof(Value *);
+}
+/// A thunk (or, pinned, a closure) now refers to this frame.
+[[gnu::noinline, gnu::cold]] void EvalState::markCaptured(Frame *f) { ++frameWords(f)[1]; }
+[[gnu::noinline, gnu::cold]] void EvalState::markPinned(Frame *f) { frameWords(f)[0] = 1; }
+/// A thunk over this frame has been forced: it holds its value now, not the frame.
+[[gnu::noinline, gnu::cold]] void EvalState::statUnref(Frame *f) { uint64_t *w = frameWords(f); if (w[1]) --w[1]; trySimRelease(*this, f); }
+/// A call has returned.
+[[gnu::noinline, gnu::cold]] void EvalState::statReturn(Frame *f) {
+  uint64_t *w = frameWords(f);
+  w[2] &= ~uint64_t(1);
+  if (w[0] || w[1]) ++nSimCaptured;
+  trySimRelease(*this, f);
+}
+
 Frame *EvalState::newFrame(RegionInfo *ri, Frame *up) {
+  if (unsigned n = ri->numSlots; n < kRecycleMax && freeFrames[n] && !statsEnabled) {
+    Frame *f = freeFrames[n];
+    freeFrames[n] = reinterpret_cast<Frame *>(f->upBits);
+    f->upBits = reinterpret_cast<uintptr_t>(up);
+    f->info = ri;
+    memset(f->slots, 0, n * sizeof(Value *));
+    return f;
+  }
   size_t sz = sizeof(Frame) + ri->numSlots * sizeof(Value *);
-  size_t maskBytes = statsEnabled ? ((ri->numSlots + 63) / 64) * sizeof(uint64_t) : 0; // stats only: the mask of slots ever read, after the slots
+  size_t maskBytes = statsEnabled ? (((ri->numSlots + 63) / 64) + 3) * sizeof(uint64_t) : 0; // stats only: the mask of slots ever read, after the slots
   auto *f = static_cast<Frame *>(alloc.Allocate(sz + maskBytes, alignof(Frame)));
   if (statsEnabled) { ++nFrames; nFrameBytes += sz; nFrameSlots += ri->numSlots; ++nFramesBySize[ri->numSlots < 16 ? ri->numSlots : 16];
     ++ri->calls;
     if (ri->chainOuter == 2) ri->chainOuter = isa_and_nonnull<nd::LambdaOp>(ri->result.getDefiningOp());
     if (ri->chainOuter == 1) { ++nChainOuter; nChainOuterSlots += ri->numSlots; }
-    if (ri->stackable == 2) {
-      // Conservative: only strict ops whose operands are read in place, never ones that build a thunk, a closure, a list or a set over
-      // the frame (a lazy operand is a thunk whose env is this frame, and the callee or the result may keep it).
-      ri->stackable = 1;
-      for (mlir::Operation &op : ri->region->front()) {
-        llvm::StringRef n = op.getName().getStringRef();
-        bool ok = n == "nix.return" || n == "nix.if" || n == "nix.not" || n == "nix.and" || n == "nix.or" || n == "nix.impl" ||
-                  n == "nix.eq" || n == "nix.neq" || n == "nix.has_attr" || n == "nix.int" || n == "nix.bool" || n == "nix.null" ||
-                  n.starts_with("nixty.");
-        if (auto sel = dyn_cast<nd::SelectOp>(op)) ok = sel.getDynKeys().empty() && !sel.getDefaultValue();
-        if (!ok) { ri->stackable = 0; break; }
-      }
-    }
+    stackFrameOK(ri);
     if (ri->stackable == 1) { ++nStackable; nStackableBytes += sizeof(Frame) + ri->numSlots * sizeof(Value *); if (ri->numSlots <= 1) ++nStackableOneSlot; }
     unsigned c = srcClassOf(ri); ++nClsFrames[c]; nClsSlots[c] += ri->numSlots; }
-  f->up = up;
+  f->upBits = reinterpret_cast<uintptr_t>(up);
   f->info = ri;
   memset(f->slots, 0, ri->numSlots * sizeof(Value *) + maskBytes);
-  if (statsEnabled) { statFrames.push_back(f); if (ri->numSlots) reinterpret_cast<uint64_t *>(f->slots + ri->numSlots)[0] |= 1; } // slot 0 is the argument
+  if (statsEnabled) {
+    // a recycled frame, if one of this size was released (the simulation: nothing is reused, only counted)
+    if (ri->numSlots >= simFree.size()) simFree.resize(ri->numSlots + 1);
+    if (!simFree[ri->numSlots].empty()) {
+      uint64_t dist = allocClock() - simFree[ri->numSlots].back();
+      simFree[ri->numSlots].pop_back(); ++nSimHit; nSimHitBytes += sz;
+      ++nSimReuseDist[dist < (32u << 10) ? 0 : dist < (256u << 10) ? 1 : dist < (2u << 20) ? 2 : dist < (32u << 20) ? 3 : 4];
+    }
+  }
+  if (statsEnabled) { frameWords(f)[2] = 1; statFrames.push_back(f); if (ri->numSlots) reinterpret_cast<uint64_t *>(f->slots + ri->numSlots)[0] |= 1; } // slot 0 is the argument
   return f;
 }
 
@@ -729,18 +881,25 @@ static Slot::How howOf(Operation *op) {
   return Slot::Thunk;
 }
 
+/// MLNIX_STATS: the first read of a frame slot.  Cold and out of line, so lookup() carries one test and one call, not the census.
+[[gnu::noinline, gnu::cold]] void EvalState::statTouch(Frame *f, RegionInfo *ri, unsigned idx) {
+  ++nSlotsTouched; ++nTouchAt[idx < 16 ? idx : 16]; ++nClsTouched[srcClassOf(ri)];
+  reinterpret_cast<uint64_t *>(f->slots + ri->numSlots)[idx / 64] |= uint64_t(1) << (idx % 64);
+  ++nTouchedBy[ri->numSlots <= 1 ? 0 : ri->numSlots <= 3 ? 1 : ri->numSlots <= 8 ? 2 : ri->numSlots <= 16 ? 3 : ri->numSlots <= 64 ? 4 : 5];
+}
+
 Value *EvalState::lookup(Frame *f, mlir::Value v) {
-  auto it = slotMap.find(v.getAsOpaquePointer());
-  if (it == slotMap.end()) throw EvalError("internal error: unindexed SSA value");
-  Slot &s = it->second;
+  Slot *sp = slotOf(v.getAsOpaquePointer());
+  if (!sp) throw EvalError("internal error: unindexed SSA value");
+  Slot &s = *sp;
   RegionInfo *ri = s.ri;
   unsigned idx = s.idx;
-  while (f && f->info != ri) f = f->up;
+  while (f && f->info != ri) f = f->up();
   if (!f) throw EvalError("internal error: SSA value used outside its scope");
   Value *noCell = nullptr; // an in-place value reached through lookup(): its one use gets its own thunk
   Value *&slot = idx == kNoSlot ? noCell : f->slots[idx];
   if (slot) return slot;
-  if (statsEnabled && idx != kNoSlot) { ++nSlotsTouched; ++nTouchAt[idx < 16 ? idx : 16]; ++nClsTouched[srcClassOf(ri)]; reinterpret_cast<uint64_t *>(f->slots + ri->numSlots)[idx / 64] |= uint64_t(1) << (idx % 64); ++nTouchedBy[ri->numSlots <= 1 ? 0 : ri->numSlots <= 3 ? 1 : ri->numSlots <= 8 ? 2 : ri->numSlots <= 16 ? 3 : ri->numSlots <= 64 ? 4 : 5]; }
+  if (statsEnabled && idx != kNoSlot) [[unlikely]] statTouch(f, ri, idx);
   Operation *op = s.def;
   if (!op) throw EvalError("internal error: unbound block argument");
   if (s.how == Slot::Unknown) s.how = howOf(op);
@@ -767,6 +926,19 @@ Value *EvalState::lookup(Frame *f, mlir::Value v) {
   nv->type = s.how == Slot::Lambda ? VType::Lambda : VType::Thunk;
   nv->thunk.op = op;
   nv->thunk.env = f;
+  if (f) f->capture();
+  if (statsEnabled && f) [[unlikely]] {
+    if (nv->type == VType::Lambda) markPinned(f);
+    else if (isProjection(op)) ++nProjThunks;          // in the simulated world this thunk holds (base cell, path), not the frame
+    else {
+      ++nHardThunks; markCaptured(f);
+      auto &e = thunksByOp[op->getName().getStringRef()];
+      ++e.first;
+      unsigned inside = 0;                                // operands defined in this very body: cells the thunk would have to create first
+      for (mlir::Value o : op->getOperands()) inside += !isa<mlir::BlockArgument>(o) && o.getParentRegion() == op->getParentRegion();
+      e.second += op->getNumOperands() * 8u + inside;     // packed: total operands in the high part, in-body operands in the low byte below
+    }
+  }
   return slot = nv;
 }
 
@@ -777,24 +949,26 @@ void EvalState::evalDefinition(mlir::Operation *def, Frame *f, Value &dest) {
     dest.type = VType::Lambda; if (statsEnabled) ++nVT[unsigned(VType::Lambda)];
     dest.thunk.op = def;
     dest.thunk.env = f;
+    if (f) f->capture();
+    if (statsEnabled && f) [[unlikely]] markPinned(f);
   } else {
     evalOp(def, f, dest);
   }
 }
 
 Value &EvalState::operand(Frame *f, mlir::Value v, Value &tmp) {
-  auto it = slotMap.find(v.getAsOpaquePointer());
-  if (it != slotMap.end() && it->second.inPlace && f && f->info == it->second.ri) {
-    evalDefinition(it->second.def, f, tmp);
+  Slot *sp = slotOf(v.getAsOpaquePointer());
+  if (sp && sp->inPlace && f && f->info == sp->ri) {
+    evalDefinition(sp->def, f, tmp);
     return tmp;
   }
   return *lookup(f, v);
 }
 
 void EvalState::evalTail(Frame *f, mlir::Value v, Value &out, PosPtr pos) {
-  auto it = slotMap.find(v.getAsOpaquePointer());
-  if (it != slotMap.end() && it->second.inPlace && f && f->info == it->second.ri) {
-    evalDefinition(it->second.def, f, out);
+  Slot *sp = slotOf(v.getAsOpaquePointer());
+  if (sp && sp->inPlace && f && f->info == sp->ri) {
+    evalDefinition(sp->def, f, out);
     return;
   }
   Value *p = lookup(f, v);
@@ -821,6 +995,7 @@ void EvalState::forceValue(Value &v, PosPtr pos) {
     v.type = VType::Blackhole; if (statsEnabled) ++nVT[unsigned(VType::Blackhole)];
     try {
       evalOp(op, env, v);
+      if (statsEnabled && env && !isProjection(op)) [[unlikely]] statUnref(env);
     } catch (...) {
       v.type = VType::Thunk; if (statsEnabled) ++nVT[unsigned(VType::Thunk)];
       v.thunk.op = op;
@@ -969,10 +1144,18 @@ RegionInfo *EvalState::bodyOf(nixfe::BodyIndex idx) {
                            [&](uint32_t row) { return mintLambda(p, row); });
 }
 
-void EvalState::callLambda(Value &fun, Value *arg, Value &out, PosPtr pos) {
-  auto lam = cast<nd::LambdaOp>(fun.thunk.op);
+/// The region of a lambda's body: the one hash lookup of a call, made once and passed down.
+RegionInfo *EvalState::infoOfSlow(nd::LambdaOp lam) {
   std::optional<uint64_t> deferred = lam.getBodyIndex();
-  RegionInfo *ri = deferred ? bodyOf(nixfe::BodyIndex(*deferred)) : regionInfo(&lam.getBody());
+  return deferred ? bodyOf(nixfe::BodyIndex(*deferred)) : regionInfo(&lam.getBody());
+}
+
+void EvalState::callLambda(Value &fun, Value *arg, Value &out, PosPtr pos) {
+  callLambdaIn(fun, infoOf(cast<nd::LambdaOp>(fun.thunk.op)), arg, out, pos);
+}
+
+void EvalState::callLambdaIn(Value &fun, RegionInfo *ri, Value *arg, Value &out, PosPtr pos) {
+  auto lam = cast<nd::LambdaOp>(fun.thunk.op);
   auto fnName = [&]() -> std::string {
     if (auto n = lam.getName()) return "function '" + n->str() + "'";
     return "function 'anonymous lambda'";
@@ -1015,9 +1198,20 @@ void EvalState::callLambda(Value &fun, Value *arg, Value &out, PosPtr pos) {
     throw StackOverflowError("stack overflow; max-call-depth exceeded", pos);
   DepthGuard g(callDepth);
   auto interpret = [&] {
+    if (stackFramesOn && stackFrameOK(ri)) {
+      // a body of strict ops over its one argument: the frame is two words and the argument, on the stack
+      alignas(Frame) char buf[sizeof(Frame) + sizeof(Value *)];
+      Frame *sf = ::new (static_cast<void *>(buf)) Frame{reinterpret_cast<uintptr_t>(fun.thunk.env), ri, {}};
+      sf->slots[0] = arg;
+      if (statsEnabled) ++nStackFrames;
+      evalTail(sf, ri->result, out, pos);
+      return;
+    }
     Frame *f = newFrame(ri, fun.thunk.env);
     f->slots[0] = arg;
     evalTail(f, ri->result, out, pos);
+    if (statsEnabled) [[unlikely]] statReturn(f);
+    else if (!f->captured() && recycleOn) recycleFrame(f);  // returned with nothing made over it: nothing can reach it again
   };
   if (scalarJIT && scalarJIT->accepts(ri->jitEntry))
     scalarJIT->evaluate(*this, lam, ri->result, fun.thunk.env, *arg, out, pos, ri->jitEntry, interpret);
@@ -1136,6 +1330,27 @@ std::string EvalState::shapeOf(RegionInfo *ri, unsigned depth) {
   return out;
 }
 
+/// `c: x: if c then [x] else []` / `if c then x else {}` called with both arguments: the same work as the two calls with the frames and the
+/// closure between them gone.  Out of line, so the loop that calls it stays small.
+[[gnu::noinline]] void EvalState::applySelector(unsigned shape, RegionInfo *ri, Value **a, Value &dest, PosPtr pos) {
+  if (forceBool(*a[0], ri->selPos, "while evaluating a branch condition")) {
+    if (shape == 2) { mkList(dest, 1); dest.list.elems[0] = a[1]; }
+    else { forceValue(*a[1], pos); dest = *a[1]; }
+  } else {
+    dest = shape == 2 ? vEmptyList : vEmptyAttrs;
+  }
+  if (statsEnabled) ++nSelectorCalls;
+}
+
+/// The opt-in JIT's saturated chain of 2 to 4 unary lambdas: true when native code ran the whole call.  Out of line: the loop that
+/// asks is the evaluator's hottest, and a run without MLNIX_JIT never gets here.
+[[gnu::noinline]] bool EvalState::jitChain(nd::LambdaOp lambda, RegionInfo *ri, Value &cur, size_t n, Value **args, Value &out, PosPtr pos) {
+  if (!scalarJIT->acceptsSaturated(nullptr) || !scalarJIT->acceptsSaturated(ri->curriedEntry, unsigned(n))) return false;
+  // This outer body is reached by the ordinary call as well. Descendant bodies are only inspected after the interpreter oracle has run them.
+  auto interpret = [&] { callFunction(cur, n, args, out, pos, false); };
+  return scalarJIT->evaluateSaturated(*this, lambda, ri->result, cur.thunk.env, llvm::ArrayRef<Value *>(args, n), out, pos, ri->curriedEntry, interpret);
+}
+
 void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out, PosPtr pos, bool allowCurried) {
   Value *cur = &fun;
   size_t i = 0;
@@ -1151,21 +1366,15 @@ void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out,
   }
   while (true) {
     forceValue(*cur, pos);
-    if (selectorsOn && cur->type == VType::Lambda && nargs - i >= 2) {
-      auto lam = cast<nd::LambdaOp>(cur->thunk.op);
-      if (!lam.getFormals()) {
-        std::optional<uint64_t> deferred = lam.getBodyIndex();
-        RegionInfo *ori = deferred ? bodyOf(nixfe::BodyIndex(*deferred)) : regionInfo(&lam.getBody());
-        if (unsigned shape = selectorShape(lam, ori); shape >= 2) {
-          // `c: x: if c then ... else ...`: the same work as the two calls, with the frames and the closure between them gone
+    nd::LambdaOp curLam;
+    RegionInfo *curRI = nullptr;
+    if (cur->type == VType::Lambda) {
+      curLam = cast<nd::LambdaOp>(cur->thunk.op);
+      curRI = infoOf(curLam);  // once per call: the selector check, the JIT check and the call below all use it
+      if (selectorsOn && nargs - i >= 2 && !curLam.getFormals()) {
+        if (unsigned shape = curRI->selShape ? curRI->selShape : selectorShape(curLam, curRI); shape >= 2) {
           Value *dest = (i + 2 == nargs) ? &out : allocValue();
-          if (forceBool(*args[i], ori->selPos, "while evaluating a branch condition")) {
-            if (shape == 2) { mkList(*dest, 1); dest->list.elems[0] = args[i + 1]; }
-            else { forceValue(*args[i + 1], pos); *dest = *args[i + 1]; }
-          } else {
-            *dest = shape == 2 ? vEmptyList : vEmptyAttrs;
-          }
-          if (statsEnabled) ++nSelectorCalls;
+          applySelector(shape, curRI, args + i, *dest, pos);
           i += 2;
           if (i >= nargs) return;
           cur = dest;
@@ -1173,24 +1382,12 @@ void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out,
         }
       }
     }
-    if (allowCurried && scalarJIT && nargs - i >= 2 && nargs - i <= 4 && cur->type == VType::Lambda) {
-      auto lambda = cast<nd::LambdaOp>(cur->thunk.op);
-      if (!lambda.getFormals() && scalarJIT->acceptsSaturated(nullptr)) {
-        // This outer body is reached by the ordinary call as well. Descendant
-        // bodies are only inspected after the interpreter oracle has run them.
-        auto deferred = lambda.getBodyIndex();
-        RegionInfo *ri = deferred ? bodyOf(nixfe::BodyIndex(*deferred)) : regionInfo(&lambda.getBody());
-        if (scalarJIT->acceptsSaturated(ri->curriedEntry, unsigned(nargs - i))) {
-          auto interpret = [&] { callFunction(*cur, nargs - i, args + i, out, pos, false); };
-          if (scalarJIT->evaluateSaturated(*this, lambda, ri->result, cur->thunk.env,
-                                         llvm::ArrayRef<Value *>(args + i, nargs - i), out, pos,
-                                         ri->curriedEntry, interpret)) return;
-        }
-      }
-    }
+    if (allowCurried && scalarJIT && nargs - i >= 2 && nargs - i <= 4 && curRI && !curLam.getFormals() &&
+        jitChain(curLam, curRI, *cur, nargs - i, args + i, out, pos))
+      return;
     Value *res = (i + 1 == nargs) ? &out : cur == &stackCells[0] ? &stackCells[1] : &stackCells[0];
     if (cur->type == VType::Lambda) {
-      callLambda(*cur, args[i], *res, pos);
+      callLambdaIn(*cur, curRI, args[i], *res, pos);
       i++;
     } else if (cur->type == VType::PrimOp || cur->type == VType::PrimOpApp) {
       // Collect already-applied arguments.
@@ -1437,11 +1634,14 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
         for (const nixfe::Name &comp : sel.getPath()) {
           Symbol sym = pathSymbol(comp, dyn, nextDyn, env, pos);
           if (!def) {
+            Value *baseV = cur;
             cur = selectField(*cur, sym, pos);
+            if (statsEnabled) statSelect(op, baseV->attrs, sym, !dyn.empty());
             continue;
           }
           forceValue(*cur, pos);
           if (cur->type != VType::Attrs) return copyFrom(lookup(env, def));
+          if (statsEnabled) statSelect(op, cur->attrs, sym, !dyn.empty());
           const Attr *a = cur->attrs->get(sym);
           if (!a) return copyFrom(lookup(env, def));
           cur = a->value;

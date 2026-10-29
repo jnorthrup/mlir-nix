@@ -104,10 +104,10 @@ struct Continuation {
 // Read only an existing cell. This must not be replaced with lookup(): callee
 // specialization and guards may not create or force a captured computation.
 Value *existing(EvalState &st, Frame *env, mlir::Value value) {
-  auto it = st.slotMap.find(value.getAsOpaquePointer());
-  if (it == st.slotMap.end() || it->second.idx == kNoSlot) return nullptr;
-  const Slot &slot = it->second;
-  while (env && env->info != slot.ri) env = env->up;
+  Slot *found = st.slotOf(value.getAsOpaquePointer());
+  if (!found || found->idx == kNoSlot) return nullptr;
+  const Slot &slot = *found;
+  while (env && env->info != slot.ri) env = env->up();
   return env && slot.idx < env->info->numSlots ? env->slots[slot.idx] : nullptr;
 }
 
@@ -251,8 +251,8 @@ struct LazyJITPlan::Impl {
     const auto &eliminated = context ? contexts[context].regions : chainRegions;
     for (auto *chainRegion : eliminated)
       if (v.getParentRegion() == chainRegion) return false;
-    auto it = state.slotMap.find(v.getAsOpaquePointer());
-    return it != state.slotMap.end() && it->second.idx != kNoSlot;
+    Slot *found = state.slotOf(v.getAsOpaquePointer());
+    return found && found->idx != kNoSlot;
   }
   bool projection(mlir::Value v, unsigned context) const {
     auto select = v.getDefiningOp<nd::SelectOp>();

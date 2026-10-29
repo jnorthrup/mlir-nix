@@ -42,6 +42,7 @@ template <class M> static void algorithm(const char *name) {
 }
 
 int main() {
+  composite::todoSink = [](const char *what) { std::fprintf(stderr, "TODO: %s\n", what); };   // the algebra has no I/O: the host says it
   algorithm<MutableSeries<int>>("Growable");
   algorithm<Fixed>("Inline<8>");
   // a full fixed body says TODO, out loud, and does not write past its cells
@@ -49,6 +50,6 @@ int main() {
   pid_t pid = fork();
   if (pid == 0) { Fixed f; for (int i = 0; i < 9; i++) f.append(i); _exit(0); }
   int status = 0; waitpid(pid, &status, 0);
-  require(WIFEXITED(status) ? false : WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT, "append past a fixed body's capacity is TODO()");
+  require(WIFSIGNALED(status) && (WTERMSIG(status) == SIGILL || WTERMSIG(status) == SIGTRAP || WTERMSIG(status) == SIGABRT), "append past a fixed body's capacity is TODO(): it says so and traps");
   std::puts("PASS bodies: one algorithm, Growable and Inline; fixed bodies cannot reserve/resize/freeze; a full fixed body is TODO()");
 }

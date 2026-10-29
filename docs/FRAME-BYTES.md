@@ -76,3 +76,30 @@ Values and frames are two thirds of the arena and about half of all memory. Neit
 (1 to 3%) take much of the frames; the cells that would fall to a strictness analysis (27 to 32% of real thunks are never forced) are
 the value half, and the frames that fall to a `lib` continent are the other. The IR and the parsed sources are the 37% outside the
 arena and have not been accounted by use.
+
+## Recycling frames, and what projections would add
+
+A frame that returns with no thunk or closure made over it can never be reached again. `Frame` carries a captured bit in the low bit of
+its `up` pointer, set at the only two places a frame pointer enters a value (a thunk or closure cell in `lookup`, a closure in
+`evalDefinition`); such a frame is pushed on a per-slot-count free stack when its call returns normally, and `newFrame` reuses it.
+`MLNIX_NORECYCLE` turns it off. On the Mac (relative, minimum of 7): peak RSS 1,190 to 1,153 MB on nixos-toplevel (-3.1%), 1,097 to
+1,074 MB on nixpkgs-drvs (-2.1%), as the simulation below predicted; time unchanged. Output is identical with it on and off.
+
+`MLNIX_STATS=1` simulates allocators that would go further. Each keeps a free list per slot count and records how many bytes were
+allocated between a frame's release and its reuse:
+
+| what may release a frame | nixos-toplevel: new frames reusing storage, MB | nixpkgs-drvs |
+|---|---|---|
+| it returned with nothing made over it (built) | 17.7%, 38.2 MB | 21.0%, 22.2 MB |
+| ... or every thunk over it has been forced, no closure pins it | 32.2%, 70.7 MB | 36.6%, 41.8 MB |
+| ... and projections of an argument or captured value hold no frame | 35.3%, 75.0 MB | 37.6%, 42.9 MB |
+| ... and calls, selects, formals hold their operand cells instead | 39.3%, 90.5 MB | 39.1%, 49.3 MB |
+| ... and lists, sets, ifs and string concatenation too | 44.6%, 131.8 MB | 51.4%, 146.4 MB |
+| every thunk self-contained (flat closures) | 46.5%, 167.8 MB | 53.0%, 181.3 MB |
+
+97 to 98.5% of the simulated reuses land within 32 KiB of allocation, Kali's L1d: a recycled frame is hot. Of the thunks that need their
+frame, calls are 31% (26% on nixpkgs-drvs), non-argument selects 14%, lists 7%, sets 7%, formals 6 to 9%, string concatenation 5 to 6%,
+conditionals 5 to 7% (`MLNIX_STATS_DOWNGRADE=` names the families the simulation treats as frame-free). The rest of the frames are pinned
+by closures, which nothing collects. The two lines past "every thunk over it has been forced" need reference counting that a copied
+unforced thunk would break, and the last two need thunks that carry their operand cells, which creates those cells eagerly; the simulation
+prices neither, so they are ceilings, not plans.

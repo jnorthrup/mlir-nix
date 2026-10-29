@@ -1,0 +1,1 @@
+{ a = 5; b = 7; c = "deep"; d = false; e = true; f = true; g = false; h = 1; i = [ 1 2 ]; j = 1; k = 1; l = 9; m = true; n = 6; o = 3; p = [ 1 2 ]; q = 7; r = 8; s = 4; t = [ 7 7 7 ]; u = true; v = 200; w = 2; }

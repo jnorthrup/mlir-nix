@@ -246,9 +246,14 @@ struct RegionInfo {
 };
 
 struct Frame {
-  Frame *up;
+  /// The enclosing frame, with bit 0 set once a thunk or a closure has been made over this frame.  A frame that returns with the bit clear can
+  /// never be reached again, and its storage is recycled (EvalState::newFrame / recycleFrame).
+  uintptr_t upBits;
   RegionInfo *info;
   Value *slots[0];
+  Frame *up() const { return reinterpret_cast<Frame *>(upBits & ~uintptr_t(1)); }
+  bool captured() const { return upBits & 1; }
+  void capture() { upBits |= 1; }
 };
 
 /// Where an SSA value lives: its region, its frame slot, and whether its single
@@ -581,7 +586,35 @@ struct EvalState {
   unsigned exprCounter = 0;
   std::function<void(const std::string &)> printTrace;
 
-  llvm::DenseMap<void *, Slot> slotMap;
+  // Where each SSA value lives.  The slots sit in a deque, at addresses that stay put as the map grows (the demand schedule keeps adding
+  // values); slotOf() answers from a direct-mapped cache in front of the hash map, a load and a compare on a hit, where every operand access
+  // paid a hash probe (lookup, operand and evalTail were 16.6% of the CPU of a NixOS evaluation on Kali).  A slot is rewritten in place
+  // when a value's address is indexed again, so the cache never holds a stale one.
+  llvm::DenseMap<void *, Slot *> slotMap;
+  std::deque<Slot> slotStore;
+  struct SlotCacheEntry { void *key = nullptr; Slot *slot = nullptr; };
+  static constexpr size_t kSlotCache = 8192;
+  SlotCacheEntry slotCache[kSlotCache];
+#ifdef MLNIX_NO_LOOKUP_CACHES
+  Slot *slotOf(void *key) {
+    auto it = slotMap.find(key);
+    return it == slotMap.end() ? nullptr : it->second;
+  }
+#else
+  Slot *slotOf(void *key) {
+    SlotCacheEntry &e = slotCache[(reinterpret_cast<uintptr_t>(key) >> 4) & (kSlotCache - 1)];
+    if (e.key == key) return e.slot;
+    auto it = slotMap.find(key);
+    if (it == slotMap.end()) return nullptr;
+    e = {key, it->second};
+    return e.slot;
+  }
+#endif
+  void setSlot(void *key, const Slot &slot) {
+    Slot *&p = slotMap[key];
+    if (!p) { slotStore.push_back(slot); p = &slotStore.back(); }
+    else *p = slot;
+  }
   uint64_t nUpdLayered = 0, nUpdMerged = 0, nUpdBase = 0, nUpdTop = 0; // MLNIX_STATS: `//` as a layer / a flat merge, entries not copied / copied
   uint64_t nDemandMinted = 0; // MLNIX_STATS: lambda bodies minted on first call
   uint64_t nVT[15] = {}; // MLNIX_STATS: instrumented tag writes, including stack values and repeated retyping;
@@ -596,6 +629,64 @@ struct EvalState {
   uint64_t nTouchedBy[6] = {}; // MLNIX_STATS: slots ever read, by the slot count of their frame (1, 2-3, 4-8, 9-16, 17-64, 65+)
   std::vector<Frame *> statFrames; // MLNIX_STATS: every frame made, each followed by a mask of the slots ever read (bit i = slot i)
   uint64_t nBindingBytes = 0, nListBytes = 0, nStringBytes = 0; // MLNIX_STATS: arena bytes by use (values and frames are counted above)
+  uint64_t nStackFrames = 0; // MLNIX_STATS: calls run on a stack frame, nothing allocated in the arena
+  bool stackFramesOn = true; // MLNIX_NOSTACKFRAMES turns it off
+  bool stackFrameOK(RegionInfo *ri);
+  // Frames that returned uncaptured, by slot count: a stack per size, linked through the frame's own first word.  The newest is reused first, so
+  // a recycled frame is almost always still in L1 (docs/FRAME-BYTES.md: 97 to 98% of reuses are within 32 KiB of allocation).
+  static constexpr unsigned kRecycleMax = 64;
+  Frame *freeFrames[kRecycleMax] = {};
+  bool recycleOn = true;  // MLNIX_NORECYCLE turns it off
+  void recycleFrame(Frame *f) {
+    unsigned n = f->info->numSlots;
+    if (n >= kRecycleMax) return;
+    f->info = nullptr;  // a stale use of a recycled frame fails at once
+    f->upBits = reinterpret_cast<uintptr_t>(freeFrames[n]);
+    freeFrames[n] = f;
+  }
+  void markCaptured(Frame *f);
+  void markPinned(Frame *f);
+  void statUnref(Frame *f);
+  void statReturn(Frame *f);
+  /// The region of a lambda's body, from a direct-mapped cache keyed by the op's address.  Sound because an entry is made only for a lambda that
+  /// is being called, and nothing erases a called op (the passes that erase run on a body when it is lowered or minted, before any call of it).
+  /// The region of a lambda's body, from a direct-mapped cache keyed by the op: a hit is a load and a compare, where the lookup was a read
+  /// of the op's deferred-body attribute and a hash probe on every call (3.7% of the CPU of a NixOS evaluation on Kali).
+#ifdef MLNIX_NO_LOOKUP_CACHES  // ablation build (docs/SELECT-AND-LOOKUP.md): the lookups without the caches in front
+  RegionInfo *infoOf(mlir::nix::LambdaOp lam) { return infoOfSlow(lam); }
+#else
+  RegionInfo *infoOf(mlir::nix::LambdaOp lam) {
+    const void *k = lam.getOperation();
+    InfoSlot &e = infoCache[(reinterpret_cast<uintptr_t>(k) >> 4) & (kInfoCache - 1)];
+    if (e.op == k) return e.ri;
+    RegionInfo *ri = infoOfSlow(lam);
+    e = {k, ri};
+    return ri;
+  }
+#endif
+  RegionInfo *infoOfSlow(mlir::nix::LambdaOp lam);
+  static constexpr size_t kInfoCache = 4096;
+  struct InfoSlot { const void *op = nullptr; RegionInfo *ri = nullptr; };
+  InfoSlot infoCache[kInfoCache];
+  bool jitChain(mlir::nix::LambdaOp lambda, RegionInfo *ri, Value &cur, size_t n, Value **args, Value &out, PosPtr pos);
+  void callLambdaIn(Value &fun, RegionInfo *ri, Value *arg, Value &out, PosPtr pos);
+  void applySelector(unsigned shape, RegionInfo *ri, Value **a, Value &dest, PosPtr pos);
+  void statTouch(Frame *f, RegionInfo *ri, unsigned idx);
+  // MLNIX_STATS: the select census.  A layout signature is the set's size and three sampled names; a site is mono-, few- or megamorphic
+  // by how many distinct signatures it has seen.
+  struct SelSite { uint64_t calls = 0, hits = 0, sameAsLast = 0, last = 0; llvm::SmallVector<uint64_t, 6> seen; bool dynamic = false; };
+  llvm::DenseMap<const void *, SelSite> selSites;
+  uint64_t nSelects = 0, nSelectHits = 0, nSelectDyn = 0, nSelectLayered = 0, nSelectProbes = 0, nSelectSizeLog[18] = {};
+  void statSelect(const void *site, const Bindings *b, Symbol key, bool dynamic);
+  // MLNIX_STATS: a recycling allocator for frames, simulated.  A frame that returns with nothing made over it (no thunk, no closure) can never be
+  // reached again, so its storage could serve the next frame of the same slot count; simFree counts those, per slot count.
+  std::vector<std::vector<uint64_t>> simFree;   // per slot count: the allocation clock at each release (a stack: the newest is reused first)
+  uint64_t allocClock() const { return nFrameBytes + nVT[14] * sizeof(Value) + nBindingBytes + nListBytes + nStringBytes; }
+  uint64_t nSimReuseDist[5] = {};               // reuse distance in bytes allocated since the release: < 32 KiB, < 256 KiB, < 2 MiB, < 32 MiB, more
+  uint64_t nSimHit = 0, nSimHitBytes = 0, nSimReleased = 0, nSimReleasedBytes = 0, nSimCaptured = 0;
+  uint64_t nBuilders = 0, nBuilderRows = 0, nBuildersBig = 0, nBuilderBigRows = 0; // MLNIX_STATS: attribute-set builders, and those past the 12 inline rows (a malloc)
+  llvm::StringMap<std::pair<uint64_t, uint64_t>> thunksByOp; // MLNIX_STATS: frame-needing thunks by operation: count, packed operand counts
+  uint64_t nProjThunks = 0, nHardThunks = 0; // MLNIX_STATS: thunks made over a frame, projections and the rest
   uint64_t nSelectorCalls = 0; // MLNIX_STATS: saturated calls of a recognized selector, made with no frame and no closure
   bool selectorsOn = true;     // MLNIX_NOSELECTORS turns the recognition off
   unsigned selectorShape(mlir::nix::LambdaOp outerLam, RegionInfo *outer);
