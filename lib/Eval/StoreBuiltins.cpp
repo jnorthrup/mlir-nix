@@ -1,5 +1,6 @@
 //===- StoreBuiltins.cpp - Builtins that touch the store / file system ----===//
 
+#include "Composite/Series.h"
 #include "Nix/Prefetch.h"
 #include "Nix/Eval.h"
 
@@ -75,7 +76,7 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
         throw EvalError("experimental Nix feature 'git-hashing' is disabled; add '--extra-experimental-features git-hashing' to enable it", pos);
       else throw EvalError("invalid value '" + str(s) + "' for 'outputHashMode' attribute", pos);
     };
-    auto handleOutputs = [&](const std::vector<std::string> &ss) {
+    auto handleOutputs = [&](const auto &ss) {
       outputs.clear();
       for (auto &j : ss) {
         if (outputs.count(j)) throw EvalError("duplicate derivation output '" + j + "'", pos);
@@ -150,10 +151,10 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
             else if (i->name == st.s.outputHashAlgo) outputHashAlgo = parseAlgo(s);
             else if (i->name == st.s.outputHashMode) handleHashMode(s);
             else if (i->name == st.s.outputs) {
-              std::vector<std::string> ss;
+              composite::MutableSeries<std::string> ss;
               std::istringstream is(s);
               std::string w;
-              while (is >> w) ss.push_back(w);
+              while (is >> w) ss.append(w);
               handleOutputs(ss);
             }
           }
@@ -385,11 +386,11 @@ static void fetchImpl(EvalState &st, A args, Value &v, PosPtr pos, bool unpack, 
         throw EvalError("failed to unpack '" + url + "'", pos);
       }
       // Use the single top-level directory if there is one.
-      std::vector<std::string> entries;
+      composite::MutableSeries<std::string> entries;
       if (DIR *d = opendir(dtmpl)) {
         while (auto *e = readdir(d)) {
           std::string n = e->d_name;
-          if (n != "." && n != "..") entries.push_back(n);
+          if (n != "." && n != "..") entries.append(n);
         }
         closedir(d);
       }

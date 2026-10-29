@@ -1,0 +1,3 @@
+slice	std_vector_grow_sites	mlnix_bytes	libNixEval_bytes	cluster_min_kali_s	note
+baseline(f54fda8+evalthin)	242	-	-	0.081	loop heap; 0.088 transform heap (Kali, clang22 -O2)
+slice1 Formats StoreBuiltins Builtins ScalarJIT Eval LazyJIT Confix + type flow	222	37861624	1563472	-	484/484 both schedules, jit 652, mlir 15/15, primops 105

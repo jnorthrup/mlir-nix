@@ -1,5 +1,6 @@
 //===- Eval.cpp - Lazy evaluator over the nix dialect ---------------------===//
 
+#include "Composite/Series.h"
 #include "Nix/Prefetch.h"
 #include <bit>
 #include "Nix/Eval.h"
@@ -102,10 +103,10 @@ Bindings *Bindings::flat() const {
   return L.flat;
 }
 
-std::vector<const Attr *> Bindings::lexicographicOrder(const SymbolTable &st) const {
-  std::vector<const Attr *> v;
+composite::MutableSeries<const Attr *> Bindings::lexicographicOrder(const SymbolTable &st) const {
+  composite::MutableSeries<const Attr *> v;
   v.reserve(size());
-  for (auto &a : *this) v.push_back(&a);
+  for (auto &a : *this) v.append(&a);
   std::sort(v.begin(), v.end(), [&](const Attr *a, const Attr *b) { return st[a->name] < st[b->name]; });
   return v;
 }
@@ -319,8 +320,8 @@ void EvalState::printStats() {
     llvm::errs() << llvm::format("== curried chains: %llu frames (%.1f%%, %.1f%% of slots) are the outer half of `a: b: ...`: they exist to capture an argument for an inner lambda\n",
                                  (unsigned long long)nChainOuter, 100.0 * nChainOuter / nFrames, 100.0 * nChainOuterSlots / nFrameSlots);
   if (nFrames) {
-    std::vector<RegionInfo *> top;
-    for (auto &kv : regionInfos) if (kv.second->calls) top.push_back(kv.second);
+    composite::MutableSeries<RegionInfo *> top;
+    for (auto &kv : regionInfos) if (kv.second->calls) top.append(kv.second);
     std::sort(top.begin(), top.end(), [](RegionInfo *a, RegionInfo *b) { return a->calls > b->calls; });
     llvm::errs() << "== the 40 lambdas that make the most frames (calls, slots, where):\n";
     uint64_t cum = 0;
@@ -1671,8 +1672,8 @@ struct TracePrinter {
       }
       if (depth >= maxDepth) { out << "{ ... }"; break; }
       out << "{";
-      std::vector<const Attr *> sorted;
-      for (auto &a : *v.attrs) sorted.push_back(&a);
+      composite::MutableSeries<const Attr *> sorted;
+      for (auto &a : *v.attrs) sorted.append(&a);
       std::sort(sorted.begin(), sorted.end(), [&](const Attr *a, const Attr *b) {
         auto an = st.symbols[a->name], bn = st.symbols[b->name];
         bool ai = an == "type" || an == "_type", bi = bn == "type" || bn == "_type";
@@ -1778,7 +1779,7 @@ static std::unique_ptr<mlir::PassManager> makeOptimizer(mlir::MLIRContext &ctx, 
   return pm;
 }
 
-nd::ExprOp EvalState::lowerToMLIR(std::shared_ptr<nixfe::Origin> origin, const std::vector<std::string> *scopeNames) {
+nd::ExprOp EvalState::lowerToMLIR(std::shared_ptr<nixfe::Origin> origin, const composite::MutableSeries<std::string> *scopeNames) {
   nixfe::ParseOptions po = parseOptions();
   nixfe::GenOptions go;
   go.isBaseName = [this](llvm::StringRef n) { return isBaseName(n); };
@@ -2049,15 +2050,15 @@ static std::string chomp(std::string s) {
 
 static void appendCodeLines(std::string &out, std::string_view text, unsigned line, unsigned col,
                             unsigned indent = 7) {
-  std::vector<std::string> lines;
+  composite::MutableSeries<std::string> lines;
   size_t start = 0;
   while (true) {
     size_t nl = text.find('\n', start);
     if (nl == std::string_view::npos) {
-      lines.push_back(std::string(text.substr(start)));
+      lines.append(std::string(text.substr(start)));
       break;
     }
-    lines.push_back(std::string(text.substr(start, nl - start)));
+    lines.append(std::string(text.substr(start, nl - start)));
     start = nl + 1;
   }
   auto fmtLine = [&](unsigned n) {

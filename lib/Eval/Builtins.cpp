@@ -1,5 +1,6 @@
 //===- Builtins.cpp - The Nix builtins (language-level) -------------------===//
 
+#include "Composite/Series.h"
 #include "Nix/Eval.h"
 
 #include "mlir/IR/BuiltinAttributes.h"
@@ -451,7 +452,7 @@ void registerBuiltins(EvalState &state) {
     auto s = st.coerceToString(*args[1], ctx, false, true, pos, "while evaluating the second argument passed to builtins.split");
     auto begin = std::sregex_iterator(s.begin(), s.end(), regex);
     auto end = std::sregex_iterator();
-    std::vector<Value *> out;
+    composite::MutableSeries<Value *> out;
     size_t lastEnd = 0;
     std::smatch last;
     bool any = false;
@@ -459,14 +460,14 @@ void registerBuiltins(EvalState &state) {
       any = true;
       const std::smatch &m = *i;
       Value *pre = st.newString(str(std::string_view(s).substr(lastEnd, m.position(0) - lastEnd)));
-      out.push_back(pre);
+      out.append(pre);
       Value *groups = st.allocValue();
       st.mkList(*groups, uint32_t(m.size() - 1) |cp::j| [&](uint32_t g) { return groupValue(st, m[g + 1]); });
-      out.push_back(groups);
+      out.append(groups);
       lastEnd = m.position(0) + m.length(0);
     }
     Value *rest = st.newString(any ? s.substr(lastEnd) : s);
-    out.push_back(rest);
+    out.append(rest);
     st.mkList(v, out);
   });
   S.addPrimOp("__compareVersions", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
@@ -476,11 +477,11 @@ void registerBuiltins(EvalState &state) {
   S.addPrimOp("__splitVersion", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
     auto ver = st.forceStringNoCtx(*args[0], pos);
     auto p = ver.begin();
-    std::vector<std::string> comps;
+    composite::MutableSeries<std::string> comps;
     while (p != ver.end()) {
       auto c = nextComponent(p, ver.end());
       if (c.empty()) break;
-      comps.push_back(str(c));
+      comps.append(str(c));
     }
     st.mkList(v, comps |cp::α| [&](const auto &c) { return st.newString(c); });
   });
@@ -699,10 +700,10 @@ void registerBuiltins(EvalState &state) {
   S.addPrimOp("__catAttrs", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     Symbol name = st.symbols.create(st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.catAttrs"));
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.catAttrs");
-    std::vector<Value *> res;
+    composite::MutableSeries<Value *> res;
     for (Value &e : args[1]->values()) {
       st.forceAttrs(e, pos, "while evaluating an element in the list passed as second argument to builtins.catAttrs");
-      if (const Attr *a = e.attrs->get(name)) res.push_back(a->value);
+      if (const Attr *a = e.attrs->get(name)) res.append(a->value);
     }
     st.mkList(v, res);
   });
@@ -981,8 +982,8 @@ void registerBuiltins(EvalState &state) {
     NixStringContext ctx;
     std::string path = st.coerceToPath(*args[1], ctx, pos, "while evaluating the second argument passed to builtins.scopedImport");
     st.realiseContext(ctx, pos);
-    std::vector<std::string> names;
-    for (auto &a : *args[0]->attrs) names.push_back(str(st.symbols[a.name]));
+    composite::MutableSeries<std::string> names;
+    for (auto &a : *args[0]->attrs) names.append(str(st.symbols[a.name]));
     std::sort(names.begin(), names.end());
     std::string real = st.resolveExprPath(st.realisePath(path, pos));
     std::string key = real;

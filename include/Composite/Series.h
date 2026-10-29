@@ -221,6 +221,28 @@ template <class T> struct MutableSeries {
     cells.push_back(std::move(v));
     return size() - 1;
   }
+  // The container surface of a list that is built and then read: iteration, the ends, the raw cells.
+  constexpr auto begin() { return cells.begin(); }
+  constexpr auto end() { return cells.end(); }
+  constexpr auto begin() const { return cells.begin(); }
+  constexpr auto end() const { return cells.end(); }
+  constexpr bool empty() const { return cells.empty(); }
+  constexpr T &back() { return cells.back(); }
+  constexpr const T &back() const { return cells.back(); }
+  constexpr T &front() { return cells.front(); }
+  constexpr const T &front() const { return cells.front(); }
+  constexpr T *data() { return cells.data(); }
+  constexpr const T *data() const { return cells.data(); }
+  constexpr void clear() { cells.clear(); }
+  constexpr void reserve(size_t n) { cells.reserve(n); }
+  constexpr void resize(size_t n) { cells.resize(n); }
+  constexpr void pop() { cells.pop_back(); }
+  constexpr void assign(size_t n, const T &v) { cells.assign(n, v); }
+  /// Accumulate a cell built in place.
+  template <class... A> constexpr uint32_t emplace(A &&...a) {
+    cells.emplace_back(std::forward<A>(a)...);
+    return size() - 1;
+  }
   /// Drain a cell: its value leaves and a default cell stays, so the indices of the others do not move.
   T drain(uint32_t i) { return std::exchange(cells[i], T{}); }
   /// The Series over the cells, as many as there are now.  It indexes through this series and holds no

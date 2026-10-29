@@ -6,6 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "Composite/Series.h"
 #include "Nix/Confix.h"
 #include "Nix/LexRules.h"
 
@@ -42,7 +43,7 @@ struct Scanner : Rules {
       if (p >= stop && stop < n) return true; // the band a scan from `need` opened has closed
       if (p >= n) {
         // At the end of the input a path ends (the lexer emits its end token), and a path with a trailing slash is an error.
-        if (st.back() == S_INPATH) { st.pop_back(); continue; }
+        if (st.back() == S_INPATH) { st.pop(); continue; }
         if (st.back() == S_INPATH_SLASH) return false;
         break;
       }
@@ -63,7 +64,7 @@ struct Scanner : Rules {
 
   Bands &bands;
   Layers layers;              // the open bands, their statements
-  std::vector<State> st;      // the lexer's state stack
+  composite::MutableSeries<State> st;      // the lexer's state stack
   size_t p = 0;
   size_t stop = src.size();   // where the scan ends: the source's end, or past the band a scan from `need` opened
   bool rooted = false;        // a scan from `need`: it ends where its first band closes
@@ -145,16 +146,16 @@ struct Scanner : Rules {
         case ')': if (!closeBand(K_PAREN, K_PAREN, i)) return false; p = i + 1; continue;
         case '[': openBand(K_BRACKET, i); p = i + 1; continue;
         case ']': if (!closeBand(K_BRACKET, K_BRACKET, i)) return false; p = i + 1; continue;
-        case '{': st.push_back(S_DEFAULT); openBand(K_BRACE, i); p = i + 1; continue;
+        case '{': st.append(S_DEFAULT); openBand(K_BRACE, i); p = i + 1; continue;
         case '}':
-          if (st.back() != S_INITIAL) st.pop_back();
+          if (st.back() != S_INITIAL) st.pop();
           if (!closeBand(K_BRACE, K_INTERP, i)) return false;
           p = i + 1;
           if (!inDefault()) return true; // the interpolation closed: back in the string or path around it
           continue;
-        case '"': st.push_back(S_STRING); openBand(K_STRING, i); p = i + 1; return true;
+        case '"': st.append(S_STRING); openBand(K_STRING, i); p = i + 1; return true;
         case '$':
-          if (at(i + 1) == '{') { st.push_back(S_DEFAULT); openBand(K_INTERP, i); p = i + 2; continue; }
+          if (at(i + 1) == '{') { st.append(S_DEFAULT); openBand(K_INTERP, i); p = i + 2; continue; }
           p = i + 1;
           continue;
         case '\'':
@@ -204,22 +205,22 @@ struct Scanner : Rules {
       p = i + m.len;
       if (m.rule >= R_KEYWORD && m.rule < R_OPERATOR && !word(i, m.len)) return false;
       switch (m.rule) {
-      case R_DOLLAR_CURLY: st.push_back(S_DEFAULT); openBand(K_INTERP, i); break;
+      case R_DOLLAR_CURLY: st.append(S_DEFAULT); openBand(K_INTERP, i); break;
       case R_RBRACE:
-        if (st.back() != S_INITIAL) st.pop_back();
+        if (st.back() != S_INITIAL) st.pop();
         if (!closeBand(K_BRACE, K_INTERP, i)) return false;
         if (!inDefault()) return true;
         break;
-      case R_LBRACE: st.push_back(S_DEFAULT); openBand(K_BRACE, i); break;
-      case R_DQUOTE: st.push_back(S_STRING); openBand(K_STRING, i); return true;
-      case R_IND_OPEN: st.push_back(S_IND_STRING); openBand(K_IND_STRING, i); return true;
+      case R_LBRACE: st.append(S_DEFAULT); openBand(K_BRACE, i); break;
+      case R_DQUOTE: st.append(S_STRING); openBand(K_STRING, i); return true;
+      case R_IND_OPEN: st.append(S_IND_STRING); openBand(K_IND_STRING, i); return true;
       case R_PATH_START:
         p = c == '~' ? i + 2 : i + mPathSeg(i);
-        st.push_back(S_INPATH_SLASH);
+        st.append(S_INPATH_SLASH);
         return true;
       case R_PATH:
       case R_HPATH:
-        st.push_back(s[i + m.len - 1] == '/' ? S_INPATH_SLASH : S_INPATH);
+        st.append(s[i + m.len - 1] == '/' ? S_INPATH_SLASH : S_INPATH);
         return true;
       default: break; // keywords, operators, numbers, search paths, URIs, comments, a character: no transition
       }
@@ -234,9 +235,9 @@ struct Scanner : Rules {
     for (;;) {
       if (p >= n) return false; // not terminated: the lexer returns the end of the input
       const size_t i = p;
-      if (s[i] == '$' && at(i + 1) == '{') { st.push_back(S_DEFAULT); openBand(K_INTERP, i); p = i + 2; return true; }
+      if (s[i] == '$' && at(i + 1) == '{') { st.append(S_DEFAULT); openBand(K_INTERP, i); p = i + 2; return true; }
       if (s[i] == '"') {
-        st.pop_back();
+        st.pop();
         if (!closeBand(K_STRING, K_STRING, i)) return false;
         p = i + 1;
         return true;
@@ -296,12 +297,12 @@ struct Scanner : Rules {
         if (at(i + 2) == '$') { p += 3; continue; }
         if (at(i + 2) == '\'') { p += 3; continue; }
         if (at(i + 2) == '\\' && !eof(i + 3)) { p += 4; continue; }
-        st.pop_back();
+        st.pop();
         if (!closeBand(K_IND_STRING, K_IND_STRING, i)) return false;
         p += 2;
         return true;
       }
-      if (at(i) == '$' && at(i + 1) == '{') { st.push_back(S_DEFAULT); openBand(K_INTERP, i); p += 2; return true; }
+      if (at(i) == '$' && at(i + 1) == '{') { st.append(S_DEFAULT); openBand(K_INTERP, i); p += 2; return true; }
       if (at(i) == '$' || at(i) == '\'') { p++; continue; }
       return false;
     }
@@ -311,9 +312,9 @@ struct Scanner : Rules {
   bool inPath() {
     const size_t i = p;
     if (at(i) == '$' && at(i + 1) == '{') {
-      st.pop_back();
-      st.push_back(S_INPATH);
-      st.push_back(S_DEFAULT);
+      st.pop();
+      st.append(S_INPATH);
+      st.append(S_DEFAULT);
       openBand(K_INTERP, i);
       p += 2;
       return true;
@@ -322,13 +323,13 @@ struct Scanner : Rules {
     while (!eof(i + run) && isPathChar(src[i + run])) run++;
     size_t l = std::max({mPath(i), mPathSeg(i), run});
     if (l) {
-      st.pop_back();
-      st.push_back(src[i + l - 1] == '/' ? S_INPATH_SLASH : S_INPATH);
+      st.pop();
+      st.append(src[i + l - 1] == '/' ? S_INPATH_SLASH : S_INPATH);
       p += l;
       return true;
     }
     if (st.back() == S_INPATH_SLASH) return false; // a trailing slash
-    st.pop_back();                                  // the end of the path
+    st.pop();                                  // the end of the path
     return true;
   }
 };

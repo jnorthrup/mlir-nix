@@ -1,5 +1,6 @@
 //===- Formats.cpp - JSON, XML and TOML conversions -----------------------===//
 
+#include "Composite/Series.h"
 #include "Nix/Eval.h"
 
 #include "mlir/IR/BuiltinAttributes.h"
@@ -243,13 +244,13 @@ struct JSONParser {
     }
     if (c == '[') {
       p++;
-      std::vector<Value *> elems;
+      composite::MutableSeries<Value *> elems;
       ws();
       if (p < s.size() && s[p] == ']') { p++; st.mkList(v, 0); return; }
       while (true) {
         Value *e = st.allocValue();
         value(*e);
-        elems.push_back(e);
+        elems.append(e);
         ws();
         if (p < s.size() && s[p] == ',') { p++; continue; }
         if (p < s.size() && s[p] == ']') { p++; break; }
@@ -312,7 +313,7 @@ void parseJSON(EvalState &state, std::string_view json, Value &v) {
 namespace {
 struct XMLWriter {
   std::ostream &out;
-  std::vector<std::string> stack;
+  composite::MutableSeries<std::string> stack{};
   using Attrs = std::map<std::string, std::string>;
   void attrs(const Attrs &as) {
     for (auto &[k, v] : as) {
@@ -332,11 +333,11 @@ struct XMLWriter {
     out << std::string(stack.size() * 2, ' ') << "<" << n;
     attrs(as);
     out << ">\n";
-    stack.push_back(n);
+    stack.append(n);
   }
   void close() {
     out << std::string((stack.size() - 1) * 2, ' ') << "</" << stack.back() << ">\n";
-    stack.pop_back();
+    stack.pop();
   }
   void empty(const std::string &n, const Attrs &as = {}) {
     out << std::string(stack.size() * 2, ' ') << "<" << n;
@@ -424,9 +425,9 @@ void toXML(EvalState &st, XMLWriter &doc, Value &v, bool strict, bool location, 
       if (auto n = lam.getArgName()) pa["name"] = n->str();
       if (lam.getEllipsis()) pa["ellipsis"] = "1";
       doc.open("attrspat", pa);
-      std::vector<std::string> names;
+      composite::MutableSeries<std::string> names;
       ArrayAttr formals = *lam.getFormals();
-      for (Attribute f : formals) names.push_back(cast<StringAttr>(f).getValue().str());
+      for (Attribute f : formals) names.append(cast<StringAttr>(f).getValue().str());
       std::sort(names.begin(), names.end());
       for (auto &n : names) doc.empty("attr", {{"name", n}});
       doc.close();
@@ -460,7 +461,7 @@ namespace {
 struct TomlNode {
   enum Kind { Table, Array, Leaf } kind = Table;
   std::map<std::string, std::shared_ptr<TomlNode>> table;
-  std::vector<std::shared_ptr<TomlNode>> array;
+  composite::MutableSeries<std::shared_ptr<TomlNode>> array;
   Value *leaf = nullptr;
   bool defined = false;       // explicitly defined via [header]
   bool inlineTable = false;   // immutable
@@ -619,8 +620,8 @@ struct TomlParser {
     }
   }
 
-  std::vector<std::string> key() {
-    std::vector<std::string> parts;
+  composite::MutableSeries<std::string> key() {
+    composite::MutableSeries<std::string> parts;
     while (true) {
       wsInline();
       std::string k;
@@ -633,7 +634,7 @@ struct TomlParser {
         k = std::string(s.substr(start, p - start));
       }
       if (k.find('\0') != std::string::npos) fail("key contains a NUL byte");
-      parts.push_back(k);
+      parts.append(k);
       wsInline();
       if (peek() == '.') { p++; continue; }
       return parts;
@@ -806,7 +807,7 @@ struct TomlParser {
     return number();
   }
 
-  void setKey(TomlNode &tbl, const std::vector<std::string> &k, Value *v) {
+  void setKey(TomlNode &tbl, const composite::MutableSeries<std::string> &k, Value *v) {
     TomlNode *cur = &tbl;
     for (size_t i = 0; i + 1 < k.size(); i++) {
       auto &n = cur->table[k[i]];
@@ -865,7 +866,7 @@ struct TomlParser {
           if (!last) { last = std::make_shared<TomlNode>(); last->kind = TomlNode::Array; last->arrayOfTables = true; }
           if (last->kind != TomlNode::Array || !last->arrayOfTables) fail("cannot redefine key '" + k.back() + "'");
           auto nt = std::make_shared<TomlNode>();
-          last->array.push_back(nt);
+          last->array.append(nt);
           cur = nt.get();
         } else {
           if (!last) last = std::make_shared<TomlNode>();

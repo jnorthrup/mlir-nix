@@ -1,4 +1,5 @@
 //===- ScalarJIT.cpp - Nix sea of nodes -> typed MLIR -> LLVM -> native -------===//
+#include "Composite/Series.h"
 #include "Nix/ScalarJIT.h"
 #include "Nix/Eval.h"
 #include "Nix/LazyJIT.h"
@@ -202,9 +203,9 @@ struct ScalarJIT::Impl {
       retirePending = false;
     }
   };
-  std::vector<std::unique_ptr<Entry>> entries;
-  std::vector<std::unique_ptr<CurriedCache>> curriedCaches;
-  std::vector<std::unique_ptr<Entry>> curriedEntries;
+  composite::MutableSeries<std::unique_ptr<Entry>> entries;
+  composite::MutableSeries<std::unique_ptr<CurriedCache>> curriedCaches;
+  composite::MutableSeries<std::unique_ptr<Entry>> curriedEntries;
   const bool curriedEnabled = [] {
     const char *setting = getenv("MLNIX_JIT_CURRIED");
     return !setting || std::string_view(setting) != "0";
@@ -632,7 +633,7 @@ bool ScalarJIT::evaluateSaturated(EvalState &st, mlir::Operation *lambda, mlir::
     }
     auto slots = std::make_unique<CurriedCache>();
     cache = slots.get();
-    p.curriedCaches.push_back(std::move(slots));
+    p.curriedCaches.append(std::move(slots));
   }
   void *&slot = static_cast<CurriedCache *>(cache)->byArity[args.size() - 2];
   if (slot == refused) return false;
@@ -644,7 +645,7 @@ bool ScalarJIT::evaluateSaturated(EvalState &st, mlir::Operation *lambda, mlir::
     entry->curriedArity = args.size();
     if (p.profiling) entry->curriedLocation = st.showPos(nd::posOfOp(lambda));
     slot = entry.get();
-    p.curriedEntries.push_back(std::move(entry));
+    p.curriedEntries.append(std::move(entry));
   }
   auto &e = *static_cast<Impl::Entry *>(slot);
   if (e.rejected) return false;
@@ -714,7 +715,7 @@ void ScalarJIT::evaluate(EvalState &st, mlir::Operation *lambda, mlir::Value res
       }
     }
     cache = entry.get();
-    p.entries.push_back(std::move(entry));
+    p.entries.append(std::move(entry));
   }
   auto &e = *static_cast<Impl::Entry *>(cache);
   if (e.rejected) { interpret(); return; }
@@ -864,8 +865,8 @@ void ScalarJIT::printStats() const {
                << " curried_arity2=" << p.curriedCalls[0] << " curried_arity3=" << p.curriedCalls[1]
                << " curried_arity4=" << p.curriedCalls[2] << '\n';
   if (p.profiling) {
-    std::vector<const Impl::Profile *> ranked;
-    for (const auto &entry : p.profiles) ranked.push_back(&entry.second);
+    composite::MutableSeries<const Impl::Profile *> ranked;
+    for (const auto &entry : p.profiles) ranked.append(&entry.second);
     std::sort(ranked.begin(), ranked.end(), [](const auto *a, const auto *b) { return a->calls > b->calls; });
     llvm::errs() << "jit-profile: kernels=" << ranked.size() << " dropped_calls=" << p.profileDropped << '\n';
     for (size_t i = 0; i < std::min<size_t>(ranked.size(), 60); ++i) {
@@ -881,8 +882,8 @@ void ScalarJIT::printStats() const {
                    << " string_comparisons=" << r.stringComparisons
                    << " at=" << r.location << '\n';
     }
-    std::vector<const Impl::Entry *> saturated;
-    for (const auto &entry : p.curriedEntries) saturated.push_back(entry.get());
+    composite::MutableSeries<const Impl::Entry *> saturated;
+    for (const auto &entry : p.curriedEntries) saturated.append(entry.get());
     std::sort(saturated.begin(), saturated.end(), [](const auto *a, const auto *b) {
       return a->curriedCalls > b->curriedCalls;
     });

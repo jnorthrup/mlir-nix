@@ -137,7 +137,7 @@ struct Bindings {
   iterator end() const { return {Rows{this}, uint32_t(size())}; }
   const Attr *get(Symbol s) const;
   /// Attributes sorted by name (string order).
-  std::vector<const Attr *> lexicographicOrder(const SymbolTable &st) const;
+  composite::MutableSeries<const Attr *> lexicographicOrder(const SymbolTable &st) const;
 };
 
 /// String context: sorted set of encoded elements
@@ -493,7 +493,7 @@ struct EvalState {
   /// Parse only.
   nixfe::ParseOptions parseOptions();
   /// Parse a source into the module (kept alive by the state, as its origin is).
-  mlir::nix::ExprOp lowerToMLIR(std::shared_ptr<nixfe::Origin> origin, const std::vector<std::string> *scopeNames = nullptr);
+  mlir::nix::ExprOp lowerToMLIR(std::shared_ptr<nixfe::Origin> origin, const composite::MutableSeries<std::string> *scopeNames = nullptr);
   Value *evalExprOp(mlir::nix::ExprOp op);
   /// Load all nix.expr ops of an MLIR module (from mlnix compile) and
   /// evaluate the one named `sym` (or the first).
