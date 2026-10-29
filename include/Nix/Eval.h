@@ -281,9 +281,12 @@ struct Slot {
   enum How : uint8_t { Unknown, Thunk, Lambda, Const, Builtin };
   RegionInfo *ri;
   mlir::Operation *def; // the op that defines the value, null for a block argument (Value::getDefiningOp() is a call into MLIR)
-  unsigned idx;         // kNoSlot: the value is evaluated in place and has no cell
+  unsigned idx;         // kNoSlot: the value has no frame cell (it is evaluated in place, or it is fixed)
   How how;
   bool inPlace;
+  Value *fixed = nullptr; // a literal or a builtin: its one cell, the same in every frame, made at its first touch
+  /// A literal or a builtin that is not evaluated in place: no frame cell, and its lookup is `fixed`.
+  bool fixedKind() const { return !inPlace && (how == Const || how == Builtin); }
 };
 
 //===----------------------------------------------------------------------===//
@@ -776,7 +779,6 @@ struct EvalState {
   uint64_t nSlotsAssigned = 0, nSlotsNoRead = 0; // MLNIX_STATS: frame cells assigned, and those given to a value with no use at all
   uint64_t nsLower = 0, nsMint = 0; // MLNIX_STATS: time lowering files (analysis of deferred lambdas included) / minting bodies on demand
   llvm::DenseMap<mlir::Region *, RegionInfo *> regionInfos;
-  llvm::DenseMap<mlir::Operation *, Value *> constCache;
   void indexRegion(mlir::Region &r);
   void evalConcatStrings(mlir::nix::ConcatStringsOp op, Frame *env, Value &out);
   void evalAttrsDynamic(mlir::nix::AttrsOp op, Frame *env, Value &out);

@@ -105,8 +105,10 @@ struct Continuation {
 // specialization and guards may not create or force a captured computation.
 Value *existing(EvalState &st, Frame *env, mlir::Value value) {
   uint32_t found = st.slotOf(value.getAsOpaquePointer());
-  if (found == EvalState::kNoHandle || st.slotStore[found].idx == kNoSlot) return nullptr;
+  if (found == EvalState::kNoHandle) return nullptr;
   const Slot slot = st.slotStore[found];
+  if (slot.fixed) return slot.fixed; // a literal or a builtin, once made: one cell for every frame
+  if (slot.idx == kNoSlot) return nullptr;
   while (env && env->info != slot.ri) env = env->up();
   return env && slot.idx < env->info->numSlots ? env->slots[slot.idx] : nullptr;
 }
@@ -252,7 +254,7 @@ struct LazyJITPlan::Impl {
     for (auto *chainRegion : eliminated)
       if (v.getParentRegion() == chainRegion) return false;
     uint32_t found = state.slotOf(v.getAsOpaquePointer());
-    return found != EvalState::kNoHandle && state.slotStore[found].idx != kNoSlot;
+    return found != EvalState::kNoHandle && (state.slotStore[found].idx != kNoSlot || state.slotStore[found].fixedKind());
   }
   bool projection(mlir::Value v, unsigned context) const {
     auto select = v.getDefiningOp<nd::SelectOp>();

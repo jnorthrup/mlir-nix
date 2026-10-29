@@ -834,6 +834,7 @@ void EvalState::throwTypeError(const char *expected, Value &v, PosPtr pos, std::
 // Regions & frames
 //===----------------------------------------------------------------------===//
 
+static Slot::How howOf(Operation *op);
 void EvalState::indexRegion(Region &r) {
   auto *ri = new RegionInfo{&r, 0, {}};
   Block &blk = r.front();
@@ -859,7 +860,10 @@ void EvalState::indexRegion(Region &r) {
         if (!inPlace && !isa<nd::IntOp, nd::FloatOp, nd::StringOp, nd::PathOp, nd::BoolOp, nd::NullOp,
                                 nd::BuiltinOp, nd::LambdaOp>(&op)) ++ri->nThunks;
       }
-      setSlot(res.getAsOpaquePointer(), {ri, &op, inPlace ? kNoSlot : slot++, Slot::Unknown, inPlace});
+      // A literal or a builtin is the same value in every frame: one cell, kept in its Slot, and no frame cell.
+      Slot::How how = howOf(&op);
+      bool fixed = !inPlace && (how == Slot::Const || how == Slot::Builtin);
+      setSlot(res.getAsOpaquePointer(), {ri, &op, inPlace || fixed ? kNoSlot : slot++, fixed ? how : Slot::Unknown, inPlace});
     }
     // A deferred lambda's region is a shell until its first call; it is indexed when it is minted.
     auto lam = dyn_cast<nd::LambdaOp>(op);
@@ -1033,6 +1037,7 @@ Value *EvalState::lookupImpl(Frame *f, mlir::Value v, bool forced) {
   uint32_t sh = slotOf(v.getAsOpaquePointer());
   if (sh == kNoHandle) throw EvalError("internal error: unindexed SSA value");
   Slot s = slotStore[sh]; // by value: the store grows while this evaluates (a nested body is indexed)
+  if (s.fixed) return s.fixed; // a literal or a builtin: no frame to find, no cell to fill
   RegionInfo *ri = s.ri;
   unsigned idx = s.idx;
   if (statsEnabled) [[unlikely]] { Frame *g = f; while (g && g->info != ri) g = g->up(); statHops(f, ri, g && idx != kNoSlot && g->slots[idx]); }
@@ -1045,9 +1050,7 @@ Value *EvalState::lookupImpl(Frame *f, mlir::Value v, bool forced) {
   Operation *op = s.def;
   if (!op) throw EvalError("internal error: unbound block argument");
   if (s.how == Slot::Unknown) { s.how = howOf(op); slotStore[sh].how = s.how; }
-  if (s.how == Slot::Const) {
-    auto c = constCache.find(op);
-    if (c != constCache.end()) return slot = c->second;
+  if (s.how == Slot::Const) { // made once, at the first touch in any frame, and kept in the Slot
     Value *cv = allocValue();
     if (auto i = dyn_cast<nd::IntOp>(op)) mkInt(*cv, i.getValue());
     else if (auto fl = dyn_cast<nd::FloatOp>(op)) mkFloat(*cv, fl.getValue().convertToDouble());
@@ -1055,13 +1058,14 @@ Value *EvalState::lookupImpl(Frame *f, mlir::Value v, bool forced) {
     else if (auto bl = dyn_cast<nd::BoolOp>(op)) mkBool(*cv, bl.getValue());
     else if (isa<nd::NullOp>(op)) mkNull(*cv);
     else mkPath(*cv, cast<nd::PathOp>(op).getValue().str());
-    constCache[op] = cv;
+    slotStore[sh].fixed = cv;
     return slot = cv;
   }
-  if (s.how == Slot::Builtin) {
+  if (s.how == Slot::Builtin) { // the base environment is complete before anything is evaluated: found once, kept in the Slot
     auto b = cast<nd::BuiltinOp>(op);
     Value *bv = baseEnvValue(b.getName().str());
     if (!bv) throw EvalError("undefined variable '" + b.getName().toString() + "'", nd::posOfOp(op));
+    slotStore[sh].fixed = bv;
     return slot = bv;
   }
   Value *nv = allocValue();
