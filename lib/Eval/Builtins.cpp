@@ -772,10 +772,10 @@ void registerBuiltins(EvalState &state) {
   });
   S.addPrimOp("__zipAttrsWith", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.zipAttrsWith");
-    std::map<Symbol, std::vector<Value *>> m;
+    std::map<Symbol, composite::MutableSeries<Value *>> m;
     for (Value &e : args[1]->values()) {
       st.forceAttrs(e, pos, "while evaluating a value of the list passed as second argument to builtins.zipAttrsWith");
-      for (auto &a : *e.attrs) m[a.name].push_back(a.value);
+      for (auto &a : *e.attrs) m[a.name].append(a.value);
     }
     EvalState::BindingsBuilder bb(st);
     for (auto &[sym, vals] : m) {
@@ -914,8 +914,7 @@ void registerBuiltins(EvalState &state) {
   S.addPrimOp("__sort", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.sort");
     size_t n = args[1]->listSize();
-    std::vector<Value *> elems(args[1]->list.elems, args[1]->list.elems + n);
-    for (auto *e : elems) st.forceValue(*e, pos);
+    for (size_t k = 0; k < n; k++) st.forceValue(*args[1]->list.elems[k], pos);
     if (n == 0) { v = *args[1]; return; }
     st.forceFunction(*args[0], pos, "while evaluating the sorting function passed to builtins.sort");
     // Fast path for __lessThan.
@@ -927,18 +926,19 @@ void registerBuiltins(EvalState &state) {
       st.callFunction(*args[0], 2, fargs, r, pos);
       return st.forceBool(r, pos, "while evaluating the return value of the sorting function passed to builtins.sort");
     };
-    std::stable_sort(elems.begin(), elems.end(), cmp);
-    st.mkList(v, elems);
+    // the result list is the argument's cells drained into a fresh arena list and sorted where they lie: no copy through a vector
+    st.mkList(v, composite::series(args[1]->list.elems, uint32_t(n)));
+    std::stable_sort(v.list.elems, v.list.elems + n, cmp);
   });
   S.addPrimOp("__partition", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.partition");
-    std::vector<Value *> right, wrong;
+    composite::MutableSeries<Value *> right, wrong;
     for (Value *e : args[1]->items()) {
       st.forceValue(*e, pos);
       Value r;
       st.callFunction(*args[0], *e, r, pos);
-      if (st.forceBool(r, pos, "while evaluating the return value of the partition function passed to builtins.partition")) right.push_back(e);
-      else wrong.push_back(e);
+      if (st.forceBool(r, pos, "while evaluating the return value of the partition function passed to builtins.partition")) right.append(e);
+      else wrong.append(e);
     }
     EvalState::BindingsBuilder bb(st);
     Value &rv = bb.alloc(st.s.right);
@@ -949,13 +949,12 @@ void registerBuiltins(EvalState &state) {
   });
   S.addPrimOp("__groupBy", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.groupBy");
-    std::map<Symbol, std::vector<Value *>> m;
-    std::vector<Symbol> order;
+    std::map<Symbol, composite::MutableSeries<Value *>> m;
     for (Value *e : args[1]->items()) {
       Value r;
       st.callFunction(*args[0], *e, r, pos);
       Symbol key = st.symbols.create(st.forceStringNoCtx(r, pos, "while evaluating the return value of the grouping function passed to builtins.groupBy"));
-      m[key].push_back(e);
+      m[key].append(e);
     }
     EvalState::BindingsBuilder bb(st);
     for (auto &[k, vals] : m) {
@@ -971,8 +970,6 @@ void registerBuiltins(EvalState &state) {
     st.forceList(*ss->value, pos, "while evaluating the 'startSet' attribute passed as argument to builtins.genericClosure");
     const Attr *op = args[0]->attrs->get(st.s.operator_);
     if (!op) throw EvalError("attribute 'operator' missing", pos);
-    std::vector<Value *> work(ss->value->list.elems, ss->value->list.elems + ss->value->listSize());
-    std::reverse(work.begin(), work.end());
     composite::MutableSeries<Value *> res;
     auto cmp = [&](Value *a, Value *b) { return st.lessThan(*a, *b, pos); };
     std::set<Value *, decltype(cmp)> done(cmp);
