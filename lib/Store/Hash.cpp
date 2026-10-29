@@ -167,21 +167,26 @@ struct Sha256Ctx {
 #endif
 } // namespace
 
+static_assert(sizeof(llvm::MD5) <= sizeof(HashSink::impl) && sizeof(llvm::SHA1) <= sizeof(HashSink::impl) &&
+                  sizeof(Sha256Ctx) <= sizeof(HashSink::impl) && sizeof(SHA512Ctx) <= sizeof(HashSink::impl),
+              "a hash context fits in its sink");
+static_assert(alignof(llvm::MD5) <= 16 && alignof(llvm::SHA1) <= 16 && alignof(Sha256Ctx) <= 16 && alignof(SHA512Ctx) <= 16);
+
 HashSink::HashSink(HashAlgo a) : algo(a) {
   switch (a) {
-  case HashAlgo::MD5: impl = new llvm::MD5(); break;
-  case HashAlgo::SHA1: impl = new llvm::SHA1(); break;
-  case HashAlgo::SHA256: impl = new Sha256Ctx(); break;
-  case HashAlgo::SHA512: impl = new SHA512Ctx(); break;
+  case HashAlgo::MD5: ::new (static_cast<void *>(impl)) llvm::MD5(); break;
+  case HashAlgo::SHA1: ::new (static_cast<void *>(impl)) llvm::SHA1(); break;
+  case HashAlgo::SHA256: ::new (static_cast<void *>(impl)) Sha256Ctx(); break;
+  case HashAlgo::SHA512: ::new (static_cast<void *>(impl)) SHA512Ctx(); break;
   }
 }
 
 HashSink::~HashSink() {
   switch (algo) {
-  case HashAlgo::MD5: delete static_cast<llvm::MD5 *>(impl); break;
-  case HashAlgo::SHA1: delete static_cast<llvm::SHA1 *>(impl); break;
-  case HashAlgo::SHA256: delete static_cast<Sha256Ctx *>(impl); break;
-  case HashAlgo::SHA512: delete static_cast<SHA512Ctx *>(impl); break;
+  case HashAlgo::MD5: reinterpret_cast<llvm::MD5 *>(impl)->~MD5(); break;
+  case HashAlgo::SHA1: reinterpret_cast<llvm::SHA1 *>(impl)->~SHA1(); break;
+  case HashAlgo::SHA256: reinterpret_cast<Sha256Ctx *>(impl)->~Sha256Ctx(); break;
+  case HashAlgo::SHA512: reinterpret_cast<SHA512Ctx *>(impl)->~SHA512Ctx(); break;
   }
 }
 
@@ -189,10 +194,10 @@ void HashSink::update(std::string_view data) {
   total += data.size();
   llvm::ArrayRef<uint8_t> a((const uint8_t *)data.data(), data.size());
   switch (algo) {
-  case HashAlgo::MD5: static_cast<llvm::MD5 *>(impl)->update(a); break;
-  case HashAlgo::SHA1: static_cast<llvm::SHA1 *>(impl)->update(a); break;
-  case HashAlgo::SHA256: static_cast<Sha256Ctx *>(impl)->update(a.data(), a.size()); break;
-  case HashAlgo::SHA512: static_cast<SHA512Ctx *>(impl)->update(a.data(), a.size()); break;
+  case HashAlgo::MD5: reinterpret_cast<llvm::MD5 *>(impl)->update(a); break;
+  case HashAlgo::SHA1: reinterpret_cast<llvm::SHA1 *>(impl)->update(a); break;
+  case HashAlgo::SHA256: reinterpret_cast<Sha256Ctx *>(impl)->update(a.data(), a.size()); break;
+  case HashAlgo::SHA512: reinterpret_cast<SHA512Ctx *>(impl)->update(a.data(), a.size()); break;
   }
 }
 
@@ -202,18 +207,18 @@ Hash HashSink::finish() {
   switch (algo) {
   case HashAlgo::MD5: {
     llvm::MD5::MD5Result r;
-    static_cast<llvm::MD5 *>(impl)->final(r);
+    reinterpret_cast<llvm::MD5 *>(impl)->final(r);
     memcpy(h.bytes, r.data(), 16);
     break;
   }
   case HashAlgo::SHA1: {
-    auto r = static_cast<llvm::SHA1 *>(impl)->final();
+    auto r = reinterpret_cast<llvm::SHA1 *>(impl)->final();
     memcpy(h.bytes, r.data(), 20);
     break;
   }
-  case HashAlgo::SHA256: static_cast<Sha256Ctx *>(impl)->final(h.bytes); break;
+  case HashAlgo::SHA256: reinterpret_cast<Sha256Ctx *>(impl)->final(h.bytes); break;
   case HashAlgo::SHA512:
-    static_cast<SHA512Ctx *>(impl)->final(h.bytes);
+    reinterpret_cast<SHA512Ctx *>(impl)->final(h.bytes);
     break;
   }
   return h;

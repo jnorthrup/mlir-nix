@@ -56,7 +56,7 @@ struct HashSink {
   uint64_t bytes() const { return total; }
 
   HashAlgo algo;
-  void *impl;
+  alignas(16) unsigned char impl[320]; // the algorithm's context, made in place: a sink allocates nothing (Hash.cpp checks each fits)
   uint64_t total = 0;
 };
 
