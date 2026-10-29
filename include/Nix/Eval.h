@@ -441,6 +441,12 @@ struct EvalState {
   PosPtr positionOf(const Attr &a) const { return attributePositions[a.pos]; }
   PosIdx positionIndex(PosPtr pos);
   PosIdx positionBase(mlir::nix::AttrsOp op);
+  /// A set literal's rows in name order, worked out at its first evaluation and kept: `m` then the source index of each row (the first of
+  /// equal names wins).  A literal's names and their symbols never change, so no evaluation after the first sorts anything.
+  const uint32_t *attrsOrderOf(mlir::nix::AttrsOp op);
+  struct AttrsOrderEntry { void *op = nullptr; const uint32_t *order = nullptr; };
+  AttrsOrderEntry attrsOrderCache[1024];                        // 16 KB, direct-mapped by the op's address
+  llvm::DenseMap<void *, const uint32_t *> attrsOrders;
   cp::MutableSeries<PosPtr> attributePositions{nullptr};
   std::unordered_map<PosPtr, PosIdx> dynamicPositions;
   llvm::DenseMap<mlir::Operation *, PosIdx> attrPositionBases;

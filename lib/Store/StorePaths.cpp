@@ -564,24 +564,25 @@ bool Derivation::isFixed() const {
 /// Appends `s` in quotes with ATerm escapes.  The bytes between two escapes are copied whole: the values of an
 /// environment are scripts of kilobytes, and a byte-at-a-time push_back was a fiftieth of a NixOS evaluation.
 static void appendEscaped(std::string &out, std::string_view s) {
-  out += '"';
-  size_t run = 0;
-  for (size_t i = 0; i < s.size(); i++) {
-    const char *escape;
-    switch (s[i]) {
-    case '"': escape = "\\\""; break;
-    case '\\': escape = "\\\\"; break;
-    case '\n': escape = "\\n"; break;
-    case '\r': escape = "\\r"; break;
-    case '\t': escape = "\\t"; break;
-    default: continue;
-    }
-    out.append(s.data() + run, i - run);
-    out += escape;
-    run = i + 1;
+  // Every byte writes either itself or a backslash and its escape letter, chosen by a table and advanced by one or two with no branch on
+  // the byte: a script full of newlines and quotes costs no mispredicted branch per line.  Room for the worst case first, the size after.
+  struct Escapes {
+    char e[256] = {};
+    constexpr Escapes() { e[uint8_t('"')] = '"'; e[uint8_t('\\')] = '\\'; e[uint8_t('\n')] = 'n'; e[uint8_t('\r')] = 'r'; e[uint8_t('\t')] = 't'; }
+  };
+  static constexpr Escapes kEsc;
+  size_t at = out.size();
+  out.resize(at + 2 * s.size() + 2);
+  char *w = out.data() + at;
+  *w++ = '"';
+  for (unsigned char c : s) {
+    char e = kEsc.e[c];
+    w[0] = e ? '\\' : char(c);
+    w[1] = e;
+    w += 1 + (e != 0);
   }
-  out.append(s.data() + run, s.size() - run);
-  out += '"';
+  *w++ = '"';
+  out.resize(size_t(w - out.data()));
 }
 
 std::string escapeATermString(std::string_view s) {
