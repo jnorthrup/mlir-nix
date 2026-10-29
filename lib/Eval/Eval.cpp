@@ -897,6 +897,7 @@ void EvalState::throwTypeError(const char *expected, Value &v, PosPtr pos, std::
 //===----------------------------------------------------------------------===//
 
 static Node::How howOf(Operation *op);
+static EvalFn evalFnOf(NodeKind k);
 /// What evaluating `op` is, read once from the op: its kind, and what its operand segments say.
 static void describe(Node *n, Operation *op, const nd::NixDialect *core) {
   n->how = howOf(op);
@@ -979,8 +980,8 @@ void EvalState::indexRegion(Region &r) {
     n->promo = Promotion::Argument;
     n->idx = slot++;
     n->ri = ri;
-    n->def = nullptr;
-    n->pos = nd::posOfOp(r.getParentOp()); // a block argument was made where its lambda is
+    n->def = r.getParentOp(); // a block argument was made where its lambda is
+    n->eval = evalFnOf(NodeKind::Arg);
     publish(a, n);
   }
   // Every value's record first: an op may read a value defined after it (a graph region) or from a body nested in it.
@@ -1004,11 +1005,11 @@ void EvalState::indexRegion(Region &r) {
       bool cell = p != Promotion::InPlace && p != Promotion::Fixed && p != Promotion::Once;
       Node *n = newNode();
       describe(n, &op, core);
+      n->eval = evalFnOf(n->kind);
       n->promo = p;
       n->idx = cell ? slot++ : kNoSlot;
       n->ri = ri;
       n->def = &op;
-      n->pos = nd::posOfOp(&op);
       publish(res, n);
     }
   }
@@ -1213,7 +1214,7 @@ Value *EvalState::makeCell(Frame *f, Node *s, bool forced) {
   if (slot) return slot;
   if (statsEnabled && idx != kNoSlot) [[unlikely]] statTouch(f, ri, idx);
   Operation *op = s->def;
-  if (!op) throw EvalError("internal error: unbound block argument");
+  if (s->kind == NodeKind::Arg) throw EvalError("internal error: unbound block argument");
   if (s->how == Node::Const) { // made once, at the first touch in any frame, and kept in the node
     Value *cv = allocValue();
     if (auto i = dyn_cast<nd::IntOp>(op)) mkInt(*cv, i.getValue());
@@ -1992,7 +1993,7 @@ void EvalState::evalAttrsDynamic(Node *node, Frame *env, Value &out) {
     seen[symbolOf(names[i])] = nullptr;
   for (size_t j = 0; j < nDynNames; j++) {
     Value *nv = lookup(env, dynNames[j]);
-    PosPtr p = dynNames[j]->pos;
+    PosPtr p = dynNames[j]->pos();
     forceValue(*nv, p);
     if (nv->type == VType::Null) continue;
     auto name = forceStringNoCtx(*nv, p, "while evaluating the name of a dynamic attribute");
@@ -2027,7 +2028,7 @@ void EvalState::evalConcatStrings(Node *node, Frame *env, Value &out) {
   bool first = !forceString;
   VType firstType = VType::String;
   for (Node *pv : parts) {
-    PosPtr ppos = pv->pos;
+    PosPtr ppos = pv->pos();
     Value *v = lookup(env, pv);
     forceValue(*v, ppos);
     if (first) firstType = v->type;
@@ -2055,7 +2056,7 @@ void EvalState::evalConcatStrings(Node *node, Frame *env, Value &out) {
     }
     first = false;
   }
-  PosPtr pos = node->pos;
+  PosPtr pos = node->pos();
   if (firstType == VType::Int) return mkInt(out, n);
   if (firstType == VType::Float) return mkFloat(out, nf);
   if (firstType == VType::Path) {
@@ -2083,171 +2084,217 @@ Value *EvalState::selectField(Value &base, Symbol key, PosPtr pos) {
   throwAttrMissing(symbols[key], pos);
 }
 
-void EvalState::evalOp(Node *n, Frame *env, Value &out) {
+void EvalState::statEval(Node *n, Frame *env) {
   Operation *op = n->def;
-  if (statsEnabled) [[unlikely]] {
-    auto &e = evalsByKind[op->getName().getAsOpaquePointer()]; e.first = op->getName().getStringRef(); ++e.second;
-    if (env) {
-      ++env->info->nEvals;
-      if (!epochEvals.empty()) ++epochEvals.back();
-      auto it = env->info->opIdx.find(op);
-      if (it != env->info->opIdx.end()) { env->info->everRan[it->second >> 6] |= 1ull << (it->second & 63); ++env->info->opEvals[it->second]; }
-    }
+  auto &e = evalsByKind[op->getName().getAsOpaquePointer()]; e.first = op->getName().getStringRef(); ++e.second;
+  if (env) {
+    ++env->info->nEvals;
+    if (!epochEvals.empty()) ++epochEvals.back();
+    auto it = env->info->opIdx.find(op);
+    if (it != env->info->opIdx.end()) { env->info->everRan[it->second >> 6] |= 1ull << (it->second & 63); ++env->info->opEvals[it->second]; }
   }
-  PosPtr pos = n->pos;
-  Node **x = n->operands;
-  auto copyFrom = [&](Value *v) {
-    forceValue(*v, pos);
-    out = *v;
-  };
-  switch (n->kind) {
-  case NodeKind::Apply: {
-    Value *f = lookupImpl(env, x[0], true);  // callFunction forces the callee before anything else it does
-    size_t na = n->nOperands - 1;
-    auto cells = cp::series(x + 1, na) |cp::α| [&](Node *a) { return lookup(env, a); }; // the argument cells, drained into a stack array (arena past six)
-    Value *buf[6];
-    Value **args = na <= 6 ? buf : allocList(na);
-    cp::drain(cells, args);
-    return callFunction(*f, na, args, out, pos);
-  }
-  case NodeKind::Select: {
-    Node *const *dyn = x + 1;
-    Node *def = n->flags & Node::kDefault ? x[1 + n->nDyn] : nullptr;
-    bool dynamic = n->nDyn != 0;
-    Value tb;
-    Value *cur = dynamic ? lookup(env, x[0]) : &operand(env, x[0], tb);
-    unsigned nextDyn = 0;
-    for (const nixfe::Name &comp : cast<nd::SelectOp>(op).getPath()) {
-      Symbol sym = pathSymbol(comp, dyn, nextDyn, env, pos);
-      if (!def) {
-        Value *baseV = cur;
-        cur = selectField(*cur, sym, pos);
-        if (statsEnabled) statSelect(op, baseV->attrs, sym, dynamic);
-        continue;
-      }
-      forceValue(*cur, pos);
-      if (cur->type != VType::Attrs) return copyFrom(lookupImpl(env, def, true));
-      if (statsEnabled) statSelect(op, cur->attrs, sym, dynamic);
-      const Attr *a = cur->attrs->get(sym);
-      if (!a) return copyFrom(lookupImpl(env, def, true));
-      cur = a->value;
-    }
-    return copyFrom(cur);
-  }
-  case NodeKind::If: {
-    Value tc;
-    bool c = forceBool(operand(env, x[0], tc), pos, "while evaluating a branch condition");
-    return evalTail(env, x[c ? 1 : 2], out, pos);
-  }
-  case NodeKind::Attrs: return evalAttrs(n, env, out);
-  case NodeKind::Eq: case NodeKind::Neq: {
-    Value ta, tb;
-    Value &ra = operand(env, x[0], ta);
-    forceValue(ra, pos);
-    Value &rb = operand(env, x[1], tb);
-    forceValue(rb, pos);
-    Value a = ra, b = rb;
-    return mkBool(out, eqValues(a, b, pos) == (n->kind == NodeKind::Eq));
-  }
-  case NodeKind::HasAttr: {
-    Node *const *dyn = x + 1;
-    Value tb;
-    Value *cur = n->nDyn ? lookup(env, x[0]) : &operand(env, x[0], tb);
-    unsigned nextDyn = 0;
-    for (const nixfe::Name &comp : cast<nd::HasAttrOp>(op).getPath()) {
-      forceValue(*cur, pos);
-      Symbol sym = pathSymbol(comp, dyn, nextDyn, env, pos);
-      if (cur->type != VType::Attrs) return mkBool(out, false);
-      const Attr *a = cur->attrs->get(sym);
-      if (!a) return mkBool(out, false);
-      cur = a->value;
-    }
-    return mkBool(out, true);
-  }
-  case NodeKind::List: return mkList(out, n->args() |cp::α| [&](Node *e) { return lookup(env, e); });
-  case NodeKind::String: return mkStringWindow(out, cast<nd::StringOp>(op).getValue().str());
-  case NodeKind::And: {
-    Value t1, t2;
-    if (!forceBool(operand(env, x[0], t1), pos, "in the left operand of the AND (&&) operator")) return mkBool(out, false);
-    return mkBool(out, forceBool(operand(env, x[1], t2), pos, "in the right operand of the AND (&&) operator"));
-  }
-  case NodeKind::Or: {
-    Value t1, t2;
-    if (forceBool(operand(env, x[0], t1), pos, "in the left operand of the OR (||) operator")) return mkBool(out, true);
-    return mkBool(out, forceBool(operand(env, x[1], t2), pos, "in the right operand of the OR (||) operator"));
-  }
-  case NodeKind::Update: {
-    Value tl, tr;
-    Value *l = &operand(env, x[0], tl);
-    forceAttrs(*l, pos, "in the left operand of the update (//) operator");
-    Value *r = &operand(env, x[1], tr);
-    forceAttrs(*r, pos, "in the right operand of the update (//) operator");
-    if (l->attrs->empty()) { out = *r; return; }
-    if (r->attrs->empty()) { out = *l; return; }
-    return mkAttrs(out, updateAttrs(l->attrs, r->attrs));
-  }
-  case NodeKind::Not: {
-    Value t;
-    return mkBool(out, !forceBool(operand(env, x[0], t), pos, "in the argument of the not operator"));
-  }
-  case NodeKind::Formal: {
-    auto f = cast<nd::FormalOp>(op);
-    Value *arg = lookup(env, x[0]);
-    forceAttrs(*arg, pos);
-    if (const Attr *a = arg->attrs->get(symbolOf(f.getName()))) return copyFrom(a->value);
-    if (n->nOperands < 2) throwMissingFormal(f.getName(), pos);
-    return copyFrom(lookupImpl(env, x[1], true));
-  }
-  case NodeKind::ConcatLists: {
-    Value tl, tr;
-    Value *l = &operand(env, x[0], tl);
-    forceList(*l, pos, "in the left operand of the list concatenation operator");
-    Value *r = &operand(env, x[1], tr);
-    forceList(*r, pos, "in the right operand of the list concatenation operator");
-    if (l->listSize() == 0) { out = *r; return; }
-    if (r->listSize() == 0) { out = *l; return; }
-    return mkList(out, l->items() + r->items());
-  }
-  case NodeKind::ConcatStrings: return evalConcatStrings(n, env, out);
-  case NodeKind::WithVar: {
-    auto w = cast<nd::WithVarOp>(op);
-    Symbol sym = symbolOf(w.getName());
-    for (Node *sc : n->args()) {
-      Value *sv = lookup(env, sc);
-      forceAttrs(*sv, sc->pos, "while evaluating the first subexpression of a with expression");
-      if (const Attr *a = sv->attrs->get(sym)) return copyFrom(a->value);
-    }
-    throwUndefinedVariable(w.getName(), pos);
-  }
-  case NodeKind::Assert: {
-    Value tc;
-    bool c = forceBool(operand(env, x[0], tc), pos, "in the condition of the assert statement");
-    if (!c) throwAssertFailed(cast<nd::AssertOp>(op), pos);
-    return evalTail(env, x[1], out, pos);
-  }
-  case NodeKind::Impl: {
-    Value t1, t2;
-    if (!forceBool(operand(env, x[0], t1), pos, "in the left operand of the IMPL (->) operator")) return mkBool(out, true);
-    return mkBool(out, forceBool(operand(env, x[1], t2), pos, "in the right operand of the IMPL (->) operator"));
-  }
-  case NodeKind::Prim: { // an op of a continent dialect: its primop, found once, on its operands' cells
-    if (!n->prim) n->prim = primFor(op);
-    Value *args[8];
-    for (unsigned i = 0; i < n->nOperands; i++) args[i] = lookup(env, x[i]);
-    return callPrimOp(*n->prim, args, out, pos);
-  }
-  case NodeKind::Int: return mkInt(out, cast<nd::IntOp>(op).getValue());
-  case NodeKind::Bool: return mkBool(out, cast<nd::BoolOp>(op).getValue());
-  case NodeKind::Null: return mkNull(out);
-  case NodeKind::Float: return mkFloat(out, cast<nd::FloatOp>(op).getValue().convertToDouble());
-  case NodeKind::Path: return mkPath(out, cast<nd::PathOp>(op).getValue().str());
-  case NodeKind::Builtin: return copyFrom(baseEnvValue(cast<nd::BuiltinOp>(op).getName().str()));
-  case NodeKind::Arg: case NodeKind::Lambda: case NodeKind::Other: break;
-  }
-  // Anything else runs through the externally attached NixEvalOpInterface model.
-  if (auto e = dyn_cast<nd::NixEvalOpInterface>(op)) return e.eval(*this, env, out);
-  throwCannotEvaluate(op, pos);
 }
+
+// The evaluation of each kind of node, one function a kind (Node::eval).  An operand is read through its record (n->operands); the op's
+// attributes (names, paths, literals) from the op (n->def).
+namespace {
+inline void copyFrom(EvalState &st, Value *v, Value &out, PosPtr pos) {
+  st.forceValue(*v, pos);
+  out = *v;
+}
+
+void evalApply(EvalState &st, Node *n, Frame *env, Value &out) {
+  Node **x = n->operands;
+  Value *f = st.lookupImpl(env, x[0], true); // callFunction forces the callee before anything else it does
+  size_t na = n->nOperands - 1;
+  auto cells = cp::series(x + 1, na) |cp::α| [&](Node *a) { return st.lookup(env, a); }; // the argument cells, drained into a stack array (arena past six)
+  Value *buf[6];
+  Value **args = na <= 6 ? buf : st.allocList(na);
+  cp::drain(cells, args);
+  st.callFunction(*f, na, args, out, n->pos());
+}
+
+void evalSelect(EvalState &st, Node *n, Frame *env, Value &out) {
+  Node **x = n->operands;
+  PosPtr pos = n->pos();
+  Node *const *dyn = x + 1;
+  Node *def = n->flags & Node::kDefault ? x[1 + n->nDyn] : nullptr;
+  bool dynamic = n->nDyn != 0;
+  Value tb;
+  Value *cur = dynamic ? st.lookup(env, x[0]) : &st.operand(env, x[0], tb);
+  unsigned nextDyn = 0;
+  for (const nixfe::Name &comp : cast<nd::SelectOp>(n->def).getPath()) {
+    Symbol sym = st.pathSymbol(comp, dyn, nextDyn, env, pos);
+    if (!def) {
+      Value *baseV = cur;
+      cur = st.selectField(*cur, sym, pos);
+      if (st.statsEnabled) st.statSelect(n->def, baseV->attrs, sym, dynamic);
+      continue;
+    }
+    st.forceValue(*cur, pos);
+    if (cur->type != VType::Attrs) return copyFrom(st, st.lookupImpl(env, def, true), out, pos);
+    if (st.statsEnabled) st.statSelect(n->def, cur->attrs, sym, dynamic);
+    const Attr *a = cur->attrs->get(sym);
+    if (!a) return copyFrom(st, st.lookupImpl(env, def, true), out, pos);
+    cur = a->value;
+  }
+  copyFrom(st, cur, out, pos);
+}
+
+void evalIf(EvalState &st, Node *n, Frame *env, Value &out) {
+  Value tc;
+  PosPtr pos = n->pos();
+  bool c = st.forceBool(st.operand(env, n->operands[0], tc), pos, "while evaluating a branch condition");
+  st.evalTail(env, n->operands[c ? 1 : 2], out, pos);
+}
+
+void evalAttrsNode(EvalState &st, Node *n, Frame *env, Value &out) { st.evalAttrs(n, env, out); }
+
+template <bool equal> void evalEq(EvalState &st, Node *n, Frame *env, Value &out) {
+  Value ta, tb;
+  PosPtr pos = n->pos();
+  Value &ra = st.operand(env, n->operands[0], ta);
+  st.forceValue(ra, pos);
+  Value &rb = st.operand(env, n->operands[1], tb);
+  st.forceValue(rb, pos);
+  Value a = ra, b = rb;
+  st.mkBool(out, st.eqValues(a, b, pos) == equal);
+}
+
+void evalHasAttr(EvalState &st, Node *n, Frame *env, Value &out) {
+  Node **x = n->operands;
+  PosPtr pos = n->pos();
+  Node *const *dyn = x + 1;
+  Value tb;
+  Value *cur = n->nDyn ? st.lookup(env, x[0]) : &st.operand(env, x[0], tb);
+  unsigned nextDyn = 0;
+  for (const nixfe::Name &comp : cast<nd::HasAttrOp>(n->def).getPath()) {
+    st.forceValue(*cur, pos);
+    Symbol sym = st.pathSymbol(comp, dyn, nextDyn, env, pos);
+    if (cur->type != VType::Attrs) return st.mkBool(out, false);
+    const Attr *a = cur->attrs->get(sym);
+    if (!a) return st.mkBool(out, false);
+    cur = a->value;
+  }
+  st.mkBool(out, true);
+}
+
+void evalList(EvalState &st, Node *n, Frame *env, Value &out) { st.mkList(out, n->args() |cp::α| [&](Node *e) { return st.lookup(env, e); }); }
+void evalString(EvalState &st, Node *n, Frame *, Value &out) { st.mkStringWindow(out, cast<nd::StringOp>(n->def).getValue().str()); }
+
+void evalAnd(EvalState &st, Node *n, Frame *env, Value &out) {
+  Value t1, t2;
+  PosPtr pos = n->pos();
+  if (!st.forceBool(st.operand(env, n->operands[0], t1), pos, "in the left operand of the AND (&&) operator")) return st.mkBool(out, false);
+  st.mkBool(out, st.forceBool(st.operand(env, n->operands[1], t2), pos, "in the right operand of the AND (&&) operator"));
+}
+void evalOr(EvalState &st, Node *n, Frame *env, Value &out) {
+  Value t1, t2;
+  PosPtr pos = n->pos();
+  if (st.forceBool(st.operand(env, n->operands[0], t1), pos, "in the left operand of the OR (||) operator")) return st.mkBool(out, true);
+  st.mkBool(out, st.forceBool(st.operand(env, n->operands[1], t2), pos, "in the right operand of the OR (||) operator"));
+}
+void evalImpl(EvalState &st, Node *n, Frame *env, Value &out) {
+  Value t1, t2;
+  PosPtr pos = n->pos();
+  if (!st.forceBool(st.operand(env, n->operands[0], t1), pos, "in the left operand of the IMPL (->) operator")) return st.mkBool(out, true);
+  st.mkBool(out, st.forceBool(st.operand(env, n->operands[1], t2), pos, "in the right operand of the IMPL (->) operator"));
+}
+void evalNot(EvalState &st, Node *n, Frame *env, Value &out) {
+  Value t;
+  st.mkBool(out, !st.forceBool(st.operand(env, n->operands[0], t), n->pos(), "in the argument of the not operator"));
+}
+
+void evalUpdate(EvalState &st, Node *n, Frame *env, Value &out) {
+  Value tl, tr;
+  PosPtr pos = n->pos();
+  Value *l = &st.operand(env, n->operands[0], tl);
+  st.forceAttrs(*l, pos, "in the left operand of the update (//) operator");
+  Value *r = &st.operand(env, n->operands[1], tr);
+  st.forceAttrs(*r, pos, "in the right operand of the update (//) operator");
+  if (l->attrs->empty()) { out = *r; return; }
+  if (r->attrs->empty()) { out = *l; return; }
+  st.mkAttrs(out, st.updateAttrs(l->attrs, r->attrs));
+}
+
+void evalConcatLists(EvalState &st, Node *n, Frame *env, Value &out) {
+  Value tl, tr;
+  PosPtr pos = n->pos();
+  Value *l = &st.operand(env, n->operands[0], tl);
+  st.forceList(*l, pos, "in the left operand of the list concatenation operator");
+  Value *r = &st.operand(env, n->operands[1], tr);
+  st.forceList(*r, pos, "in the right operand of the list concatenation operator");
+  if (l->listSize() == 0) { out = *r; return; }
+  if (r->listSize() == 0) { out = *l; return; }
+  st.mkList(out, l->items() + r->items());
+}
+
+void evalConcatStringsNode(EvalState &st, Node *n, Frame *env, Value &out) { st.evalConcatStrings(n, env, out); }
+
+void evalFormal(EvalState &st, Node *n, Frame *env, Value &out) {
+  auto f = cast<nd::FormalOp>(n->def);
+  PosPtr pos = n->pos();
+  Value *arg = st.lookup(env, n->operands[0]);
+  st.forceAttrs(*arg, pos);
+  if (const Attr *a = arg->attrs->get(st.symbolOf(f.getName()))) return copyFrom(st, a->value, out, pos);
+  if (n->nOperands < 2) throwMissingFormal(f.getName(), pos);
+  copyFrom(st, st.lookupImpl(env, n->operands[1], true), out, pos);
+}
+
+void evalWithVar(EvalState &st, Node *n, Frame *env, Value &out) {
+  auto w = cast<nd::WithVarOp>(n->def);
+  PosPtr pos = n->pos();
+  Symbol sym = st.symbolOf(w.getName());
+  for (Node *sc : n->args()) {
+    Value *sv = st.lookup(env, sc);
+    st.forceAttrs(*sv, sc->pos(), "while evaluating the first subexpression of a with expression");
+    if (const Attr *a = sv->attrs->get(sym)) return copyFrom(st, a->value, out, pos);
+  }
+  throwUndefinedVariable(w.getName(), pos);
+}
+
+void evalAssert(EvalState &st, Node *n, Frame *env, Value &out) {
+  Value tc;
+  PosPtr pos = n->pos();
+  bool c = st.forceBool(st.operand(env, n->operands[0], tc), pos, "in the condition of the assert statement");
+  if (!c) throwAssertFailed(cast<nd::AssertOp>(n->def), pos);
+  st.evalTail(env, n->operands[1], out, pos);
+}
+
+void evalPrim(EvalState &st, Node *n, Frame *env, Value &out) { // an op of a continent dialect: its primop, found once, on its operands' cells
+  if (!n->prim) n->prim = st.primFor(n->def);
+  Value *args[8];
+  for (unsigned i = 0; i < n->nOperands; i++) args[i] = st.lookup(env, n->operands[i]);
+  st.callPrimOp(*n->prim, args, out, n->pos());
+}
+
+void evalInt(EvalState &st, Node *n, Frame *, Value &out) { st.mkInt(out, cast<nd::IntOp>(n->def).getValue()); }
+void evalBool(EvalState &st, Node *n, Frame *, Value &out) { st.mkBool(out, cast<nd::BoolOp>(n->def).getValue()); }
+void evalNull(EvalState &st, Node *, Frame *, Value &out) { st.mkNull(out); }
+void evalFloat(EvalState &st, Node *n, Frame *, Value &out) { st.mkFloat(out, cast<nd::FloatOp>(n->def).getValue().convertToDouble()); }
+void evalPath(EvalState &st, Node *n, Frame *, Value &out) { st.mkPath(out, cast<nd::PathOp>(n->def).getValue().str()); }
+void evalBuiltin(EvalState &st, Node *n, Frame *, Value &out) {
+  copyFrom(st, st.baseEnvValue(cast<nd::BuiltinOp>(n->def).getName().str()), out, n->pos());
+}
+
+/// Anything else runs through the externally attached NixEvalOpInterface model, which reads its operands by their SSA values: their
+/// records are put in the map of every value first.
+void evalOther(EvalState &st, Node *n, Frame *env, Value &out) {
+  Operation *op = n->def;
+  for (unsigned i = 0; i < n->nOperands; i++)
+    if (n->operands[i] && !st.nodeOf(op->getOperand(i).getAsOpaquePointer())) st.setNode(op->getOperand(i).getAsOpaquePointer(), n->operands[i]);
+  if (auto e = dyn_cast<nd::NixEvalOpInterface>(op)) return e.eval(st, env, out);
+  throwCannotEvaluate(op, n->pos());
+}
+
+constexpr EvalFn kEvalFns[] = {
+    /* Arg */ evalOther, evalList, evalAttrsNode, evalSelect, evalHasAttr, evalApply, evalIf, evalAssert, evalNot, evalAnd, evalOr, evalImpl,
+    evalEq<true>, evalEq<false>, evalUpdate, evalConcatLists, evalConcatStringsNode, evalWithVar, evalFormal, evalInt, evalBool, evalNull,
+    evalFloat, evalString, evalPath, evalBuiltin, /* Lambda */ evalOther, evalPrim, evalOther};
+static_assert(sizeof(kEvalFns) / sizeof(kEvalFns[0]) == unsigned(NodeKind::Other) + 1, "one evaluation function a node kind");
+} // namespace
+
+static EvalFn evalFnOf(NodeKind k) { return kEvalFns[unsigned(k)]; }
 
 //===----------------------------------------------------------------------===//
 // Coercion

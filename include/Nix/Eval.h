@@ -312,7 +312,10 @@ struct Frame {
 using Promotion = mlir::nix::NixDialect::Promotion;
 
 inline constexpr unsigned kNoSlot = ~0u;
-/// What evaluating an op does, as a switch case: not a chain of TypeID compares.  Prim is an op of the continent dialects (a primop), Other
+/// How a node is evaluated: one function a kind, which the node holds, so evaluating it is one indirect call into a function that saves
+/// what that kind needs and no more (a single switch saved, at every entry, the registers of its biggest case).
+using EvalFn = void (*)(EvalState &, Node *, Frame *, Value &);
+/// What evaluating an op does, as a function: not a chain of TypeID compares.  Prim is an op of the continent dialects (a primop), Other
 /// anything the evaluator reaches through NixEvalOpInterface.
 enum class NodeKind : uint8_t {
   Arg, List, Attrs, Select, HasAttr, Apply, If, Assert, Not, And, Or, Impl, Eq, Neq, Update, ConcatLists, ConcatStrings, WithVar, Formal,
@@ -336,15 +339,17 @@ struct Node {
   RegionInfo *ri;
   Value *fixed = nullptr;   // a literal or a builtin: its one cell, the same in every frame, made at its first touch
   Node **operands = nullptr; // the op's operands, in order
-  mlir::Operation *def;     // the op that defines the value, null for a block argument
+  mlir::Operation *def;     // the op that defines the value; a block argument's lambda (kind Arg)
   const PrimOp *prim = nullptr; // Prim: what the op runs
-  PosPtr pos = nullptr;     // the op's position; a block argument's is its lambda's
+  EvalFn eval = nullptr;    // what evaluating the op is
   static constexpr uint8_t kDefault = 1, kDynamic = 1, kForceString = 1;
   bool inPlace() const { return promo == Promotion::InPlace; }
   /// A value with a cell to read back: its frame cell, or its fixed one.  Not one evaluated in place, whose lookup makes a temporary, nor
   /// one made by its one use, whose cell the frame does not keep.
   bool persists() const { return promo != Promotion::InPlace && promo != Promotion::Once; }
   auto args() const { return cp::series(operands, nOperands); }
+  /// The op's position; a block argument's is its lambda's (where it was made).
+  PosPtr pos() const { return mlir::nix::posOfOp(def); }
 };
 static_assert(sizeof(Node) == 64, "a node is one cache line");
 
@@ -691,7 +696,11 @@ struct EvalState {
     return n;
   }
   [[noreturn]] static void unindexed();
-  void evalOp(Node *n, Frame *env, Value &out);
+  void evalOp(Node *n, Frame *env, Value &out) {
+    if (statsEnabled) [[unlikely]] statEval(n, env);
+    n->eval(*this, n, env, out);
+  }
+  void statEval(Node *n, Frame *env);
   RegionInfo *regionInfo(mlir::Region *r);
   Frame *newFrame(RegionInfo *ri, Frame *up);
 
