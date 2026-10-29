@@ -1,5 +1,6 @@
 //===- Builtins.cpp - The Nix builtins (language-level) -------------------===//
 
+#include <deque>
 #include "Composite/Series.h"
 #include "Nix/Eval.h"
 
@@ -370,14 +371,18 @@ void registerBuiltins(EvalState &state) {
     int64_t start = st.forceInt(*args[0], pos, "while evaluating the first argument (the start offset) passed to builtins.substring");
     if (start < 0) throw EvalError("negative start position in substring", pos);
     int64_t len = st.forceInt(*args[1], pos, "while evaluating the second argument (the substring length) passed to builtins.substring");
-    if (len == 0) {
-      st.forceValue(*args[2], pos);
-      if (args[2]->type == VType::String) {
-        NixStringContext c;
-        st.copyContext(*args[2], c);
-        st.mkString(v, "", c);
-        return;
-      }
+    st.forceValue(*args[2], pos);
+    if (args[2]->type == VType::String) {
+      // A window over the string's own bytes, sharing its context: nothing is copied (CharSeries).
+      composite::CharSeries chars = args[2]->chars();
+      uint32_t from = (uint64_t)start >= chars.size() ? chars.size() : uint32_t(start);
+      uint32_t to = len < 0 || (uint64_t)len >= chars.size() - from ? chars.size() : from + uint32_t(len);
+      composite::CharWindow w = chars.CharWindow::operator[](join::TwInt(from, to));
+      v.type = VType::String;
+      v.str.s = w.data();
+      v.aux = w.size();
+      v.str.ctx = args[2]->str.ctx;
+      return;
     }
     NixStringContext ctx;
     auto s = st.coerceToString(*args[2], ctx, false, true, pos, "while evaluating the third argument (the string) passed to builtins.substring");
@@ -388,13 +393,24 @@ void registerBuiltins(EvalState &state) {
     NixStringContext ctx;
     auto sep = st.forceString(*args[0], ctx, pos, "while evaluating the first argument (the separator string) passed to builtins.concatStringsSep");
     st.forceList(*args[1], pos, "while evaluating the second argument (the list of strings to concat) passed to builtins.concatStringsSep");
-    std::string res;
+    // The result is the series of its pieces: strings are windows over their own bytes, the separator one window, coerced elements
+    // (paths, sets with outPath) the only text made; one arena buffer, written once.
+    llvm::SmallVector<composite::CharWindow, 16> pieces;
+    std::deque<std::string> owned;
     for (size_t i = 0; i < args[1]->listSize(); i++) {
-      if (i) res += sep;
-      res += st.coerceToString(*args[1]->list.elems[i], ctx, false, true, pos,
-                               "while evaluating one element of the list of strings to concat passed to builtins.concatStringsSep");
+      if (i) pieces.push_back(composite::CharWindow(sep));  // a window on the separator's own arena bytes
+      Value &e = *args[1]->list.elems[i];
+      st.forceValue(e, pos);
+      if (e.type == VType::String) {
+        st.copyContext(e, ctx);
+        pieces.push_back(e.window());
+      } else {
+        owned.push_back(st.coerceToString(e, ctx, false, true, pos,
+                                          "while evaluating one element of the list of strings to concat passed to builtins.concatStringsSep"));
+        pieces.push_back(composite::CharWindow(std::string_view(owned.back())));
+      }
     }
-    st.mkString(v, res, ctx);
+    st.mkStringOf(v, pieces, st.makeContext(ctx));
   });
   S.addPrimOp("__replaceStrings", 3, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[0], pos, "while evaluating the first argument passed to builtins.replaceStrings");
@@ -963,8 +979,11 @@ void registerBuiltins(EvalState &state) {
 
   // -- Environment -----------------------------------------------------------
   S.addPrimOp("__getEnv", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
-    auto name = str(st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.getEnv"));
-    const char *e = st.settings.pureEval ? nullptr : getenv(name.c_str());
+    composite::CharSeries name{st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.getEnv")};
+    // A whole arena string is its own C string (copyString terminates it); only a window that is not followed by its NUL is copied.
+    std::string copy;
+    const char *cname = composite::facet<composite::text::Terminated>(name) ? name.data() : (copy = std::string(name.view())).c_str();
+    const char *e = st.settings.pureEval ? nullptr : getenv(cname);
     st.mkString(v, e ? e : "");
   });
 

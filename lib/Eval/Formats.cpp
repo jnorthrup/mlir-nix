@@ -1,5 +1,6 @@
 //===- Formats.cpp - JSON, XML and TOML conversions -----------------------===//
 
+#include "Composite/CharSeries.h"
 #include "Composite/Series.h"
 #include "Nix/Eval.h"
 
@@ -37,10 +38,10 @@ static void checkUTF8(std::string_view s) {
       if (n > 1)
         for (size_t k = 1; k < n && i + k < s.size(); k++)
           if (((unsigned char)s[i + k] >> 6) != 2) { bad = i + k; break; }
-      char buf[160];
-      snprintf(buf, sizeof buf, "JSON serialization error: [json.exception.type_error.316] invalid UTF-8 byte at index %zu: 0x%02X",
-               bad, (unsigned char)s[bad]);
-      throw EvalError(buf);
+      const char hex[] = "0123456789ABCDEF";
+      unsigned char byte = (unsigned char)s[bad];
+      throw EvalError("JSON serialization error: [json.exception.type_error.316] invalid UTF-8 byte at index " + std::to_string(bad) + ": 0x" +
+                      hex[byte >> 4] + hex[byte & 15]);
     }
     i += n;
   }
@@ -267,27 +268,28 @@ struct JSONParser {
       size_t start = p;
       if (s[p] == '-') p++;
       bool isFloat = false;
-      while (p < s.size() && isdigit((unsigned char)s[p])) p++;
-      if (p < s.size() && s[p] == '.') { isFloat = true; p++; while (p < s.size() && isdigit((unsigned char)s[p])) p++; }
+      while (p < s.size() && composite::isAsciiDigit(s[p])) p++;
+      if (p < s.size() && s[p] == '.') { isFloat = true; p++; while (p < s.size() && composite::isAsciiDigit(s[p])) p++; }
       if (p < s.size() && (s[p] == 'e' || s[p] == 'E')) {
         isFloat = true;
         p++;
         if (p < s.size() && (s[p] == '+' || s[p] == '-')) p++;
-        while (p < s.size() && isdigit((unsigned char)s[p])) p++;
+        while (p < s.size() && composite::isAsciiDigit(s[p])) p++;
       }
       std::string num(s.substr(start, p - start));
       if (!isFloat) {
-        errno = 0;
+        // The integer facets (composite::text::Integer), the reading strtoll and strtoull make: overflow is ERANGE.
+        composite::CharSeries digits{std::string_view(num)};
         if (num[0] == '-') {
-          long long n = strtoll(num.c_str(), nullptr, 10);
-          if (errno == ERANGE) { st.mkFloat(v, strtod(num.c_str(), nullptr)); return; }
-          st.mkInt(v, n);
+          composite::text::Reading r = composite::facet<composite::text::Integer<10, true>>(digits);
+          if (r.overflow) { st.mkFloat(v, strtod(num.c_str(), nullptr)); return; }
+          st.mkInt(v, (int64_t)r.value);
         } else {
-          unsigned long long n = strtoull(num.c_str(), nullptr, 10);
-          if (errno == ERANGE) { st.mkFloat(v, strtod(num.c_str(), nullptr)); return; }
-          if (n > (unsigned long long)INT64_MAX)
+          composite::text::Reading r = composite::facet<composite::text::Integer<10, false>>(digits);
+          if (r.overflow) { st.mkFloat(v, strtod(num.c_str(), nullptr)); return; }
+          if (r.value > (uint64_t)INT64_MAX)
             throw EvalError("unsigned json number " + num + " outside of Nix integer range");
-          st.mkInt(v, (int64_t)n);
+          st.mkInt(v, (int64_t)r.value);
         }
       } else {
         st.mkFloat(v, strtod(num.c_str(), nullptr));
@@ -503,7 +505,7 @@ struct TomlParser {
       else break;
     }
   }
-  static bool isBare(char c) { return isalnum((unsigned char)c) || c == '_' || c == '-'; }
+  static bool isBare(char c) { return composite::isAsciiAlnum(c) || c == '_' || c == '-'; }
 
   static void utf8(std::string &out, uint32_t cp) {
     if (cp < 0x80) out += char(cp);
@@ -643,7 +645,7 @@ struct TomlParser {
 
   bool isDateAhead() {
     // YYYY-MM-DD or HH:MM:SS
-    auto d = [&](size_t o) { return isdigit((unsigned char)peek(o)); };
+    auto d = [&](size_t o) { return composite::isAsciiDigit(peek(o)); };
     if (d(0) && d(1) && d(2) && d(3) && peek(4) == '-' && d(5) && d(6) && peek(7) == '-') return true;
     if (d(0) && d(1) && peek(2) == ':' && d(3) && d(4) && peek(5) == ':') return true;
     return false;
@@ -652,20 +654,20 @@ struct TomlParser {
   std::string dateTime() {
     size_t start = p;
     auto take = [&](auto pred) { while (!eof() && pred(s[p])) p++; };
-    take([](char c) { return isdigit((unsigned char)c) || c == '-' || c == ':'; });
+    take([](char c) { return composite::isAsciiDigit(c) || c == '-' || c == ':'; });
     std::string res(s.substr(start, p - start));
     // date-time separator
-    if ((peek() == 'T' || peek() == 't' || (peek() == ' ' && isdigit((unsigned char)peek(1)))) && res.find('-') != std::string::npos) {
+    if ((peek() == 'T' || peek() == 't' || (peek() == ' ' && composite::isAsciiDigit(peek(1)))) && res.find('-') != std::string::npos) {
       p++;
       res += 'T';
       size_t ts = p;
-      take([](char c) { return isdigit((unsigned char)c) || c == ':'; });
+      take([](char c) { return composite::isAsciiDigit(c) || c == ':'; });
       res += std::string(s.substr(ts, p - ts));
     }
     if (peek() == '.') {
       p++;
       size_t fs = p;
-      take([](char c) { return isdigit((unsigned char)c) != 0; });
+      take([](char c) { return composite::isAsciiDigit(c); });
       std::string frac(s.substr(fs, p - fs));
       size_t padTo = frac.size() <= 3 ? 3 : frac.size() <= 6 ? 6 : 9;
       if (frac.size() > 9) frac = frac.substr(0, 9);
@@ -673,10 +675,10 @@ struct TomlParser {
       res += "." + frac;
     }
     if (peek() == 'Z' || peek() == 'z') { p++; res += "Z"; }
-    else if ((peek() == '+' || peek() == '-') && isdigit((unsigned char)peek(1))) {
+    else if ((peek() == '+' || peek() == '-') && composite::isAsciiDigit(peek(1))) {
       size_t os = p;
       p++;
-      take([](char c) { return isdigit((unsigned char)c) || c == ':'; });
+      take([](char c) { return composite::isAsciiDigit(c) || c == ':'; });
       res += std::string(s.substr(os, p - os));
     }
     return res;
@@ -685,7 +687,7 @@ struct TomlParser {
   Value *number() {
     size_t start = p;
     std::string tok;
-    while (!eof() && (isalnum((unsigned char)s[p]) || s[p] == '_' || s[p] == '+' || s[p] == '-' || s[p] == '.'))
+    while (!eof() && (composite::isAsciiAlnum(s[p]) || s[p] == '_' || s[p] == '+' || s[p] == '-' || s[p] == '.'))
       tok += s[p++];
     if (tok.empty()) fail("expected a value");
     Value *v = st.allocValue();
@@ -699,7 +701,7 @@ struct TomlParser {
       std::string r;
       for (size_t i = 0; i < x.size(); i++) {
         if (x[i] == '_') {
-          if (i == 0 || i + 1 >= x.size() || !isalnum((unsigned char)x[i - 1]) || !isalnum((unsigned char)x[i + 1]))
+          if (i == 0 || i + 1 >= x.size() || !composite::isAsciiAlnum(x[i - 1]) || !composite::isAsciiAlnum(x[i + 1]))
             fail("invalid underscore in number");
           continue;
         }
@@ -711,12 +713,13 @@ struct TomlParser {
       if (t[0] == '+' || t[0] == '-') fail("sign not allowed on non-decimal integer");
       int base = body[1] == 'x' ? 16 : body[1] == 'o' ? 8 : 2;
       std::string digits = strip(body.substr(2));
-      errno = 0;
-      char *end;
-      unsigned long long n = strtoull(digits.c_str(), &end, base);
-      if (*end) fail("invalid integer");
-      if (errno == ERANGE || n > (unsigned long long)INT64_MAX) fail("too large integer");
-      st.mkInt(*v, (int64_t)n);
+      composite::CharSeries cs{std::string_view(digits)};
+      composite::text::Reading r = base == 16 ? composite::facet<composite::text::Integer<16, false>>(cs)
+                                 : base == 8  ? composite::facet<composite::text::Integer<8, false>>(cs)
+                                              : composite::facet<composite::text::Integer<2, false>>(cs);
+      if (r.consumed != digits.size()) fail("invalid integer");
+      if (r.overflow || r.value > (uint64_t)INT64_MAX) fail("too large integer");
+      st.mkInt(*v, (int64_t)r.value);
       return v;
     }
     std::string clean = strip(t);
@@ -730,11 +733,10 @@ struct TomlParser {
     }
     std::string digits = clean[0] == '+' || clean[0] == '-' ? clean.substr(1) : clean;
     if (digits.size() > 1 && digits[0] == '0') fail("leading zeros are not allowed");
-    errno = 0;
-    char *end;
-    long long n = strtoll(clean.c_str(), &end, 10);
-    if (*end) fail("invalid value '" + tok + "'");
-    if (errno == ERANGE) {
+    composite::text::Reading r = composite::facet<composite::text::Integer<10, true>>(composite::CharSeries{std::string_view(clean)});
+    long long n = (long long)r.value;
+    if (r.consumed != clean.size()) fail("invalid value '" + tok + "'");
+    if (r.overflow) {
       if (clean[0] == '-')
         throw EvalError("while parsing TOML: [error] toml::parse_dec_integer: too small integer: current min digits = -2^63");
       throw EvalError("while parsing TOML: [error] toml::parse_dec_integer: too large integer: current max digits = 2^63");
@@ -913,7 +915,7 @@ bool tomlTimestamps = false;
 static std::string percentDecode(std::string_view s) {
   std::string r;
   for (size_t i = 0; i < s.size(); i++) {
-    if (s[i] == '%' && i + 2 < s.size() && isxdigit((unsigned char)s[i + 1]) && isxdigit((unsigned char)s[i + 2])) {
+    if (s[i] == '%' && i + 2 < s.size() && composite::isDigitIn(s[i + 1], 16) && composite::isDigitIn(s[i + 2], 16)) {
       r += char(std::stoi(std::string(s.substr(i + 1, 2)), nullptr, 16));
       i += 2;
     } else r += s[i];
@@ -924,10 +926,9 @@ static std::string percentDecode(std::string_view s) {
 static std::string percentEncode(std::string_view s, const char *keep = "-._~/:@!$'()*+,;=") {
   std::string r;
   for (unsigned char c : s) {
-    if (isalnum(c) || strchr(keep, c)) r += char(c);
+    if (composite::isAsciiAlnum(char(c)) || c == 0 || std::string_view(keep).find(char(c)) != std::string_view::npos) r += char(c);
     else {
-      char buf[4];
-      snprintf(buf, sizeof buf, "%%%02X", c);
+      const char buf[4] = {'%', "0123456789ABCDEF"[c >> 4], "0123456789ABCDEF"[c & 15], 0};
       r += buf;
     }
   }
@@ -952,7 +953,7 @@ static std::map<std::string, std::string> parseQuery(std::string_view q) {
 static bool isHexRev(std::string_view s) {
   if (s.size() != 40) return false;
   for (char c : s)
-    if (!isxdigit((unsigned char)c)) return false;
+    if (!composite::isDigitIn(c, 16)) return false;
   return true;
 }
 
@@ -960,7 +961,7 @@ static void putFlakeAttr(EvalState &st, EvalState::BindingsBuilder &bb, const st
   static const std::set<std::string> ints = {"revCount", "lastModified"};
   static const std::set<std::string> bools = {"submodules", "shallow", "allRefs", "exportIgnore", "lfs", "verifyCommit"};
   Value &x = bb.alloc(k);
-  if (ints.count(k)) st.mkInt(x, atoll(v.c_str()));
+  if (ints.count(k)) st.mkInt(x, (int64_t)composite::facet<composite::text::Integer<10, true>>(composite::CharSeries{std::string_view(v)}).value);
   else if (bools.count(k)) st.mkBool(x, v == "1" || v == "true");
   else st.mkString(x, v);
 }

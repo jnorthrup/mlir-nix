@@ -36,6 +36,7 @@ namespace mlir { class PassManager; }
 #include <unordered_map>
 #include <vector>
 
+#include "Composite/CharSeries.h"
 #include "Nix/Arena.h"
 
 namespace nixev {
@@ -194,6 +195,10 @@ struct Value {
   bool isThunk() const { return type == VType::Thunk || type == VType::App || type == VType::Blackhole; }
   bool isFunction() const { return type == VType::Lambda || type == VType::PrimOp || type == VType::PrimOpApp; }
   std::string_view sv() const { return {str.s, aux}; }
+  /// The string's characters as a TrikeShed CharSeries: a window over its arena bytes, never a copy.
+  composite::CharSeries chars() const { return composite::CharSeries(str.s, aux); }
+  /// The string's characters as a window only (no cursor): the weight of a string_view.
+  composite::CharWindow window() const { return composite::CharWindow(str.s, aux); }
   std::string_view pathView() const { return {path.s, aux}; }
   size_t listSize() const { return aux; }
   auto items() const { return cp::series(list.elems, aux); }                               // the cells of a list, a Series
@@ -401,6 +406,8 @@ struct EvalState {
   void mkBool(Value &v, bool b) { if (statsEnabled) ++nVT[unsigned(VType::Bool)];  v.type = VType::Bool; v.boolean = b; }
   void mkNull(Value &v) { if (statsEnabled) ++nVT[unsigned(VType::Null)];  v.type = VType::Null; }
   void mkString(Value &v, std::string_view s, const NixStringContext &ctx = {});
+  /// A string made of pieces (CharSeries windows over existing bytes), written once into one arena buffer.
+  void mkStringOf(Value &v, llvm::ArrayRef<composite::CharWindow> pieces, const StringContext *ctx);
   void mkPath(Value &v, std::string_view p);
   void mkList(Value &v, size_t n);
   /// A list drained from a series of Value * (a Series, a vector, a combine): the one fill loop, the α of the caller inlined.
@@ -569,7 +576,7 @@ struct EvalState {
   /// Symbol of one select/has_attr path component: literal (a name) or the
   /// next computed key (operand), forced to a string.
   Symbol pathSymbol(const nixfe::Name &comp, mlir::OperandRange dyn, unsigned &nextDyn, Frame *env, PosPtr pos);
-  Value *lookup(Frame *f, mlir::Value v);
+  Value *lookup(Frame *f, mlir::Value v) { return lookupImpl(f, v, false); }
   void evalOp(mlir::Operation *op, Frame *env, Value &out);
   RegionInfo *regionInfo(mlir::Region *r);
   Frame *newFrame(RegionInfo *ri, Frame *up);
@@ -632,6 +639,9 @@ struct EvalState {
   uint64_t nStackFrames = 0; // MLNIX_STATS: calls run on a stack frame, nothing allocated in the arena
   bool stackFramesOn = true; // MLNIX_NOSTACKFRAMES turns it off
   bool stackFrameOK(RegionInfo *ri);
+  Value *lookupImpl(Frame *f, mlir::Value v, bool forced);
+  bool eagerOn = true;  // MLNIX_NOEAGER turns it off
+  uint64_t nEager = 0;   // MLNIX_STATS
   // Frames that returned uncaptured, by slot count: a stack per size, linked through the frame's own first word.  The newest is reused first, so
   // a recycled frame is almost always still in L1 (docs/FRAME-BYTES.md: 97 to 98% of reuses are within 32 KiB of allocation).
   static constexpr unsigned kRecycleMax = 64;
@@ -686,7 +696,9 @@ struct EvalState {
   uint64_t nSimHit = 0, nSimHitBytes = 0, nSimReleased = 0, nSimReleasedBytes = 0, nSimCaptured = 0;
   uint64_t nBuilders = 0, nBuilderRows = 0, nBuildersBig = 0, nBuilderBigRows = 0; // MLNIX_STATS: attribute-set builders, and those past the 12 inline rows (a malloc)
   llvm::StringMap<std::pair<uint64_t, uint64_t>> thunksByOp; // MLNIX_STATS: frame-needing thunks by operation: count, packed operand counts
-  uint64_t nProjThunks = 0, nHardThunks = 0; // MLNIX_STATS: thunks made over a frame, projections and the rest
+  uint64_t nProjThunks = 0, nHardThunks = 0, nImmediate = 0, nImmediateLater = 0; // MLNIX_STATS: frame-needing thunks forced as the very next thing
+  const Value *lastThunk = nullptr;
+  llvm::StringMap<uint64_t> immediateByOp; // MLNIX_STATS: thunks made over a frame, projections and the rest
   uint64_t nSelectorCalls = 0; // MLNIX_STATS: saturated calls of a recognized selector, made with no frame and no closure
   bool selectorsOn = true;     // MLNIX_NOSELECTORS turns the recognition off
   unsigned selectorShape(mlir::nix::LambdaOp outerLam, RegionInfo *outer);

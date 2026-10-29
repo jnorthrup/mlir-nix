@@ -12,6 +12,8 @@
 //             "pure" describes memory effects, not permission to speculate:
 //             primops may still throw, diverge, or force effectful lazy operands.
 //   nix.fold  the primop may be evaluated at compile time on scalar constants
+//   nix.strict every operand is forced before the op returns and none is kept (the NixModes of a core op, for a continent op):
+//             the evaluator's frameless rule (EvalState::stackFrameOK) reads it
 //   nix.fresh the result is a newly allocated list / attribute set with observable
 //             identity: the op is pure but equal calls must not be merged (a
 //             MemAlloc effect on the result, like memref.alloc)
@@ -84,47 +86,47 @@ irdl.dialect @nixbit attributes {nix.summary = "Bit operations", nix.scope = "va
 }
 
 irdl.dialect @nixty attributes {nix.summary = "Type predicates", nix.scope = "val", nix.continent = "nixty"} {
-  irdl.operation @is_attrs attributes {nix.key = "__isAttrs", nix.fx = "pure", nix.fold} {
+  irdl.operation @is_attrs attributes {nix.key = "__isAttrs", nix.fx = "pure", nix.fold, nix.strict} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @is_bool attributes {nix.key = "__isBool", nix.fx = "pure", nix.fold} {
+  irdl.operation @is_bool attributes {nix.key = "__isBool", nix.fx = "pure", nix.fold, nix.strict} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @is_float attributes {nix.key = "__isFloat", nix.fx = "pure", nix.fold} {
+  irdl.operation @is_float attributes {nix.key = "__isFloat", nix.fx = "pure", nix.fold, nix.strict} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @is_function attributes {nix.key = "__isFunction", nix.fx = "pure", nix.fold} {
+  irdl.operation @is_function attributes {nix.key = "__isFunction", nix.fx = "pure", nix.fold, nix.strict} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @is_int attributes {nix.key = "__isInt", nix.fx = "pure", nix.fold} {
+  irdl.operation @is_int attributes {nix.key = "__isInt", nix.fx = "pure", nix.fold, nix.strict} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @is_list attributes {nix.key = "__isList", nix.fx = "pure", nix.fold} {
+  irdl.operation @is_list attributes {nix.key = "__isList", nix.fx = "pure", nix.fold, nix.strict} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @is_null attributes {nix.key = "isNull", nix.fx = "pure", nix.fold} {
+  irdl.operation @is_null attributes {nix.key = "isNull", nix.fx = "pure", nix.fold, nix.strict} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @is_path attributes {nix.key = "__isPath", nix.fx = "pure", nix.fold} {
+  irdl.operation @is_path attributes {nix.key = "__isPath", nix.fx = "pure", nix.fold, nix.strict} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @is_string attributes {nix.key = "__isString", nix.fx = "pure", nix.fold} {
+  irdl.operation @is_string attributes {nix.key = "__isString", nix.fx = "pure", nix.fold, nix.strict} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v)
     irdl.results(r: %v)
@@ -166,7 +168,7 @@ irdl.dialect @nixlist attributes {nix.summary = "Lists: structure and access", n
     irdl.operands(a0: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @length attributes {nix.key = "__length", nix.fx = "pure"} {
+  irdl.operation @length attributes {nix.key = "__length", nix.fx = "pure", nix.strict} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v)
     irdl.results(r: %v)
@@ -314,7 +316,7 @@ irdl.dialect @nixstr attributes {nix.summary = "Strings: slicing, replace, coerc
     irdl.operands(a0: %v, a1: %v, a2: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @string_length attributes {nix.key = "__stringLength", nix.fx = "pure", nix.fold} {
+  irdl.operation @string_length attributes {nix.key = "__stringLength", nix.fx = "pure", nix.fold, nix.strict} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v)
     irdl.results(r: %v)

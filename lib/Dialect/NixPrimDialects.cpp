@@ -213,6 +213,9 @@ LogicalResult mlir::nix::loadPrimDialects(MLIRContext *ctx, NixDialect &core) {
       bool foldable = opOp->hasAttr("nix.fold");
       bool fresh = opOp->hasAttr("nix.fresh");
 
+      // nix.strict: every operand is forced before the op returns and none is kept, the modes a core op declares with NixModes.
+      if (opOp->hasAttr("nix.strict"))
+        core.operandModes[name.getAsOpaquePointer()] = {arity >= 32 ? ~0u : (1u << arity) - 1, 0u};
       if (!core.registerPrim(key.getValue(), arity, name, *fx, foldable, fresh))
         return opOp.emitError("duplicate nix.key '") << key.getValue() << "'";
 
