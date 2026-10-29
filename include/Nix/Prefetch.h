@@ -17,7 +17,9 @@
 
 #include "Composite/Mutable.h"
 
+#include <cstdint>
 #include <string>
+#include <unordered_map>
 
 namespace nixprefetch {
 
@@ -34,6 +36,14 @@ void noteSlow(char kind, const char *path);
 /// Remember that the evaluation is touching `path` (kinds above).  One branch when not recording.
 inline void note(char kind, const char *path) {
   if (recording) noteSlow(kind, path);
+}
+/// The lambda bodies a replayed list says were minted, by file, in the order they were (`M path row`; a row of a lambda nested in a
+/// body exists only once that body is minted, so the order is part of the row numbers): MLNIX_PRELOWER mints them ahead, with the file.
+extern std::unordered_map<std::string, composite::MutableSeries<uint32_t>> replayMints;
+void noteMintSlow(const char *path, uint32_t row);
+/// Remember that the evaluation minted the body of pool row `row` of `path`.
+inline void noteMint(const char *path, uint32_t row) {
+  if (recording) noteMintSlow(path, row);
 }
 
 } // namespace nixprefetch

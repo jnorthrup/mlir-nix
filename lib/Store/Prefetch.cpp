@@ -27,6 +27,7 @@ namespace nixprefetch {
 
 bool recording = false;
 composite::MutableSeries<std::string> replayFiles;
+std::unordered_map<std::string, composite::MutableSeries<uint32_t>> replayMints;
 
 namespace {
 
@@ -171,6 +172,11 @@ void noteSlow(char kind, const char *path) {
   if (trace->seen.insert(line).second) trace->order.append(std::move(line));
 }
 
+void noteMintSlow(const char *path, uint32_t row) {
+  std::string line = "M " + absolute(path) + " " + std::to_string(row);
+  if (trace->seen.insert(line).second) trace->order.append(std::move(line));
+}
+
 /// auto: the list for this invocation (working directory + arguments) under the state directory.
 std::string autoSpec(int argc, char **argv) {
   uint64_t h = 1469598103934665603ull; // FNV-1a
@@ -206,7 +212,10 @@ void init(int argc, char **argv) {
     composite::MutableSeries<Entry> es;
     std::ifstream in(spec.substr(spec.find(':') + 1));
     for (std::string l; std::getline(in, l);)
-      if (l.size() > 2 && l[1] == ' ') {
+      if (l.size() > 2 && l[1] == ' ' && l[0] == 'M') { // a minted body: for the prelowering helpers, nothing to read ahead
+        size_t sp = l.rfind(' ');
+        if (sp > 2) replayMints[l.substr(2, sp - 2)].append(uint32_t(strtoul(l.c_str() + sp + 1, nullptr, 10)));
+      } else if (l.size() > 2 && l[1] == ' ') {
         es.append({l[0], l.substr(2)});
         if (l[0] == 'F' && l.size() > 6 && l.compare(l.size() - 4, 4, ".nix") == 0) replayFiles.append(l.substr(2));
       }

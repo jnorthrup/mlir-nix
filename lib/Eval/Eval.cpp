@@ -1503,15 +1503,15 @@ static std::string pipelineText(const EvalSettings &settings) {
 RegionInfo *EvalState::mintLambda(nixfe::FilePool &p, uint32_t row) {
   auto t0 = std::chrono::steady_clock::now();
   auto lam = cast<nd::LambdaOp>(p.rows.col<nixfe::PoolCol::Op>()[row]);
-  nixfe::GenOptions go;
-  go.isBaseName = [this](llvm::StringRef n) { return isBaseName(n); };
-  go.deferBodies = true; // lambdas nested in this body wait for their own first call
-  go.pool = &p;
-  nixfe::mintBody(lam, p, row, go);
-  if (settings.optimize) {
-    if (!devirt) devirt = std::make_unique<mlir::FrozenRewritePatternSet>(mlir::nix::makeDevirtualizePatterns(&ctx));
-    mlir::nix::devirtualizePrims(lam, *devirt);
+  if (lam.getBody().front().empty()) { // not minted ahead by the helper that prelowered the file
+    nixfe::GenOptions go;
+    go.isBaseName = [this](llvm::StringRef n) { return isBaseName(n); };
+    go.deferBodies = true; // lambdas nested in this body wait for their own first call
+    go.pool = &p;
+    nixfe::mintBody(lam, p, row, go);
+    if (settings.optimize) mlir::nix::devirtualizePrims(lam);
   }
+  nixprefetch::noteMint(p.origin->path.c_str(), row);
   if (statsEnabled) {
     lam.getBody().walk([&](mlir::Operation *o) { ++opStats[o->getName().getStringRef()]; });
     ++nDemandMinted;
@@ -2826,6 +2826,15 @@ void EvalState::prelowerLoop() {
         go.pool = pl->pool.get();
         pl->mod = ModuleOp::create(UnknownLoc::get(&ctx));
         pl->op = nixfe::genExpr(*pl->mod, origin, pre->po, "expr", go);
+        // The bodies the recorded run minted in this file, minted here in its order (the rows of nested lambdas follow from it): the
+        // evaluator only indexes them at their first call.  If one fails (the file changed since), the whole file is left to the evaluator.
+        if (auto mints = nixprefetch::replayMints.find(path); mints != nixprefetch::replayMints.end())
+          for (uint32_t row : mints->second) {
+            if (row >= pl->pool->rows.size()) break;
+            auto lam = dyn_cast_or_null<nd::LambdaOp>(pl->pool->rows.col<nixfe::PoolCol::Op>()[row]);
+            if (!lam || !lam.getBody().front().empty()) continue;
+            nixfe::mintBody(lam, *pl->pool, row, go);
+          }
         // The default pipeline is devirtualization alone, which reads only the IR and the dialect's primop table: done here, off the
         // evaluator's thread.  Another pipeline runs at adoption, where the prim folder (the evaluator's) can be called.
         if (settings.optimize && pipelineText(settings) == "nix-prims") {
