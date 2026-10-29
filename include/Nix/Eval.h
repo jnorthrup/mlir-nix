@@ -44,7 +44,6 @@ namespace mlir { class PassManager; }
 #include <unordered_set>
 #include <vector>
 
-#include "Composite/CharSeries.h"
 #include "Nix/StdBind.h"
 #include "Nix/Arena.h"
 
@@ -208,10 +207,8 @@ struct Value {
   bool isThunk() const { return type == VType::Thunk || type == VType::App || type == VType::Blackhole; }
   bool isFunction() const { return type == VType::Lambda || type == VType::PrimOp || type == VType::PrimOpApp; }
   std::string_view sv() const { return {str.s, aux}; }
-  /// The string's characters as a TrikeShed CharSeries: a window over its arena bytes, never a copy.
-  composite::CharSeries chars() const { return composite::CharSeries(str.s, aux); }
-  /// The string's characters as a window only (no cursor): the weight of a string_view.
-  composite::CharWindow window() const { return composite::CharWindow(str.s, aux); }
+  /// The string's characters as a window over its arena bytes (Series<char>, no cursor), never a copy: the weight of a string_view.
+  composite::Chars window() const { return composite::chars(str.s, aux); }
   std::string_view pathView() const { return {path.s, aux}; }
   size_t listSize() const { return aux; }
   auto items() const { return cp::series(list.elems, aux); }                               // the cells of a list, a Series
@@ -431,8 +428,8 @@ struct EvalState {
     v.type = VType::String; if (statsEnabled) ++nVT[unsigned(VType::String)];
     v.str.s = s.data(); v.aux = static_cast<uint32_t>(s.size()); v.str.ctx = nullptr;
   }
-  /// A string made of pieces (CharSeries windows over existing bytes), written once into one arena buffer.
-  void mkStringOf(Value &v, llvm::ArrayRef<composite::CharWindow> pieces, const StringContext *ctx);
+  /// A string made of pieces (windows over existing bytes), written once into one arena buffer.
+  void mkStringOf(Value &v, llvm::ArrayRef<composite::Chars> pieces, const StringContext *ctx);
   void mkPath(Value &v, std::string_view p);
   void mkList(Value &v, size_t n);
   /// A list drained from a series of Value * (a Series, a vector, a combine): the one fill loop, the α of the caller inlined.
@@ -499,7 +496,7 @@ struct EvalState {
                              PosPtr pos = nullptr, std::string_view errorCtx = "",
                              bool canonicalizePath = true);
   // The same coercion as a window: a string is its own bytes in the arena (nothing copied); anything else is made in `scratch`, which the window views.
-  composite::CharWindow coerceToWindow(Value &v, NixStringContext &ctx, bool coerceMore, bool copyToStore, PosPtr pos,
+  composite::Chars coerceToWindow(Value &v, NixStringContext &ctx, bool coerceMore, bool copyToStore, PosPtr pos,
                                        std::string_view errorCtx, std::string &scratch, bool canonicalizePath = true);
   std::string coerceToPath(Value &v, NixStringContext &ctx, PosPtr pos, std::string_view errorCtx = "");
   std::string coerceToStorePath(Value &v, NixStringContext &ctx, PosPtr pos, std::string_view errorCtx = "");

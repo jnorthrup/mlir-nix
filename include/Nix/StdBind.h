@@ -9,7 +9,7 @@
 #define NIX_STDBIND_H
 
 #include "Composite/Pack.h"
-#include "Composite/CharSeries.h"
+#include "Composite/Series.h"
 
 #include <string_view>
 #include <tuple>
@@ -21,15 +21,11 @@ template <size_t I, class A, class B> struct tuple_element<I, join::Dense<A, B>>
 } // namespace std
 
 namespace composite {
-/// A window or a cursor as a std::string_view, for an API that wants one (the windows hold a pointer and a length, nothing more).
+/// A window as a std::string_view, for an API that wants one (a window holds a pointer and a length, nothing more).  Text with a cursor is
+/// cast down to its window first (CharSeries::window(): the characters between pos and limit).
 template <class W> constexpr std::string_view view(const W &w) { return {w.data(), w.size()}; }
-/// A cursor's view is the characters between pos and limit (the window's own bytes are the whole root).
-constexpr std::string_view view(const CharSeries &c) { return {c.data() + c.pos, c.rem()}; }
-/// The other way: a window, or a cursor over it, on the characters of a std::string_view (nothing is copied).
-constexpr CharWindow window(std::string_view s) { return CharWindow(s.data(), uint32_t(s.size())); }
-constexpr CharSeries cseries(std::string_view s) { return CharSeries(s.data(), uint32_t(s.size())); }
-/// Or as the hot Series<char>, with no cursor at all: what an ordering or a fold over the bytes wants.
-constexpr auto chars(std::string_view s) { return series(s.data(), uint32_t(s.size())); }
+/// The other way: the characters of a std::string_view as the hot Series<char> (nothing is copied); a CharSeries is made from one.
+constexpr Chars chars(std::string_view s) { return series(s.data(), uint32_t(s.size())); }
 } // namespace composite
 
 #endif

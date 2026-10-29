@@ -229,14 +229,14 @@ void EvalState::mkString(Value &v, std::string_view s, const NixStringContext &c
   v.str.ctx = makeContext(ctx);
 }
 
-void EvalState::mkStringOf(Value &v, llvm::ArrayRef<composite::CharWindow> pieces, const StringContext *ctx) {
+void EvalState::mkStringOf(Value &v, llvm::ArrayRef<composite::Chars> pieces, const StringContext *ctx) {
   size_t total = composite::fold(composite::series(pieces.data(), uint32_t(pieces.size())), size_t(0),
-                                 [](size_t n, const composite::CharWindow &p) { return n + p.size(); });
+                                 [](size_t n, const composite::Chars &p) { return n + p.size(); });
   if (total > UINT32_MAX) throw EvalError("string of 4 GiB or more");
   char *buf = static_cast<char *>(alloc.Allocate(total + 1, 1));
   if (statsEnabled) nStringBytes += total + 1;
   char *at = composite::fold(composite::series(pieces.data(), uint32_t(pieces.size())), buf,
-                             [](char *to, const composite::CharWindow &p) { return std::copy(p.data(), p.data() + p.size(), to); });
+                             [](char *to, const composite::Chars &p) { return std::copy(p.data(), p.data() + p.size(), to); });
   *at = 0;
   v.type = VType::String; if (statsEnabled) ++nVT[unsigned(VType::String)];
   v.str.s = buf;
@@ -1775,8 +1775,8 @@ void EvalState::evalConcatStrings(nd::ConcatStringsOp op, Frame *env, Value &out
   // The windows of the parts: a stack array (the arena past sixteen parts).  A part that must be coerced (a number, a path, a set with __toString)
   // makes text in `scratch`, which is copied into the arena at once, so no part owns anything and nothing is a heap list.
   size_t np = parts.size(), nv = 0;
-  composite::CharWindow stackViews[16];
-  composite::CharWindow *views = np <= 16 ? stackViews : static_cast<composite::CharWindow *>(alloc.Allocate(np * sizeof(composite::CharWindow), alignof(composite::CharWindow)));
+  composite::Chars stackViews[16];
+  composite::Chars *views = np <= 16 ? stackViews : static_cast<composite::Chars *>(alloc.Allocate(np * sizeof(composite::Chars), alignof(composite::Chars)));
   std::string scratch;
   size_t total = 0;
   int64_t n = 0;
@@ -1803,8 +1803,8 @@ void EvalState::evalConcatStrings(nd::ConcatStringsOp op, Frame *env, Value &out
       else if (v->type == VType::Float) nf += v->fpoint;
       else throwCannotAdd(showType(*v), "a float", ppos);
     } else {
-      composite::CharWindow w = coerceToWindow(*v, context, false, firstType == VType::String, ppos, "while evaluating a path segment", scratch, !first);
-      if (w.size() && w.data() == scratch.data()) { w = composite::CharWindow(copyString(scratch), w.size()); } // text made here lives in the arena
+      composite::Chars w = coerceToWindow(*v, context, false, firstType == VType::String, ppos, "while evaluating a path segment", scratch, !first);
+      if (w.size() && w.data() == scratch.data()) { w = composite::chars(copyString(scratch), w.size()); } // text made here lives in the arena
       views[nv++] = w;
       total += w.size();
     }
@@ -1821,7 +1821,7 @@ void EvalState::evalConcatStrings(nd::ConcatStringsOp op, Frame *env, Value &out
     for (size_t k = 0; k < nv; k++) str += composite::view(views[k]);
     return mkPath(out, nixfe::canonPath(str));
   }
-  mkStringOf(out, llvm::ArrayRef<composite::CharWindow>(views, nv), makeContext(context));
+  mkStringOf(out, llvm::ArrayRef<composite::Chars>(views, nv), makeContext(context));
 }
 
 Symbol EvalState::pathSymbol(const nixfe::Name &comp, mlir::OperandRange dyn, unsigned &nextDyn, Frame *env,
@@ -2029,7 +2029,7 @@ std::optional<std::string> EvalState::tryAttrsToString(Value &v, NixStringContex
                         "while evaluating the result of the `__toString` attribute");
 }
 
-composite::CharWindow EvalState::coerceToWindow(Value &v, NixStringContext &ctx, bool coerceMore, bool copyToStore,
+composite::Chars EvalState::coerceToWindow(Value &v, NixStringContext &ctx, bool coerceMore, bool copyToStore,
                                                  PosPtr pos, std::string_view errorCtx, std::string &scratch,
                                                  bool canonicalizePath) {
   forceValue(v, pos);
@@ -2038,7 +2038,7 @@ composite::CharWindow EvalState::coerceToWindow(Value &v, NixStringContext &ctx,
     return v.window();
   }
   scratch = coerceToString(v, ctx, coerceMore, copyToStore, pos, errorCtx, canonicalizePath);
-  return composite::window(std::string_view(scratch));
+  return composite::chars(std::string_view(scratch));
 }
 
 std::string EvalState::coerceToString(Value &v, NixStringContext &ctx, bool coerceMore, bool copyToStore,

@@ -1,6 +1,6 @@
 //===- Builtins.cpp - The Nix builtins (language-level) -------------------===//
 
-#include <deque>
+#include "Composite/CharSeries.h"
 #include "Composite/Mutable.h"
 #include "Nix/Eval.h"
 
@@ -91,7 +91,7 @@ static std::regex &getRegex(EvalState &st, const std::string &re, PosPtr pos) {
 
 /// A string result that is `w`, a window on the bytes of `arg` when the argument was a string: those bytes and its context are shared,
 /// nothing is copied.  Any other argument was coerced into text of its own, so the result is made from it with `ctx`.
-static void mkSharedString(EvalState &st, Value &v, const Value &arg, composite::CharWindow w, const NixStringContext &ctx) {
+static void mkSharedString(EvalState &st, Value &v, const Value &arg, composite::Chars w, const NixStringContext &ctx) {
   if (arg.type != VType::String) return st.mkString(v, composite::view(w), ctx);
   v.type = VType::String;
   v.str.s = w.data();
@@ -385,11 +385,11 @@ void registerBuiltins(EvalState &state) {
     int64_t len = st.forceInt(*args[1], pos, "while evaluating the second argument (the substring length) passed to builtins.substring");
     st.forceValue(*args[2], pos);
     if (args[2]->type == VType::String) {
-      // A window over the string's own bytes, sharing its context: nothing is copied (CharSeries).
-      composite::CharSeries chars = args[2]->chars();
+      // A window over the string's own bytes, sharing its context: nothing is copied.
+      composite::Chars chars = args[2]->window();
       uint32_t from = (uint64_t)start >= chars.size() ? chars.size() : uint32_t(start);
       uint32_t to = len < 0 || (uint64_t)len >= chars.size() - from ? chars.size() : from + uint32_t(len);
-      composite::CharWindow w = chars.CharWindow::operator[](join::TwInt(from, to));
+      composite::Chars w = composite::slice(chars, from, to);
       v.type = VType::String;
       v.str.s = w.data();
       v.aux = w.size();
@@ -409,19 +409,19 @@ void registerBuiltins(EvalState &state) {
     // The result is the series of its pieces: strings are windows over their own bytes, the separator one window, coerced elements
     // (paths, sets with outPath) the only text made; one arena buffer, written once.
     size_t ne = args[1]->listSize(), np = ne ? 2 * ne - 1 : 0, nv = 0;
-    composite::CharWindow stackPieces[32];
-    composite::CharWindow *pieces = np <= 32 ? stackPieces : static_cast<composite::CharWindow *>(st.alloc.Allocate(np * sizeof(composite::CharWindow), alignof(composite::CharWindow)));
+    composite::Chars stackPieces[32];
+    composite::Chars *pieces = np <= 32 ? stackPieces : static_cast<composite::Chars *>(st.alloc.Allocate(np * sizeof(composite::Chars), alignof(composite::Chars)));
     std::string scratch;
     for (size_t i = 0; i < ne; i++) {
-      if (i) pieces[nv++] = composite::window(sep);  // a window on the separator's own arena bytes
+      if (i) pieces[nv++] = composite::chars(sep);  // a window on the separator's own arena bytes
       Value &e = *args[1]->list.elems[i];
       st.forceValue(e, pos);
-      composite::CharWindow w = st.coerceToWindow(e, ctx, false, true, pos,
+      composite::Chars w = st.coerceToWindow(e, ctx, false, true, pos,
           "while evaluating one element of the list of strings to concat passed to builtins.concatStringsSep", scratch);
-      if (w.size() && w.data() == scratch.data()) w = composite::CharWindow(st.copyString(scratch), w.size()); // coerced text lives in the arena
+      if (w.size() && w.data() == scratch.data()) w = composite::chars(st.copyString(scratch), w.size()); // coerced text lives in the arena
       pieces[nv++] = w;
     }
-    st.mkStringOf(v, llvm::ArrayRef<composite::CharWindow>(pieces, nv), st.makeContext(ctx));
+    st.mkStringOf(v, llvm::ArrayRef<composite::Chars>(pieces, nv), st.makeContext(ctx));
   });
   S.addPrimOp("__replaceStrings", 3, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[0], pos, "while evaluating the first argument passed to builtins.replaceStrings");
@@ -541,7 +541,7 @@ void registerBuiltins(EvalState &state) {
       from = slash == std::string_view::npos ? 0 : uint32_t(slash + 1);
       to = uint32_t(last + 1);
     }
-    mkSharedString(st, v, *args[0], w.CharWindow::operator[](join::TwInt(from, to)), ctx);
+    mkSharedString(st, v, *args[0], composite::slice(w, from, to), ctx);
   });
   S.addPrimOp("dirOf", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceValue(*args[0], pos);
@@ -555,7 +555,7 @@ void registerBuiltins(EvalState &state) {
     auto w = st.coerceToWindow(*args[0], ctx, false, false, pos, "while evaluating the first argument passed to 'builtins.dirOf'", scratch);
     auto slash = composite::view(w).rfind('/');
     if (slash == std::string_view::npos) return st.mkString(v, ".", ctx);
-    mkSharedString(st, v, *args[0], w.CharWindow::operator[](join::TwInt(0, slash == 0 ? 1 : uint32_t(slash))), ctx);
+    mkSharedString(st, v, *args[0], composite::slice(w, 0, slash == 0 ? 1 : uint32_t(slash)), ctx);
   });
 
   // -- Context ---------------------------------------------------------------
@@ -996,10 +996,10 @@ void registerBuiltins(EvalState &state) {
 
   // -- Environment -----------------------------------------------------------
   S.addPrimOp("__getEnv", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
-    composite::CharSeries name = composite::cseries(st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.getEnv"));
+    composite::CharSeries name = composite::chars(st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.getEnv"));
     // A whole arena string is its own C string (copyString terminates it); only a window that is not followed by its NUL is copied.
     std::string copy;
-    const char *cname = composite::facet<composite::text::Terminated>(name) ? name.data() : (copy = std::string(composite::view(name))).c_str();
+    const char *cname = composite::facet<composite::text::Terminated>(name) ? name.data() : (copy = std::string(composite::view(name.window()))).c_str();
     const char *e = st.settings.pureEval ? nullptr : getenv(cname);
     st.mkString(v, e ? e : "");
   });

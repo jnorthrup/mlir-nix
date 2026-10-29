@@ -4,12 +4,12 @@
 //
 // A window of characters that is never copied, a cursor over it, equality by content, no hash, and text made only at the gate.
 //
-//   CharWindow       the window: where it starts and how long it is, 16 bytes, the weight of a std::string_view.  Kotlin keeps a root
-//                    and TwInt bounds so that a window of a window reads the same root instead of stacking accessors (CharWindow
-//                    flattening); in C++ the start is a pointer and the flattening is the pointer arithmetic, base + from.
-//   CharSeries       a window and its cursor (pos/limit/mark, relative to the window): get, mk, res, flip, rew, clr, lim, slice, skipWs,
-//                    rtrim, trim, seekTo; 24 bytes.  The weight is the cursor's: where only a window is needed (the pieces of a
-//                    string being built) a CharWindow is used.
+//   Chars            the window (Series.h): Series<char> over memory, where it starts and how long it is, 16 bytes, the weight of a
+//                    std::string_view.  Kotlin keeps a root and TwInt bounds so that a window of a window reads the same root instead of
+//                    stacking accessors (CharWindow flattening); in C++ the start is a pointer and the flattening is base + from (slice).
+//   CharSeries       a Chars and its cursor (pos/limit/mark, relative to the window): get, mk, res, flip, rew, clr, lim, slice, skipWs,
+//                    rtrim, trim, seekTo; 32 bytes.  The weight is the cursor's: where only a window is needed (the pieces of a string
+//                    being built) the window is cast down to Chars, which is all of the hot set it needs.
 //   ==               the same characters between pos and limit.  The cursor's position is not identity.
 //   no hash          a cursor is not a key: there is no std::hash for it.  Reify at the gate (view()) and key on that.
 //   view()           the gate: a std::string_view of pos..limit, for an API that wants one.  The window is NOT terminated
@@ -28,36 +28,19 @@ namespace composite {
 /// Kotlin's Char.isWhitespace for the ASCII range, without <cctype>.
 constexpr bool isWs(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'; }
 
-/// The window: contiguous characters, viewed.  A Series<char> (size and index), and a window of a window is a window of the same bytes.
-struct CharWindow {
-  const char *base = nullptr;  // the first character of the window: never owned, never copied
-  uint32_t len = 0;
-
-  constexpr CharWindow() = default;
-  constexpr CharWindow(const char *b, uint32_t n) : base(b), len(n) {}
-
-  constexpr uint32_t size() const { return len; }
-  constexpr char operator[](uint32_t i) const { return base[i]; }
-  constexpr const char *data() const { return base; }
-  constexpr auto series() const { return len |j| [b = base](uint32_t i) { return b[i]; }; }
-  /// A window of this window: the same bytes, from + base.
-  constexpr CharWindow operator[](join::TwInt r) const {
-    if (r.first() > r.second() || r.second() > len) TODO("CharWindow outside its bounds");
-    return CharWindow(base + r.first(), r.second() - r.first());
-  }
-};
-
-struct CharSeries : CharWindow {
+/// The cursor over a window: Chars (Series.h, the window itself, a Series<char>) and pos/limit/mark relative to it.  A CharSeries is a
+/// Series<char>: cast down (window(), or a plain conversion to Chars) once the cursor's work is done, and the cursor is dead.
+struct CharSeries : Chars {
   uint32_t pos = 0, limit = 0;
   int32_t mark = -1;
 
-  constexpr CharSeries() = default;
-  constexpr CharSeries(CharWindow w) : CharWindow(w), limit(w.len) {}
-  constexpr CharSeries(const char *b, uint32_t n) : CharSeries(CharWindow(b, n)) {}
+  constexpr CharSeries() : Chars{0, {nullptr}} {}
+  constexpr CharSeries(Chars w) : Chars(w), limit(w.size()) {}
+  constexpr CharSeries(const char *b, uint32_t n) : CharSeries(series(b, n)) {}
 
   /// A window of this window, as a fresh cursor over it.
-  constexpr CharSeries operator[](join::TwInt r) const { return CharSeries(CharWindow::operator[](r)); }
-  using CharWindow::operator[];
+  constexpr CharSeries operator[](join::TwInt r) const { return CharSeries(composite::slice(*this, r.first(), r.second())); }
+  using Chars::operator[];
   /// The window between the cursor's position and its limit.
   constexpr CharSeries slice() const { return (*this)[join::TwInt(pos, limit)]; }
 
@@ -78,8 +61,8 @@ struct CharSeries : CharWindow {
   constexpr CharSeries &lim(uint32_t l) { limit = l; return *this; }
   constexpr CharSeries &at(uint32_t p) { pos = p; return *this; }
 
-  /// The characters between the cursor's position and its limit, as a Series.
-  constexpr auto remaining() const { return rem() |j| [r = data() + pos](uint32_t i) { return r[i]; }; }
+  /// The characters between the cursor's position and its limit, as a Series<char>: the cast down.
+  constexpr Chars remaining() const { return series(data() + pos, rem()); }
 
   /// Skip whitespace from the position.
   constexpr CharSeries &skipWs() { pos += firstWhere(remaining(), [](char c) { return !isWs(c); }); return *this; }
@@ -123,7 +106,7 @@ struct CharSeries : CharWindow {
   }
 
   /// The window between pos and limit, without the cursor.
-  constexpr CharWindow window() const { return CharWindow(data() + pos, rem()); }
+  constexpr Chars window() const { return remaining(); }
 };
 
 /// Lazy split on a delimiter: a Series of windows, the delimiters found once.

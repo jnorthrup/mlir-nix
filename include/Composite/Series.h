@@ -37,6 +37,15 @@ template <uint32_t N> using Size = Const<uint32_t, N>;
 template <class A> inline constexpr bool kSized = same<A, uint32_t>;
 template <uint32_t N> inline constexpr bool kSized<Size<N>> = true;
 
+/// The index function of contiguous memory: the pointer is all of it.  So a Series over memory (series(p, n), below) is a pointer and a
+/// count, and reads both back: data() and size().
+template <class T> struct Ptr {
+  T *p;
+  constexpr T &operator()(uint32_t i) const { return p[i]; }
+};
+template <class B> inline constexpr bool kPtr = false;
+template <class T> inline constexpr bool kPtr<Ptr<T>> = true;
+
 template <class A, class B> struct Join {
   A a;
   B b;
@@ -47,6 +56,8 @@ template <class A, class B> struct Join {
   constexpr const A &domain() const { return a; }
   constexpr const A &first() const { return a; }   // the accessors a packed Dense has, so a pair reads the same either way
   constexpr const B &second() const { return b; }
+  /// A Series over memory gives its pointer back.
+  constexpr auto data() const requires kPtr<B> { return b.p; }
   constexpr decltype(auto) operator[](const A &k) const {
     return b(k);
   }
@@ -90,9 +101,16 @@ template <class A, class B> requires(join::PacksInARegister<A, B>) constexpr aut
 }
 
 /// A Series over contiguous memory.  The pointer must outlive the Series, and `n` is the caller's word.
-template <class T> constexpr auto series(T *p, uint32_t n) {
-  return n |j| [p](uint32_t i) -> T & { return p[i]; };
+template <class T> constexpr Series<Ptr<T>> series(T *p, uint32_t n) { return {n, {p}}; }
+/// The cells from..to of a Series over memory, over the same memory: a window of a window is a window of the same cells.
+template <class T> constexpr Series<Ptr<T>> slice(const Series<Ptr<T>> &s, uint32_t from, uint32_t to) {
+  if (from > to || to > s.a) TODO("a slice outside its series");
+  return {to - from, {s.b.p + from}};
 }
+/// Series<Char>: characters over memory, never owned, never copied, the weight of a string_view.  Text with a cursor (CharSeries) is one
+/// of these and casts down to it when the cursor's work is done: what reads the characters then needs nothing past this header.
+using Chars = Series<Ptr<const char>>;
+constexpr Chars chars(const char *p, uint32_t n) { return series(p, n); }
 
 //===----------------------------------------------------------------------===//
 // α: lazy projection

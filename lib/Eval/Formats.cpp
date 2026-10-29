@@ -280,7 +280,7 @@ struct JSONParser {
       std::string num(s.substr(start, p - start));
       if (!isFloat) {
         // The integer facets (composite::text::Integer), the reading strtoll and strtoull make: overflow is ERANGE.
-        composite::CharSeries digits = composite::cseries(std::string_view(num));
+        composite::CharSeries digits = composite::chars(num);
         if (num[0] == '-') {
           composite::text::Reading r = composite::facet<composite::text::Integer<10, true>>(digits);
           if (r.overflow) { st.mkFloat(v, strtod(num.c_str(), nullptr)); return; }
@@ -716,7 +716,7 @@ struct TomlParser {
       if (t[0] == '+' || t[0] == '-') fail("sign not allowed on non-decimal integer");
       int base = body[1] == 'x' ? 16 : body[1] == 'o' ? 8 : 2;
       std::string digits = strip(body.substr(2));
-      composite::CharSeries cs = composite::cseries(std::string_view(digits));
+      composite::CharSeries cs = composite::chars(digits);
       composite::text::Reading r = base == 16 ? composite::facet<composite::text::Integer<16, false>>(cs)
                                  : base == 8  ? composite::facet<composite::text::Integer<8, false>>(cs)
                                               : composite::facet<composite::text::Integer<2, false>>(cs);
@@ -736,7 +736,7 @@ struct TomlParser {
     }
     std::string digits = clean[0] == '+' || clean[0] == '-' ? clean.substr(1) : clean;
     if (digits.size() > 1 && digits[0] == '0') fail("leading zeros are not allowed");
-    composite::text::Reading r = composite::facet<composite::text::Integer<10, true>>(composite::cseries(std::string_view(clean)));
+    composite::text::Reading r = composite::facet<composite::text::Integer<10, true>>(composite::chars(clean));
     long long n = (long long)r.value;
     if (r.consumed != clean.size()) fail("invalid value '" + tok + "'");
     if (r.overflow) {
@@ -964,7 +964,7 @@ static void putFlakeAttr(EvalState &st, EvalState::BindingsBuilder &bb, const st
   static const std::set<std::string> ints = {"revCount", "lastModified"};
   static const std::set<std::string> bools = {"submodules", "shallow", "allRefs", "exportIgnore", "lfs", "verifyCommit"};
   Value &x = bb.alloc(k);
-  if (ints.count(k)) st.mkInt(x, (int64_t)composite::facet<composite::text::Integer<10, true>>(composite::cseries(std::string_view(v))).value);
+  if (ints.count(k)) st.mkInt(x, (int64_t)composite::facet<composite::text::Integer<10, true>>(composite::chars(v)).value);
   else if (bools.count(k)) st.mkBool(x, v == "1" || v == "true");
   else st.mkString(x, v);
 }

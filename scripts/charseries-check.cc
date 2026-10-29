@@ -1,5 +1,6 @@
 // CharSeries, as ../TrikeShed/src/commonMain/kotlin/borg/trikeshed/lib/CharSeries.kt specifies it: windows that never copy and flatten,
 // the cursor verbs, equality by the content of pos..limit, no hash, and the lazy split.  Build like minmax-check.cc.
+#include "Composite/CharSeries.h"
 #include "Nix/StdBind.h"
 #include <cstdio>
 #include <cstdlib>
@@ -7,31 +8,34 @@
 #include <type_traits>
 #include <unordered_set>
 using namespace composite;
+constexpr CharSeries cs(std::string_view s) { return chars(s); } // a cursor over the characters of a string_view
 static void require(bool ok, const char *m) { if (!ok) { std::fprintf(stderr, "FAIL: %s\n", m); std::exit(1); } }
 
 // a window of a window reads the same root: nothing is copied and nothing stacks
 constexpr const char sample[] = "  hello, world  ";
-static_assert(CharSeries(sample, 16)[join::TwInt(2, 14)][join::TwInt(0, 5)].base == sample + 2, "a window of a window is a window of the same bytes");
-static_assert(sizeof(CharWindow) == 16 && sizeof(CharSeries) == 24, "the window weighs a string_view; the cursor is the rest");
+static_assert(CharSeries(sample, 16)[join::TwInt(2, 14)][join::TwInt(0, 5)].data() == sample + 2, "a window of a window is a window of the same bytes");
+static_assert(sizeof(Chars) == 16 && sizeof(CharSeries) == 32, "the window weighs a string_view; the cursor is the rest");
+// CharSeries isa Series<char>: the cast down is the whole window; the characters between pos and limit are window() (or slice())
+static_assert(composite::view(Chars(CharSeries(sample, 16).trim())) == "  hello, world  " && composite::view(CharSeries(sample, 16).trim().window()) == "hello, world");
 static_assert(composite::view(CharSeries(sample, 16)[join::TwInt(2, 14)][join::TwInt(0, 5)]) == "hello");
-static_assert(composite::view(CharSeries(sample, 16).trim()) == "hello, world", "skipWs and rtrim");
-static_assert(composite::cseries(std::string_view("a,b,,c")).size() == 6);
+static_assert(composite::view(CharSeries(sample, 16).trim().window()) == "hello, world", "skipWs and rtrim");
+static_assert(cs(("a,b,,c")).size() == 6);
 constexpr bool cursor() {
-  CharSeries s = composite::cseries(std::string_view("key=value;rest"));
+  CharSeries s = cs(("key=value;rest"));
   if (!s.seekTo('=')) return false;
   CharSeries v = s; v.lim(v.pos + 5);
   if (composite::view(v.slice()) != "value") return false;
   s.mk(); s.get(); s.get(); s.res();              // reset to the mark
   if (s.get() != 'v') return false;
-  CharSeries q = composite::cseries(std::string_view(R"(a\"b"c)"));
+  CharSeries q = cs((R"(a\"b"c)"));
   return q.seekTo('"', '\\') && composite::view(q.slice()) == "c";
 }
 static_assert(cursor(), "get, mk, res, lim, slice, seekTo with an escape");
 // equality is the characters, not the cursor or the root
 constexpr bool equality() {
-  CharSeries a = composite::cseries(std::string_view("xxabc")), b = composite::cseries(std::string_view("abcyy"));
+  CharSeries a = cs(("xxabc")), b = cs(("abcyy"));
   a.at(2); b.lim(3);
-  return a == b && !(composite::cseries(std::string_view("ab")) == composite::cseries(std::string_view("abc")));
+  return a == b && !(cs(("ab")) == cs(("abc")));
 }
 static_assert(equality(), "content equality over pos..limit");
 // a cursor is not a key
@@ -40,19 +44,19 @@ static_assert(!Hashable<CharSeries>, "no hash: reify at the gate with view() and
 
 static void integerFacetsAgreeWithLibc();
 int main() {
-  auto parts = split(composite::cseries(std::string_view("a,b,,c")), ',');
+  auto parts = split(cs(("a,b,,c")), ',');
   require(parts.size() == 4, "four parts");
   require(composite::view(parts[0]) == "a" && composite::view(parts[1]) == "b" && composite::view(parts[2]) == "" && composite::view(parts[3]) == "c", "the parts");
   // randomized: windows and splits agree with std::string
   uint64_t st = 88172645463325252ull; auto rng = [&] { st ^= st << 13; st ^= st >> 7; st ^= st << 17; return st; };
   for (int r = 0; r < 20000; r++) {
     std::string s; for (unsigned i = 0, n = rng() % 24; i < n; i++) s += "ab ,\t"[rng() % 5];
-    CharSeries c = composite::cseries(s);
+    CharSeries c = cs(s);
     uint32_t a = rng() % (s.size() + 1), b = a + rng() % (s.size() - a + 1);
     require(composite::view(c[join::TwInt(a, b)]) == std::string_view(s).substr(a, b - a), "window");
     CharSeries t = c; t.trim();
     size_t f = s.find_first_not_of(" \t"), l = s.find_last_not_of(" \t");
-    require(composite::view(t) == (f == std::string::npos ? std::string_view() : std::string_view(s).substr(f, l - f + 1)), "trim");
+    require(composite::view(t.window()) == (f == std::string::npos ? std::string_view() : std::string_view(s).substr(f, l - f + 1)), "trim");
     auto ps = split(c, ',');
     std::string joined; for (uint32_t k = 0; k < ps.size(); k++) { if (k) joined += ','; joined += composite::view(ps[k]); }
     require(joined == s, "split then join is the identity");
@@ -63,16 +67,16 @@ int main() {
 
 // ── facets ──
 namespace facets {
-static_assert(facet<text::Bytes>(composite::cseries(std::string_view("héllo"))) == 6 && facet<text::Codepoints>(composite::cseries(std::string_view("héllo"))) == 5);
-static_assert(facet<text::FNV1a>(composite::cseries(std::string_view("a"))) == 0xaf63dc4c8601ec8cull, "FNV-1a of \"a\"");
-static_assert(facet<text::Deduced>(composite::cseries(std::string_view("-42"))) == text::Memento::Int);
-static_assert(facet<text::Deduced>(composite::cseries(std::string_view("1.5e3"))) == text::Memento::Float);
-static_assert(facet<text::Deduced>(composite::cseries(std::string_view("true"))) == text::Memento::Bool);
-static_assert(facet<text::Deduced>(composite::cseries(std::string_view("4a"))) == text::Memento::String);
-static_assert(facet<text::Deduced>(composite::cseries(std::string_view(""))) == text::Memento::Empty);
-static_assert(facet<text::Integer<10, true>>(composite::cseries(std::string_view("-9223372036854775808"))).value == uint64_t(1) << 63);
-static_assert(facet<text::Integer<10, true>>(composite::cseries(std::string_view("9223372036854775808"))).overflow);
-static_assert(facet<text::Integer<16, false>>(composite::cseries(std::string_view("0xff"))).value == 255);
+static_assert(facet<text::Bytes>(cs(("héllo"))) == 6 && facet<text::Codepoints>(cs(("héllo"))) == 5);
+static_assert(facet<text::FNV1a>(cs(("a"))) == 0xaf63dc4c8601ec8cull, "FNV-1a of \"a\"");
+static_assert(facet<text::Deduced>(cs(("-42"))) == text::Memento::Int);
+static_assert(facet<text::Deduced>(cs(("1.5e3"))) == text::Memento::Float);
+static_assert(facet<text::Deduced>(cs(("true"))) == text::Memento::Bool);
+static_assert(facet<text::Deduced>(cs(("4a"))) == text::Memento::String);
+static_assert(facet<text::Deduced>(cs((""))) == text::Memento::Empty);
+static_assert(facet<text::Integer<10, true>>(cs(("-9223372036854775808"))).value == uint64_t(1) << 63);
+static_assert(facet<text::Integer<10, true>>(cs(("9223372036854775808"))).overflow);
+static_assert(facet<text::Integer<16, false>>(cs(("0xff"))).value == 255);
 } // namespace facets
 
 #include <cerrno>
@@ -84,7 +88,7 @@ static void integerFacetsAgreeWithLibc() {
     unsigned n = rng() % 26;
     for (unsigned i = 0; i < n; i++) t += alphabet[rng() % 22];
     if (rng() % 3 == 0) t = std::to_string((long long)rng()) + (rng() % 2 ? "9" : "");
-    CharSeries c = composite::cseries(t);
+    CharSeries c = cs(t);
     auto check = [&](auto reading, auto libc, const char *what) {
       char *end; errno = 0;
       auto v = libc(t.c_str(), &end);
