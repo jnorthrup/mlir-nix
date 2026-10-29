@@ -138,7 +138,7 @@ struct Bindings {
   iterator end() const { return {Rows{this}, uint32_t(size())}; }
   const Attr *get(Symbol s) const;
   /// Attributes sorted by name (string order).
-  composite::MutableSeries<const Attr *> lexicographicOrder(const SymbolTable &st) const;
+  composite::Frozen<const Attr *> lexicographicOrder(const SymbolTable &st) const;
 };
 
 /// String context: sorted set of encoded elements
@@ -382,7 +382,7 @@ struct EvalState {
   PosPtr positionOf(const Attr &a) const { return attributePositions[a.pos]; }
   PosIdx positionIndex(PosPtr pos);
   PosIdx positionBase(mlir::nix::AttrsOp op);
-  cp::MutableSeries<PosPtr> attributePositions{{nullptr}};
+  cp::MutableSeries<PosPtr> attributePositions{nullptr};
   std::unordered_map<PosPtr, PosIdx> dynamicPositions;
   llvm::DenseMap<mlir::Operation *, PosIdx> attrPositionBases;
 

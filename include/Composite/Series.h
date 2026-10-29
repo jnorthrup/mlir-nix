@@ -211,6 +211,27 @@ template <class A, class B, class S> constexpr auto select(A &&a, B &&b, S &&sel
 // MutableSeries, ↺ and Cursor: where a Series is mutated, and says so
 //===----------------------------------------------------------------------===//
 
+/// The body of a frozen Series: cells that were built and are now only read.  Move-only, so the promotion from MutableSeries
+/// is a move and a stray copy is a compile error, not a quiet materialization.
+template <class T> struct Cells {
+  std::vector<T> c;
+  Cells(std::vector<T> &&v) : c(std::move(v)) {}
+  Cells(Cells &&) = default;
+  Cells &operator=(Cells &&) = default;
+  Cells(const Cells &) = delete;
+  Cells &operator=(const Cells &) = delete;
+  const T &operator()(uint32_t i) const { return c[i]; }
+};
+template <class T> using Frozen = Series<Cells<T>>;
+
+/// A known-size body: the array is the storage, on the stack, with no heap.
+template <class T, size_t N> struct Slab {
+  std::array<T, N> a;
+  constexpr const T &operator()(uint32_t i) const { return a[i]; }
+};
+/// freeze(array): the handle for a body whose size is a constant.  vec<N>(f) builds one, freeze keeps it as a Series.
+template <class T, size_t N> constexpr auto freeze(std::array<T, N> a) { return uint32_t(N) |j| Slab<T, N>{std::move(a)}; }
+
 template <class T> struct MutableSeries {
   std::vector<T> cells;
   MutableSeries() = default;
@@ -248,6 +269,10 @@ template <class T> struct MutableSeries {
   constexpr void resize(size_t n) { cells.resize(n); }
   constexpr void pop() { cells.pop_back(); }
   constexpr void assign(size_t n, const T &v) { cells.assign(n, v); }
+  /// The promotion of the handle to its body: the cells move into a const Series.  Only an rvalue can be frozen, so the hand-over
+  /// is written out (`std::move(x).freeze()`), costs a pointer, and leaves this series valid and empty.
+  Frozen<T> freeze() && { uint32_t n = size(); return n |j| Cells<T>(std::move(cells)); }
+  Frozen<T> freeze() & = delete;
   /// Accumulate a cell built in place.
   template <class... A> constexpr uint32_t emplace(A &&...a) {
     cells.emplace_back(std::forward<A>(a)...);

@@ -103,12 +103,12 @@ Bindings *Bindings::flat() const {
   return L.flat;
 }
 
-composite::MutableSeries<const Attr *> Bindings::lexicographicOrder(const SymbolTable &st) const {
+composite::Frozen<const Attr *> Bindings::lexicographicOrder(const SymbolTable &st) const {
   composite::MutableSeries<const Attr *> v;
   v.reserve(size());
   for (auto &a : *this) v.append(&a);
   std::sort(v.begin(), v.end(), [&](const Attr *a, const Attr *b) { return st[a->name] < st[b->name]; });
-  return v;
+  return std::move(v).freeze();  // sorted once, then only read: the handle's cells move into a const Series
 }
 
 /// `a // b`.  A small `b` next to a big `a` becomes a layer that DEPENDS on `a` (nothing of `a` is copied, and `a` may
