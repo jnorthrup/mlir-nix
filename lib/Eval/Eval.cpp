@@ -401,8 +401,8 @@ void EvalState::printStats() {
       if (g.example.empty()) g.example = showPos(nd::posOfOp(ri->region->getParentOp()));
       g.frames += ri->calls; ++g.lambdas; g.shape = sh;
     }
-    std::vector<Group> gs;
-    for (auto &kv : byShape) gs.push_back(kv.second);
+    composite::MutableSeries<Group> gs;
+    for (auto &kv : byShape) gs.append(kv.second);
     std::sort(gs.begin(), gs.end(), [](const Group &a, const Group &b) { return a.frames > b.frames; });
     size_t keep = 30;
     if (const char *t = getenv("MLNIX_STATS_SHAPES")) keep = std::max<size_t>(1, strtoul(t, nullptr, 10));
@@ -466,8 +466,8 @@ void EvalState::printStats() {
     llvm::errs() << llvm::format("   a one-entry cache per site (same layout as the site's last select) would hit %.1f%% of selects\n", 100.0 * sameLast / nSelects);
   }
   if (!thunksByOp.empty()) {
-    std::vector<std::pair<std::string, std::pair<uint64_t, uint64_t>>> v;
-    for (auto &kv : thunksByOp) v.push_back({kv.getKey().str(), kv.getValue()});
+    composite::MutableSeries<std::pair<std::string, std::pair<uint64_t, uint64_t>>> v;
+    for (auto &kv : thunksByOp) v.append({kv.getKey().str(), kv.getValue()});
     std::sort(v.begin(), v.end(), [](auto &a, auto &b) { return a.second.first > b.second.first; });
     llvm::errs() << "== thunks that need the frame, by operation (share of those; mean operands, of which defined in the same body):\n";
     uint64_t cum = 0;
@@ -483,8 +483,8 @@ void EvalState::printStats() {
   if (nHardThunks) {
     llvm::errs() << llvm::format("== of the thunks that need their frame, %llu (%.1f%%) are forced as the very next thing after they are made: eager evaluation would keep the order and never capture the frame\n",
                                  (unsigned long long)nImmediate, 100.0 * nImmediate / nHardThunks);
-    std::vector<std::pair<std::string, uint64_t>> v;
-    for (auto &kv : immediateByOp) v.push_back({kv.getKey().str(), kv.getValue()});
+    composite::MutableSeries<std::pair<std::string, uint64_t>> v;
+    for (auto &kv : immediateByOp) v.append({kv.getKey().str(), kv.getValue()});
     std::sort(v.begin(), v.end(), [](auto &a, auto &b) { return a.second > b.second; });
     llvm::errs() << "   by operation:";
     for (size_t i = 0; i < v.size() && i < 8; ++i) llvm::errs() << llvm::format(" %s %.1f%%", v[i].first.c_str(), 100.0 * v[i].second / nImmediate);
@@ -977,7 +977,7 @@ static void trySimRelease(EvalState &st, Frame *f) {
   w[2] |= 2;
   unsigned n = f->info->numSlots;
   if (n >= st.simFree.size()) st.simFree.resize(n + 1);
-  st.simFree[n].push_back(st.allocClock()); ++st.nSimReleased; st.nSimReleasedBytes += sizeof(Frame) + n * sizeof(Value *);
+  st.simFree[n].append(st.allocClock()); ++st.nSimReleased; st.nSimReleasedBytes += sizeof(Frame) + n * sizeof(Value *);
 }
 /// A thunk (or, pinned, a closure) now refers to this frame.
 [[gnu::noinline, gnu::cold]] void EvalState::markCaptured(Frame *f) { ++frameWords(f)[1]; }
@@ -1020,7 +1020,7 @@ Frame *EvalState::newFrame(RegionInfo *ri, Frame *up) {
     if (ri->numSlots >= simFree.size()) simFree.resize(ri->numSlots + 1);
     if (!simFree[ri->numSlots].empty()) {
       uint64_t dist = allocClock() - simFree[ri->numSlots].back();
-      simFree[ri->numSlots].pop_back(); ++nSimHit; nSimHitBytes += sz;
+      simFree[ri->numSlots].pop(); ++nSimHit; nSimHitBytes += sz;
       ++nSimReuseDist[dist < (32u << 10) ? 0 : dist < (256u << 10) ? 1 : dist < (2u << 20) ? 2 : dist < (32u << 20) ? 3 : 4];
     }
   }

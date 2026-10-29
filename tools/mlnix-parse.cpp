@@ -34,7 +34,7 @@ int main(int argc, char **argv) {
   }
   std::ifstream list(argv[a]);
   // Read everything first: the time reported is the parser's, not the file system's.
-  std::vector<std::pair<std::string, std::shared_ptr<const nixfe::Source>>> corpus;
+  composite::MutableSeries<std::pair<std::string, std::shared_ptr<const nixfe::Source>>> corpus;
   std::string path;
   size_t bytes = 0;
   while (std::getline(list, path)) {
@@ -46,7 +46,7 @@ int main(int argc, char **argv) {
       src = nixfe::Source::fromString(ss.str());
     }
     bytes += src->view().size();
-    corpus.emplace_back(path, std::move(src));
+    corpus.emplace(path, std::move(src));
   }
   if (scanOnly) {
     using clock = std::chrono::steady_clock;

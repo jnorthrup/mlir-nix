@@ -74,7 +74,6 @@ struct ParseOptions {
   /// Receives lint warnings (formatted by the caller).
   std::function<void(const ParseError &)> onWarning;
   std::string home;                     // for ~/ paths
-  std::vector<std::string> *warnings = nullptr;
 };
 
 /// Print a source in the format of `nix-instantiate --parse`.  Throws ParseError.

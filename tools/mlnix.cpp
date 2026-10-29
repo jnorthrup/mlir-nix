@@ -89,7 +89,7 @@ composite::MutableSeries<SearchPathElem> parseNixPath(const std::string &s) {
 struct Options {
   composite::MutableSeries<std::string> files;
   composite::MutableSeries<std::string> attrPaths;
-  std::vector<std::pair<std::string, std::string>> argExprs, argStrs;
+  composite::MutableSeries<std::pair<std::string, std::string>> argExprs, argStrs;
   composite::MutableSeries<std::string> includes;
   bool fromArgs = false, readStdin = false, evalOnly = false, parseOnly = false, strict = false;
   bool json = false, xml = false, raw = false, location = true, findFile = false;
@@ -115,10 +115,10 @@ bool parseCommon(Options &o, const std::string &arg, int &i, int argc, char **ar
     o.includes.append(arg.substr(2));
   } else if (arg == "--arg") {
     std::string n = next(), v = next();
-    o.argExprs.push_back({n, v});
+    o.argExprs.append({n, v});
   } else if (arg == "--argstr") {
     std::string n = next(), v = next();
-    o.argStrs.push_back({n, v});
+    o.argStrs.append({n, v});
   } else if (arg == "-A" || arg == "--attr") {
     o.attrPaths.append(next());
   } else if (arg == "-E" || arg == "--expr") {
@@ -193,14 +193,13 @@ void finishOptions(Options &o) {
     o.eval.currentSystem = sys ? sys : defaultSystem();
   }
   // NIX_PATH and -I.
-  for (auto *it = o.includes.end(); it != o.includes.begin();) {
-    --it;
-    auto v = parseNixPath(*it);
-    o.eval.nixPath.insert(o.eval.nixPath.begin(), v.begin(), v.end());
+  for (const std::string &inc : o.includes) {
+    auto v = parseNixPath(inc);
+    for (auto &e : v) o.eval.nixPath.append(e);
   }
   if (const char *np = getenv("NIX_PATH")) {
     auto v = parseNixPath(np);
-    o.eval.nixPath.insert(o.eval.nixPath.end(), v.begin(), v.end());
+    for (auto &e : v) o.eval.nixPath.append(e);
   }
   for (auto &e : o.eval.nixPath)
     if (e.path.find("://") == std::string::npos) e.path = absPath(e.path);
@@ -365,7 +364,7 @@ int runEvalCommand(Options &o, bool build) {
   // million ops, the attribute uniquer and the arenas apart one object at a time cost 6.6% of a NixOS
   // evaluation (docs/PERFORMANCE.md).  The one thing the destructor did, printing the statistics, is
   // done here.  `build` keeps the ordinary teardown.
-  EvalState *stp = new EvalState(o.eval, store);
+  EvalState *stp = new EvalState(std::move(o.eval), store); // the settings are the state's from here on
   struct Teardown {
     EvalState *st;
     bool leak;
@@ -396,7 +395,6 @@ int runEvalCommandIn(Options &o, bool build, EvalState &st, std::shared_ptr<nixs
   auto autoArgs = buildAutoArgs(st, o);
   if (o.attrPaths.empty()) o.attrPaths.append("");
 
-  std::vector<std::pair<std::string, std::function<Value *()>>> exprs;
 
   auto handleParsed = [&](const std::string &text, const std::string &baseDir, const std::string &name,
                           const std::string &path) -> Value * {
@@ -640,7 +638,7 @@ int cmdStore(int argc, char **argv, int start) {
       if (args.size() != 1) usage("--restore requires a path");
       nixstore::restorePath(absPath(args[0]), readStdin());
     } else if (op == "--gc") {
-      std::vector<std::string> deleted;
+      composite::MutableSeries<std::string> deleted;
       store.collectGarbage(printInvalid, deleted);
       for (auto &d : deleted) std::cout << (printInvalid ? "" : "deleting '") << d << (printInvalid ? "" : "'") << "\n";
       std::cerr << deleted.size() << " store paths deleted\n";
@@ -806,7 +804,7 @@ int realMain(int argc, char **argv) {
   if (cmd == "eval" || cmd == "parse" || cmd == "emit-mlir" || cmd == "run-mlir") {
     composite::MutableSeries<char *> args;
     for (int ai = 0; ai < argc; ai++) args.append(argv[ai]);
-    std::vector<std::string> extra;
+    composite::MutableSeries<std::string> extra;
     if (cmd == "eval") extra = {"--eval", "--strict"};
     if (cmd == "parse") extra = {"--parse"};
     if (cmd == "emit-mlir") extra = {"--emit-mlir"};
@@ -825,7 +823,7 @@ int realMain(int argc, char **argv) {
     finishOptions(o);
     o.store.readOnly = true;
     auto store = std::make_shared<nixstore::Store>(o.store);
-    EvalState st(o.eval, store);
+    EvalState st(std::move(o.eval), store);
     composite::MutableSeries<std::pair<std::string, unsigned>> v;
     for (auto &e : st.baseEnv)
       if (e.getValue()->type == VType::PrimOp) v.append({e.getKey().str(), e.getValue()->primOp->arity});

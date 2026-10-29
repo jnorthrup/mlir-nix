@@ -250,7 +250,7 @@ struct Store {
   /// Add a symlink GC root.
   void addPermRoot(const std::string &storePath, const std::string &link);
 
-  bool collectGarbage(bool dryRun, std::vector<std::string> &deleted);
+  bool collectGarbage(bool dryRun, composite::MutableSeries<std::string> &deleted);
   bool deletePath(const std::string &path);
 
   std::function<void(const std::string &)> log;

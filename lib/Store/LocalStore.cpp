@@ -645,7 +645,7 @@ bool Store::deletePath(const std::string &path) {
   return true;
 }
 
-bool Store::collectGarbage(bool dryRun, std::vector<std::string> &deleted) {
+bool Store::collectGarbage(bool dryRun, composite::MutableSeries<std::string> &deleted) {
   std::set<std::string> roots;
   std::function<void(const std::string &)> scanRoots = [&](const std::string &dir) {
     DIR *d = opendir(dir.c_str());
@@ -698,7 +698,7 @@ bool Store::collectGarbage(bool dryRun, std::vector<std::string> &deleted) {
         deletePathRecursive(toReal(*it));
         unlink(infoFile(*it).c_str());
       }
-      deleted.push_back(*it);
+      deleted.append(*it);
       it = remaining.erase(it);
       progress = true;
     }

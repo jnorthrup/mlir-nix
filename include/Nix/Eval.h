@@ -326,7 +326,7 @@ struct SearchPathElem {
 };
 
 struct EvalSettings {
-  std::vector<SearchPathElem> nixPath;
+  composite::MutableSeries<SearchPathElem> nixPath;
   std::string currentSystem;
   bool pureEval = false;
   bool restrictEval = false;
@@ -756,7 +756,7 @@ struct EvalState {
   void statSelect(const void *site, const Bindings *b, Symbol key, bool dynamic);
   // MLNIX_STATS: a recycling allocator for frames, simulated.  A frame that returns with nothing made over it (no thunk, no closure) can never be
   // reached again, so its storage could serve the next frame of the same slot count; simFree counts those, per slot count.
-  std::vector<std::vector<uint64_t>> simFree;   // per slot count: the allocation clock at each release (a stack: the newest is reused first)
+  composite::MutableSeries<composite::MutableSeries<uint64_t>> simFree;   // per slot count: the allocation clock at each release (a stack: the newest is reused first)
   uint64_t allocClock() const { return nFrameBytes + nVT[14] * sizeof(Value) + nBindingBytes + nListBytes + nStringBytes; }
   uint64_t nSimReuseDist[5] = {};               // reuse distance in bytes allocated since the release: < 32 KiB, < 256 KiB, < 2 MiB, < 32 MiB, more
   uint64_t nSimHit = 0, nSimHitBytes = 0, nSimReleased = 0, nSimReleasedBytes = 0, nSimCaptured = 0;
