@@ -560,13 +560,13 @@ void registerBuiltins(EvalState &state) {
   S.addPrimOp("__getContext", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
     NixStringContext ctx;
     st.forceString(*args[0], ctx, pos, "while evaluating the argument passed to builtins.getContext");
-    struct Info { bool path = false, all = false; std::vector<std::string> outputs; };
+    struct Info { bool path = false, all = false; composite::MutableSeries<std::string> outputs; };
     std::map<std::string, Info> m;
     for (auto &c : ctx) {
       if (c[0] == '=') m[c.substr(1)].all = true;
       else if (c[0] == '!') {
         auto p = c.find('!', 1);
-        m[c.substr(p + 1)].outputs.push_back(c.substr(1, p - 1));
+        m[c.substr(p + 1)].outputs.append(c.substr(1, p - 1));
       } else m[c].path = true;
     }
     EvalState::BindingsBuilder bb(st);
@@ -819,13 +819,13 @@ void registerBuiltins(EvalState &state) {
   });
   S.addPrimOp("__filter", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.filter");
-    std::vector<Value *> res;
+    composite::MutableSeries<Value *> res;
     bool same = true;
     for (size_t i = 0; i < args[1]->listSize(); i++) {
       Value r;
       st.callFunction(*args[0], *args[1]->list.elems[i], r, pos);
       if (st.forceBool(r, pos, "while evaluating the return value of the filtering function passed to builtins.filter"))
-        res.push_back(args[1]->list.elems[i]);
+        res.append(args[1]->list.elems[i]);
       else same = false;
     }
     if (same) { v = *args[1]; return; }
@@ -939,10 +939,10 @@ void registerBuiltins(EvalState &state) {
     if (!op) throw EvalError("attribute 'operator' missing", pos);
     std::vector<Value *> work(ss->value->list.elems, ss->value->list.elems + ss->value->listSize());
     std::reverse(work.begin(), work.end());
-    std::vector<Value *> res;
+    composite::MutableSeries<Value *> res;
     auto cmp = [&](Value *a, Value *b) { return st.lessThan(*a, *b, pos); };
     std::set<Value *, decltype(cmp)> done(cmp);
-    std::vector<Value *> queue(ss->value->list.elems, ss->value->list.elems + ss->value->listSize());
+    composite::MutableSeries<Value *> queue(ss->value->list.elems, ss->value->list.elems + ss->value->listSize());
     size_t qi = 0;
     while (qi < queue.size()) {
       Value *e = queue[qi++];
@@ -952,11 +952,11 @@ void registerBuiltins(EvalState &state) {
       st.forceValue(*key->value, pos);
       if (done.count(key->value)) continue;
       done.insert(key->value);
-      res.push_back(e);
+      res.append(e);
       Value r;
       st.callFunction(*op->value, *e, r, pos);
       st.forceList(r, pos, "while evaluating the return value of the `operator` passed to builtins.genericClosure");
-      for (size_t i = 0; i < r.listSize(); i++) queue.push_back(r.list.elems[i]);
+      for (size_t i = 0; i < r.listSize(); i++) queue.append(r.list.elems[i]);
     }
     st.mkList(v, res);
   });

@@ -84,14 +84,14 @@ struct Bands {
 struct Layers {
   explicit Layers(Bands &b) : out(b) {}
   void open(Kind k, size_t at) {
-    stack.push_back({out.rows.append(join::TwInt(uint32_t(at), 0), uint8_t(k), join::TwInt()), 0, uint32_t(pend.size())});
+    stack.append({out.rows.append(join::TwInt(uint32_t(at), 0), uint8_t(k), join::TwInt()), 0, uint32_t(pend.size())});
     out.opening.try_emplace(uint32_t(at), stack.back().row);
   }
   /// Close the innermost band at `at`; it must be of kind `a` or `b`.
   bool close(Kind a, Kind b, size_t at) {
     if (stack.empty() || (out.kind(stack.back().row) != a && out.kind(stack.back().row) != b)) return false;
     Open o = stack.back();
-    stack.pop_back();
+    stack.pop();
     out.rows.col<BandCol::Span>()[o.row] = join::TwInt(out.span(o.row).first(), uint32_t(at));
     out.rows.col<BandCol::Stmts>()[o.row] = join::TwInt(out.ends.size(), uint32_t(pend.size() - o.from));
     out.ends.cells.insert(out.ends.cells.end(), pend.begin() + o.from, pend.end());
@@ -103,10 +103,10 @@ struct Layers {
   void semi(size_t at) {
     uint32_t &owed = stack.empty() ? owedRoot : stack.back().owed;
     if (owed) owed--;
-    else if (!stack.empty()) pend.push_back(uint32_t(at));
+    else if (!stack.empty()) pend.append(uint32_t(at));
   }
   void comma(size_t at) {
-    if (!stack.empty()) pend.push_back(uint32_t(at));
+    if (!stack.empty()) pend.append(uint32_t(at));
   }
   bool inside(Kind k) const { return !stack.empty() && out.kind(stack.back().row) == k; }
   bool balanced() const { return stack.empty(); }
@@ -115,8 +115,8 @@ struct Layers {
     uint32_t row, owed, from; // the band, the semicolons it is owed, where its ends begin in `pend`
   };
   Bands &out;
-  std::vector<Open> stack;
-  std::vector<uint32_t> pend;
+  composite::MutableSeries<Open> stack;
+  composite::MutableSeries<uint32_t> pend;
   uint32_t owedRoot = 0;
 };
 

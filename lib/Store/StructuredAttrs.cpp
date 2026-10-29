@@ -5,6 +5,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "Composite/Series.h"
 #include "Nix/Store.h"
 
 #include <cmath>
@@ -20,7 +21,7 @@ struct JV {
   enum T { Null, Bool, Num, Str, Arr, Obj } t = Null;
   bool b = false;
   std::string raw; // number text or string value
-  std::vector<JV> arr;
+  composite::MutableSeries<JV> arr;
   std::map<std::string, JV> obj;
 };
 
@@ -95,7 +96,7 @@ struct P {
       ws();
       if (s[p] == ']') { p++; return v; }
       while (true) {
-        v.arr.push_back(val());
+        v.arr.append(val());
         ws();
         if (s[p] == ',') { p++; continue; }
         p++;

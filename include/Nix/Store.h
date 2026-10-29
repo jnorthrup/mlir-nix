@@ -273,7 +273,7 @@ std::string jsonEscape(std::string_view s);
 /// Number formatting as done by nlohmann::json for doubles.
 std::string jsonFloat(double d);
 /// Run a program, capturing stdout. Returns exit status.
-int runProgram(const std::string &prog, const std::vector<std::string> &args,
+int runProgram(const std::string &prog, const composite::MutableSeries<std::string> &args,
                std::string *out, const std::string *input = nullptr,
                const std::string &cwd = "");
 

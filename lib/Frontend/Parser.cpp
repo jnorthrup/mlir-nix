@@ -2440,7 +2440,7 @@ struct Parser {
 } // namespace
 
 std::string canonPath(std::string_view path) {
-  std::vector<std::string_view> parts;
+  composite::MutableSeries<std::string_view> parts;
   size_t i = 0;
   while (i < path.size()) {
     while (i < path.size() && path[i] == '/') i++;
@@ -2449,8 +2449,8 @@ std::string canonPath(std::string_view path) {
     std::string_view seg = path.substr(i, j - i);
     i = j;
     if (seg.empty() || seg == ".") continue;
-    if (seg == "..") { if (!parts.empty()) parts.pop_back(); continue; }
-    parts.push_back(seg);
+    if (seg == "..") { if (!parts.empty()) parts.pop(); continue; }
+    parts.append(seg);
   }
   if (parts.empty()) return "/";
   std::string out;

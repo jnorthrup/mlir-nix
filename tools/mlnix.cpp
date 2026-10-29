@@ -426,15 +426,15 @@ int runEvalCommandIn(Options &o, bool build, EvalState &st, std::shared_ptr<nixs
     return st.evalExprOp(op);
   };
 
-  std::vector<std::function<Value *()>> roots;
+  composite::MutableSeries<std::function<Value *()>> roots;
   if (o.readStdin) {
-    roots.push_back([&]() { return handleParsed(readStdin(), cwdPath(), "«stdin»", ""); });
+    roots.append([&]() { return handleParsed(readStdin(), cwdPath(), "«stdin»", ""); });
   } else if (o.fromArgs) {
-    for (auto &f : o.files) roots.push_back([&, f]() { return handleParsed(f, cwdPath(), "«string»", ""); });
+    for (auto &f : o.files) roots.append([&, f]() { return handleParsed(f, cwdPath(), "«string»", ""); });
   } else {
     if (o.files.empty()) o.files.append("./default.nix");
     for (auto &f : o.files)
-      roots.push_back([&, f]() -> Value * {
+      roots.append([&, f]() -> Value * {
         std::string p = lookupFileArg(st, f);
         if (o.findFile) {
           std::cout << p << "\n";
@@ -686,7 +686,7 @@ int cmdHash(int argc, char **argv, int start) {
   nixstore::HashAlgo algo = nixstore::HashAlgo::SHA256;
   nixstore::HashFormat fmt = nixstore::HashFormat::Base16;
   bool flat = false, sri = false;
-  std::vector<std::string> args;
+  composite::MutableSeries<std::string> args;
   bool algoGiven = false;
   for (int i = start; i < argc; i++) {
     std::string a = argv[i];
@@ -705,7 +705,7 @@ int cmdHash(int argc, char **argv, int start) {
     else if (a == "--to-base32" || a == "--to-nix32" || a == "--to-base16" || a == "--to-base64" || a == "--to-sri")
       mode = a;
     else if (a == "path" || a == "file") mode = a;
-    else args.push_back(a);
+    else args.append(a);
   }
   try {
     for (auto &a : args) {
@@ -733,11 +733,11 @@ int cmdHash(int argc, char **argv, int start) {
 
 int cmdDerivationShow(int argc, char **argv, int start) {
   Options o;
-  std::vector<std::string> args;
+  composite::MutableSeries<std::string> args;
   for (int i = start; i < argc; i++) {
     std::string a = argv[i];
     if (parseCommon(o, a, i, argc, argv)) continue;
-    args.push_back(a);
+    args.append(a);
   }
   finishOptions(o);
   nixstore::Store store(o.store);
@@ -802,7 +802,7 @@ int realMain(int argc, char **argv) {
   if (cmd == "instantiate") return cmdInstantiate(argc, argv, 2, false);
   if (cmd == "build") return cmdInstantiate(argc, argv, 2, true);
   if (cmd == "eval" || cmd == "parse" || cmd == "emit-mlir" || cmd == "run-mlir") {
-    std::vector<char *> args(argv, argv + argc);
+    composite::MutableSeries<char *> args(argv, argv + argc);
     std::vector<std::string> extra;
     if (cmd == "eval") extra = {"--eval", "--strict"};
     if (cmd == "parse") extra = {"--parse"};

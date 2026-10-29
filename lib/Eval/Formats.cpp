@@ -760,11 +760,11 @@ struct TomlParser {
     if (s.substr(p, 5) == "false" && !isBare(peek(5))) { p += 5; return &st.vFalse; }
     if (c == '[') {
       p++;
-      std::vector<Value *> elems;
+      composite::MutableSeries<Value *> elems;
       while (true) {
         wsAll();
         if (peek() == ']') { p++; break; }
-        elems.push_back(value());
+        elems.append(value());
         wsAll();
         if (peek() == ',') { p++; continue; }
         if (peek() == ']') { p++; break; }
@@ -979,11 +979,11 @@ static void parseFlakeRef(EvalState &st, std::string_view ref, Value &v, PosPtr 
   std::string scheme = colon == std::string::npos ? "" : s.substr(0, colon);
   if (scheme == "github" || scheme == "gitlab" || scheme == "sourcehut") {
     std::string rest = s.substr(colon + 1);
-    std::vector<std::string> parts;
+    composite::MutableSeries<std::string> parts;
     size_t i = 0;
     while (true) {
       size_t sl = rest.find('/', i);
-      parts.push_back(percentDecode(rest.substr(i, sl == std::string::npos ? std::string::npos : sl - i)));
+      parts.append(percentDecode(rest.substr(i, sl == std::string::npos ? std::string::npos : sl - i)));
       if (sl == std::string::npos) break;
       i = sl + 1;
     }

@@ -13,6 +13,7 @@
 #ifndef NIX_EVAL_H
 #define NIX_EVAL_H
 
+#include "Composite/Series.h"
 #include "Nix/MLIRGen.h"
 #include "Nix/Store.h"
 #include "NixDialect/NixDialect.h"
@@ -48,14 +49,14 @@ struct SymbolTable {
     if (it != map.end()) return it->second;
     Symbol id = names.size();
     auto r = map.try_emplace(s, id);
-    names.push_back(r.first->getKey());
+    names.append(r.first->getKey());
     return id;
   }
   llvm::StringRef operator[](Symbol s) const { return names[s]; }
   size_t size() const { return names.size(); }
 
   llvm::StringMap<Symbol> map;
-  std::vector<llvm::StringRef> names;
+  composite::MutableSeries<llvm::StringRef> names;
 };
 
 struct Value;
@@ -272,11 +273,11 @@ struct Trace {
 struct EvalError : std::exception {
   std::string msg;
   PosPtr pos = nullptr;
-  std::vector<Trace> traces;
+  composite::MutableSeries<Trace> traces;
   EvalError(std::string m, PosPtr p = nullptr) : msg(std::move(m)), pos(p) {}
   const char *what() const noexcept override { return msg.c_str(); }
   EvalError &addTrace(PosPtr p, std::string m) {
-    traces.push_back({p, std::move(m)});
+    traces.append({p, std::move(m)});
     return *this;
   }
 };

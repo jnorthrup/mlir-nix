@@ -33,6 +33,7 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <ranges>
 #include <tuple>
 #include <type_traits>
@@ -212,6 +213,11 @@ template <class A, class B, class S> constexpr auto select(A &&a, B &&b, S &&sel
 
 template <class T> struct MutableSeries {
   std::vector<T> cells;
+  MutableSeries() = default;
+  explicit MutableSeries(size_t n) : cells(n) {}
+  MutableSeries(size_t n, const T &v) : cells(n, v) {}
+  template <class It> requires(!std::is_integral_v<It>) MutableSeries(It b, It e) : cells(b, e) {}
+  MutableSeries(std::initializer_list<T> il) : cells(il) {}
   bool operator==(const MutableSeries &) const = default;
   constexpr uint32_t size() const { return uint32_t(cells.size()); }
   T &operator[](uint32_t i) { return cells[i]; }

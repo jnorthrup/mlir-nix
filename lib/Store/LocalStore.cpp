@@ -149,10 +149,10 @@ static void copyRecursive(const std::string &from, const std::string &to, const 
     if (mkdir(to.c_str(), 0755) != 0) throw Error("creating directory '" + to + "': " + strerror(errno));
     DIR *d = opendir(from.c_str());
     if (!d) throw Error("opening directory '" + from + "'");
-    std::vector<std::string> names;
+    composite::MutableSeries<std::string> names;
     while (auto *e = readdir(d)) {
       std::string n = e->d_name;
-      if (n != "." && n != "..") names.push_back(n);
+      if (n != "." && n != "..") names.append(n);
     }
     closedir(d);
     for (auto &n : names) {
@@ -325,22 +325,22 @@ void Store::fillInOutputPaths(Derivation &drv) {
 
 std::set<std::string> Store::computeFSClosure(const std::set<std::string> &paths, bool includeOutputs) {
   std::set<std::string> res;
-  std::vector<std::string> todo(paths.begin(), paths.end());
+  composite::MutableSeries<std::string> todo(paths.begin(), paths.end());
   while (!todo.empty()) {
     std::string p = todo.back();
-    todo.pop_back();
+    todo.pop();
     if (!res.insert(p).second) continue;
     if (auto info = queryPathInfo(p)) {
-      for (auto &r : info->references) todo.push_back(r);
+      for (auto &r : info->references) todo.append(r);
     } else if (drvCache.count(p)) {
       auto &d = drvCache[p];
-      for (auto &r : drvReferences(d)) todo.push_back(r);
+      for (auto &r : drvReferences(d)) todo.append(r);
     }
     if (includeOutputs && p.size() > 4 && p.substr(p.size() - 4) == ".drv") {
       try {
         Derivation d = readDerivation(p);
         for (auto &[n, o] : d.outputs)
-          if (!o.path.empty() && isValidPath(o.path)) todo.push_back(o.path);
+          if (!o.path.empty() && isValidPath(o.path)) todo.append(o.path);
       } catch (Error &) {
       }
     }
@@ -369,10 +369,10 @@ static std::set<std::string> scanForReferences(const std::string &path,
     } else if (S_ISDIR(st.st_mode)) {
       DIR *d = opendir(p.c_str());
       if (!d) return;
-      std::vector<std::string> names;
+      composite::MutableSeries<std::string> names;
       while (auto *e = readdir(d)) {
         std::string n = e->d_name;
-        if (n != "." && n != "..") names.push_back(n);
+        if (n != "." && n != "..") names.append(n);
       }
       closedir(d);
       for (auto &n : names) scan(p + "/" + n);
@@ -502,8 +502,8 @@ void Store::runBuilder(const std::string &drvPath, const Derivation &drv,
   const char *tmp = getenv("TMPDIR");
   std::string tmpBase = tmp && *tmp ? tmp : "/tmp";
   std::string tmpl = tmpBase + "/nix-build-" + drv.name + "-XXXXXX";
-  std::vector<char> buf(tmpl.begin(), tmpl.end());
-  buf.push_back('\0');
+  composite::MutableSeries<char> buf(tmpl.begin(), tmpl.end());
+  buf.append('\0');
   if (!mkdtemp(buf.data())) throw Error("creating build directory: " + std::string(strerror(errno)));
   std::string top = buf.data();
 
@@ -648,10 +648,10 @@ bool Store::collectGarbage(bool dryRun, std::vector<std::string> &deleted) {
   std::function<void(const std::string &)> scanRoots = [&](const std::string &dir) {
     DIR *d = opendir(dir.c_str());
     if (!d) return;
-    std::vector<std::string> names;
+    composite::MutableSeries<std::string> names;
     while (auto *e = readdir(d)) {
       std::string n = e->d_name;
-      if (n != "." && n != "..") names.push_back(n);
+      if (n != "." && n != "..") names.append(n);
     }
     closedir(d);
     for (auto &n : names) {

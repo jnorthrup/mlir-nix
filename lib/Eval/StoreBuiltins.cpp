@@ -439,14 +439,14 @@ static void fetchGit(EvalState &st, A args, Value &v, PosPtr pos) {
   if (!mkdtemp(tmpl)) throw EvalError("cannot create temporary directory", pos);
   std::string dir = std::string(tmpl) + "/checkout";
   std::string out;
-  std::vector<std::string> cloneArgs = {"clone", "--quiet"};
-  if (shallow && rev.empty()) cloneArgs.push_back("--depth=1");
+  composite::MutableSeries<std::string> cloneArgs = {"clone", "--quiet"};
+  if (shallow && rev.empty()) cloneArgs.append("--depth=1");
   if (!ref.empty() && rev.empty()) {
-    cloneArgs.push_back("--branch");
-    cloneArgs.push_back(ref.rfind("refs/heads/", 0) == 0 ? ref.substr(11) : ref);
+    cloneArgs.append("--branch");
+    cloneArgs.append(ref.rfind("refs/heads/", 0) == 0 ? ref.substr(11) : ref);
   }
-  cloneArgs.push_back(url);
-  cloneArgs.push_back(dir);
+  cloneArgs.append(url);
+  cloneArgs.append(dir);
   if (nixstore::runProgram("git", cloneArgs, &out) != 0) {
     nixstore::deletePathRecursive(tmpl);
     throw EvalError("failed to clone '" + url + "'", pos);

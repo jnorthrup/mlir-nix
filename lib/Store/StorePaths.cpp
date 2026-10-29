@@ -182,7 +182,7 @@ std::string jsonFloat(double d) {
   return neg ? "-" + out : out;
 }
 
-int runProgram(const std::string &prog, const std::vector<std::string> &args, std::string *out,
+int runProgram(const std::string &prog, const composite::MutableSeries<std::string> &args, std::string *out,
                const std::string *input, const std::string &cwd) {
   int outPipe[2], inPipe[2];
   if (pipe(outPipe) != 0) throw Error("pipe failed");
@@ -286,14 +286,14 @@ struct NarWriter {
     } else if (S_ISDIR(st.st_mode)) {
       str("type");
       str("directory");
-      std::vector<std::string> names;
+      composite::MutableSeries<std::string> names;
       nixprefetch::note('D', path.c_str());
       DIR *d = opendir(path.c_str());
       if (!d) throw Error("opening directory '" + path + "': " + strerror(errno));
       while (auto *e = readdir(d)) {
         std::string n = e->d_name;
         if (n == "." || n == "..") continue;
-        names.push_back(n);
+        names.append(n);
       }
       closedir(d);
       std::sort(names.begin(), names.end());
