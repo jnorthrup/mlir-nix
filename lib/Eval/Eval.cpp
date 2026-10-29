@@ -2826,6 +2826,12 @@ void EvalState::prelowerLoop() {
         go.pool = pl->pool.get();
         pl->mod = ModuleOp::create(UnknownLoc::get(&ctx));
         pl->op = nixfe::genExpr(*pl->mod, origin, pre->po, "expr", go);
+        // The default pipeline is devirtualization alone, which reads only the IR and the dialect's primop table: done here, off the
+        // evaluator's thread.  Another pipeline runs at adoption, where the prim folder (the evaluator's) can be called.
+        if (settings.optimize && pipelineText(settings) == "nix-prims") {
+          nd::devirtualizePrims(pl->op);
+          pl->optimized = true;
+        }
         pl->origin = origin;
         pl->ok = true;
       }
@@ -2862,7 +2868,7 @@ nd::ExprOp EvalState::takePrelowered(const std::string &resolved) {
   op.setSymName("expr" + std::to_string(exprCounter++));
   module->push_back(op);
   pl->mod = nullptr;
-  if (settings.optimize) {
+  if (settings.optimize && !pl->optimized) {
     if (!optimizer) optimizer = makeOptimizer(ctx, settings);
     if (mlir::failed(optimizer->run(op))) throw EvalError("the optimization pipeline failed");
   }

@@ -752,6 +752,7 @@ struct EvalState {
     mlir::nix::ExprOp op;
     std::unique_ptr<nixfe::FilePool> pool;
     bool done = false, ok = false;
+    bool optimized = false; // devirtualized by the helper (the demand schedule's whole pipeline): adoption runs no pass
   };
   struct PrelowerState {
     std::mutex m;

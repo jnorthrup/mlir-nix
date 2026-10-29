@@ -432,7 +432,9 @@ FrozenRewritePatternSet mlir::nix::makeDevirtualizePatterns(MLIRContext *ctx) {
 /// The single devirtualization rewrite on every call, then the cleanup of the callee computations it orphaned.  The calls are found by a
 /// walk that stops only at `nix.apply` and are rewritten directly: the pattern driver, asked of every op of every minted body, cost the
 /// evaluator 1.5% of its cycles for a rewrite that costs 0.04% (the pattern is the same function, for the nix-prims pass).
-void mlir::nix::devirtualizePrims(Operation *root, const FrozenRewritePatternSet &) {
+void mlir::nix::devirtualizePrims(Operation *root, const FrozenRewritePatternSet &) { devirtualizePrims(root); }
+
+void mlir::nix::devirtualizePrims(Operation *root) {
   llvm::SmallVector<ApplyOp, 32> calls;
   root->walk([&](ApplyOp op) { calls.push_back(op); });
   IRRewriter rw(root->getContext());
@@ -458,10 +460,6 @@ void mlir::nix::devirtualizePrims(Operation *root, const FrozenRewritePatternSet
       if (isa<BuiltinOp, SelectOp, StringOp>(d) && d->use_empty())
         work.push_back(d);
   }
-}
-
-void mlir::nix::devirtualizePrims(Operation *root) {
-  devirtualizePrims(root, makeDevirtualizePatterns(root->getContext()));
 }
 
 namespace {
