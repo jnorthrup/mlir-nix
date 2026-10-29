@@ -1235,6 +1235,9 @@ def main():
     checked = 0
     with tempfile.TemporaryDirectory(prefix="mlnix-jit-check-") as tmp:
         base = {k: v for k, v in os.environ.items() if not k.startswith("MLNIX_JIT")}
+        # The JIT gate exercises the JIT's selector tier; the interpreter's structural selector recognition takes those saturated
+        # calls first (no frame, no guards), so it is off here and tested by test/lang/eval-okay-selectors.nix instead.
+        base["MLNIX_NOSELECTORS"] = "1"
         for key in ("MLNIX_DEFER", "MLNIX_STATS", "MLNIX_PRIMS_IRDL", "MLNIX_PIPELINE"):
             base.pop(key, None)
         base.update(MLNIX_STORE_ROOT=tmp + "/root", MLNIX_STATE_DIR=tmp + "/state", NIX_REMOTE="dummy://")

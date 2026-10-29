@@ -492,3 +492,12 @@ takes 0.45 ms at level 0 against 1.85 ms at level 2, and 2M-call loops run at th
 level 0. `MLNIX_JIT_CLEAN=1` runs `canonicalize,cse,control-flow-sink` on the typed functions before lowering; it is opt-in
 because it measured no gain on these small kernels (4.5 to 4.8 ms before the optimization-level change, within noise or slightly slower).
 `MLNIX_JIT_PHASE=1` prints the three phase times per compile.
+
+## The selector shapes no longer reach the JIT (2026-10-28)
+
+`c: x: if c then [x] else []` and `c: x: if c then x else {}` (`lib.optional`, `lib.optionalAttrs`) are recognized by the structure of their
+IR when called with both arguments, and run with no frame, no closure and no guards (`EvalState::selectorShape`, off with
+`MLNIX_NOSELECTORS`). That is the JIT's pointer-selector tier's work done without compiling it, so those saturated calls are taken
+before the JIT is consulted and its selector counters stay at zero. `scripts/check-jit.py` runs with the recognition off so the JIT
+tier is still exercised; the recognition is tested by `test/lang/eval-okay-selectors.nix`, which real Nix 2.35.4 and Lix 2.91.3
+print identically.

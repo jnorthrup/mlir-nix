@@ -248,6 +248,7 @@ EvalState::EvalState(EvalSettings st, std::shared_ptr<nixstore::Store> store)
   statsEnabled = getenv("MLNIX_STATS") != nullptr;
   scalarJIT = ScalarJIT::create();
   settings.mapSources = !getenv("MLNIX_NOMMAP"); // ablation switch: read and copy every file, as before
+  selectorsOn = !getenv("MLNIX_NOSELECTORS"); // ablation switch: every curried selector runs as two calls, as before
   inPlaceEnabled = !getenv("MLNIX_NOINPLACE"); // ablation switch: every operand gets a thunk, as before
   settings.deferBodies = getenv("MLNIX_DEFER") != nullptr; // sea-of-nodes schedule: mint bodies on first call
   // The evaluator is single-threaded.  With threading enabled every attribute
@@ -333,6 +334,7 @@ void EvalState::printStats() {
                    << showPos(nd::posOfOp(top[i]->region->getParentOp())) << "\n";
     }
   }
+  llvm::errs() << "selector calls with no frame (lib.optional, lib.optionalAttrs shapes): " << nSelectorCalls << "\n";
   llvm::errs() << "curried intermediates held by value: " << nStackCells << " (" << nStackCells * sizeof(Value) << " bytes of heap cells not allocated)\n";
   llvm::errs() << "empty attribute sets: " << nEmptyShared << " shared as one constant (" << nEmptyShared * (sizeof(Bindings)) << " bytes not allocated)\n";
   llvm::errs() << "value allocations: count=" << nVT[14] << " bytes=" << nVT[14] * sizeof(Value) << '\n';
@@ -961,6 +963,34 @@ mlir::Attribute EvalState::foldPrimOp(llvm::StringRef key, llvm::ArrayRef<mlir::
   }
 }
 
+/// Which selector, if any, a curried lambda is, by the structure of its IR and not by its name or file: `c: x: if c then [x] else []`
+/// (shape 2, lib.optional) or `c: x: if c then x else {}` (shape 3, lib.optionalAttrs).  Both lambdas take one plain argument, the outer
+/// body is only the inner lambda, and the inner body is the `if` on the outer argument.  Anything else is shape 1.
+unsigned EvalState::selectorShape(nd::LambdaOp outerLam, RegionInfo *outer) {
+  if (outer->selShape) return outer->selShape;
+  outer->selShape = 1;
+  if (outerLam.getFormals()) return 1;
+  auto *innerOp = outer->result.getDefiningOp();
+  auto inner = dyn_cast_or_null<nd::LambdaOp>(innerOp);
+  if (!inner || inner.getFormals()) return 1;
+  std::optional<uint64_t> deferred = inner.getBodyIndex();
+  RegionInfo *ri = deferred ? bodyOf(nixfe::BodyIndex(*deferred)) : regionInfo(&inner.getBody());
+  if (outer->region->front().getNumArguments() != 1 || ri->region->front().getNumArguments() != 1) return 1;
+  mlir::Value c = outer->region->front().getArgument(0), x = ri->region->front().getArgument(0);
+  auto iff = dyn_cast_or_null<nd::IfOp>(ri->result.getDefiningOp());
+  if (!iff || iff.getCond() != c) return 1;
+  outer->selPos = nd::posOfOp(iff);
+  mlir::Operation *no = iff.getElseValue().getDefiningOp();
+  if (auto list = dyn_cast_or_null<nd::ListOp>(iff.getThenValue().getDefiningOp())) {
+    auto none = dyn_cast_or_null<nd::ListOp>(no);
+    if (none && none.getElements().empty() && list.getElements().size() == 1 && list.getElements()[0] == x) return outer->selShape = 2;
+  } else if (iff.getThenValue() == x) {
+    auto none = dyn_cast_or_null<nd::AttrsOp>(no);
+    if (none && none.getNames().empty() && none.getDynNames().empty()) return outer->selShape = 3;
+  }
+  return 1;
+}
+
 void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out, PosPtr pos, bool allowCurried) {
   Value *cur = &fun;
   size_t i = 0;
@@ -976,6 +1006,28 @@ void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out,
   }
   while (true) {
     forceValue(*cur, pos);
+    if (selectorsOn && cur->type == VType::Lambda && nargs - i >= 2) {
+      auto lam = cast<nd::LambdaOp>(cur->thunk.op);
+      if (!lam.getFormals()) {
+        std::optional<uint64_t> deferred = lam.getBodyIndex();
+        RegionInfo *ori = deferred ? bodyOf(nixfe::BodyIndex(*deferred)) : regionInfo(&lam.getBody());
+        if (unsigned shape = selectorShape(lam, ori); shape >= 2) {
+          // `c: x: if c then ... else ...`: the same work as the two calls, with the frames and the closure between them gone
+          Value *dest = (i + 2 == nargs) ? &out : allocValue();
+          if (forceBool(*args[i], ori->selPos, "while evaluating a branch condition")) {
+            if (shape == 2) { mkList(*dest, 1); dest->list.elems[0] = args[i + 1]; }
+            else { forceValue(*args[i + 1], pos); *dest = *args[i + 1]; }
+          } else {
+            *dest = shape == 2 ? vEmptyList : vEmptyAttrs;
+          }
+          if (statsEnabled) ++nSelectorCalls;
+          i += 2;
+          if (i >= nargs) return;
+          cur = dest;
+          continue;
+        }
+      }
+    }
     if (allowCurried && scalarJIT && nargs - i >= 2 && nargs - i <= 4 && cur->type == VType::Lambda) {
       auto lambda = cast<nd::LambdaOp>(cur->thunk.op);
       if (!lambda.getFormals() && scalarJIT->acceptsSaturated(nullptr)) {
