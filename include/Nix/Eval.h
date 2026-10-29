@@ -595,6 +595,7 @@ struct EvalState {
   uint64_t nStackable = 0, nStackableBytes = 0, nStackableOneSlot = 0; // MLNIX_STATS: frames (and their bytes) of bodies that cannot leak their frame
   uint64_t nTouchedBy[6] = {}; // MLNIX_STATS: slots ever read, by the slot count of their frame (1, 2-3, 4-8, 9-16, 17-64, 65+)
   std::vector<Frame *> statFrames; // MLNIX_STATS: every frame made, each followed by a mask of the slots ever read (bit i = slot i)
+  uint64_t nBindingBytes = 0, nListBytes = 0, nStringBytes = 0; // MLNIX_STATS: arena bytes by use (values and frames are counted above)
   uint64_t nSelectorCalls = 0; // MLNIX_STATS: saturated calls of a recognized selector, made with no frame and no closure
   bool selectorsOn = true;     // MLNIX_NOSELECTORS turns the recognition off
   unsigned selectorShape(mlir::nix::LambdaOp outerLam, RegionInfo *outer);

@@ -53,8 +53,26 @@ The reads are scattered: a quarter to a third of the slots are read but half to 
 The best chunking (4 slots) saves 10.5 MB of nixos-toplevel's 1.2 GB peak (0.9%) and 38.7 MB of nixpkgs-drvs (about 3%), and every
 read of a slot would pay the table indirection. It is not worth building.
 
-## What is left
+## What the peak is made of
 
-Frames are about a quarter of the peak and neither stack frames (under 1%) nor sparse frames (1 to 3%) take much of it. The other
-three quarters are value cells (12.2M of 24 bytes on nixos-toplevel), attribute rows, the IR of the lowered files and the parsed
-sources; none of those has been accounted this way yet.
+`MLNIX_STATS=1` now prints the arena against the process's peak RSS. Everything the evaluator builds is in one never-freed bump arena
+(`include/Nix/Arena.h`). nixos-toplevel, demand schedule (a stats run: the per-frame masks of the census above add to the arena and the
+RSS, so the percentages are against 1,363 MB, not the 1,203 MB of an ordinary run):
+
+| | MB | of the arena | of peak RSS |
+|---|---:|---:|---:|
+| Value cells (12.2M of 24 bytes) | 280 | 33% | 21% |
+| frames | 294 | 34% | 22% |
+| attribute rows | 92 | 11% | 7% |
+| string bytes | 38 | 4% | 3% |
+| list cells | 14 | 2% | 1% |
+| other, slab slack and the census masks | 143 | 17% | 10% |
+| **arena (slabs)** | **861** | | **63%** |
+| outside the arena: lowered IR, parsed sources, the MLIR context | about 500 | | 37% |
+
+nixpkgs-drvs: 820 MB of slabs against 1,205 MB (68%), values 235, frames 260, attribute rows 79, strings 47, lists 12.
+
+Values and frames are two thirds of the arena and about half of all memory. Neither stack frames (under 1% of peak) nor sparse frames
+(1 to 3%) take much of the frames; the cells that would fall to a strictness analysis (27 to 32% of real thunks are never forced) are
+the value half, and the frames that fall to a `lib` continent are the other. The IR and the parsed sources are the 37% outside the
+arena and have not been accounted by use.

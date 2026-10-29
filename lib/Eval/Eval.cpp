@@ -1,5 +1,6 @@
 //===- Eval.cpp - Lazy evaluator over the nix dialect ---------------------===//
 
+#include <sys/resource.h>
 #include <map>
 #include "Composite/Series.h"
 #include "Nix/Prefetch.h"
@@ -171,6 +172,7 @@ Bindings *EvalState::updateAttrs(Bindings *a, Bindings *b) {
 }
 
 Bindings *EvalState::allocBindings(size_t n) {
+  if (statsEnabled) nBindingBytes += sizeof(Bindings) + n * sizeof(Attr);
   void *mem = alloc.Allocate(sizeof(Bindings) + n * sizeof(Attr), alignof(Bindings));
   auto *b = new (mem) Bindings();
   b->size_ = 0;
@@ -193,10 +195,12 @@ Bindings *EvalState::BindingsBuilder::finish() {
 
 Value **EvalState::allocList(size_t n) {
   if (!n) return nullptr;
+  if (statsEnabled) nListBytes += n * sizeof(Value *);
   return static_cast<Value **>(alloc.Allocate(n * sizeof(Value *), alignof(Value *)));
 }
 
 const char *EvalState::copyString(std::string_view s) {
+  if (statsEnabled) nStringBytes += s.size() + 1;
   char *p = static_cast<char *>(alloc.Allocate(s.size() + 1, 1));
   memcpy(p, s.data(), s.size());
   p[s.size()] = 0;
@@ -409,6 +413,20 @@ void EvalState::printStats() {
       llvm::errs() << llvm::format("   %u-slot chunks: %5.1f%% touched, storage %7.1f MB  (saves %6.1f MB = %5.1f%% of those frames)\n", sizes[k],
                                    totalBy[k] ? 100.0 * touchedBy[k] / totalBy[k] : 0.0, chunkedBy[k] / 1048576.0,
                                    (double(flat) - double(chunkedBy[k])) / 1048576.0, flat ? 100.0 * (double(flat) - double(chunkedBy[k])) / double(flat) : 0.0);
+  }
+  if (nFrames) {
+    auto mb = [](uint64_t b) { return b / 1048576.0; };
+    struct rusage ru; getrusage(RUSAGE_SELF, &ru);
+#ifdef __APPLE__
+    double rss = mb(ru.ru_maxrss);
+#else
+    double rss = ru.ru_maxrss / 1024.0;
+#endif
+    uint64_t values = nVT[14] * sizeof(Value), named = values + nFrameBytes + nBindingBytes + nListBytes + nStringBytes;
+    uint64_t handed = alloc.getTotalMemory();  // the slabs, which is what the pages are
+    llvm::errs() << llvm::format("== arena: %.0f MB of slabs; peak RSS %.0f MB. By use: values %.0f (%llu cells), frames %.0f, attribute rows %.0f, list cells %.0f, string bytes %.0f, other and slack %.0f MB\n",
+                                 mb(handed), rss, mb(values), (unsigned long long)nVT[14], mb(nFrameBytes), mb(nBindingBytes), mb(nListBytes),
+                                 mb(nStringBytes), mb(handed > named ? handed - named : 0));
   }
   llvm::errs() << "selector calls with no frame (lib.optional, lib.optionalAttrs shapes): " << nSelectorCalls << "\n";
   llvm::errs() << "curried intermediates held by value: " << nStackCells << " (" << nStackCells * sizeof(Value) << " bytes of heap cells not allocated)\n";
