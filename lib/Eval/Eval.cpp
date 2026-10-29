@@ -1071,8 +1071,7 @@ unsigned EvalState::srcClassOf(RegionInfo *ri) {
 /// Can a call of this body run on a stack frame?  Yes when nothing in it can make a thunk, a closure, a list or a set over the frame (a
 /// lazy operand is a thunk whose env is the frame, and the callee or the result may keep it) and it holds no cell but its argument: only
 /// strict ops, whose operands are read in place.  Such a call allocates nothing in the never-freed arena.
-bool EvalState::stackFrameOK(RegionInfo *ri) {
-  if (ri->stackable != 2) return ri->stackable == 1;
+bool EvalState::classifyStackFrame(RegionInfo *ri) {
   ri->stackable = 0;
   if (ri->numSlots > 1) return false;
   // The rule is the dialect's, not a list of names: an op whose every operand is strict or tail (its NixModes, or nix.strict on a continent
@@ -1145,7 +1144,7 @@ void EvalState::statReturn(Frame *f) {
   trySimRelease(*this, f);
 }
 
-Frame *EvalState::newFrame(RegionInfo *ri, Frame *up) {
+Frame *EvalState::newFrameSlow(RegionInfo *ri, Frame *up) {
   if (unsigned n = ri->numSlots; n < kRecycleMax && freeFrames[n] && !statsEnabled) {
     Frame *f = freeFrames[n];
     freeFrames[n] = reinterpret_cast<Frame *>(f->upBits);

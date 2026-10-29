@@ -704,7 +704,17 @@ struct EvalState {
   }
   void statEval(Node *n, Frame *env);
   RegionInfo *regionInfo(mlir::Region *r);
-  Frame *newFrame(RegionInfo *ri, Frame *up);
+  /// A frame of `ri`'s body: its slots empty.  The ordinary case (no census, no recycling) is a bump of the arena, here; the rest out of line.
+  Frame *newFrame(RegionInfo *ri, Frame *up) {
+    if (statsEnabled || recycleOn) [[unlikely]] return newFrameSlow(ri, up);
+    unsigned n = ri->numSlots;
+    auto *f = static_cast<Frame *>(alloc.Allocate(sizeof(Frame) + n * sizeof(Value *), alignof(Frame)));
+    f->upBits = reinterpret_cast<uintptr_t>(up);
+    f->info = ri;
+    memset(f->slots, 0, n * sizeof(Value *));
+    return f;
+  }
+  Frame *newFrameSlow(RegionInfo *ri, Frame *up);
 
   unsigned callDepth = 0;
   unsigned tryLevel = 0;
@@ -799,7 +809,9 @@ struct EvalState {
   uint64_t nTouchedBy[6] = {}; // MLNIX_STATS: slots ever read, by the slot count of their frame (1, 2-3, 4-8, 9-16, 17-64, 65+)
   uint64_t nBindingBytes = 0, nListBytes = 0, nStringBytes = 0; // MLNIX_STATS: arena bytes by use (values and frames are counted above)
   uint64_t nStackFrames = 0; // MLNIX_STATS: calls run on a stack frame, nothing allocated in the arena
-  bool stackFrameOK(RegionInfo *ri);
+  /// Can a call of this body run on a stack frame?  Decided at its first call (classifyStackFrame) and kept in the region.
+  bool stackFrameOK(RegionInfo *ri) { return ri->stackable == 2 ? classifyStackFrame(ri) : ri->stackable == 1; }
+  bool classifyStackFrame(RegionInfo *ri);
   /// The cell of `v` in frame `f` (or the enclosing frame of its region): a fixed one, or one its frame already holds, is found here; one to
   /// make (a thunk, a value evaluated now, a closure, a literal) is made out of line.
   Value *lookupImpl(Frame *f, Node *v, bool forced) {
