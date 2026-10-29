@@ -668,6 +668,13 @@ void EvalState::printStats() {
     for (size_t i = 0; i < ev.size() && i < 16; i++)
       llvm::errs() << "  " << llvm::format("%-26s", ev[i]->second.first.str().c_str()) << llvm::format("%12llu", (unsigned long long)ev[i]->second.second) << llvm::format("%7.1f%%", 100.0 * ev[i]->second.second / tot) << '\n';
   }
+  if (nMatchCalls) { // builtins.match: how often the same (regex, input) comes back, which a memo would answer without matching
+    uint64_t repeats = 0, regexes = 0;
+    llvm::StringMap<char> res;
+    for (auto &e : matchPairs) { repeats += e.getValue() - 1; res[e.getKey().split('\0').first] = 1; }
+    llvm::errs() << llvm::format("== builtins.match: %llu calls, %u distinct (regex, input) pairs over %u regexes; %llu calls (%.1f%%) repeat a pair already matched\n",
+                                 (unsigned long long)nMatchCalls, matchPairs.size(), res.size(), (unsigned long long)repeats, 100.0 * repeats / nMatchCalls);
+  }
   { // The IR the evaluator reads: ops evaluated, and how many bytes of MLIR operations hold the hottest of them (what a compact form would shrink).
     struct Hot { uint32_t evals; uint32_t bytes; };
     cp::MutableSeries<Hot> hot;

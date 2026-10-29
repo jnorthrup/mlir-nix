@@ -771,6 +771,9 @@ struct EvalState {
   // by how many distinct signatures it has seen.
   struct SelSite { uint64_t calls = 0, hits = 0, sameAsLast = 0, last = 0; cp::MutableSeries<uint64_t, cp::Inline<uint64_t, 6>> seen; bool dynamic = false; };
   llvm::DenseMap<const void *, SelSite> selSites;
+  uint64_t nMatchCalls = 0; llvm::StringMap<uint64_t> matchPairs; // MLNIX_STATS: builtins.match calls, by (regex, input)
+  llvm::StringMap<Value> matchMemo; // builtins.match's answers, keyed by the pattern's length and bytes, then the input's
+  std::string matchKey;             // the key of the call at hand, built here so a lookup allocates nothing
   uint64_t nSelects = 0, nSelectHits = 0, nSelectDyn = 0, nSelectLayered = 0, nSelectProbes = 0, nSelectSizeLog[18] = {};
   void statSelect(const void *site, const Bindings *b, Symbol key, bool dynamic);
   // MLNIX_STATS: a recycling allocator for frames, simulated.  A frame that returns with nothing made over it (no thunk, no closure) can never be

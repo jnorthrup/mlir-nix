@@ -76,16 +76,16 @@ static int compareVersions(std::string_view v1, std::string_view v2) {
 // Regex cache
 //===----------------------------------------------------------------------===//
 
-static std::regex &getRegex(EvalState &st, const std::string &re, PosPtr pos) {
-  static std::map<std::string, std::regex> cache;
-  auto it = cache.find(re);
+static std::regex &getRegex(EvalState &st, std::string_view re, PosPtr pos) {
+  static llvm::StringMap<std::regex> cache; // looked up by the pattern's bytes as they lie: a call copies nothing
+  auto it = cache.find(llvm::StringRef(re.data(), re.size()));
   if (it != cache.end()) return it->second;
   try {
-    return cache.emplace(re, std::regex(re, std::regex::extended)).first->second;
+    return cache.try_emplace(llvm::StringRef(re.data(), re.size()), std::string(re), std::regex::extended).first->second;
   } catch (std::regex_error &e) {
     if (e.code() == std::regex_constants::error_space)
-      throw EvalError("memory limit exceeded by regular expression '" + re + "'", pos);
-    throw EvalError("invalid regular expression '" + re + "'", pos);
+      throw EvalError("memory limit exceeded by regular expression '" + str(re) + "'", pos);
+    throw EvalError("invalid regular expression '" + str(re) + "'", pos);
   }
 }
 
@@ -475,17 +475,29 @@ void registerBuiltins(EvalState &state) {
     st.mkString(v, res, ctx);
   });
   S.addPrimOp("__match", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
-    auto re = str(st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.match"));
+    auto re = st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.match");
     std::regex &regex = getRegex(st, re, pos);
     NixStringContext ctx;
     std::string scratch;
     auto s = composite::view(st.coerceToWindow(*args[1], ctx, false, true, pos, "while evaluating the second argument passed to builtins.match", scratch));
+    if (st.statsEnabled) [[unlikely]] { ++st.nMatchCalls; ++st.matchPairs[str(re) + '\0' + str(s)]; }
+    // The answer is a function of the pattern's bytes and the input's, and it is a value nothing writes (null, or a list of strings with no
+    // context): a pair met before is answered from the memo, keyed by its content, built in a buffer that is reused (more than half of the
+    // calls of a NixOS evaluation repeat a pair).
+    std::string &key = st.matchKey; // the pattern's length, the pattern, the input: no two pairs share a key
+    uint32_t rlen = uint32_t(re.size());
+    key.assign(reinterpret_cast<const char *>(&rlen), sizeof rlen);
+    key.append(re.data(), re.size());
+    key.append(s.data(), s.size());
+    auto memo = st.matchMemo.find(key);
+    if (memo != st.matchMemo.end()) { v = memo->second; return; }
     std::cmatch m;
-    if (!std::regex_match(s.data(), s.data() + s.size(), m, regex)) { st.mkNull(v); return; }
-    st.mkList(v, uint32_t(m.size() - 1) |cp::j| [&](uint32_t i) { return groupValue(st, m[i + 1]); });
+    if (!std::regex_match(s.data(), s.data() + s.size(), m, regex)) st.mkNull(v);
+    else st.mkList(v, uint32_t(m.size() - 1) |cp::j| [&](uint32_t i) { return groupValue(st, m[i + 1]); });
+    st.matchMemo.try_emplace(key, v);
   });
   S.addPrimOp("__split", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
-    auto re = str(st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.split"));
+    auto re = st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.split");
     std::regex &regex = getRegex(st, re, pos);
     NixStringContext ctx;
     std::string scratch;
