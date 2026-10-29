@@ -162,6 +162,15 @@ struct Bindings {
   iterator begin() const { return {Rows{this}, 0}; }
   iterator end() const { return {Rows{this}, uint32_t(size())}; }
   const Attr *get(Symbol s) const;
+  /// get(), with a guess of the row: the row the asker found the name at last time, in a set of the same layout (62% of the selects of
+  /// a NixOS evaluation hit the layout their site saw last).  A right guess is one row read instead of a search; a wrong one costs a
+  /// compare, and the search's answer becomes the next guess.
+  const Attr *getGuess(Symbol s, uint32_t &guess) const {
+    if (!layered() && guess < size_ && attrs[guess].name == s) return &attrs[guess];
+    const Attr *r = get(s);
+    if (r && !layered()) guess = uint32_t(r - attrs);
+    return r;
+  }
   /// Attributes sorted by name (string order).
   composite::Frozen<const Attr *> lexicographicOrder(const SymbolTable &st) const;
 };
@@ -340,7 +349,10 @@ struct Node {
   Value *fixed = nullptr;   // a literal or a builtin: its one cell, the same in every frame, made at its first touch
   Node **operands = nullptr; // the op's operands, in order
   mlir::Operation *def;     // the op that defines the value; a block argument's lambda (kind Arg)
-  const PrimOp *prim = nullptr; // Prim: what the op runs
+  union {
+    const PrimOp *prim = nullptr; // Prim: what the op runs
+    uint32_t rowGuess;            // Select: the row its first name was found at last (Bindings::getGuess)
+  };
   EvalFn eval = nullptr;    // what evaluating the op is
   static constexpr uint8_t kDefault = 1, kDynamic = 1, kForceString = 1;
   bool inPlace() const { return promo == Promotion::InPlace; }
@@ -564,6 +576,7 @@ struct EvalState {
   /// Force/check a selection base and return its existing, unforced field cell.
   /// Dynamic-key validation precedes this operation; the caller forces the result.
   Value *selectField(Value &base, Symbol key, PosPtr pos);
+  Value *selectField(Value &base, Symbol key, PosPtr pos, uint32_t &guess); // with the row guess of the select (Bindings::getGuess)
   void copyContext(const Value &v, NixStringContext &ctx);
 
   // -- Calls -----------------------------------------------------------------

@@ -2095,6 +2095,14 @@ Symbol EvalState::pathSymbol(const nixfe::Name &comp, Node *const *dyn, unsigned
   return symbolOfString(forceStringNoCtx(*lookup(env, dyn[nextDyn++]), pos, "while evaluating an attribute name"));
 }
 
+Value *EvalState::selectField(Value &base, Symbol key, PosPtr pos, uint32_t &guess) {
+  forceValue(base, pos);
+  if (base.type != VType::Attrs)
+    throwTypeError("a set", base, pos, "while selecting an attribute");
+  if (const Attr *attr = base.attrs->getGuess(key, guess)) return attr->value;
+  throwAttrMissing(symbols[key], pos);
+}
+
 Value *EvalState::selectField(Value &base, Symbol key, PosPtr pos) {
   forceValue(base, pos);
   if (base.type != VType::Attrs)
@@ -2142,18 +2150,21 @@ void evalSelect(EvalState &st, Node *n, Frame *env, Value &out) {
   Value tb;
   Value *cur = dynamic ? st.lookup(env, x[0]) : &st.operand(env, x[0], tb);
   unsigned nextDyn = 0;
+  bool first = true; // the first name has the node's row guess
   for (const nixfe::Name &comp : cast<nd::SelectOp>(n->def).getPath()) {
     Symbol sym = st.pathSymbol(comp, dyn, nextDyn, env, pos);
     if (!def) {
       Value *baseV = cur;
-      cur = st.selectField(*cur, sym, pos);
+      cur = first ? st.selectField(*cur, sym, pos, n->rowGuess) : st.selectField(*cur, sym, pos);
+      first = false;
       if (st.statsEnabled) st.statSelect(n->def, baseV->attrs, sym, dynamic);
       continue;
     }
     st.forceValue(*cur, pos);
     if (cur->type != VType::Attrs) return copyFrom(st, st.lookupImpl(env, def, true), out, pos);
     if (st.statsEnabled) st.statSelect(n->def, cur->attrs, sym, dynamic);
-    const Attr *a = cur->attrs->get(sym);
+    const Attr *a = first ? cur->attrs->getGuess(sym, n->rowGuess) : cur->attrs->get(sym);
+    first = false;
     if (!a) return copyFrom(st, st.lookupImpl(env, def, true), out, pos);
     cur = a->value;
   }
