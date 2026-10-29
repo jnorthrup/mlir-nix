@@ -134,63 +134,14 @@ composite::Frozen<const Attr *> Bindings::lexicographicOrder(const SymbolTable &
   return std::move(v).freeze();  // sorted once, then only read: the handle's cells move into a const Series
 }
 
-/// `a // b`.  A small `b` next to a big `a` becomes a layer that DEPENDS on `a` (nothing of `a` is copied, and `a` may
-/// itself be a layer, so a chain of `//` stays a chain); otherwise the two are merged into one flat set.  The chain is
-/// bounded (`kMaxDepth`): past it, and when `b` is no longer small, the chain is materialised and merged.
+/// `a // b`: the two merged into one flat set, as Nix does.  A set that is a chain of layers over its base (a `//` that copied nothing) was
+/// measured slower to read than it was to copy: every lookup walked the chain, a miss a level, and every `//` over it walked the base's
+/// rows through the chain to build its selection (Mac, same outputs: toplevel -2.5%, nixpkgs-73 -7% when merged flat; peak memory +5% and
+/// +13%).  A set made a layer before this is still read as one, and merged here as one.
 Bindings *EvalState::updateAttrs(Bindings *a, Bindings *b) {
-  constexpr size_t kMinBase = 32, kRatio = 8, kMaxDepth = 6;
   b = b->flat();
   if (a->layered() && a->layer().flat) a = a->layer().flat;
-  size_t depth = a->layered() ? a->layer().depth : 0;
-  size_t baseSize = a->size();
-  if (statsEnabled) {
-    if (baseSize >= kMinBase && b->size_ * kRatio <= baseSize && depth < kMaxDepth) { nUpdLayered++; nUpdBase += baseSize; nUpdTop += b->size_; }
-    else { nUpdMerged++; nUpdTop += baseSize + b->size_; }
-  }
-  if (baseSize >= kMinBase && b->size_ * kRatio <= baseSize && depth < kMaxDepth) {
-    uint32_t nsel = uint32_t(baseSize + b->size_); // the selection's words, at most one a row of either side: in the arena, as the layer is
-    if (statsEnabled) nLayerBytes += sizeof(Bindings) + sizeof(Bindings::Layer) + nsel * sizeof(uint32_t);
-    void *mem = alloc.Allocate(sizeof(Bindings) + sizeof(Bindings::Layer), alignof(Bindings));
-    auto *r = new (mem) Bindings();
-    r->size_ = Bindings::kLayered;
-    auto *words = static_cast<uint32_t *>(alloc.Allocate(nsel * sizeof(uint32_t), alignof(uint32_t)));
-    auto *L = new (static_cast<void *>(r->attrs)) Bindings::Layer{b, a, nullptr, &alloc, cp::Sel(words, nsel), uint32_t(depth + 1)};
-    // The rows of the layer, in name order, as a selection (Series.h `Bits`, the dialect's `trikeshed.select`): one bit a
-    // row, side 1 for the top.  Both sides are sorted and both are read as Series, so a `base` that is itself a layer is
-    // read through its own selection: one walk, no row copied, an equal name shadowed by the top.  The two names in the
-    // walk are carried, not re-read: a row is read once, in order, and the selection's memo (Series.h) serves each next
-    // row as a load and an add -- a re-read of the same row would jump, and a jump is a bisection over the shadows.
-    auto rb = a->rows();
-    auto rt = b->rows();
-    uint32_t nb = uint32_t(baseSize), nt = uint32_t(b->size_);
-    uint32_t i = 0, j = 0;
-    bool haveB = nb > 0, haveT = nt > 0;
-    Symbol bn{}, tn{};
-    if (haveB) bn = rb[0].name;
-    if (haveT) tn = rt[0].name;
-    while (haveB || haveT) {
-      if (!haveT || (haveB && bn < tn)) { // the base's row is smaller, or the top is spent
-        L->sel.append(i, false);
-        i++;
-        haveB = i < nb;
-        if (haveB) bn = rb[i].name;
-      } else if (!haveB || tn < bn) { // the top's row is smaller: it is inserted
-        L->sel.append(j, true);
-        j++;
-        haveT = j < nt;
-        if (haveT) tn = rt[j].name;
-      } else { // equal: the top's row wins, the base's is shadowed -- and simply not in the selection
-        L->sel.append(j, true);
-        i++;
-        j++;
-        haveB = i < nb;
-        if (haveB) bn = rb[i].name;
-        haveT = j < nt;
-        if (haveT) tn = rt[j].name;
-      }
-    }
-    return r;
-  }
+  if (statsEnabled) { nUpdMerged++; nUpdTop += a->size() + b->size_; }
   return mergeBindings(alloc, a->flat(), b);
 }
 
