@@ -118,9 +118,9 @@ static void checkSplit(Engine &k, const std::regex &re, const std::string &pat, 
   }
 }
 
-static std::string randomInput(std::mt19937 &rng, int r) {
+static std::string randomInput(std::mt19937 &rng, int r, int maxLen = 24) {
   std::string s;
-  int n = rng() % 24;
+  int n = rng() % maxLen;
   for (int i = 0; i < n; i++) s += alphabet[rng() % (sizeof alphabet - 1)];
   if (r % 7 == 0 && n > 2) s = std::string("mirror://gnu/") + s;
   if (r % 11 == 0) s = "a-" + s + ".service";
@@ -160,8 +160,17 @@ int main() {
     }
     if (!stdOk) { verdictFixed++; std::printf("  VERDICT /%s/: std rejects it, kursive takes it\n", pat); continue; }
     taken++;
+    // libstdc++ explores every path of a nested loop on an input that does not match: the corner patterns get short inputs only
+    bool corner = std::strstr(pat, ")*") || std::strstr(pat, ")+") || std::strstr(pat, "|)");
     for (const char *c : crafted) { checkMatch(k, re, pat, c); checkSplit(k, re, pat, c); }
-    for (int r = 0; r < 3000; r++) { std::string s = randomInput(rng, r); checkMatch(k, re, pat, s); if (r % 3 == 0) checkSplit(k, re, pat, s); }
+    for (int r = 0; r < (corner ? 600 : 3000); r++) {
+      std::string s = randomInput(rng, r, corner ? 10 : 24);
+      if (corner && s.size() > 10) s.resize(10);
+      checkMatch(k, re, pat, s);
+      if (r % 3 == 0) checkSplit(k, re, pat, s);
+    }
+    std::printf("  ok so far: /%s/ (%ld checks, %ld mismatches)\n", pat, tests, mismatches);
+    std::fflush(stdout);
   }
   // random patterns: the same verdict on errors, and the same answers where both take the pattern
   static const char meta[] = "ab()|*+?{}[]^$.\\-,12:"; // counts of one or two: libstdc++ explores every path, and a{3333} would take it hours
@@ -184,7 +193,7 @@ int main() {
     if (!stdOk) { agreeErr++; continue; }
     bothOk++;
     for (const char *c : crafted) checkMatch(k, re, pat, c);
-    for (int r = 0; r < 20; r++) { std::string s = randomInput(rng, r); checkMatch(k, re, pat, s); if (r % 4 == 0) checkSplit(k, re, pat, s); }
+    for (int r = 0; r < 20; r++) { std::string s = randomInput(rng, r, 10); checkMatch(k, re, pat, s); if (r % 4 == 0) checkSplit(k, re, pat, s); }
   }
   verdict += verdictFixed;
   std::printf("%s kursive: %d of %zu patterns taken; %ld match/split checks, %ld mismatches; random patterns: %ld both take, %ld both reject, "
