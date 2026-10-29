@@ -298,6 +298,7 @@ EvalState::EvalState(EvalSettings st, std::shared_ptr<nixstore::Store> store)
     : settings(std::move(st)), store(std::move(store)) {
   statsEnabled = getenv("MLNIX_STATS") != nullptr;
   recordEdges = statsEnabled && getenv("MLNIX_STATS_EDGES");
+  instrumented = statsEnabled || recordEdges;
   if (getenv("MLNIX_STATS_IMPORTS")) nixfe::pathLiterals = new std::unordered_set<std::string>();
   Bindings::countGets = statsEnabled;
   scalarJIT = ScalarJIT::create();
@@ -1199,7 +1200,7 @@ void EvalState::statHops(Frame *f, RegionInfo *ri, bool hit) {
   ++nLookups; nLookupHits += hit; ++nHopHist[h < 5 ? h : 5];
 }
 
-Value *EvalState::lookupImpl(Frame *f, Node *s, bool forced) {
+Value *EvalState::makeCell(Frame *f, Node *s, bool forced) {
   if (!s) unindexed();
   if (s->fixed) return s->fixed; // a literal or a builtin: no frame to find, no cell to fill
   RegionInfo *ri = s->ri;
@@ -1325,7 +1326,7 @@ void EvalState::epochTouch(const Value &v) {
   if (it != forcedBy.end() && it->second != cur) epochEdges.insert(uint64_t(it->second) << 32 | cur);
 }
 
-void EvalState::forceValue(Value &v, PosPtr pos) {
+void EvalState::forceCell(Value &v, PosPtr pos) {
   if (recordEdges && !epochEvals.empty()) [[unlikely]] epochTouch(v);
   if (statsEnabled && lastThunk) [[unlikely]] {
     if (&v == lastThunk && v.type == VType::Thunk) { ++nImmediate; ++immediateByOp[v.thunk.node->def->getName().getStringRef()]; }

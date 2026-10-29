@@ -534,7 +534,12 @@ struct EvalState {
   };
 
   // -- Forcing -------------------------------------------------------------
-  void forceValue(Value &v, PosPtr pos = nullptr);
+  /// A value is already one: the common case is a test, here; a cell that is not a value yet (or any cell, in an instrumented run) is
+  /// forced out of line, where the exception handling and the census live.
+  void forceValue(Value &v, PosPtr pos = nullptr) {
+    if (v.isThunk() || instrumented) forceCell(v, pos);
+  }
+  void forceCell(Value &v, PosPtr pos);
   /// The cell's evaluation threw this evaluation error, now in flight: the cell keeps it (VType::Failed).
   void fail(Value &v);
   [[noreturn]] void rethrowFailed(const Value &v);
@@ -642,6 +647,7 @@ struct EvalState {
   /// MLNIX_STATS=1: op histogram of every module lowered, printed at exit.
   llvm::StringMap<size_t> opStats;
   bool statsEnabled = false;
+  bool instrumented = false; // statsEnabled or recordEdges: forceValue always takes the out-of-line path
 
   /// The operand `v` of the op being evaluated in frame `f`, for a consumer that forces it
   /// right away and does not keep the Value (a `strict` operand, see NixModes).  When the
@@ -783,7 +789,20 @@ struct EvalState {
   uint64_t nBindingBytes = 0, nListBytes = 0, nStringBytes = 0; // MLNIX_STATS: arena bytes by use (values and frames are counted above)
   uint64_t nStackFrames = 0; // MLNIX_STATS: calls run on a stack frame, nothing allocated in the arena
   bool stackFrameOK(RegionInfo *ri);
-  Value *lookupImpl(Frame *f, Node *v, bool forced);
+  /// The cell of `v` in frame `f` (or the enclosing frame of its region): a fixed one, or one its frame already holds, is found here; one to
+  /// make (a thunk, a value evaluated now, a closure, a literal) is made out of line.
+  Value *lookupImpl(Frame *f, Node *v, bool forced) {
+    if (v && !statsEnabled) {
+      if (v->fixed) return v->fixed;
+      if (v->idx != kNoSlot) {
+        Frame *g = f;
+        while (g && g->info != v->ri) g = g->up();
+        if (g && g->slots[v->idx]) return g->slots[v->idx];
+      }
+    }
+    return makeCell(f, v, forced);
+  }
+  Value *makeCell(Frame *f, Node *v, bool forced);
   uint64_t nEager = 0;   // MLNIX_STATS
   // Frames that returned uncaptured, by slot count: a stack per size, linked through the frame's own first word.  The newest is reused first, so
   // a recycled frame is almost always still in L1 (docs/FRAME-BYTES.md: 97 to 98% of reuses are within 32 KiB of allocation).
