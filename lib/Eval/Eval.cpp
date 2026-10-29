@@ -230,9 +230,22 @@ void EvalState::mkString(Value &v, std::string_view s, const NixStringContext &c
 }
 
 void EvalState::mkStringOf(Value &v, llvm::ArrayRef<composite::Chars> pieces, const StringContext *ctx) {
-  size_t total = composite::fold(composite::series(pieces.data(), uint32_t(pieces.size())), size_t(0),
-                                 [](size_t n, const composite::Chars &p) { return n + p.size(); });
+  struct Sum { size_t total; uint32_t full; composite::Chars one; };
+  Sum sum = composite::fold(composite::series(pieces.data(), uint32_t(pieces.size())), Sum{0, 0, composite::chars("", 0)},
+                            [](Sum s, const composite::Chars &p) {
+                              if (p.size()) { s.full++; s.one = p; }
+                              s.total += p.size();
+                              return s;
+                            });
+  size_t total = sum.total;
   if (total > UINT32_MAX) throw EvalError("string of 4 GiB or more");
+  if (sum.full <= 1) { // nothing is joined to the one piece (or there is none): it is the string, its bytes shared, as a string is never written
+    v.type = VType::String; if (statsEnabled) ++nVT[unsigned(VType::String)];
+    v.str.s = sum.one.data();
+    v.aux = sum.one.size();
+    v.str.ctx = ctx;
+    return;
+  }
   char *buf = static_cast<char *>(alloc.Allocate(total + 1, 1));
   if (statsEnabled) nStringBytes += total + 1;
   char *at = composite::fold(composite::series(pieces.data(), uint32_t(pieces.size())), buf,
@@ -2036,6 +2049,15 @@ composite::Chars EvalState::coerceToWindow(Value &v, NixStringContext &ctx, bool
   if (v.type == VType::String) {
     copyContext(v, ctx);
     return v.window();
+  }
+  if (v.type == VType::Attrs) { // a set is the string its __toString returns or its outPath: a string value either way, so a window, not text made here
+    if (const Attr *f = v.attrs->get(s.toString)) {
+      Value *r = allocValue();
+      callFunction(*f->value, v, *r, nullptr);
+      return coerceToWindow(*r, ctx, coerceMore, copyToStore, nullptr, "while evaluating the result of the `__toString` attribute", scratch);
+    }
+    if (const Attr *o = v.attrs->get(s.outPath))
+      return coerceToWindow(*o->value, ctx, coerceMore, copyToStore, pos, "while evaluating the `outPath` attribute", scratch, canonicalizePath);
   }
   scratch = coerceToString(v, ctx, coerceMore, copyToStore, pos, errorCtx, canonicalizePath);
   return composite::chars(std::string_view(scratch));

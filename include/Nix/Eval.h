@@ -495,7 +495,8 @@ struct EvalState {
   std::string coerceToString(Value &v, NixStringContext &ctx, bool coerceMore, bool copyToStore,
                              PosPtr pos = nullptr, std::string_view errorCtx = "",
                              bool canonicalizePath = true);
-  // The same coercion as a window: a string is its own bytes in the arena (nothing copied); anything else is made in `scratch`, which the window views.
+  // The same coercion as a window: a string, and a set's __toString result or outPath, is its own bytes (nothing copied); anything else is made
+  // in `scratch`, which the window views.
   composite::Chars coerceToWindow(Value &v, NixStringContext &ctx, bool coerceMore, bool copyToStore, PosPtr pos,
                                        std::string_view errorCtx, std::string &scratch, bool canonicalizePath = true);
   std::string coerceToPath(Value &v, NixStringContext &ctx, PosPtr pos, std::string_view errorCtx = "");
