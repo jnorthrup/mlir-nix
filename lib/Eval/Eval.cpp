@@ -176,6 +176,8 @@ Bindings *EvalState::allocBindings(size_t n) {
 }
 
 Bindings *EvalState::BindingsBuilder::finish() {
+  // A set of size 0 is the one constant: nothing is written to it after it is built, so every empty set is the same cell.
+  if (attrs.empty()) { if (st.statsEnabled) ++st.nEmptyShared; return st.vEmptyAttrs.attrs; }
   std::stable_sort(attrs.begin(), attrs.end(), [](const Attr &a, const Attr &b) { return a.name < b.name; });
   Bindings *b = st.allocBindings(attrs.size());
   size_t n = 0;
@@ -313,6 +315,9 @@ void EvalState::printStats() {
                                    (unsigned long long)nClsSlots[c], 100.0 * nClsSlots[c] / nFrameSlots,
                                    nClsSlots[c] ? 100.0 * nClsTouched[c] / nClsSlots[c] : 0.0);
   }
+  if (nFrames)
+    llvm::errs() << llvm::format("== curried chains: %llu frames (%.1f%%, %.1f%% of slots) are the outer half of `a: b: ...`: they exist to capture an argument for an inner lambda\n",
+                                 (unsigned long long)nChainOuter, 100.0 * nChainOuter / nFrames, 100.0 * nChainOuterSlots / nFrameSlots);
   if (nFrames) {
     std::vector<RegionInfo *> top;
     for (auto &kv : regionInfos) if (kv.second->calls) top.push_back(kv.second);
@@ -325,6 +330,8 @@ void EvalState::printStats() {
                    << showPos(nd::posOfOp(top[i]->region->getParentOp())) << "\n";
     }
   }
+  llvm::errs() << "curried intermediates held by value: " << nStackCells << " (" << nStackCells * sizeof(Value) << " bytes of heap cells not allocated)\n";
+  llvm::errs() << "empty attribute sets: " << nEmptyShared << " shared as one constant (" << nEmptyShared * (sizeof(Bindings)) << " bytes not allocated)\n";
   llvm::errs() << "value allocations: count=" << nVT[14] << " bytes=" << nVT[14] * sizeof(Value) << '\n';
   // How many ops of real programs live where: per tier of the dialect hierarchy
   // (scope > continent > dialect), read from the IRDL declaration.
@@ -591,6 +598,8 @@ Frame *EvalState::newFrame(RegionInfo *ri, Frame *up) {
   auto *f = static_cast<Frame *>(alloc.Allocate(sz, alignof(Frame)));
   if (statsEnabled) { ++nFrames; nFrameBytes += sz; nFrameSlots += ri->numSlots; ++nFramesBySize[ri->numSlots < 16 ? ri->numSlots : 16];
     ++ri->calls;
+    if (ri->chainOuter == 2) ri->chainOuter = isa_and_nonnull<nd::LambdaOp>(ri->result.getDefiningOp());
+    if (ri->chainOuter == 1) { ++nChainOuter; nChainOuterSlots += ri->numSlots; }
     unsigned c = srcClassOf(ri); ++nClsFrames[c]; nClsSlots[c] += ri->numSlots; }
   f->up = up;
   f->info = ri;
@@ -953,6 +962,10 @@ void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out,
   Value *cur = &fun;
   size_t i = 0;
   Value tmp;
+  // The intermediate of a curried chain is a closure: (op, env), two words that the next step reads and nobody keeps.  It is
+  // held by value here, not in a heap cell.  Anything that is not a closure may be kept (a partial application links to
+  // it, a functor's `self` goes into a frame), so it is moved to a heap cell, and the stack cell never escapes.
+  Value stackCells[2];
   if (nargs == 0) {
     forceValue(fun, pos);
     out = fun;
@@ -975,7 +988,7 @@ void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out,
         }
       }
     }
-    Value *res = (i + 1 == nargs) ? &out : allocValue();
+    Value *res = (i + 1 == nargs) ? &out : cur == &stackCells[0] ? &stackCells[1] : &stackCells[0];
     if (cur->type == VType::Lambda) {
       callLambda(*cur, args[i], *res, pos);
       i++;
@@ -1028,6 +1041,10 @@ void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out,
                       pos);
     }
     if (i >= nargs) return;
+    if (res == &stackCells[0] || res == &stackCells[1]) {
+      if (res->type == VType::Lambda) { if (statsEnabled) ++nStackCells; }
+      else { Value *h = allocValue(); *h = *res; res = h; }
+    }
     cur = res;
   }
 }

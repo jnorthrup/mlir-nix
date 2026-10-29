@@ -229,6 +229,7 @@ struct RegionInfo {
   /// Optional arity-indexed JIT cache, owned by ScalarJIT and never an environment.
   void *curriedEntry = nullptr;
   uint64_t calls = 0; // MLNIX_STATS: frames made for this region
+  uint8_t chainOuter = 2; // MLNIX_STATS: 1 when the body's result is itself a lambda (a curried chain's outer half), 2 unclassified
   uint8_t srcClass = 0; // MLNIX_STATS: where the region's code is defined, once classified (EvalState::srcClassOf); 0 unclassified
   /// MLNIX_STATS: what this region's sea of nodes holds.  nOps its body's ops; nThunks its cells that start as
   /// thunks (finer-grain deferral would mint those, so they are its rows); nEvals its ops' evals (a region called
@@ -585,6 +586,9 @@ struct EvalState {
   static constexpr unsigned kSrcClasses = 5; // 1 nixpkgs lib, 2 nixos modules, 3 pkgs, 4 other
   uint64_t nClsFrames[kSrcClasses] = {}, nClsSlots[kSrcClasses] = {}, nClsTouched[kSrcClasses] = {};
   unsigned srcClassOf(RegionInfo *ri);
+  uint64_t nChainOuter = 0, nChainOuterSlots = 0; // MLNIX_STATS: frames (and their slots) that exist only to capture an argument for an inner lambda
+  uint64_t nStackCells = 0; // MLNIX_STATS: curried-call intermediates held by value instead of in a heap cell
+  uint64_t nEmptyShared = 0; // MLNIX_STATS: empty attribute sets that were the shared constant instead of a fresh 16-byte cell
   uint64_t nSlotsTouched = 0; // MLNIX_STATS: frame slots that were ever read (a cell made on first touch), of nFrameSlots allocated
   uint64_t nSlotsAssigned = 0, nSlotsNoRead = 0; // MLNIX_STATS: frame cells assigned, and those given to a value with no use at all
   uint64_t nsLower = 0, nsMint = 0; // MLNIX_STATS: time lowering files (analysis of deferred lambdas included) / minting bodies on demand
