@@ -132,6 +132,89 @@ std::string storePathHashPart(std::string_view storePath);
 // Derivations
 //===----------------------------------------------------------------------===//
 
+/// A set of strings kept as one series sorted in byte order (std::set's): no node per entry.  An insert in order is an append, which is how a
+/// derivation's inputs arrive (from a sorted context) and how its text is parsed (sorted).
+struct SortedSet {
+  composite::MutableSeries<std::string> rows;
+  SortedSet() = default;
+  SortedSet(SortedSet &&) = default;
+  SortedSet &operator=(SortedSet &&) = default;
+  SortedSet(const SortedSet &o) { rows.reserve(o.rows.size()); for (const std::string &r : o.rows) rows.append(r); }
+  SortedSet &operator=(const SortedSet &o) { if (this != &o) { SortedSet t(o); *this = std::move(t); } return *this; }
+  template <class It> SortedSet(It b, It e) { insert(b, e); }
+  const std::string *begin() const { return rows.begin(); }
+  const std::string *end() const { return rows.end(); }
+  size_t size() const { return rows.size(); }
+  bool empty() const { return rows.empty(); }
+  size_t lowerBound(std::string_view k) const {
+    size_t lo = 0, hi = rows.size();
+    while (lo < hi) { size_t mid = (lo + hi) / 2; if (std::string_view(rows[uint32_t(mid)]) < k) lo = mid + 1; else hi = mid; }
+    return lo;
+  }
+  size_t count(std::string_view k) const { size_t i = lowerBound(k); return i < rows.size() && rows[uint32_t(i)] == k; }
+  bool insert(std::string_view k) {
+    if (rows.empty() || std::string_view(rows.back()) < k) { rows.append(std::string(k)); return true; }
+    size_t i = lowerBound(k);
+    if (i < rows.size() && rows[uint32_t(i)] == k) return false;
+    rows.append(std::string(k));
+    for (size_t j = rows.size() - 1; j > i; j--) std::swap(rows[uint32_t(j)], rows[uint32_t(j - 1)]);
+    return true;
+  }
+  template <class It> void insert(It b, It e) { for (; b != e; ++b) insert(std::string_view(*b)); }
+  bool operator==(const SortedSet &o) const { return rows == o.rows; }
+};
+
+/// A map from strings kept as rows sorted in byte order (std::map's) in one series: no node per entry.  Lookups bisect; an entry added in key
+/// order is an append, which is how a derivation's environment arrives (its attributes are visited by name) and how its text is parsed.
+template <class V> struct SortedMap {
+  struct Row {
+    std::string first;
+    V second;
+  };
+  composite::MutableSeries<Row> rows;
+  SortedMap() = default;
+  SortedMap(SortedMap &&) = default;
+  SortedMap &operator=(SortedMap &&) = default;
+  SortedMap(const SortedMap &o) { rows.reserve(o.rows.size()); for (const Row &r : o.rows) rows.append(Row{r.first, r.second}); }
+  SortedMap &operator=(const SortedMap &o) { if (this != &o) { SortedMap t(o); *this = std::move(t); } return *this; }
+  Row *begin() { return rows.begin(); }
+  Row *end() { return rows.end(); }
+  const Row *begin() const { return rows.begin(); }
+  const Row *end() const { return rows.end(); }
+  size_t size() const { return rows.size(); }
+  bool empty() const { return rows.empty(); }
+  size_t lowerBound(std::string_view k) const {
+    size_t lo = 0, hi = rows.size();
+    while (lo < hi) { size_t mid = (lo + hi) / 2; if (std::string_view(rows[uint32_t(mid)].first) < k) lo = mid + 1; else hi = mid; }
+    return lo;
+  }
+  Row *find(std::string_view k) { size_t i = lowerBound(k); return i < rows.size() && rows[uint32_t(i)].first == k ? begin() + i : end(); }
+  const Row *find(std::string_view k) const { size_t i = lowerBound(k); return i < rows.size() && rows[uint32_t(i)].first == k ? begin() + i : end(); }
+  size_t count(std::string_view k) const { return find(k) != end(); }
+  /// The row for k, made (with V()) where k sorts when there is none.
+  Row *place(std::string_view k) {
+    if (rows.empty() || std::string_view(rows.back().first) < k) { rows.append(Row{std::string(k), V()}); return end() - 1; }
+    size_t i = lowerBound(k);
+    if (i < rows.size() && rows[uint32_t(i)].first == k) return begin() + i;
+    rows.append(Row{std::string(k), V()});
+    for (size_t j = rows.size() - 1; j > i; j--) std::swap(rows[uint32_t(j)], rows[uint32_t(j - 1)]);
+    return begin() + i;
+  }
+  V &operator[](std::string_view k) { return place(k)->second; }
+  V &at(std::string_view k) { Row *r = find(k); if (r == end()) throw std::out_of_range("no entry '" + std::string(k) + "'"); return r->second; }
+  const V &at(std::string_view k) const { const Row *r = find(k); if (r == end()) throw std::out_of_range("no entry '" + std::string(k) + "'"); return r->second; }
+  /// An entry, moved in: at the end when it sorts there (the hint is the end), else where it sorts; an existing key keeps its value.
+  Row *emplace_hint(Row *, std::string k, V v) {
+    if (rows.empty() || rows.back().first < k) { rows.append(Row{std::move(k), std::move(v)}); return end() - 1; }
+    size_t i = lowerBound(k);
+    if (i < rows.size() && rows[uint32_t(i)].first == k) return begin() + i;
+    rows.append(Row{std::move(k), std::move(v)});
+    for (size_t j = rows.size() - 1; j > i; j--) std::swap(rows[uint32_t(j)], rows[uint32_t(j - 1)]);
+    return begin() + i;
+  }
+};
+using DrvInputs = SortedMap<SortedSet>;
+
 struct DerivationOutput {
   enum Kind { InputAddressed, CAFixed, CAFloating, Deferred, Impure } kind = Deferred;
   std::string path;                 // InputAddressed
@@ -145,12 +228,12 @@ struct DerivationOutput {
 
 struct Derivation {
   std::string name;
-  std::map<std::string, DerivationOutput> outputs;
-  std::map<std::string, std::set<std::string>> inputDrvs;
-  std::set<std::string> inputSrcs;
+  SortedMap<DerivationOutput> outputs;
+  DrvInputs inputDrvs;
+  SortedSet inputSrcs;
   std::string platform, builder;
   composite::MutableSeries<std::string> args;
-  std::map<std::string, std::string> env;
+  SortedMap<std::string> env;
   std::optional<std::string> structuredAttrs; // JSON text (env "__json")
 
   Derivation() = default;
@@ -166,10 +249,9 @@ struct Derivation {
   }
 
   bool isFixed() const;
-  std::string unparse(bool maskOutputs,
-                      const std::map<std::string, std::set<std::string>> *actualInputs = nullptr) const;
+  std::string unparse(bool maskOutputs, const DrvInputs *actualInputs = nullptr) const;
   /// SHA-256 of unparse(...), the text fed to the hash as it is made and never kept.
-  Hash hashUnparsed(bool maskOutputs, const std::map<std::string, std::set<std::string>> *actualInputs = nullptr) const;
+  Hash hashUnparsed(bool maskOutputs, const DrvInputs *actualInputs = nullptr) const;
 };
 
 Derivation parseDerivation(std::string_view text, std::string name);

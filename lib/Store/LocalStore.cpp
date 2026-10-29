@@ -249,7 +249,7 @@ std::string Store::addTextToStore(std::string_view name, std::string_view text,
 //===----------------------------------------------------------------------===//
 
 static std::set<std::string> drvReferences(const Derivation &drv) {
-  std::set<std::string> refs = drv.inputSrcs;
+  std::set<std::string> refs(drv.inputSrcs.begin(), drv.inputSrcs.end());
   for (auto &[p, o] : drv.inputDrvs) refs.insert(p);
   return refs;
 }
@@ -309,7 +309,7 @@ std::map<std::string, Hash> Store::hashDerivationModulo(const Derivation &drv, b
   for (auto &[n, o] : drv.outputs)
     if (o.kind == DerivationOutput::CAFloating || o.kind == DerivationOutput::Impure)
       throw Error("content-addressed and impure derivations are not supported (derivation '" + drv.name + "')");
-  std::map<std::string, std::set<std::string>> inputs2;
+  DrvInputs inputs2;
   for (auto &[drvPath, outs] : drv.inputDrvs) {
     std::map<std::string, Hash> h;
     auto it = drvHashes.find(drvPath);
@@ -471,7 +471,7 @@ std::map<std::string, std::string> Store::realise(const std::string &drvPath,
   // Post-process outputs.
   std::set<std::string> candidates;
   {
-    std::set<std::string> inputs = drv.inputSrcs;
+    std::set<std::string> inputs(drv.inputSrcs.begin(), drv.inputSrcs.end());
     for (auto &[inDrv, outs] : drv.inputDrvs) {
       Derivation d = readDerivation(inDrv);
       for (auto &o : outs) {

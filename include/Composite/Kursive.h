@@ -13,7 +13,8 @@
 //   * a group keeps the span of its last iteration.
 // What libstdc++ rejects is rejected here (Program::error), with the message Nix gives for it; a pattern too large for the step and set
 // arrays is reported as libstdc++ reports a pattern too large for its states.  Nix's libstdc++ is built strict (__STRICT_ANSI__): only
-// the special characters ^$\.*+?()[]{}| may be escaped, and `\n` is an error, as `nix-instantiate --eval` 2.35.4 answers.
+// the special characters .[\()*+?{|^$ may be escaped (libstdc++'s extended set: not ] or }), and `\n` or `\]` is an error, as
+// `nix-instantiate --eval` 2.35.4 answers.
 //
 // No #include, no std::: Core.h and the caller's memory.
 //
@@ -198,7 +199,7 @@ struct Compiler {
     case '\\': { // only a special character may be escaped: Nix's libstdc++ is built strict (__STRICT_ANSI__), where any other is an error
       if (p == end) { bad(Error::Invalid); return 0; }
       char e = *p++;
-      const char *special = "^$\\.*+?()[]{}|";
+      const char *special = ".[\\()*+?{|^$"; // libstdc++'s _M_extended_spec_char: ']' and '}' are not among them
       bool ok = false;
       for (const char *q = special; *q; q++) ok = ok || *q == e;
       if (!ok) { bad(Error::Invalid); return 0; }

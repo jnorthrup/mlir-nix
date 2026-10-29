@@ -638,7 +638,7 @@ struct HashOut {
 };
 
 template <class Out>
-void unparseTo(const Derivation &d, Out &out, bool maskOutputs, const std::map<std::string, std::set<std::string>> *actualInputs) {
+void unparseTo(const Derivation &d, Out &out, bool maskOutputs, const DrvInputs *actualInputs) {
   const auto &outputs = d.outputs;
   const auto &inputDrvs = d.inputDrvs;
   const auto &inputSrcs = d.inputSrcs;
@@ -754,14 +754,14 @@ void unparseTo(const Derivation &d, Out &out, bool maskOutputs, const std::map<s
 }
 } // namespace
 
-std::string Derivation::unparse(bool maskOutputs, const std::map<std::string, std::set<std::string>> *actualInputs) const {
+std::string Derivation::unparse(bool maskOutputs, const DrvInputs *actualInputs) const {
   std::string s;
   TextOut out{s};
   unparseTo(*this, out, maskOutputs, actualInputs);
   return s;
 }
 
-Hash Derivation::hashUnparsed(bool maskOutputs, const std::map<std::string, std::set<std::string>> *actualInputs) const {
+Hash Derivation::hashUnparsed(bool maskOutputs, const DrvInputs *actualInputs) const {
   HashSink h(HashAlgo::SHA256);
   HashOut out{h};
   unparseTo(*this, out, maskOutputs, actualInputs);
@@ -857,12 +857,12 @@ Derivation parseDerivation(std::string_view text, std::string name) {
     P.expect(",");
     auto outs = P.strs();
     P.expect(")");
-    d.inputDrvs[path] = std::set<std::string>(outs.begin(), outs.end());
+    d.inputDrvs[path] = SortedSet(outs.begin(), outs.end());
     if (P.peek(',')) P.p++;
   }
   P.expect("],");
   auto srcs = P.strs();
-  d.inputSrcs = std::set<std::string>(srcs.begin(), srcs.end());
+  d.inputSrcs = SortedSet(srcs.begin(), srcs.end());
   P.expect(",");
   d.platform = P.str();
   P.expect(",");
