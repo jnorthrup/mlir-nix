@@ -47,11 +47,26 @@ compilers).
 
 ## What it does not say
 
-- It is a micro-benchmark of one header-only path. It is not an evaluator result: the project's release build does not use LTO,
-  and no whole-binary LTO measurement against Nix and Lix is recorded here.
+- It is a micro-benchmark of one header-only path. It does not carry over to the evaluator (next section).
 - One host, one boot, five runs per cell. Differences under about 2% are inside the run-to-run spread; the +0.0% and +2.5% rows
   should be read as "level".
 - PGO was trained on this single workload.
+
+## The whole binary: ThinLTO does not move the evaluator
+
+`mlnix` built with clang 22 `-flto=thin` (GNU ld with clang's plugin; Kali has no gold or lld) beside the ordinary build, same
+boot, both timed live against Nix 2.35.4 and Lix 2.91.3, seven interleaved runs, demand schedule, state on ext4. The two
+binaries print byte-identical output for every case of the language suite on both schedules (484/484 semantic).
+
+| workload | ordinary: min / vs Nix | ThinLTO: min / vs Nix |
+|---|---:|---:|
+| nixos-toplevel, demand | 3.79 s / x0.97 | 3.68 s / x0.96 |
+| nixpkgs-73, demand | 3.33 s / x0.87 | 3.37 s / x0.88 |
+
+Peak RSS is identical (1203 and 1131 MB for demand). The binary is 1% smaller (32,457,640 against 32,778,064 bytes). The
+differences are inside the run-to-run spread (Nix's own minimum moved 3.94 to 3.72 s between the two arms of one session), so
+whole-program optimization buys the evaluator nothing measurable. The evaluator is bound by forcing, allocation and cache
+misses, not by call overhead the optimizer can remove; the heap micro-benchmark is a different regime.
 
 ## Reproduce
 
