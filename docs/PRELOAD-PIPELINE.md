@@ -27,8 +27,21 @@ Kali, one boot, five interleaved rounds, list from a previous run (warm start):
 CPU time rises about 5-10% (toplevel 4.00 -> 4.39 s) for the speculative and handoff work; the wall time falls 14-21%. Mac: 1.56 -> 1.27 s
 (toplevel), 1.35 -> 1.14 s (nixpkgs-73). With one helper the evaluator waited for 1,152 of 2,888 files on toplevel; two helpers close most of it.
 
+## Peak memory
+
+Mac, nixos-toplevel, three runs each: peak RSS 1,182 MB plain, 1,208 MB with one helper, 1,210 MB with two (+27 MB, +2.3%).
+
 ## What it is not
 
 A cold start (no list) gets nothing: 88.4% of evaluated files are named by a path literal lowered earlier, but only 16% of the 15,851 distinct
 literals lead to an evaluated file (`MLNIX_STATS_IMPORTS`), so lowering every literal would waste most of its work and memory. The honest
 labels are "warm start" for the numbers above and "cold" for the unchanged ones. Peak RSS with helpers is not measured yet. Default off.
+
+### The cold-start predictor that was tried and dropped
+
+A predictor that needs no previous run offered every `.nix` or extension-less path literal of each file the evaluator started to a stack the
+helpers popped (newest first), kept a sliding window of lowered-but-unadopted files, and let literals seen by a helper wait for its file's
+adoption (so speculation did not recurse). Output was identical, but on nixos-toplevel (Mac, two helpers, windows of 16 to 1,024):
+214 of the 2,888 files were adopted (7%), 14,071 were lowered speculatively and 13,806 evicted unused, and the run was slower than plain
+(1.56-1.66 s against 1.57-1.60 s). Which file is wanted next depends on which attribute the evaluator forces, and a literal says only that
+a path exists. The code is not kept; the diff is in the session scratchpad. The warm-start trace is the predictor.
