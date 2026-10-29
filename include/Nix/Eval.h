@@ -59,15 +59,24 @@ struct SymbolTable {
     Symbol id = names.size();
     auto r = map.try_emplace(s, id);
     names.append(r.first->getKey());
+    uint64_t p = 0; // the first eight bytes, big-endian, zero-padded: comparing two of these orders the names as their bytes do
+    for (size_t i = 0; i < 8; i++) p = p << 8 | (i < s.size() ? uint8_t(s[i]) : 0);
+    prefix.append(p);
     return id;
   }
   llvm::StringRef operator[](Symbol s) const { return names[s]; }
   /// The name's bytes as the hot Series<char>: what an ordering by name reads.
   auto chars(Symbol s) const { llvm::StringRef r = names[s]; return composite::series(r.data(), uint32_t(r.size())); }
+  /// The order of two names as their bytes: one compare of the prefix words, the bytes only when the first eight agree.
+  bool less(Symbol a, Symbol b) const {
+    uint64_t pa = prefix[a], pb = prefix[b];
+    return pa != pb ? pa < pb : composite::lessChars(chars(a), chars(b));
+  }
   size_t size() const { return names.size(); }
 
   llvm::StringMap<Symbol> map;
   composite::MutableSeries<llvm::StringRef> names;
+  composite::MutableSeries<uint64_t> prefix; // per symbol: its first eight bytes as one word (less)
 };
 
 struct Value;

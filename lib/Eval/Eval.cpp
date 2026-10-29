@@ -114,7 +114,7 @@ composite::Frozen<const Attr *> Bindings::lexicographicOrder(const SymbolTable &
   composite::MutableSeries<const Attr *> v;
   v.reserve(size());
   for (auto &a : *this) v.append(&a);
-  cp::sortRows(v.data(), v.size(), [&](const Attr *a, const Attr *b) { return cp::lessChars(st.chars(a->name), st.chars(b->name)); });
+  cp::sortRows(v.data(), v.size(), [&](const Attr *a, const Attr *b) { return st.less(a->name, b->name); });
   return std::move(v).freeze();  // sorted once, then only read: the handle's cells move into a const Series
 }
 
@@ -2404,7 +2404,7 @@ struct TracePrinter {
         auto an = st.symbols[a->name], bn = st.symbols[b->name];
         bool ai = an == "type" || an == "_type", bi = bn == "type" || bn == "_type";
         if (ai != bi) return ai;
-        return cp::lessChars(st.symbols.chars(a->name), st.symbols.chars(b->name));
+        return st.symbols.less(a->name, b->name);
       });
       size_t cur = 0;
       for (auto *a : sorted) {
