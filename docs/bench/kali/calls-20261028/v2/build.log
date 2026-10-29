@@ -1,0 +1,49 @@
+[1/4] Building CXX object lib/CMakeFiles/NixEval.dir/Eval/LazyJIT.cpp.o
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/LazyJIT.cpp:599:29: warning: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/LazyJIT.cpp:599:45)>' is deprecated: Prefer calling the constructor of llvm::scope_exit directly. [-Wdeprecated-declarations]
+  599 |   auto restoreDepth = llvm::make_scope_exit([&] { st.callDepth = initialDepth; });
+      |                             ^~~~~~~~~~~~~~~
+      |                             scope_exit
+/usr/lib/llvm-22/include/llvm/ADT/ScopeExit.h:56:1: note: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/LazyJIT.cpp:599:45)>' has been explicitly marked deprecated here
+   56 | LLVM_DEPRECATED("Prefer calling the constructor of llvm::scope_exit directly.",
+      | ^
+/usr/lib/llvm-22/include/llvm/Support/Compiler.h:250:50: note: expanded from macro 'LLVM_DEPRECATED'
+  250 | #define LLVM_DEPRECATED(MSG, FIX) __attribute__((deprecated(MSG, FIX)))
+      |                                                  ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/LazyJIT.cpp:660:38: warning: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/LazyJIT.cpp:660:54)>' is deprecated: Prefer calling the constructor of llvm::scope_exit directly. [-Wdeprecated-declarations]
+  660 |       auto restoreForceDepth = llvm::make_scope_exit([&] { st.callDepth = initialDepth; });
+      |                                      ^~~~~~~~~~~~~~~
+      |                                      scope_exit
+/usr/lib/llvm-22/include/llvm/ADT/ScopeExit.h:56:1: note: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/LazyJIT.cpp:660:54)>' has been explicitly marked deprecated here
+   56 | LLVM_DEPRECATED("Prefer calling the constructor of llvm::scope_exit directly.",
+      | ^
+/usr/lib/llvm-22/include/llvm/Support/Compiler.h:250:50: note: expanded from macro 'LLVM_DEPRECATED'
+  250 | #define LLVM_DEPRECATED(MSG, FIX) __attribute__((deprecated(MSG, FIX)))
+      |                                                  ^
+2 warnings generated.
+[2/4] Building CXX object lib/CMakeFiles/NixEval.dir/Eval/ScalarJIT.cpp.o
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:55:51: warning: missing field 'capture' initializer [-Wmissing-field-initializers]
+   55 |   if (result == arg) return {PointerKind::Argument};
+      |                                                   ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:201:29: warning: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:201:45)>' is deprecated: Prefer calling the constructor of llvm::scope_exit directly. [-Wdeprecated-declarations]
+  201 |     auto recordTime = llvm::make_scope_exit([&] {
+      |                             ^~~~~~~~~~~~~~~
+      |                             scope_exit
+/usr/lib/llvm-22/include/llvm/ADT/ScopeExit.h:56:1: note: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:201:45)>' has been explicitly marked deprecated here
+   56 | LLVM_DEPRECATED("Prefer calling the constructor of llvm::scope_exit directly.",
+      | ^
+/usr/lib/llvm-22/include/llvm/Support/Compiler.h:250:50: note: expanded from macro 'LLVM_DEPRECATED'
+  250 | #define LLVM_DEPRECATED(MSG, FIX) __attribute__((deprecated(MSG, FIX)))
+      |                                                  ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:518:28: warning: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:518:44)>' is deprecated: Prefer calling the constructor of llvm::scope_exit directly. [-Wdeprecated-declarations]
+  518 |     auto activeRun = llvm::make_scope_exit([&] {
+      |                            ^~~~~~~~~~~~~~~
+      |                            scope_exit
+/usr/lib/llvm-22/include/llvm/ADT/ScopeExit.h:56:1: note: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:518:44)>' has been explicitly marked deprecated here
+   56 | LLVM_DEPRECATED("Prefer calling the constructor of llvm::scope_exit directly.",
+      | ^
+/usr/lib/llvm-22/include/llvm/Support/Compiler.h:250:50: note: expanded from macro 'LLVM_DEPRECATED'
+  250 | #define LLVM_DEPRECATED(MSG, FIX) __attribute__((deprecated(MSG, FIX)))
+      |                                                  ^
+3 warnings generated.
+[3/4] Linking CXX static library lib/libNixEval.a
+[4/4] Linking CXX executable bin/mlnix

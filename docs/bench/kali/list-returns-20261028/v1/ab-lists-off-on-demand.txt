@@ -1,0 +1,8 @@
+== nixos-toplevel  (5 interleaved runs each; identical output from all: yes)
+  A ../../../tmp/kb/list-returns-20261 wall med  4.153s min  3.996s   cpu med  4.424s   rss med 1.319GB max 1.321GB   hash 2057239a9017
+  B ../../../tmp/kb/list-returns-20261 wall med  4.201s min  3.982s   cpu med  4.477s   rss med 1.321GB max 1.323GB   hash 2057239a9017
+  B vs A: wall +1.2%   cpu +1.2%   rss +0.2%
+== nixpkgs-73  (5 interleaved runs each; identical output from all: yes)
+  A ../../../tmp/kb/list-returns-20261 wall med  3.802s min  3.496s   cpu med  4.037s   rss med 1.208GB max 1.210GB   hash 5e8fff662dff
+  B ../../../tmp/kb/list-returns-20261 wall med  3.515s min  3.499s   cpu med  3.752s   rss med 1.208GB max 1.210GB   hash 5e8fff662dff
+  B vs A: wall -7.6%   cpu -7.1%   rss +0.0%

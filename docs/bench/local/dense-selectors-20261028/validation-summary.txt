@@ -1,0 +1,12 @@
+Local validation, macOS, LLVM 23.1.1
+477/477 semantic language cases; 219/477 exact against stored suite expectations in each of eager/demand and JIT off/on at threshold1.
+15/15 MLIR tests;105 registered/105 declared primops;90 exact focused JIT interpreter/native comparisons.
+No Nix/Lix executables invoked in this iteration.
+prior eager: 1428 saved .out/.err/.rc files compared; 0 differing.
+eager JIT off/on: 1431 saved .out/.err/.rc files compared; 0 differing.
+demand JIT off/on: 1431 saved .out/.err/.rc files compared; 0 differing.
+Local evaluator SHA256 01e4875524af2eb3c15fe2fb90769b807b410ca0ed06ae122ae05d09db2d448b
+
+V2 cached-refusal bypass: rebuilt successfully;90 exact JIT comparisons passed again.
+Profiling smoke test on a refused tracing graph retained all5calls, exactly5effects, and expected result10.
+V2 macOS evaluator SHA2569ae259db90ff8c559409972ad0406898d7fa02150318d6c4b236a834d91c7402

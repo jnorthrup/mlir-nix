@@ -1,0 +1,3 @@
+eager: 84 exact comparisons; scalar/pointer/Boolean/demand/deopt/grace/budget guards verified
+demand: 84 exact comparisons; scalar/pointer/Boolean/demand/deopt/grace/budget guards verified
+JIT: 168 exact comparisons passed

@@ -1,0 +1,46 @@
+List-return PMU repeatability confirmation, 2026-10-28
+
+Four equally weighted paired ON-versus-OFF percentage changes per workload, including original off/on pair0; new orders on/off,off/on,on/off. Percent=(ON/OFF-1)*100. Summary is median of paired percentages and full min/max range, not ratio of pooled counts. No selective replacement.
+
+PMU tool discards stdout; PMU samples check exit status only. Same commands had full output-hash validation in prior profile/timing series.
+
+All events cover inherited user-space threads/children, excluding kernel/hypervisor.
+Original pair0 is retained unchanged. No builds, gates, reference executions or new timing series.
+
+nixos-toplevel
+  pair order      cycles     instructions cache_refs cache_misses branches   branch_misses
+     0 off/on       -0.9017%    +0.0004%    -1.5516%    -7.1266%    +0.0656%    +0.0083%
+     1 on/off       +2.7082%    -0.1799%    +5.2429%    +9.3605%    -0.1872%    +5.5437%
+     2 off/on       -0.0922%    -0.2612%    -1.6145%    -1.1548%    -0.2931%    -0.3701%
+     3 on/off       -0.3117%    -0.0355%    -1.3374%    -1.7133%    +0.0111%    +0.5568%
+  Four-pair median [minimum, maximum]:
+    cycles             -0.2019% [-0.9017%, +2.7082%]
+    instructions       -0.1077% [-0.2612%, +0.0004%]
+    cache_references   -1.4445% [-1.6145%, +5.2429%]
+    cache_misses       -1.4341% [-7.1266%, +9.3605%]
+    branches           -0.0880% [-0.2931%, +0.0656%]
+    branch_misses      +0.2826% [-0.3701%, +5.5437%]
+
+nixpkgs-73
+  pair order      cycles     instructions cache_refs cache_misses branches   branch_misses
+     0 off/on       -3.0084%    -0.0673%    -2.5579%   -17.1114%    -0.0474%    -0.8600%
+     1 on/off       +0.7912%    -0.0688%    +0.6518%    +3.8237%    -0.0408%    +0.6291%
+     2 off/on       -1.9199%    -0.3008%    +1.3573%   -13.2088%    -0.3596%    -0.6027%
+     3 on/off       +1.1297%    -0.2248%    -0.4460%    +1.5523%    -0.2588%    +0.2724%
+  Four-pair median [minimum, maximum]:
+    cycles             -0.5643% [-3.0084%, +1.1297%]
+    instructions       -0.1468% [-0.3008%, -0.0673%]
+    cache_references   +0.1029% [-2.5579%, +1.3573%]
+    cache_misses       -5.8283% [-17.1114%, +3.8237%]
+    branches           -0.1531% [-0.3596%, -0.0408%]
+    branch_misses      -0.1652% [-0.8600%, +0.6291%]
+
+All 16 samples exit0; every event ran for 100% of enabled time.
+Six before-pair snapshots plus completion snapshot are retained with exact launcher and settings.
+Per-pair counter differences do not establish a wall-time speedup. Interpretation must retain
+the full range, original pair and possible host/order variation.
+
+Observed repeatability: cache-miss percentage ranges cross zero on both workloads.
+For nixpkgs all four signs align with measured order: both off/on pairs are negative,
+both on/off pairs positive. This observation does not assign a causal source to the
+order effect, but the original large reduction is not a robust repeated result.

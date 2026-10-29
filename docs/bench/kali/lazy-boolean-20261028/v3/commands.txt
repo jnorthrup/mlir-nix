@@ -1,0 +1,11 @@
+Actual launcher: commands-v3.sh; no credentials or unrelated environment.
+Frozen archive: /tmp/mlir-nix-lazy-boolean-v3-20261028.tar.gz (7a69f6b8391960baca027c225ff87e49986ea494a73909f45026ea7fbba5478d, 560290 bytes).
+Preserved V2: /tmp/kb/lazy-boolean-20261028-v2/mlnix.
+V3: /tmp/kb/lazy-boolean-20261028-v3/mlnix.
+Frozen overlay uses the existing isolated source/build at /home/jim/work/mlir-nix-dense-selectors-20261028, serialized by /tmp/kb/gen.lock.
+
+The launcher clears MLNIX_JIT, MLNIX_DEFER, MLNIX_STATS, MLNIX_PIPELINE, MLNIX_PRIMS_IRDL, MLNIX_JIT_THRESHOLD, MLNIX_JIT_DUMP and MLNIX_JIT_PROFILE.
+Untimed profiles set MLNIX_JIT=1, MLNIX_DEFER=1, MLNIX_STATS=1, MLNIX_JIT_PROFILE=1 and temporary store/state roots. Output hashes must match the saved workload goldens.
+Three rotating paired rounds compare V2 ON / V3 ON with MLNIX_DEFER=1. Five paired rounds compare V3 OFF / V3 ON with MLNIX_DEFER=1. Stats and profiling remain absent from timings.
+Separate PMU pairs remove MLNIX_JIT for OFF and set MLNIX_JIT=1 for ON. The PMU command array does not repeat this inherited wrapper environment; the arm is explicit in the launcher and filename.
+No Nix/Lix binaries, old broad suites, or unrelated benchmark jobs are invoked.

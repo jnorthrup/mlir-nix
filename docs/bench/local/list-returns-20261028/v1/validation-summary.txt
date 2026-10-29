@@ -1,0 +1,32 @@
+Lazy list returns V1 local validation, 2026-10-28
+
+Build: cmake --build build --target mlnix -j 4
+Build log: /tmp/mlnix-locality/build-list-returns-v1.txt (exit 0).
+Focused gate: python3 scripts/check-jit.py — 536 exact comparisons, 268 per schedule;
+29 new list-return cases plus three ablations, independent expected outputs/traces,
+and separate native/grace/retirement/depth/resource counter assertions.
+All 58 new eager/demand semantic oracles and the two fixture checks were independently
+checked against /tmp/mlnix-locality/mlnix-values-v1 before candidate validation.
+
+Full suites: python3 /tmp/mlnix-locality/run-list-returns-suites.py
+Every inherited MLNIX_* variable cleared, then JIT=1 and JIT_THRESHOLD=1;
+demand additionally DEFER=1, eager leaves it absent. Both schedules pass
+483/483 semantic and 225 stored exact expectations. All 1,446 prior Values V1
+output/error/status files per schedule remain byte-identical. The new list-return
+fixture returns true with no stderr. See saved manifests and suite-parity.txt.
+Raw full outputs: /tmp/mlnix-locality/list-returns-v1-{eager,demand}.
+No Nix/Lix reference binary or reference startup/version/RSS process ran.
+
+Six local profiles: python3 /tmp/mlnix-locality/run-list-returns-local.py
+Every inherited MLNIX_* variable cleared, then DEFER=1, STATS=1, JIT_PROFILE=1,
+STORE_ROOT=/tmp/mlnix-np-root and STATE_DIR=/tmp/mlnix-np-state.
+Arms: JIT absent; JIT=1/LISTS=0; JIT=1/LISTS absent. Threshold absent/default1024,
+VALUES/CURRIED/INLINE/PROJECTION absent/default enabled. Every profile exits0 and
+matches its unchanged local golden. These are diagnostic allocation/coverage profiles,
+not paired timing measurements.
+NixOS local SHA256: f1cfa7cd14649110397a1d1c728d2db80435f2d7bdc084885b8c748a57e6b9bf
+nixpkgs SHA256: 5e8fff662dffa4eab642b75e78028fb54204cd15ec1a9972c2cafe2306234959
+The distinct local NixOS golden does not replace the saved Kali golden.
+
+Frozen macOS binary: /tmp/mlnix-locality/mlnix-list-returns-v1
+SHA256: e2798d307b0dca6a41d7718cd33f38a6578b2173bfa5fed7564555077187935d

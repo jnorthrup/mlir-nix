@@ -1,0 +1,113 @@
+[1/9] Building CXX object lib/CMakeFiles/NixEval.dir/Eval/EvalModels.cpp.o
+[2/9] Building CXX object lib/CMakeFiles/NixEval.dir/Eval/StoreBuiltins.cpp.o
+[3/9] Building CXX object lib/CMakeFiles/NixEval.dir/Eval/Formats.cpp.o
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/Formats.cpp:448:20: warning: missing field 'stack' initializer [-Wmissing-field-initializers]
+  448 |   XMLWriter doc{out};
+      |                    ^
+1 warning generated.
+[4/9] Building CXX object tools/CMakeFiles/mlnix.dir/mlnix.cpp.o
+[5/9] Building CXX object lib/CMakeFiles/NixEval.dir/Eval/LazyJIT.cpp.o
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/LazyJIT.cpp:803:29: warning: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/LazyJIT.cpp:803:45)>' is deprecated: Prefer calling the constructor of llvm::scope_exit directly. [-Wdeprecated-declarations]
+  803 |   auto restoreDepth = llvm::make_scope_exit([&] { st.callDepth = initialDepth; });
+      |                             ^~~~~~~~~~~~~~~
+      |                             scope_exit
+/usr/lib/llvm-22/include/llvm/ADT/ScopeExit.h:56:1: note: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/LazyJIT.cpp:803:45)>' has been explicitly marked deprecated here
+   56 | LLVM_DEPRECATED("Prefer calling the constructor of llvm::scope_exit directly.",
+      | ^
+/usr/lib/llvm-22/include/llvm/Support/Compiler.h:250:50: note: expanded from macro 'LLVM_DEPRECATED'
+  250 | #define LLVM_DEPRECATED(MSG, FIX) __attribute__((deprecated(MSG, FIX)))
+      |                                                  ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/LazyJIT.cpp:849:40: warning: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/LazyJIT.cpp:849:56)>' is deprecated: Prefer calling the constructor of llvm::scope_exit directly. [-Wdeprecated-declarations]
+  849 |         auto restoreForceDepth = llvm::make_scope_exit([&] { st.callDepth = initialDepth; });
+      |                                        ^~~~~~~~~~~~~~~
+      |                                        scope_exit
+/usr/lib/llvm-22/include/llvm/ADT/ScopeExit.h:56:1: note: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/LazyJIT.cpp:849:56)>' has been explicitly marked deprecated here
+   56 | LLVM_DEPRECATED("Prefer calling the constructor of llvm::scope_exit directly.",
+      | ^
+/usr/lib/llvm-22/include/llvm/Support/Compiler.h:250:50: note: expanded from macro 'LLVM_DEPRECATED'
+  250 | #define LLVM_DEPRECATED(MSG, FIX) __attribute__((deprecated(MSG, FIX)))
+      |                                                  ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/LazyJIT.cpp:919:38: warning: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/LazyJIT.cpp:919:54)>' is deprecated: Prefer calling the constructor of llvm::scope_exit directly. [-Wdeprecated-declarations]
+  919 |       auto restoreForceDepth = llvm::make_scope_exit([&] { st.callDepth = initialDepth; });
+      |                                      ^~~~~~~~~~~~~~~
+      |                                      scope_exit
+/usr/lib/llvm-22/include/llvm/ADT/ScopeExit.h:56:1: note: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/LazyJIT.cpp:919:54)>' has been explicitly marked deprecated here
+   56 | LLVM_DEPRECATED("Prefer calling the constructor of llvm::scope_exit directly.",
+      | ^
+/usr/lib/llvm-22/include/llvm/Support/Compiler.h:250:50: note: expanded from macro 'LLVM_DEPRECATED'
+  250 | #define LLVM_DEPRECATED(MSG, FIX) __attribute__((deprecated(MSG, FIX)))
+      |                                                  ^
+3 warnings generated.
+[6/9] Building CXX object lib/CMakeFiles/NixEval.dir/Eval/Builtins.cpp.o
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/Builtins.cpp:801:5: warning: 'cp::Combine' may not intend to support class template argument deduction [-Wctad-maybe-unsupported]
+  801 |     cp::Combine all(args[0]->items() |cp::α| [&](Value *l) {
+      |     ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/include/Composite/Series.h:126:31: note: add a deduction guide to suppress this warning
+  126 | template <class Parts> struct Combine {
+      |                               ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/Builtins.cpp:816:5: warning: 'cp::Combine' may not intend to support class template argument deduction [-Wctad-maybe-unsupported]
+  816 |     cp::Combine all(rs |cp::α| [](Value *r) { return r->items(); });
+      |     ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/include/Composite/Series.h:126:31: note: add a deduction guide to suppress this warning
+  126 | template <class Parts> struct Combine {
+      |                               ^
+2 warnings generated.
+[7/9] Building CXX object lib/CMakeFiles/NixEval.dir/Eval/ScalarJIT.cpp.o
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:56:51: warning: missing field 'capture' initializer [-Wmissing-field-initializers]
+   56 |   if (result == arg) return {PointerKind::Argument};
+      |                                                   ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:220:29: warning: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:220:45)>' is deprecated: Prefer calling the constructor of llvm::scope_exit directly. [-Wdeprecated-declarations]
+  220 |     auto recordTime = llvm::make_scope_exit([&] {
+      |                             ^~~~~~~~~~~~~~~
+      |                             scope_exit
+/usr/lib/llvm-22/include/llvm/ADT/ScopeExit.h:56:1: note: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:220:45)>' has been explicitly marked deprecated here
+   56 | LLVM_DEPRECATED("Prefer calling the constructor of llvm::scope_exit directly.",
+      | ^
+/usr/lib/llvm-22/include/llvm/Support/Compiler.h:250:50: note: expanded from macro 'LLVM_DEPRECATED'
+  250 | #define LLVM_DEPRECATED(MSG, FIX) __attribute__((deprecated(MSG, FIX)))
+      |                                                  ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:360:28: warning: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:360:44)>' is deprecated: Prefer calling the constructor of llvm::scope_exit directly. [-Wdeprecated-declarations]
+  360 |       auto restore = llvm::make_scope_exit([&] { st.callDepth = depth; });
+      |                            ^~~~~~~~~~~~~~~
+      |                            scope_exit
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:397:36: note: in instantiation of function template specialization 'nixev::ScalarJIT::Impl::evaluateLazy(EvalState &, Entry &, mlir::Operation *, Frame *, llvm::ArrayRef<Value *>, Value &, PosPtr, void *&, llvm::function_ref<void ()>)::(lambda)::operator()<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:397:37)>' requested here
+  397 |         auto observed = atCallDepth([&] { return e.lazyPlan->observe(st, closureEnv, args); });
+      |                                    ^
+/usr/lib/llvm-22/include/llvm/ADT/ScopeExit.h:56:1: note: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:360:44)>' has been explicitly marked deprecated here
+   56 | LLVM_DEPRECATED("Prefer calling the constructor of llvm::scope_exit directly.",
+      | ^
+/usr/lib/llvm-22/include/llvm/Support/Compiler.h:250:50: note: expanded from macro 'LLVM_DEPRECATED'
+  250 | #define LLVM_DEPRECATED(MSG, FIX) __attribute__((deprecated(MSG, FIX)))
+      |                                                  ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:433:28: warning: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:433:44)>' is deprecated: Prefer calling the constructor of llvm::scope_exit directly. [-Wdeprecated-declarations]
+  433 |     auto activeRun = llvm::make_scope_exit([&] {
+      |                            ^~~~~~~~~~~~~~~
+      |                            scope_exit
+/usr/lib/llvm-22/include/llvm/ADT/ScopeExit.h:56:1: note: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:433:44)>' has been explicitly marked deprecated here
+   56 | LLVM_DEPRECATED("Prefer calling the constructor of llvm::scope_exit directly.",
+      | ^
+/usr/lib/llvm-22/include/llvm/Support/Compiler.h:250:50: note: expanded from macro 'LLVM_DEPRECATED'
+  250 | #define LLVM_DEPRECATED(MSG, FIX) __attribute__((deprecated(MSG, FIX)))
+      |                                                  ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:360:28: warning: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:360:44)>' is deprecated: Prefer calling the constructor of llvm::scope_exit directly. [-Wdeprecated-declarations]
+  360 |       auto restore = llvm::make_scope_exit([&] { st.callDepth = depth; });
+      |                            ^~~~~~~~~~~~~~~
+      |                            scope_exit
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:436:30: note: in instantiation of function template specialization 'nixev::ScalarJIT::Impl::evaluateLazy(EvalState &, Entry &, mlir::Operation *, Frame *, llvm::ArrayRef<Value *>, Value &, PosPtr, void *&, llvm::function_ref<void ()>)::(lambda)::operator()<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:436:31)>' requested here
+  436 |     auto result = atCallDepth([&] { return e.lazyPlan->run(st, closureEnv, args, e.lazyFn, validating); });
+      |                              ^
+/usr/lib/llvm-22/include/llvm/ADT/ScopeExit.h:56:1: note: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:360:44)>' has been explicitly marked deprecated here
+   56 | LLVM_DEPRECATED("Prefer calling the constructor of llvm::scope_exit directly.",
+      | ^
+/usr/lib/llvm-22/include/llvm/Support/Compiler.h:250:50: note: expanded from macro 'LLVM_DEPRECATED'
+  250 | #define LLVM_DEPRECATED(MSG, FIX) __attribute__((deprecated(MSG, FIX)))
+      |                                                  ^
+5 warnings generated.
+[8/9] Linking CXX static library lib/libNixEval.a
+[9/9] Linking CXX executable bin/mlnix
+FAILED: [code=1] bin/mlnix 
+: && /usr/bin/clang++-22 -fPIC -fno-semantic-interposition -fvisibility-inlines-hidden -Werror=date-time -Werror=unguarded-availability-new -Wall -Wextra -Wno-unused-parameter -Wwrite-strings -Wcast-qual -Wmissing-field-initializers -Wimplicit-fallthrough -Wcovered-switch-default -Wno-noexcept-type -Wnon-virtual-dtor -Wdelete-non-virtual-dtor -Wsuggest-override -Wstring-conversion -Wno-pass-failed -Wmisleading-indentation -Wctad-maybe-unsupported -fdiagnostics-color -ffunction-sections -fdata-sections -fexceptions -frtti -Wno-unused-parameter -O3 -DNDEBUG -Xlinker --dependency-file=tools/CMakeFiles/mlnix.dir/link.d tools/CMakeFiles/mlnix.dir/mlnix.cpp.o -o bin/mlnix  -Wl,-rpath,/usr/lib/llvm-22/lib  lib/libNixEval.a  lib/libNixFrontend.a  lib/libNixStore.a  lib/libMLIRNix.a  /usr/lib/llvm-22/lib/libMLIRIR.a  /usr/lib/llvm-22/lib/libMLIRParser.a  /usr/lib/llvm-22/lib/libMLIRPass.a  /usr/lib/llvm-22/lib/libMLIRSupport.a  /usr/lib/llvm-22/lib/libLLVMSupport.a  -lrt  -lm  /usr/lib/x86_64-linux-gnu/libz3.so  /usr/lib/x86_64-linux-gnu/libzstd.so  /usr/lib/llvm-22/lib/libLLVMDemangle.a  /usr/lib/x86_64-linux-gnu/libcrypto.a  -ldl  /usr/lib/x86_64-linux-gnu/libz.so  -lzstd  /usr/lib/x86_64-linux-gnu/liburing.so  -lpthread  /usr/lib/llvm-22/lib/libMLIRIRDL.a  /usr/lib/llvm-22/lib/libMLIRFuncToLLVM.a  /usr/lib/llvm-22/lib/libMLIRArithToLLVM.a  /usr/lib/llvm-22/lib/libMLIRArithAttrToLLVMConversion.a  /usr/lib/llvm-22/lib/libMLIRArithTransforms.a  /usr/lib/llvm-22/lib/libMLIRBufferizationTransforms.a  /usr/lib/llvm-22/lib/libMLIRBufferizationDialect.a  /usr/lib/llvm-22/lib/libMLIRSparseTensorDialect.a  /usr/lib/llvm-22/lib/libMLIRSCFDialect.a  /usr/lib/llvm-22/lib/libMLIRFuncTransforms.a  /usr/lib/llvm-22/lib/libMLIRShardingInterface.a  /usr/lib/llvm-22/lib/libMLIRShardDialect.a  /usr/lib/llvm-22/lib/libMLIRVectorDialect.a  /usr/lib/llvm-22/lib/libMLIRTensorDialect.a  /usr/lib/llvm-22/lib/libMLIRParallelCombiningOpInterface.a  /usr/lib/llvm-22/lib/libMLIRAffineDialect.a  /usr/lib/llvm-22/lib/libMLIRIndexingMapOpInterface.a  /usr/lib/llvm-22/lib/libMLIRMaskableOpInterface.a  /usr/lib/llvm-22/lib/libMLIRMaskingOpInterface.a  /usr/lib/llvm-22/lib/libMLIRVectorInterfaces.a  /usr/lib/llvm-22/lib/libMLIRControlFlowToLLVM.a  /usr/lib/llvm-22/lib/libMLIRControlFlowDialect.a  /usr/lib/llvm-22/lib/libMLIRLLVMCommonConversion.a  /usr/lib/llvm-22/lib/libMLIRReconcileUnrealizedCasts.a  /usr/lib/llvm-22/lib/libMLIRExecutionEngine.a  /usr/lib/llvm-22/lib/libMLIRExecutionEngineUtils.a  /usr/lib/llvm-22/lib/libMLIRBuiltinToLLVMIRTranslation.a  /usr/lib/llvm-22/lib/libMLIRLLVMToLLVMIRTranslation.a  /usr/lib/llvm-22/lib/libMLIRTargetLLVMIRExport.a  /usr/lib/llvm-22/lib/libMLIRLLVMIRTransforms.a  /usr/lib/llvm-22/lib/libMLIRTransforms.a  /usr/lib/llvm-22/lib/libMLIRTransformUtils.a  /usr/lib/llvm-22/lib/libMLIRRewrite.a  /usr/lib/llvm-22/lib/libMLIRRewritePDL.a  /usr/lib/llvm-22/lib/libMLIRPDLToPDLInterp.a  /usr/lib/llvm-22/lib/libMLIRPass.a  /usr/lib/llvm-22/lib/libMLIRPDLInterpDialect.a  /usr/lib/llvm-22/lib/libMLIRPDLDialect.a  /usr/lib/llvm-22/lib/libMLIRSubsetOpInterface.a  /usr/lib/llvm-22/lib/libMLIRRuntimeVerifiableOpInterface.a  /usr/lib/llvm-22/lib/libMLIRNVVMDialect.a  /usr/lib/llvm-22/lib/libMLIRGPUDialect.a  /usr/lib/llvm-22/lib/libMLIRMemRefDialect.a  /usr/lib/llvm-22/lib/libMLIRMemOpInterfaces.a  /usr/lib/llvm-22/lib/libMLIRValueBoundsOpInterface.a  /usr/lib/llvm-22/lib/libMLIRAnalysis.a  /usr/lib/llvm-22/lib/libMLIRLoopLikeInterface.a  /usr/lib/llvm-22/lib/libMLIRInferStridedMetadataInterface.a  /usr/lib/llvm-22/lib/libMLIRPresburger.a  /usr/lib/llvm-22/lib/libMLIRViewLikeInterface.a  /usr/lib/llvm-22/lib/libMLIRDestinationStyleOpInterface.a  /usr/lib/llvm-22/lib/libMLIRArithUtils.a  /usr/lib/llvm-22/lib/libMLIRComplexDialect.a  /usr/lib/llvm-22/lib/libMLIRDialectUtils.a  /usr/lib/llvm-22/lib/libMLIRDLTIDialect.a  /usr/lib/llvm-22/lib/libMLIRMathDialect.a  /usr/lib/llvm-22/lib/libMLIRArithDialect.a  /usr/lib/llvm-22/lib/libMLIRCastInterfaces.a  /usr/lib/llvm-22/lib/libMLIRInferIntRangeCommon.a  /usr/lib/llvm-22/lib/libMLIRShapedOpInterfaces.a  /usr/lib/llvm-22/lib/libMLIRDialect.a  /usr/lib/llvm-22/lib/libMLIRUBDialect.a  /usr/lib/llvm-22/lib/libMLIROpenMPDialect.a  /usr/lib/llvm-22/lib/libMLIRFuncDialect.a  /usr/lib/llvm-22/lib/libMLIRLLVMDialect.a  /usr/lib/llvm-22/lib/libMLIRSideEffectInterfaces.a  /usr/lib/llvm-22/lib/libMLIRInferIntRangeInterface.a  /usr/lib/llvm-22/lib/libMLIRInferTypeOpInterface.a  /usr/lib/llvm-22/lib/libMLIRControlFlowInterfaces.a  /usr/lib/llvm-22/lib/libMLIRFunctionInterfaces.a  /usr/lib/llvm-22/lib/libMLIRCallInterfaces.a  /usr/lib/llvm-22/lib/libMLIRDataLayoutInterfaces.a  /usr/lib/llvm-22/lib/libMLIRMemorySlotInterfaces.a  /usr/lib/llvm-22/lib/libMLIRPtrMemorySpaceInterfaces.a  /usr/lib/llvm-22/lib/libMLIROpenACCMPCommon.a  /usr/lib/llvm-22/lib/libMLIRTranslateLib.a  /usr/lib/llvm-22/lib/libMLIRParser.a  /usr/lib/llvm-22/lib/libMLIRBytecodeReader.a  /usr/lib/llvm-22/lib/libMLIRAsmParser.a  /usr/lib/llvm-22/lib/libMLIRIR.a  /usr/lib/llvm-22/lib/libMLIRSupport.a  /usr/lib/llvm-22/lib/libLLVM.so.1 && :
+/usr/bin/x86_64-linux-gnu-ld.bfd: lib/libNixEval.a(LazyJIT.cpp.o): in function `nixev::LazyJITPlan::run(nixev::EvalState&, nixev::Frame*, llvm::ArrayRef<nixev::Value*>, unsigned long (*)(unsigned int, nixev::LazyJITPlan::Runtime*), bool)':
+LazyJIT.cpp:(.text._ZN5nixev11LazyJITPlan3runERNS_9EvalStateEPNS_5FrameEN4llvm8ArrayRefIPNS_5ValueEEEPFmjPNS0_7RuntimeEEb+0x52e): undefined reference to `nixev::EvalState::selectField(nixev::Value&, unsigned int, void const*)'
+clang++-22: error: linker command failed with exit code 1 (use -v to see invocation)
+ninja: build stopped: subcommand failed.

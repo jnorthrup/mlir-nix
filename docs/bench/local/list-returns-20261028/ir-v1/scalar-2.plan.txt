@@ -1,0 +1,17 @@
+lazy-boolean-cps nodes=2/64 leaves=3/16 blocks=24/256 resume-limit=32 inline-calls=1 saturated-inline-calls=0 projections=0 value-returns=1 list-returns=1 inline-depth-limit=4 chain-count=2 entry=7
+destinations: 0=false 1=true 2=deopt; resume=destination+1 (0=entry)
+value terminal: 4294967295 (no resume entry)
+empty result codes: 17=attrs 18=list 19=string
+list result codes: 20+recipe-id (unforced persistent handles)
+statuses: 2=demand 5=depth-overflow 6=value 7=guard-miss; continuation in upper bits
+call entry/leave bookkeeping stays in native control flow
+leaf 0 context=0 argument=0
+leaf 1 context=0 argument=1
+leaf 2 context=1 current-closure capture
+node 0 list recipe=0 code=20 leaves=2,1,2
+node 1 call callee-leaf=0 context=1 arity=1 body=0
+continuation 3 node=1 action=2 true=1 false=1 consumer=nix.apply
+continuation 4 node=1 action=2 true=0 false=0 consumer=nix.apply
+continuation 5 node=1 action=2 true=4294967295 false=4294967295 consumer=nix.apply
+continuation 6 node=0 action=5 true=5 false=5 consumer=nix.apply
+continuation 7 node=1 action=1 true=6 false=2 consumer=nix.apply

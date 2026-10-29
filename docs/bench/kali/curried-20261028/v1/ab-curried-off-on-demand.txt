@@ -1,0 +1,8 @@
+== nixos-toplevel  (5 interleaved runs each; identical output from all: yes)
+  A ../../../tmp/kb/curried-20261028-v wall med  4.117s min  3.995s   cpu med  4.437s   rss med 1.325GB max 1.326GB   hash 2057239a9017
+  B ../../../tmp/kb/curried-20261028-v wall med  4.139s min  3.959s   cpu med  4.356s   rss med 1.327GB max 1.328GB   hash 2057239a9017
+  B vs A: wall +0.5%   cpu -1.8%   rss +0.2%
+== nixpkgs-73  (5 interleaved runs each; identical output from all: yes)
+  A ../../../tmp/kb/curried-20261028-v wall med  3.589s min  3.375s   cpu med  3.793s   rss med 1.222GB max 1.223GB   hash 5e8fff662dff
+  B ../../../tmp/kb/curried-20261028-v wall med  3.690s min  3.633s   cpu med  3.984s   rss med 1.221GB max 1.221GB   hash 5e8fff662dff
+  B vs A: wall +2.8%   cpu +5.0%   rss -0.1%

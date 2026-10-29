@@ -1,0 +1,6 @@
+2057239a9017fb18a37976ec6c96ad31ee36847cfa2107f146d4fac427f0cd86  /tmp/kb/calls-20261028-v2/profile-jit-off-nixos-toplevel.out
+2057239a9017fb18a37976ec6c96ad31ee36847cfa2107f146d4fac427f0cd86  /tmp/kb/calls-20261028-v2/profile-inline-off-nixos-toplevel.out
+2057239a9017fb18a37976ec6c96ad31ee36847cfa2107f146d4fac427f0cd86  /tmp/kb/calls-20261028-v2/profile-inline-on-nixos-toplevel.out
+5e8fff662dffa4eab642b75e78028fb54204cd15ec1a9972c2cafe2306234959  /tmp/kb/calls-20261028-v2/profile-jit-off-nixpkgs-73.out
+5e8fff662dffa4eab642b75e78028fb54204cd15ec1a9972c2cafe2306234959  /tmp/kb/calls-20261028-v2/profile-inline-off-nixpkgs-73.out
+5e8fff662dffa4eab642b75e78028fb54204cd15ec1a9972c2cafe2306234959  /tmp/kb/calls-20261028-v2/profile-inline-on-nixpkgs-73.out

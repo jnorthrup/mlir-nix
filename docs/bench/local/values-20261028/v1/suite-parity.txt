@@ -1,0 +1,2 @@
+eager: all 1443 prior output/error/status files byte-identical; new values fixture returns true with no stderr. Manifest SHA256 4d28fb79e0fda377428c4dcf3e9545499dc3eccd20aa27812ee7af2b864c848f
+demand: all 1443 prior output/error/status files byte-identical; new values fixture returns true with no stderr. Manifest SHA256 4d28fb79e0fda377428c4dcf3e9545499dc3eccd20aa27812ee7af2b864c848f

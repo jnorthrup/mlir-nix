@@ -1,0 +1,2 @@
+eager: eval-okay-jit-projection passed (JIT threshold1), rc0, stdout=true, stderr empty
+demand: eval-okay-jit-projection passed (JIT threshold1), rc0, stdout=true, stderr empty

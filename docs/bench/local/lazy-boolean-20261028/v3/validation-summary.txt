@@ -1,0 +1,24 @@
+V3 nonforcing compilation preflight: local validation, 2026-10-28
+macOS / LLVM-MLIR 23.1.1
+Source archive SHA256: 7a69f6b8391960baca027c225ff87e49986ea494a73909f45026ea7fbba5478d
+Evaluator SHA256: d48c18bdfcfdcf65cf0dd063881f7224f6c39a4cc7dfb9ce148243e650c39438
+
+Focused check: 186 exact JIT/interpreter comparisons; see check-jit.txt.
+Independent preflight oracles assert output, diagnostic fragments, ordered trace lines, compilation counts and three native grace checks.
+
+eager: 478/478 semantic; 220/478 exact against stored suite expectations.
+eager: all 1434 saved output/error/status files are byte-identical to Boolean v2.
+eager: saved-file manifest SHA256 a09364991be376279d613c385b233088fe51a4e54550c819627969d994f9efdc
+demand: 478/478 semantic; 220/478 exact against stored suite expectations.
+demand: all 1434 saved output/error/status files are byte-identical to Boolean v2.
+demand: saved-file manifest SHA256 a09364991be376279d613c385b233088fe51a4e54550c819627969d994f9efdc
+
+Commands:
+MLNIX_JIT=1 MLNIX_JIT_THRESHOLD=1 python3 scripts/run-lang-tests.py --save /tmp/mlnix-locality/boolean-v3-eager
+MLNIX_DEFER=1 MLNIX_JIT=1 MLNIX_JIT_THRESHOLD=1 python3 scripts/run-lang-tests.py --save /tmp/mlnix-locality/boolean-v3-demand
+
+Untimed demand profile: default threshold 1024, MLNIX_JIT_PROFILE=1, MLNIX_STATS=1.
+Output SHA256: 5e8fff662dffa4eab642b75e78028fb54204cd15ec1a9972c2cafe2306234959
+jit: compiled=5 executions=571469 grace=42 rejected=3481 type_misses=0 overflows=0 mismatches=0 compile_failures=0 candidates=60 pointer_compiled=1 identity_executions=122890 capture_executions=11799 selector_executions=233126 pointer_grace=30 pointer_mismatches=0 boolean_compiled=4 boolean_executions=203654 boolean_completions=201795 boolean_demands=186782 boolean_resumes=399236 boolean_deopts=1859 boolean_grace=12 boolean_mismatches=0 boolean_retired=1 boolean_preflight_attempts=196 boolean_preflight_deopts=192 boolean_preflight_rejections=3
+
+No Nix or Lix executable invoked. All results compare candidate behavior or reuse stored evidence.

@@ -1,0 +1,4 @@
+archive=/tmp/mlir-nix-list-returns-v1-20261028.tar.gz
+archive_sha256=d6e161d79b6ef2eeadf1281ed79fc1eaeee34679b41455dea06b49c04613a9d8
+expected_focused_checks=536
+baseline=/tmp/kb/values-20261028-v1/mlnix

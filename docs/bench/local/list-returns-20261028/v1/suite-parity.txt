@@ -1,0 +1,2 @@
+eager: all 1446 prior output/error/status files byte-identical; new list-return fixture returns true with no stderr. Manifest SHA256 5d16340290cb751530fbd581c4405962780eadf22a2cecb11819272219462c19
+demand: all 1446 prior output/error/status files byte-identical; new list-return fixture returns true with no stderr. Manifest SHA256 5d16340290cb751530fbd581c4405962780eadf22a2cecb11819272219462c19

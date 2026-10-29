@@ -1,0 +1,6 @@
+Frozen implementation/build/test files: 1176 byte-identical to List Returns V1 archive.
+All 13 protected incoming files remain byte-identical to incoming snapshot.
+d6e161d79b6ef2eeadf1281ed79fc1eaeee34679b41455dea06b49c04613a9d8  /tmp/mlir-nix-list-returns-v1-20261028.tar.gz
+e2798d307b0dca6a41d7718cd33f38a6578b2173bfa5fed7564555077187935d  /Users/jim/work/mlir-nix/build/bin/mlnix
+e2798d307b0dca6a41d7718cd33f38a6578b2173bfa5fed7564555077187935d  /tmp/mlnix-locality/mlnix-list-returns-v1
+Read-only consistency check; no workloads or reference processes rerun.

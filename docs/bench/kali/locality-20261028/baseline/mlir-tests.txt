@@ -1,0 +1,5 @@
+SKIP declaration.mlir: a RUN line needs cse-dynamic-ops, which this LLVM lacks
+SKIP declaration.mlir: a RUN line needs cse-dynamic-ops, which this LLVM lacks
+SKIP effects.mlir: a RUN line needs cse-dynamic-ops, which this LLVM lacks
+SKIP identity.mlir: a RUN line needs cse-dynamic-ops, which this LLVM lacks
+mlir tests: 13 passed, 0 failed, 4 run lines skipped (cse-dynamic-ops)

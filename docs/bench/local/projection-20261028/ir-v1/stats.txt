@@ -1,0 +1,63 @@
+trace: projection key
+trace: projection base
+trace: projection field
+jit: compiled=4 executions=16 grace=12 rejected=5 type_misses=0 overflows=0 mismatches=0 compile_failures=0 compile_ns=22108834 candidates=2 pointer_compiled=0 identity_executions=0 capture_executions=0 selector_executions=0 pointer_grace=0 pointer_mismatches=0 boolean_compiled=4 boolean_executions=16 boolean_completions=16 boolean_demands=5 boolean_resumes=45 boolean_deopts=0 boolean_grace=12 boolean_mismatches=0 boolean_retired=0 boolean_preflight_attempts=4 boolean_preflight_deopts=0 boolean_preflight_rejections=0 boolean_inline_compiled=2 boolean_inline_calls=10 boolean_guard_misses=0 boolean_depth_entries=10 boolean_specializations=2 boolean_specialization_deopts=0 boolean_projection_compiled=2 boolean_projection_requests=9 boolean_projection_forces=5 boolean_projection_deopts=0 boolean_projection_flat=9 boolean_projection_layered=0 boolean_projection_cached_flat=0 boolean_saturated_inline_compiled=2 boolean_saturated_inline_calls=10 curried_candidates=2 curried_compiled=2 curried_executions=10 curried_completions=10 curried_grace=6 curried_deopts=0 curried_rejected=0 curried_frames_saved=12 curried_values_saved=8 curried_arity2=3 curried_arity3=7 curried_arity4=0
+attribute cells: bytes=16 position_rows=4 position_bytes=32
+frame allocations: count=23 bytes=864 slots=62
+value allocations: count=166 bytes=3984
+== instrumented value-tag writes (including stack temporaries; not live heap rows)
+  app                 4
+  blackhole          26
+  int                 7
+  bool               14
+  null                1
+  string              9
+  attrs               8
+  list                4
+  lambda             11
+  primop            105
+== sea of nodes: 3 file regions hold 49 ops (30.6% ever ran, 15 evals, 22 thunk cells); 7 minted bodies hold 19 ops (36.8% ever ran, 23 evals, 2 thunk cells).  Finer grain mints a cell: the thunk cells are its rows against lambda grain's 7
+== frame cells: 66 assigned, 2 to a value with no use at all (3.0%) -- a value no one reads still costs a cell in every frame of its region
+== mlnix ops lowered: 70
+== `//`: 0 layered (0 entries not copied, 0 top entries incl. merges), 0 flat merges, 0 layers flattened later
+== lowering 0 ms (the analysis of deferred lambdas included), minted on demand 0 ms
+== read plan: 16 names pooled; 0 lambdas skimmed and not yet reached (9 free names kept)
+== lambda pools: 2 files, (at, pos, op, withs, names, body), 9 rows deferred, 7 drained (body minted on a first call), 2 never called
+== scopes (5)
+  core            55
+  ctl              8
+  coll             5
+  io               1
+  val              1
+== continents (6)
+  core            55
+  nixctl           8
+  nixlist          4
+  nixstore         1
+  nixty            1
+  nixattr          1
+== dialects (9)
+  nix             55
+  nixtrace         3
+  nixlistfn        3
+  nixctl           3
+  nixerr           2
+  nixstore         1
+  nixty            1
+  nixlist          1
+  nixattr          1
+== top ops
+  nix.lambda                   10
+  nix.return                   10
+  nix.str                       9
+  nix.apply                     7
+  nix.attrs                     4
+  nixtrace.trace                3
+  nix.list                      2
+  nixerr.throw                  2
+  nix.update                    2
+  nixctl.seq                    2
+  nix.expr                      2
+  nix.bool                      2
+  nixlistfn.map                 2
+  nix.select                    2

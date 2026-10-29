@@ -1,0 +1,81 @@
+jit: compiled=1 executions=367815 grace=30 rejected=3508 type_misses=0 overflows=0 mismatches=0 compile_failures=0 candidates=29 pointer_compiled=1 identity_executions=122890 capture_executions=11799 selector_executions=233126 pointer_grace=30 pointer_mismatches=0
+attribute cells: bytes=16 position_rows=104540 position_bytes=1048576
+== value heap by facet: 11769738 rows allocated (282 MB), 11672039 of them with a final state; thunk and blackhole tags are a force's transient marks
+  thunk               4  (transient)
+  app           2809876  row 24 B  facet 16 B     67.4 ->   45.0 MB
+  blackhole     3873936  (transient)
+  int            281280  row 24 B  facet  8 B      6.8 ->    2.3 MB
+  bool          3259225  row 24 B  facet  1 B     78.2 ->    3.3 MB
+  null             2377  row 24 B  facet  0 B      0.1 ->    0.0 MB
+  string        2247748  row 24 B  facet 20 B     53.9 ->   45.0 MB
+  path             4278  row 24 B  facet 12 B      0.1 ->    0.1 MB
+  attrs         1011310  row 24 B  facet  8 B     24.3 ->    8.1 MB
+  list           776629  row 24 B  facet 12 B     18.6 ->    9.3 MB
+  lambda        1235637  row 24 B  facet 16 B     29.7 ->   19.8 MB
+  primop            105  row 24 B  facet  8 B      0.0 ->    0.0 MB
+  primopapp       43574  row 24 B  facet 16 B      1.0 ->    0.7 MB
+  final states at 24 B a row: 280 MB; on facet-sized rows: 133 MB.  A force re-types a row in place, so a row must fit the largest facet: the uniform 24-B row is the price of call-by-need, and this measures it.
+== sea of nodes: 2395 file regions hold 315435 ops (14.2% ever ran, 395916 evals, 178084 thunk cells); 2315 minted bodies hold 67797 ops (47.3% ever ran, 9998866 evals, 37099 thunk cells).  Finer grain mints a cell: the thunk cells are its rows against lambda grain's 2315
+== frame cells: 382059 assigned, 460 to a value with no use at all (0.1%) -- a value no one reads still costs a cell in every frame of its region
+== mlnix ops lowered: 384405
+== `//`: 40671 layered (12400410 entries not copied, 9002115 top entries incl. merges), 142409 flat merges, 9506 layers flattened later
+== lowering 492 ms (the analysis of deferred lambdas included), minted on demand 39 ms
+== read plan: 44831 names pooled; 1072 lambdas skimmed and not yet reached (9936 free names kept)
+== lambda pools: 1173 files, (at, pos, op, withs, names, body), 22154 rows deferred, 2315 drained (body minted on a first call), 19839 never called
+== scopes (7)
+  core        381435
+  ctl           1916
+  text           440
+  coll           430
+  val            112
+  io              60
+  meta            12
+== continents (11)
+  core        381435
+  nixctl        1916
+  nixstr         436
+  nixlist        288
+  nixattr        142
+  nixnum          61
+  nixty           51
+  nixpath         47
+  nixstore        13
+  nixfmt          12
+  nixctx           4
+== dialects (21)
+  nix         381435
+  nixerr        1657
+  nixstr         412
+  nixload        253
+  nixlistfn      209
+  nixattr        139
+  nixlist         79
+  nixnum          61
+  nixty           42
+  nixfs           37
+  nixstore        13
+  nixre           13
+  nixver          11
+  nixjson         11
+  nixpath         10
+  nixrefl          9
+  nixctl           5
+  nixctx           4
+  nixattrfn        3
+  nixtrace         1
+  nixtoml          1
+== top ops
+  nix.str                   89138
+  nix.attrs                 62156
+  nix.apply                 54253
+  nix.with_var              36576
+  nix.select                32008
+  nix.lambda                23376
+  nix.list                  19046
+  nix.formal                17716
+  nix.path                  15048
+  nix.int                    9371
+  nix.return                 4710
+  nix.concat_strings         4704
+  nix.concat_lists           3018
+  nixerr.throw               1649

@@ -1,0 +1,18 @@
+Wed Oct 28 06:43:24 UTC 2026
+ 01:43:24 up 1 day,  7:59,  0 users,  load average: 2.92, 3.42, 2.29
+               total        used        free      shared  buff/cache   available
+Mem:           15963       10360        2198         361        4008        5602
+Swap:           4096           0        4096
+    PID COMMAND         %CPU %MEM
+ 197776 java             276 31.7
+ 203498 exe              102  4.5
+ 167973 java            12.4 23.5
+ 203501 sshd-session     6.6  0.0
+ 153343 mesh             0.9  0.1
+ 203491 python3          0.6  0.1
+  80255 containerd       0.1  0.2
+     71 systemd-udevd    0.0  0.0
+    211 dockerd          0.0  0.5
+ 153236 containerd-shim  0.0  0.1
+ 201771 sshd-session     0.0  0.0
+cpu MHz		: 2711.999

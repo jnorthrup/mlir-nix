@@ -1,0 +1,8 @@
+== nixos-toplevel  (5 interleaved runs each; identical output from all: yes)
+  A ../../../tmp/kb/dense-selectors-20 wall med  4.031s min  3.733s   cpu med  4.421s   rss med 1.319GB max 1.320GB   hash 2057239a9017
+  B ../../../tmp/kb/dense-selectors-20 wall med  4.174s min  3.951s   cpu med  4.541s   rss med 1.327GB max 1.327GB   hash 2057239a9017
+  B vs A: wall +3.6%   cpu +2.7%   rss +0.6%
+== nixpkgs-73  (5 interleaved runs each; identical output from all: yes)
+  A ../../../tmp/kb/dense-selectors-20 wall med  3.488s min  3.385s   cpu med  3.720s   rss med 1.220GB max 1.222GB   hash 5e8fff662dff
+  B ../../../tmp/kb/dense-selectors-20 wall med  3.735s min  3.413s   cpu med  4.109s   rss med 1.228GB max 1.228GB   hash 5e8fff662dff
+  B vs A: wall +7.1%   cpu +10.5%   rss +0.7%

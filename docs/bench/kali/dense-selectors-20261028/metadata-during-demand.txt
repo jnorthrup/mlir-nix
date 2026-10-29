@@ -1,0 +1,7 @@
+2026-10-28T07:10:48.881014+00:00
+loadavg (1.5380859375, 1.95166015625, 2.01708984375)
+MemAvailable:    5635596 kB
+SwapTotal:       4194304 kB
+SwapFree:        4194304 kB
+java 167973 current_cpu_percent 0.0
+java 197776 current_cpu_percent 0.0

@@ -1,0 +1,141 @@
+Projection V1 local profile analysis — saved evidence only, 2026-10-28
+
+Both arms have JIT enabled and demand scheduling. "off" means only
+MLNIX_JIT_PROJECTION=0; "on" leaves projection enabled. Threshold is 1024.
+These diagnostic profiles establish coverage/allocations, not paired throughput.
+No evaluator, workload, test, Nix or Lix executable was run for this analysis.
+Source and tests remain frozen. See validation-summary.txt for original commands.
+
+Exact aggregate counters (columns: NixOS off/on; nixpkgs-73 off/on):
+compiled                                        12           16 |            9           14
+compile_ns                                41810000     71210627 |     31311250     46324249
+boolean_compiled                                11           15 |            8           13
+boolean_executions                          111694       128833 |       203666       216847
+boolean_completions                         111116       119951 |       201807       209155
+boolean_deopts                                 578         8882 |         1859         7692
+boolean_demands                             103749       121840 |       186782       176456
+boolean_resumes                             277566       323464 |       552451       604679
+boolean_retired                                  1            5 |            1            3
+boolean_preflight_attempts                     470          794 |          392          655
+boolean_preflight_deopts                       459          779 |          384          642
+boolean_preflight_rejections                   106           90 |           73           83
+boolean_guard_misses                             0          134 |            0          232
+boolean_projection_compiled                      0            6 |            0            5
+boolean_projection_requests                      0        28689 |            0        33296
+boolean_projection_forces                        0        29769 |            0        10019
+boolean_projection_deopts                        0            0 |            0            0
+boolean_saturated_inline_compiled                0            1 |            0            1
+boolean_saturated_inline_calls                   0         9130 |            0        20350
+curried_candidates                             256          256 |          256          256
+curried_compiled                                 4            4 |            3            4
+curried_completions                          77366        67542 |       188515       169192
+curried_deopts                                   0         2110 |            0         1482
+
+All four arms have zero mismatches and zero compile failures. On-arm projection
+lookups are all flat: 28,689 / 33,296; layered and cached_flat are zero.
+boolean_projection_deopts counts projection-peek refusal, not every enclosing
+plan fallback. Non-Bool results and opaque branches count as boolean_deopts.
+Curried counters are subsets of aggregate Boolean counters; do not add them.
+
+Attributable fallbacks (source locations relative to .cache/nixpkgs):
+* lib/modules.nix:802:13: `m.options ? _type && (...)` newly has a native
+  false path when _type is absent; the present case reaches unsupported equality
+  / error logic. NixOS: 6,768 completions, 5,995 deopts, 12,763 projection
+  requests and 25,520 force actions. The off arm has zero native calls here.
+* lib/modules.nix:273:68: `_: v: v.value` now enters the Boolean result tier.
+  NixOS: 1,857 completions and 2,110 deopts; nixpkgs: 1,024 and 1,482.
+  This is a bare selected arbitrary value, so a non-Bool correctly falls back.
+  Native fallback rates are 53.19% / 59.14%; off has zero native calls here.
+* lib/attrsets.nix:657:53: `name: !pred name set.${name}` has 9,130 / 20,350
+  completions and 134 / 232 deopts. These equal the aggregate callback guard
+  miss counts. Thus changed/unready callback guards are a small contributor.
+
+NixOS deopts increase 578 -> 8,882 (+8,304). The three newly visible sources
+above contribute 5,995 + 2,110 + 134 = 8,239, leaving a net residual of 65.
+Nixpkgs increases 1,859 -> 7,692 (+5,833); named visible sources contribute
+1,482 + 232 = 1,714, leaving a net residual of 4,119. Residuals may include
+increases and decreases at unprinted locations and must not be assigned to a
+particular cause. Profiling prints only the 60 highest-call unary and 60 highest-
+call curried rows, not a deopt ranking. NixOS additionally hits the 4,096 unary
+profile-entry cap and reports 214,363 dropped calls in each arm; nixpkgs records
+3,537 entries and zero dropped calls. Aggregate counters are not this truncated.
+
+Inline work replaces existing curried execution:
+At lib/systems/default.nix:46:41, curried completions fall 62,117 -> 52,990
+(NixOS, -9,127) and 161,997 -> 141,650 (nixpkgs, -20,347). Each reduction is
+exactly the new filterAttrs wrapper completion count minus its three grace
+calls. The new inline counts therefore represent replacement of existing
+curried execution, not wholly additional native coverage. Semantic saved-frame
+counters are not independent incremental allocation measurements.
+
+Actual allocation counters and requested-byte changes (on minus off):
+nixos-toplevel:
+  frame_count  4790678 -> 4773425; delta -17253 (-0.360%)
+  frame_bytes  299482184 -> 298698792; delta -783392 (-0.262%)
+  value_count  14346974 -> 14338544; delta -8430 (-0.059%)
+  value_bytes  344327376 -> 344125056; delta -202320 (-0.059%)
+nixpkgs-73:
+  frame_count  2843280 -> 2814579; delta -28701 (-1.009%)
+  frame_bytes  257859360 -> 256585328; delta -1274032 (-0.494%)
+  value_count  11581232 -> 11559864; delta -21368 (-0.185%)
+  value_bytes  277949568 -> 277436736; delta -512832 (-0.185%)
+Bytes above are evaluator allocation requests, not peak RSS or resident memory.
+
+Admission and budget explanation:
+ScalarJIT.cpp admits LLVM after one successful pure post-oracle observation.
+The three native grace checks validate correctness; they do not establish a
+high completion rate. A Done resets the native miss streak; retirement requires
+64 consecutive Deopts, so mixed low-yield kernels can persist indefinitely.
+Each evaluator's tiers share a cap of 16 compilation attempts, including the
+pointer engine; retirement frees code but does not refund an attempt. NixOS uses all
+16 slots (off: 12). The previously productive `(n: v: v ? value)` at
+lib/types.nix:833:32 falls from 2,554 native completions to zero, with its
+curried profile stopping at call 1,024. This is consistent with compile-budget
+displacement, not proof: refusal reasons / admission ordering are not logged.
+Nixpkgs uses 14 slots (off: 9), so its final compile budget is not exhausted.
+Curried candidates hit the separate 256-entry cap in every arm. Compile wall
+cost increases 41.810000 -> 71.210627 ms and 31.311250 -> 46.324249 ms.
+
+Conservative next work, not a measured performance claim:
+1. Keep projections consumed by explicit Boolean logic/predicates, but consider
+   excluding bare root Select from the Bool-only tier. A later generic Value-
+   return projection recipe could support arbitrary selected results without
+   treating non-Bool results as deopts; it must preserve key/base/field demand
+   order, original error context, stable-cell lifetime and grace non-forcing.
+2. Evaluate a bounded post-oracle admission sample and/or a bounded rolling
+   completion/deopt budget. Reuse the one oracle result and pure observer;
+   never force extra inputs for profitability. This targets mixed low-yield
+   paths that consecutive-miss retirement misses. Preserve activeRuns lifetime
+   pins and reentrant compile/retirement checks; add independent counter tests.
+3. Callback polymorphism is a lower priority in these profiles: only 134 / 232
+   guard misses versus 8,304 / 5,833 additional general deopts. More variants
+   would also consume the already-tight compilation budget.
+The ordinary Select helper extraction is a separate default-path cost risk;
+select-helper-assembly.txt records the local out-of-line call and binary hash.
+No causal throughput conclusion follows from these diagnostic profiles.
+
+Sources and reproducible read-only extraction:
+- This directory's validation-summary.txt, four profile-projection-*.txt files,
+  and select-helper-assembly.txt.
+- lib/Eval/ScalarJIT.cpp: kMaxCompiles, evaluateLazy, compile, profile print loop.
+- lib/Eval/LazyJIT.cpp: cps Kind::Leaf, emit Bool guard, observe, specialize.
+- .cache/nixpkgs/lib/modules.nix:273,802; lib/attrsets.nix:657;
+  lib/systems/default.nix:46; lib/types.nix:833.
+Commands used to inspect existing data/source (not workload commands):
+  rg -n 'kMaxCompiles|booleanMisses|preflightMisses|jit-shape|jit-curried' lib/Eval/ScalarJIT.cpp
+  sed -n '340,510p' lib/Eval/ScalarJIT.cpp
+  sed -n '758,810p' lib/Eval/ScalarJIT.cpp
+  sed -n '330,395p' lib/Eval/LazyJIT.cpp
+  sed -n '640,671p' lib/Eval/LazyJIT.cpp
+  sed -n '250,287p' .cache/nixpkgs/lib/modules.nix
+  sed -n '786,820p' .cache/nixpkgs/lib/modules.nix
+Python parsing: for each profile, read the `jit:` line and apply
+  dict((k,int(v)) for k,v in re.findall(r'(\w+)=(\d+)', line))
+Read `frame allocations:` / `value allocations:` lines the same way. Differences
+are on minus off; percentages are (on/off - 1)*100. Filter `jit-shape:` rows by
+boolean_deopts and `jit-curried:` by completions/deopts, retaining source paths.
+Input SHA-256:
+f0b3b11654c0e1d0548aa13c6a5dc628fdffc86c81fb7d321cc176ce710e3e4b  profile-projection-off-nixos-toplevel.txt
+51b5dfa6bef94a8ecf90b02547a283b00524a0f20fea873dd6f5b37565179562  profile-projection-on-nixos-toplevel.txt
+0f669ecd5e0c5fc10d933efec1f526afc99df376b513f7c64370de1a80d85467  profile-projection-off-nixpkgs-73.txt
+5262f4bee4d2e35ac9a23cc97c00c0631a88ecddd9e79de8709d0238bf2f1477  profile-projection-on-nixpkgs-73.txt

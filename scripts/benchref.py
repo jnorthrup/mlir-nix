@@ -46,7 +46,8 @@ class Store:
         """[(NN-sha9, tools, golden)], oldest first.  tools: name -> (min, median, rss, timed); timed is False for a pinned line."""
         out = []
         for g in sorted(x for x in os.listdir(self.d) if re.match(r"\d\d-", x)):
-            lines = open(os.path.join(self.d, g, workload + ".txt")).read().splitlines()
+            with open(os.path.join(self.d, g, workload + ".txt")) as stream:
+                lines = stream.read().splitlines()
             if lines[0] != self.host:
                 continue
             tools, gold = {}, None

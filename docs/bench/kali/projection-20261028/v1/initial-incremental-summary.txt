@@ -1,0 +1,2 @@
+05:30:49 build rc=1, error lines: 1
+05:30:49 stage build failed

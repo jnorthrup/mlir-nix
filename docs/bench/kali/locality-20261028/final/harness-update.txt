@@ -1,0 +1,2 @@
+59150ba61cff4b3bedf3ccd621b07f0ce356c04d13beba209cbd50bfa90b4b01  scripts/vs-nix.py
+b4b928ea925da59e105f4f983ff11165c4511141c04d0cf679e091b131d57974  scripts/check-vs-nix.py

@@ -7,7 +7,8 @@
 // under two 128 B lines on the Mac's performance cores, four 64 B lines on
 // kali.  The heap is a min-max heap, so the min and the max sit at the edges;
 // every swap settles at an edge.  A ring of spare pegs absorbs what an edge
-// swap displaces -- the slop cache.  Nothing here allocates; nothing leaves L1.
+// swap displaces -- the slop cache.  Nothing here allocates.  The size bounds
+// below cover each unit, not the residency of a whole bucket array in L1.
 
 #include <array>
 #include <cstdint>
@@ -19,8 +20,8 @@ namespace composite {
 /// ordered (objectid, type, offset).  Inside one block window the objectid
 /// tail is small, so the index a cluster orders is 96 bits: objectid tail
 /// (24) + type (8) in `hi`, the whole offset in `lo`, and a 32-bit payload
-/// handle in `val`.  Compare is register math: two loads, two compares, no
-/// memory.
+/// handle in `val`.  The caller must keep objectid in [base, base + 2^24).
+/// Comparison uses the packed words, with no pointer lookup.
 struct InodeRow {
   uint64_t lo;   // offset
   uint32_t hi;   // (objectid - window base) << 8 | type
@@ -45,6 +46,7 @@ static_assert(sizeof(InodeRow) == 16);
 /// Even levels are min levels, odd levels are max levels.  The minimum is the
 /// root; the maximum is a child of the root -- both edges are O(1) reads, and
 /// every removal swaps an edge row with the last row and sifts it down.
+/// The caller must not push when full or read/pop when empty.
 template <class Row, unsigned N>
 struct MinMaxHeap {
   static_assert((N & (N + 1)) == 0, "N is one less than a power of two (level-clean)");
@@ -59,7 +61,7 @@ struct MinMaxHeap {
     a[i] = r;
     if (i == 0) return;
     // level(i) = floor(log2(i + 1)); a min level is an even level.
-    bool minLevel = ((63 - __builtin_clz(i + 1)) & 1) == 0;
+    bool minLevel = ((31 - __builtin_clz(i + 1)) & 1) == 0;
     uint32_t p = (i - 1) / 2;
     if (minLevel ? a[p] < a[i] : a[i] < a[p]) {
       Row t = a[i]; a[i] = a[p]; a[p] = t;  // settle at the parent edge
@@ -116,10 +118,9 @@ private:
         if (a[g] < a[m]) m = g;
       if (!(a[m] < a[i])) break;
       Row t = a[i]; a[i] = a[m]; a[m] = t;
-      if (m >= 4 * i + 3) {  // a grandchild: it may exceed its parent
-        uint32_t p = (m - 1) / 2;
-        if (a[p] < a[m]) { Row u = a[m]; a[m] = a[p]; a[p] = u; }
-      }
+      if (m < 4 * i + 3) break; // a child is on the opposite level: stop here
+      uint32_t p = (m - 1) / 2;
+      if (a[p] < a[m]) { Row u = a[m]; a[m] = a[p]; a[p] = u; }
       i = m;
     }
   }
@@ -133,10 +134,9 @@ private:
         if (a[m] < a[g]) m = g;
       if (!(a[i] < a[m])) break;
       Row t = a[i]; a[i] = a[m]; a[m] = t;
-      if (m >= 4 * i + 3) {
-        uint32_t p = (m - 1) / 2;
-        if (a[m] < a[p]) { Row u = a[m]; a[m] = a[p]; a[p] = u; }
-      }
+      if (m < 4 * i + 3) break;
+      uint32_t p = (m - 1) / 2;
+      if (a[m] < a[p]) { Row u = a[m]; a[m] = a[p]; a[p] = u; }
       i = m;
     }
   }
@@ -150,6 +150,7 @@ private:
 template <class Row, unsigned P>
 struct Pegs {
   static_assert((P & (P - 1)) == 0, "peg ring is a power of two (mask indexing)");
+  static constexpr uint32_t mask = P - 1;
   std::array<Row, P> a{};
   uint32_t head = 0, cnt = 0;
 
@@ -190,6 +191,13 @@ struct Cluster {
   constexpr uint32_t size() const { return heap.size() + pegs.size(); }
   constexpr bool full() const { return heap.full() && pegs.full(); }
 
+  constexpr Row min() const {
+    return !heap.size() ? pegs.min() : !pegs.size() || heap.min() < pegs.min() ? heap.min() : pegs.min();
+  }
+  constexpr Row popMin() {
+    return !heap.size() ? pegs.popMin() : !pegs.size() || heap.min() < pegs.min() ? heap.popMin() : pegs.popMin();
+  }
+
   constexpr uint32_t insert(Row r) {
     if (heap.full() && pegs.full()) return 2;
     if (!heap.full()) { heap.push(r); return 0; }
@@ -203,25 +211,62 @@ struct Cluster {
     return 1;
   }
 
+  /// The stored row equal to `r`, or null.  The heap's edges are O(1) reads, so a key outside [min, max] skips the heap
+  /// scan; the pegs are unordered and always scanned.  Both scans are register scale.
+  constexpr const Row *find(const Row &r) const {
+    if (heap.size() && !(r < heap.min()) && !(heap.max() < r))
+      for (uint32_t i = 0; i < heap.size(); ++i)
+        if (heap.a[i] == r) return &heap.a[i];
+    for (uint32_t i = 0; i < pegs.size(); ++i) {
+      const Row &c = pegs.a[(pegs.head + i) & (decltype(pegs)::mask)];
+      if (c == r) return &c;
+    }
+    return nullptr;
+  }
+
   /// Emits every row in key order: the min edge of the heap and the min peg
   /// race, and the smaller leaves.  The drain of a fill -- no search, one pop
   /// a row, locally dispatched.
   template <class Emit>
   constexpr void drain(Emit &&emit) {
-    while (heap.size() && pegs.size()) {
-      if (heap.min() < pegs.min()) emit(heap.popMin());
-      else emit(pegs.popMin());
-    }
-    while (heap.size()) emit(heap.popMin());
-    while (pegs.size()) emit(pegs.popMin());
+    while (size()) emit(popMin());
   }
 };
 
+/// Stable permutation of one cluster. Read the whole input before any output,
+/// so the caller can reuse its key buffer for the permutation.
+template <class Keys, class Emit>
+constexpr bool clusterOrder(const Keys &keys, Emit emit) {
+  if (uint64_t(keys.size()) > 23) return false;
+  struct Row {
+    int64_t key;
+    uint32_t index;
+    constexpr bool operator<(const Row &r) const { return key != r.key ? key < r.key : index < r.index; }
+  };
+  Cluster<Row, 15, 8> c;
+  for (uint32_t i = 0; i < keys.size(); ++i) c.insert({int64_t(keys[i]), i});
+  c.drain([&](Row r) { emit(r.index); });
+  return true;
+}
+
 namespace law {
+constexpr bool mixedEdges() {
+  const int input[] = {0, 0, 1, 0, 0, 0, 1}, expected[] = {0, 1, 0, 1, 0, 0, 0};
+  for (unsigned reverse = 0; reverse < 2; ++reverse) {
+    MinMaxHeap<int, 7> h;
+    for (int x : input) h.push(reverse ? -x : x);
+    for (unsigned i = 0; i < 7; ++i) {
+      int x = ((i & 1) != reverse) ? h.popMax() : h.popMin();
+      if (x != (reverse ? -expected[i] : expected[i])) return false;
+    }
+  }
+  return true;
+}
+static_assert(mixedEdges(), "equal child/grandchild keys preserve both heap edges");
+
 /// The law of the cluster, held at compile time: a cluster filled out of order
 /// and drained emits the same stream a sort of the same rows emits; a full
-/// cluster says so and stays intact; and the edges never move more than one
-/// row.
+/// cluster says so and stays intact.
 constexpr bool clusterSorts() {
   const uint32_t seed[23] = {7, 3, 9, 1, 8, 12, 5, 14, 0, 11, 6, 13, 2, 10, 4,
                              20, 16, 18, 15, 19, 17, 22, 21};

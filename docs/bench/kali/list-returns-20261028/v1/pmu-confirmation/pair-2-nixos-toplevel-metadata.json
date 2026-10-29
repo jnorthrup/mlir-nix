@@ -1,0 +1,70 @@
+{
+  "pair": 2,
+  "workload": "nixos-toplevel",
+  "order": [
+    "off",
+    "on"
+  ],
+  "binary_sha256": "a34739ca7f9dddaf7db70c45fa33c445b3ead6192e8bb5b2736527797b227e14",
+  "started": "2026-10-28T11:45:05.948358+00:00",
+  "arms": [
+    {
+      "mode": "off",
+      "file": "pair-2-lists-off-nixos-toplevel.json",
+      "command": [
+        "python3",
+        "scripts/hw-counters.py",
+        "--",
+        "env",
+        "MLNIX_DEFER=1",
+        "/tmp/kb/list-returns-20261028-v1/mlnix",
+        "instantiate",
+        "--readonly-mode",
+        "--eval",
+        "--strict",
+        "test/nixos-toplevel.nix",
+        "--arg",
+        "nixpkgs",
+        "./.cache/nixpkgs"
+      ],
+      "settings": {
+        "MLNIX_JIT": "1",
+        "MLNIX_JIT_LISTS": "0",
+        "MLNIX_JIT_THRESHOLD": "absent/default1024"
+      },
+      "started": "2026-10-28T11:45:05.956102+00:00",
+      "finished": "2026-10-28T11:45:09.961547+00:00",
+      "exit_code": 0
+    },
+    {
+      "mode": "on",
+      "file": "pair-2-lists-on-nixos-toplevel.json",
+      "command": [
+        "python3",
+        "scripts/hw-counters.py",
+        "--",
+        "env",
+        "MLNIX_DEFER=1",
+        "/tmp/kb/list-returns-20261028-v1/mlnix",
+        "instantiate",
+        "--readonly-mode",
+        "--eval",
+        "--strict",
+        "test/nixos-toplevel.nix",
+        "--arg",
+        "nixpkgs",
+        "./.cache/nixpkgs"
+      ],
+      "settings": {
+        "MLNIX_JIT": "1",
+        "MLNIX_JIT_LISTS": "absent",
+        "MLNIX_JIT_THRESHOLD": "absent/default1024"
+      },
+      "started": "2026-10-28T11:45:09.961823+00:00",
+      "finished": "2026-10-28T11:45:13.941277+00:00",
+      "exit_code": 0
+    }
+  ],
+  "finished": "2026-10-28T11:45:13.941545+00:00",
+  "final_binary_sha256": "a34739ca7f9dddaf7db70c45fa33c445b3ead6192e8bb5b2736527797b227e14"
+}

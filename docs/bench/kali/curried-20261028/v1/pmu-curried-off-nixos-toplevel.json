@@ -1,0 +1,58 @@
+{
+  "command": [
+    "env",
+    "MLNIX_DEFER=1",
+    "/tmp/kb/curried-20261028-v1/mlnix",
+    "instantiate",
+    "--readonly-mode",
+    "--eval",
+    "--strict",
+    "test/nixos-toplevel.nix",
+    "--arg",
+    "nixpkgs",
+    "./.cache/nixpkgs"
+  ],
+  "exit_code": 0,
+  "wall_seconds": 4.065682658998412,
+  "cpu_seconds": 4.3754930000000005,
+  "peak_rss_mib": 1263.73046875,
+  "scope": "user-space, inherited threads/children",
+  "events": {
+    "cycles": {
+      "raw": 12148085430,
+      "enabled_ns": 4363332600,
+      "running_ns": 4363332600,
+      "scaled": 12148085430
+    },
+    "instructions": {
+      "raw": 18816480926,
+      "enabled_ns": 4363332600,
+      "running_ns": 4363332600,
+      "scaled": 18816480926
+    },
+    "cache_references": {
+      "raw": 633096918,
+      "enabled_ns": 4363332600,
+      "running_ns": 4363332600,
+      "scaled": 633096918
+    },
+    "cache_misses": {
+      "raw": 110376537,
+      "enabled_ns": 4363332600,
+      "running_ns": 4363332600,
+      "scaled": 110376537
+    },
+    "branches": {
+      "raw": 3386587062,
+      "enabled_ns": 4363332600,
+      "running_ns": 4363332600,
+      "scaled": 3386587062
+    },
+    "branch_misses": {
+      "raw": 87410602,
+      "enabled_ns": 4363332600,
+      "running_ns": 4363332600,
+      "scaled": 87410602
+    }
+  }
+}

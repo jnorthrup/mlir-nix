@@ -1,0 +1,7 @@
+Wed Oct 28 08:28:10 UTC 2026
+ 03:28:10 up 1 day,  9:44,  0 users,  load average: 0.09, 0.10, 0.18
+               total        used        free      shared  buff/cache   available
+Mem:           15963       10754        5026         507         894        5209
+Swap:           4096           0        4096
+7a69f6b8391960baca027c225ff87e49986ea494a73909f45026ea7fbba5478d  /tmp/mlir-nix-lazy-boolean-v3-20261028.tar.gz
+7f6c7ec17d8f4bda9ba08219fab2cb730caaa1c7bd93d5464db649525452f6e8  /tmp/kb/lazy-boolean-20261028-v2/mlnix

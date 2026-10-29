@@ -1,0 +1,22 @@
+[1/3] Building CXX object lib/CMakeFiles/NixEval.dir/Eval/Eval.cpp.o
+In file included from /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/Eval.cpp:5:
+In file included from /home/jim/work/mlir-nix-dense-selectors-20261028/include/Nix/Eval.h:16:
+In file included from /home/jim/work/mlir-nix-dense-selectors-20261028/include/Nix/MLIRGen.h:11:
+/home/jim/work/mlir-nix-dense-selectors-20261028/include/Composite/Series.h:132:80: warning: 'Combine' may not intend to support class template argument deduction [-Wctad-maybe-unsupported]
+  132 | template <class F> constexpr auto operator+(Series<F> a, Series<F> b) { return Combine(std::array{std::move(a), std::move(b)}); }
+      |                                                                                ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/Eval.cpp:1268:32: note: in instantiation of function template specialization 'composite::operator+<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/include/Composite/Series.h:95:16)>' requested here
+ 1268 |         mkList(out, l->items() + r->items());
+      |                                ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/include/Composite/Series.h:126:31: note: add a deduction guide to suppress this warning
+  126 | template <class Parts> struct Combine {
+      |                               ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/Eval.cpp:1666:34: warning: missing field 'seen' initializer [-Wmissing-field-initializers]
+ 1666 |   TracePrinter p{*this, os, false};
+      |                                  ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/Eval.cpp:2061:20: warning: missing field 'ex' initializer [-Wmissing-field-initializers]
+ 2061 |   } c{std::move(fn)};
+      |                    ^
+3 warnings generated.
+[2/3] Linking CXX static library lib/libNixEval.a
+[3/3] Linking CXX executable bin/mlnix

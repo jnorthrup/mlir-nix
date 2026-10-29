@@ -1,0 +1,22 @@
+Captured: 2026-10-28 (America/Chicago)
+Host: Apple M3 Pro; arm64; macOS 15.8.1
+LLVM/MLIR: 23.1.1
+Base commit: 46182e5b41a88d96f619b53f923bd6aafb7f46a2; uncommitted working changes included
+Evaluator binary SHA256: 527475024d71ae52b7d67030e0d79e077394cefc0eac917946784a47ac0e16af
+Source manifest SHA256: 1e37a4a3473a677a01cf9b1cf59cf6d3a0b1f9b9df91c4a98a37f3303b19f1b1
+Manifest: sorted include/lib/tools .h/.td/.cpp/.mlir/.txt files and root CMakeLists.txt;
+  hash input is u64le path-byte-count + relative UTF-8 path + u64le file-byte-count + file bytes.
+Source files newer than binary at metadata capture: none
+Benchmark command: python3 scripts/jit-bench.py --runs 5 --demand --count 1000 --count 100000 --count 1000000
+Schedule: demand (MLNIX_DEFER=1); MLNIX_JIT_THRESHOLD=1024; JIT toggled off/on
+Timing: whole subprocess; compilation and three grace comparisons included; five interleaved rounds
+Correctness: every timed arm checked against the independent arithmetic sum oracle
+Scope: generated scalar arithmetic only; these are not nixpkgs timings
+Native dump command environment: MLNIX_JIT=1 MLNIX_JIT_THRESHOLD=1 MLNIX_STATS=1 MLNIX_JIT_DUMP=/tmp/mlnix-locality/native-dump
+Native expression: let f = x: ((x * 3) - 1) + 7; in builtins.foldl' builtins.add 0 (builtins.genList f 12)
+Native result: 270
+Native counters: compiled=1 executions=12 grace=3 rejected=0 type_misses=0 overflows=0 mismatches=0 compile_failures=0 candidates=1
+Assembly command: llc -O2 scalar-0.ll -o scalar-0.s (LLVM 23.1.1, host ARM64 target)
+Assembly inspection: smulh/add/sub and overflow checks; no arithmetic runtime calls
+No benchmark or acceptance reruns were made while archiving these logs.
+Benchmark snapshot includes the inline-small-list prototype, subsequently rejected and reverted after Kali A/B.

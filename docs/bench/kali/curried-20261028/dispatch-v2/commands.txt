@@ -1,0 +1,10 @@
+Actual launcher: commands-v2.sh; no credentials or unrelated environment.
+Frozen archive: /tmp/mlir-nix-curried-dispatch-v2-20261028.tar.gz (SHA256 77d0788b1a5355acd3d7d9511c69c150c030b5b18446e7b6d6817415b56dec71, 821625 bytes).
+Preserved baseline: /tmp/kb/curried-20261028-v1/mlnix (SHA256 919d653831c6b034770dd9312f7cfdf305c075b7e01ee87fd33d56f4de8a95bc).
+Candidate: /tmp/kb/curried-20261028-dispatch-v2/mlnix. Frozen source overlay reuses isolated build tree /home/jim/work/mlir-nix-dense-selectors-20261028, serialized by /tmp/kb/gen.lock. Projection development and parked builtin-results candidate are not applied.
+
+The launcher clears MLNIX_JIT, MLNIX_JIT_INLINE, MLNIX_JIT_CURRIED, MLNIX_DEFER, MLNIX_STATS, MLNIX_PIPELINE, MLNIX_PRIMS_IRDL, MLNIX_JIT_THRESHOLD, MLNIX_JIT_DUMP and MLNIX_JIT_PROFILE.
+Untimed candidate profiles use MLNIX_JIT=1, MLNIX_DEFER=1, MLNIX_STATS=1, MLNIX_JIT_PROFILE=1 and temporary store/state roots. Threshold, INLINE and CURRIED remain absent (defaults). Full output SHA256 must match saved goldens; per-location jit-curried rows are retained and compared with saved Curried V1 profiles.
+Five rotating paired rounds compare V1/V2 with MLNIX_JIT=1. Three paired control rounds compare V1/V2 with JIT absent. All timings use MLNIX_DEFER=1. Stats and profiling remain absent from timings.
+Separate PMU pairs compare V1/V2 with MLNIX_JIT=1 and MLNIX_DEFER=1. The PMU command array does not repeat inherited JIT=1; the setting is explicit in the launcher and filename.
+No Nix/Lix binaries, old broad suites, or unrelated benchmark jobs are invoked.

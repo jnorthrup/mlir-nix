@@ -1,0 +1,7 @@
+FAIL map (f: builtins.convertHash { hash = "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU="; toHashFormat = f; }) ["base16" "nix32" "base64" "sri"]
+   mlnix: (0, '[ "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" "0mdqa9w1p6cmli6976v4wi0sw9r4p5prkj7lzfd1877wk11c9c73" "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=" "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=" ]')
+   Nix 2.35.4:  (0, '[ "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" "0mdqa9w1p6cmli6976v4wi0sw9r4p5prkj7lzfd1877wk11c9c73" "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=" "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=" ]') 
+   Lix 2.91.3:  (1, '')    <- differs from mlnix
+72/72 identical to Nix 2.35.4
+71/72 identical to Lix 2.91.3
+1 case(s) where the references disagree with each other (shown above)

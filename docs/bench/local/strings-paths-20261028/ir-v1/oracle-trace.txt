@@ -1,0 +1,3 @@
+trace: path base
+trace: path intermediate
+trace: selected string

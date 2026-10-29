@@ -1,0 +1,8 @@
+== nixos-toplevel  (5 interleaved runs each; identical output from all: yes)
+  A ../../../tmp/kb/calls-20261028-v2/ wall med  4.041s min  3.957s   cpu med  4.347s   rss med 1.316GB max 1.316GB   hash 2057239a9017
+  B ../../../tmp/kb/builtin-results-20 wall med  4.099s min  3.861s   cpu med  4.434s   rss med 1.302GB max 1.304GB   hash 2057239a9017
+  B vs A: wall +1.4%   cpu +2.0%   rss -1.1%
+== nixpkgs-73  (5 interleaved runs each; identical output from all: yes)
+  A ../../../tmp/kb/calls-20261028-v2/ wall med  3.547s min  3.441s   cpu med  3.879s   rss med 1.217GB max 1.219GB   hash 5e8fff662dff
+  B ../../../tmp/kb/builtin-results-20 wall med  3.702s min  3.597s   cpu med  4.031s   rss med 1.212GB max 1.213GB   hash 5e8fff662dff
+  B vs A: wall +4.4%   cpu +3.9%   rss -0.4%

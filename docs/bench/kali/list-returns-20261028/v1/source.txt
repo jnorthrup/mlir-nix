@@ -1,0 +1,4 @@
+d6e161d79b6ef2eeadf1281ed79fc1eaeee34679b41455dea06b49c04613a9d8  /tmp/mlir-nix-list-returns-v1-20261028.tar.gz
+a34739ca7f9dddaf7db70c45fa33c445b3ead6192e8bb5b2736527797b227e14  /tmp/kb/list-returns-20261028-v1/mlnix
+eb0ffd499e6f89ea580ff94bbaec7cfa6e73c6809ec6c33996af1bbe5ac96762  test/nixos-toplevel.nix
+5ecb18f73dc6563db6dfaabe46f552f74efb70e0b68e5639b599d7b0814a82d4  test/nixpkgs-drvs.nix

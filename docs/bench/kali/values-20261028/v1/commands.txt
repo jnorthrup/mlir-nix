@@ -1,0 +1,13 @@
+Actual measured-run launcher: commands-v1.sh; no credentials or unrelated environment.
+Frozen archive: /tmp/mlir-nix-values-v1-20261028.tar.gz (SHA256 3d54905419b293a778a4c91a26d6b8d01b729906c634f68822b1b5cf69b5d1c5, 1296899 bytes).
+Preserved baseline: /tmp/kb/projection-20261028-v1/mlnix (SHA256 0e66ac30093a2d044cdbdf2c72f93d65eea0e4e9e20b3592d3f2ab01eb3ca466).
+Candidate: /tmp/kb/values-20261028-v1/mlnix. The final frozen source includes persistent returns and three empty-container recipes; the intermediate persistent-only candidate was never built on Kali.
+Frozen overlay uses isolated tree /home/jim/work/mlir-nix-dense-selectors-20261028, serialized by /tmp/kb/gen.lock. Every archived regular file is verified byte for byte, then the full isolated build directory is cleaned before compilation. Source bytes and preserved baselines remain unchanged.
+
+The launcher clears MLNIX_JIT, MLNIX_JIT_INLINE, MLNIX_JIT_CURRIED, MLNIX_JIT_PROJECTION, MLNIX_JIT_VALUES, MLNIX_DEFER, MLNIX_STATS, MLNIX_PIPELINE, MLNIX_PRIMS_IRDL, MLNIX_JIT_THRESHOLD, MLNIX_JIT_DUMP and MLNIX_JIT_PROFILE.
+Untimed candidate profiles use MLNIX_DEFER=1, MLNIX_STATS=1, MLNIX_JIT_PROFILE=1 and temporary store/state roots. Three arms are JIT absent, JIT=1 with MLNIX_JIT_VALUES=0, and JIT=1 with VALUES absent (default enabled). Threshold remains absent (default1024); INLINE/CURRIED/PROJECTION remain absent (defaults). Full output SHA256 must match saved Kali goldens; all profile rows retained.
+Five rotating paired rounds compare candidate VALUES=0 / default with JIT=1 in both. Five paired rounds compare candidate JIT absent / JIT=1. Three pairs compare preserved Projection V1 / candidate with JIT=1; three controls compare them with JIT absent. All timings use MLNIX_DEFER=1. Stats and profiling remain absent from timings.
+Separate PMU pairs compare candidate VALUES=0 / default with JIT=1 in both. The PMU child command array omits inherited environment; settings are explicit in the launcher and filename.
+UTC/load/memory/swap and Java/mlnix/build process snapshots are saved before every series and at completion. Process CPU percentages are lifetime averages, not instantaneous measurements. No unrelated command arguments are captured, and external processes are never changed.
+Kali full goldens remain 2057239a9017fb18a37976ec6c96ad31ee36847cfa2107f146d4fac427f0cd86 and 5e8fff662dffa4eab642b75e78028fb54204cd15ec1a9972c2cafe2306234959.
+No Nix/Lix binaries, broad suites, or unrelated benchmark jobs are invoked.

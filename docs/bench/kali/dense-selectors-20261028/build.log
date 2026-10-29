@@ -1,0 +1,93 @@
+[1/49] Building NixDialect.cpp.inc...
+[2/49] Building NixInterfaces.cpp.inc...
+[3/49] Building NixInterfaces.h.inc...
+[4/49] Building NixSyntaxEnums.cpp.inc...
+[5/49] Building NixDialect.h.inc...
+[6/49] Building NixSyntaxEnums.h.inc...
+[7/49] Building NixOps.h.inc...
+[8/49] Building NixOps.cpp.inc...
+[9/49] Building TrikeShedAttrDefs.cpp.inc...
+[10/49] Building NixTypes.h.inc...
+[11/49] Building TrikeShedAttrDefs.h.inc...
+[12/49] Building TrikeShedDialect.cpp.inc...
+[13/49] Building NixTypes.cpp.inc...
+[14/49] Building TrikeShedDialect.h.inc...
+[15/49] Building TrikeShedEnums.h.inc...
+[16/49] Building TrikeShedEnums.cpp.inc...
+[17/49] Building TrikeShedTypes.cpp.inc...
+[18/49] Building TrikeShedTypes.h.inc...
+[19/49] Building TrikeShedOps.cpp.inc...
+[20/49] Building TrikeShedOps.h.inc...
+[21/49] Building CXX object lib/CMakeFiles/NixStore.dir/Store/Hash.cpp.o
+[22/49] Building CXX object lib/CMakeFiles/NixStore.dir/Store/Prefetch.cpp.o
+[23/49] Building CXX object lib/CMakeFiles/NixFrontend.dir/Frontend/Source.cpp.o
+[24/49] Building CXX object lib/CMakeFiles/NixStore.dir/Store/StorePaths.cpp.o
+[25/49] Building CXX object lib/CMakeFiles/NixStore.dir/Store/LocalStore.cpp.o
+[26/49] Building CXX object lib/CMakeFiles/NixStore.dir/Store/StructuredAttrs.cpp.o
+[27/49] Linking CXX static library lib/libNixStore.a
+[28/49] Building CXX object lib/CMakeFiles/NixFrontend.dir/Frontend/Confix.cpp.o
+[29/49] Building CXX object lib/CMakeFiles/TrikeShedRuntime.dir/Composite/ClusterRuntime.cpp.o
+[30/49] Building CXX object lib/CMakeFiles/obj.MLIRNix.dir/Dialect/NixPrimDialects.cpp.o
+[31/49] Building CXX object lib/CMakeFiles/obj.MLIRTrikeShed.dir/Composite/ClusterLowering.cpp.o
+[32/49] Building CXX object lib/CMakeFiles/NixFrontend.dir/Frontend/Parser.cpp.o
+[33/49] Building CXX object lib/CMakeFiles/NixEval.dir/Eval/StoreBuiltins.cpp.o
+[34/49] Linking CXX shared library lib/libTrikeShedRuntime.so
+[35/49] Building CXX object lib/CMakeFiles/NixEval.dir/Eval/Formats.cpp.o
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/Formats.cpp:448:20: warning: missing field 'stack' initializer [-Wmissing-field-initializers]
+  448 |   XMLWriter doc{out};
+      |                    ^
+1 warning generated.
+[36/49] Building CXX object lib/CMakeFiles/NixEval.dir/Eval/EvalModels.cpp.o
+[37/49] Building CXX object lib/CMakeFiles/NixEval.dir/Eval/Builtins.cpp.o
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/Builtins.cpp:801:5: warning: 'cp::Combine' may not intend to support class template argument deduction [-Wctad-maybe-unsupported]
+  801 |     cp::Combine all(args[0]->items() |cp::α| [&](Value *l) {
+      |     ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/include/Composite/Series.h:126:31: note: add a deduction guide to suppress this warning
+  126 | template <class Parts> struct Combine {
+      |                               ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/Builtins.cpp:816:5: warning: 'cp::Combine' may not intend to support class template argument deduction [-Wctad-maybe-unsupported]
+  816 |     cp::Combine all(rs |cp::α| [](Value *r) { return r->items(); });
+      |     ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/include/Composite/Series.h:126:31: note: add a deduction guide to suppress this warning
+  126 | template <class Parts> struct Combine {
+      |                               ^
+2 warnings generated.
+[38/49] Building CXX object lib/CMakeFiles/NixEval.dir/Eval/Eval.cpp.o
+In file included from /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/Eval.cpp:5:
+In file included from /home/jim/work/mlir-nix-dense-selectors-20261028/include/Nix/Eval.h:16:
+In file included from /home/jim/work/mlir-nix-dense-selectors-20261028/include/Nix/MLIRGen.h:11:
+/home/jim/work/mlir-nix-dense-selectors-20261028/include/Composite/Series.h:132:80: warning: 'Combine' may not intend to support class template argument deduction [-Wctad-maybe-unsupported]
+  132 | template <class F> constexpr auto operator+(Series<F> a, Series<F> b) { return Combine(std::array{std::move(a), std::move(b)}); }
+      |                                                                                ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/Eval.cpp:1276:32: note: in instantiation of function template specialization 'composite::operator+<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/include/Composite/Series.h:95:16)>' requested here
+ 1276 |         mkList(out, l->items() + r->items());
+      |                                ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/include/Composite/Series.h:126:31: note: add a deduction guide to suppress this warning
+  126 | template <class Parts> struct Combine {
+      |                               ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/Eval.cpp:1674:34: warning: missing field 'seen' initializer [-Wmissing-field-initializers]
+ 1674 |   TracePrinter p{*this, os, false};
+      |                                  ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/Eval.cpp:2069:20: warning: missing field 'ex' initializer [-Wmissing-field-initializers]
+ 2069 |   } c{std::move(fn)};
+      |                    ^
+3 warnings generated.
+[39/49] Building CXX object lib/CMakeFiles/obj.MLIRNix.dir/Dialect/NixDialect.cpp.o
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Dialect/NixDialect.cpp:203:37: warning: comparison of integers of different signs: 'size_t' (aka 'unsigned long') and 'int64_t' (aka 'long') [-Wsign-compare]
+  203 |         getFormalDefaults()->size() != (int64_t)getFormals()->size())
+      |         ~~~~~~~~~~~~~~~~~~~~~~~~~~~ ^  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+1 warning generated.
+[40/49] Linking CXX static library lib/libMLIRNix.a
+[41/49] Linking CXX static library lib/libNixFrontend.a
+[42/49] Building CXX object lib/CMakeFiles/obj.MLIRTrikeShed.dir/Composite/TrikeShedDialect.cpp.o
+[43/49] Linking CXX static library lib/libMLIRTrikeShed.a
+[44/49] Building CXX object tools/CMakeFiles/mlnix-opt.dir/mlnix-opt.cpp.o
+[45/49] Linking CXX executable bin/mlnix-opt
+[46/49] Building CXX object tools/CMakeFiles/mlnix.dir/mlnix.cpp.o
+[47/49] Building CXX object lib/CMakeFiles/NixEval.dir/Eval/ScalarJIT.cpp.o
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:49:51: warning: missing field 'capture' initializer [-Wmissing-field-initializers]
+   49 |   if (result == arg) return {PointerKind::Argument};
+      |                                                   ^
+1 warning generated.
+[48/49] Linking CXX static library lib/libNixEval.a
+[49/49] Linking CXX executable bin/mlnix

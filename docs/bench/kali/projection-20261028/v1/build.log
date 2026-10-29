@@ -1,0 +1,171 @@
+[1/50] Building NixInterfaces.cpp.inc...
+[2/50] Building NixInterfaces.h.inc...
+[3/50] Building NixDialect.h.inc...
+[4/50] Building NixSyntaxEnums.cpp.inc...
+[5/50] Building NixSyntaxEnums.h.inc...
+[6/50] Building NixDialect.cpp.inc...
+[7/50] Building NixOps.cpp.inc...
+[8/50] Building NixOps.h.inc...
+[9/50] Building NixTypes.cpp.inc...
+[10/50] Building NixTypes.h.inc...
+[11/50] Building TrikeShedAttrDefs.cpp.inc...
+[12/50] Building TrikeShedDialect.cpp.inc...
+[13/50] Building TrikeShedDialect.h.inc...
+[14/50] Building TrikeShedAttrDefs.h.inc...
+[15/50] Building TrikeShedEnums.h.inc...
+[16/50] Building TrikeShedEnums.cpp.inc...
+[17/50] Building TrikeShedTypes.cpp.inc...
+[18/50] Building TrikeShedTypes.h.inc...
+[19/50] Building TrikeShedOps.cpp.inc...
+[20/50] Building TrikeShedOps.h.inc...
+[21/50] Building CXX object lib/CMakeFiles/NixStore.dir/Store/Hash.cpp.o
+[22/50] Building CXX object lib/CMakeFiles/NixStore.dir/Store/Prefetch.cpp.o
+[23/50] Building CXX object lib/CMakeFiles/NixFrontend.dir/Frontend/Source.cpp.o
+[24/50] Building CXX object lib/CMakeFiles/NixStore.dir/Store/StorePaths.cpp.o
+[25/50] Building CXX object lib/CMakeFiles/NixStore.dir/Store/LocalStore.cpp.o
+[26/50] Building CXX object lib/CMakeFiles/NixFrontend.dir/Frontend/Confix.cpp.o
+[27/50] Building CXX object lib/CMakeFiles/NixStore.dir/Store/StructuredAttrs.cpp.o
+[28/50] Linking CXX static library lib/libNixStore.a
+[29/50] Building CXX object lib/CMakeFiles/TrikeShedRuntime.dir/Composite/ClusterRuntime.cpp.o
+[30/50] Building CXX object lib/CMakeFiles/obj.MLIRNix.dir/Dialect/NixPrimDialects.cpp.o
+[31/50] Building CXX object lib/CMakeFiles/obj.MLIRTrikeShed.dir/Composite/ClusterLowering.cpp.o
+[32/50] Building CXX object lib/CMakeFiles/NixFrontend.dir/Frontend/Parser.cpp.o
+[33/50] Building CXX object lib/CMakeFiles/NixEval.dir/Eval/StoreBuiltins.cpp.o
+[34/50] Building CXX object lib/CMakeFiles/NixEval.dir/Eval/Formats.cpp.o
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/Formats.cpp:448:20: warning: missing field 'stack' initializer [-Wmissing-field-initializers]
+  448 |   XMLWriter doc{out};
+      |                    ^
+1 warning generated.
+[35/50] Building CXX object lib/CMakeFiles/NixEval.dir/Eval/EvalModels.cpp.o
+[36/50] Linking CXX shared library lib/libTrikeShedRuntime.so
+[37/50] Building CXX object lib/CMakeFiles/NixEval.dir/Eval/Builtins.cpp.o
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/Builtins.cpp:801:5: warning: 'cp::Combine' may not intend to support class template argument deduction [-Wctad-maybe-unsupported]
+  801 |     cp::Combine all(args[0]->items() |cp::α| [&](Value *l) {
+      |     ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/include/Composite/Series.h:126:31: note: add a deduction guide to suppress this warning
+  126 | template <class Parts> struct Combine {
+      |                               ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/Builtins.cpp:816:5: warning: 'cp::Combine' may not intend to support class template argument deduction [-Wctad-maybe-unsupported]
+  816 |     cp::Combine all(rs |cp::α| [](Value *r) { return r->items(); });
+      |     ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/include/Composite/Series.h:126:31: note: add a deduction guide to suppress this warning
+  126 | template <class Parts> struct Combine {
+      |                               ^
+2 warnings generated.
+[38/50] Building CXX object lib/CMakeFiles/obj.MLIRNix.dir/Dialect/NixDialect.cpp.o
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Dialect/NixDialect.cpp:203:37: warning: comparison of integers of different signs: 'size_t' (aka 'unsigned long') and 'int64_t' (aka 'long') [-Wsign-compare]
+  203 |         getFormalDefaults()->size() != (int64_t)getFormals()->size())
+      |         ~~~~~~~~~~~~~~~~~~~~~~~~~~~ ^  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+1 warning generated.
+[39/50] Linking CXX static library lib/libMLIRNix.a
+[40/50] Linking CXX static library lib/libNixFrontend.a
+[41/50] Building CXX object lib/CMakeFiles/NixEval.dir/Eval/Eval.cpp.o
+In file included from /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/Eval.cpp:5:
+In file included from /home/jim/work/mlir-nix-dense-selectors-20261028/include/Nix/Eval.h:16:
+In file included from /home/jim/work/mlir-nix-dense-selectors-20261028/include/Nix/MLIRGen.h:11:
+/home/jim/work/mlir-nix-dense-selectors-20261028/include/Composite/Series.h:132:80: warning: 'Combine' may not intend to support class template argument deduction [-Wctad-maybe-unsupported]
+  132 | template <class F> constexpr auto operator+(Series<F> a, Series<F> b) { return Combine(std::array{std::move(a), std::move(b)}); }
+      |                                                                                ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/Eval.cpp:1284:32: note: in instantiation of function template specialization 'composite::operator+<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/include/Composite/Series.h:95:16)>' requested here
+ 1284 |         mkList(out, l->items() + r->items());
+      |                                ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/include/Composite/Series.h:126:31: note: add a deduction guide to suppress this warning
+  126 | template <class Parts> struct Combine {
+      |                               ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/Eval.cpp:1682:34: warning: missing field 'seen' initializer [-Wmissing-field-initializers]
+ 1682 |   TracePrinter p{*this, os, false};
+      |                                  ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/Eval.cpp:2077:20: warning: missing field 'ex' initializer [-Wmissing-field-initializers]
+ 2077 |   } c{std::move(fn)};
+      |                    ^
+3 warnings generated.
+[42/50] Building CXX object lib/CMakeFiles/obj.MLIRTrikeShed.dir/Composite/TrikeShedDialect.cpp.o
+[43/50] Linking CXX static library lib/libMLIRTrikeShed.a
+[44/50] Building CXX object tools/CMakeFiles/mlnix-opt.dir/mlnix-opt.cpp.o
+[45/50] Building CXX object tools/CMakeFiles/mlnix.dir/mlnix.cpp.o
+[46/50] Building CXX object lib/CMakeFiles/NixEval.dir/Eval/LazyJIT.cpp.o
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/LazyJIT.cpp:803:29: warning: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/LazyJIT.cpp:803:45)>' is deprecated: Prefer calling the constructor of llvm::scope_exit directly. [-Wdeprecated-declarations]
+  803 |   auto restoreDepth = llvm::make_scope_exit([&] { st.callDepth = initialDepth; });
+      |                             ^~~~~~~~~~~~~~~
+      |                             scope_exit
+/usr/lib/llvm-22/include/llvm/ADT/ScopeExit.h:56:1: note: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/LazyJIT.cpp:803:45)>' has been explicitly marked deprecated here
+   56 | LLVM_DEPRECATED("Prefer calling the constructor of llvm::scope_exit directly.",
+      | ^
+/usr/lib/llvm-22/include/llvm/Support/Compiler.h:250:50: note: expanded from macro 'LLVM_DEPRECATED'
+  250 | #define LLVM_DEPRECATED(MSG, FIX) __attribute__((deprecated(MSG, FIX)))
+      |                                                  ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/LazyJIT.cpp:849:40: warning: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/LazyJIT.cpp:849:56)>' is deprecated: Prefer calling the constructor of llvm::scope_exit directly. [-Wdeprecated-declarations]
+  849 |         auto restoreForceDepth = llvm::make_scope_exit([&] { st.callDepth = initialDepth; });
+      |                                        ^~~~~~~~~~~~~~~
+      |                                        scope_exit
+/usr/lib/llvm-22/include/llvm/ADT/ScopeExit.h:56:1: note: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/LazyJIT.cpp:849:56)>' has been explicitly marked deprecated here
+   56 | LLVM_DEPRECATED("Prefer calling the constructor of llvm::scope_exit directly.",
+      | ^
+/usr/lib/llvm-22/include/llvm/Support/Compiler.h:250:50: note: expanded from macro 'LLVM_DEPRECATED'
+  250 | #define LLVM_DEPRECATED(MSG, FIX) __attribute__((deprecated(MSG, FIX)))
+      |                                                  ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/LazyJIT.cpp:919:38: warning: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/LazyJIT.cpp:919:54)>' is deprecated: Prefer calling the constructor of llvm::scope_exit directly. [-Wdeprecated-declarations]
+  919 |       auto restoreForceDepth = llvm::make_scope_exit([&] { st.callDepth = initialDepth; });
+      |                                      ^~~~~~~~~~~~~~~
+      |                                      scope_exit
+/usr/lib/llvm-22/include/llvm/ADT/ScopeExit.h:56:1: note: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/LazyJIT.cpp:919:54)>' has been explicitly marked deprecated here
+   56 | LLVM_DEPRECATED("Prefer calling the constructor of llvm::scope_exit directly.",
+      | ^
+/usr/lib/llvm-22/include/llvm/Support/Compiler.h:250:50: note: expanded from macro 'LLVM_DEPRECATED'
+  250 | #define LLVM_DEPRECATED(MSG, FIX) __attribute__((deprecated(MSG, FIX)))
+      |                                                  ^
+3 warnings generated.
+[47/50] Linking CXX executable bin/mlnix-opt
+[48/50] Building CXX object lib/CMakeFiles/NixEval.dir/Eval/ScalarJIT.cpp.o
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:56:51: warning: missing field 'capture' initializer [-Wmissing-field-initializers]
+   56 |   if (result == arg) return {PointerKind::Argument};
+      |                                                   ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:220:29: warning: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:220:45)>' is deprecated: Prefer calling the constructor of llvm::scope_exit directly. [-Wdeprecated-declarations]
+  220 |     auto recordTime = llvm::make_scope_exit([&] {
+      |                             ^~~~~~~~~~~~~~~
+      |                             scope_exit
+/usr/lib/llvm-22/include/llvm/ADT/ScopeExit.h:56:1: note: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:220:45)>' has been explicitly marked deprecated here
+   56 | LLVM_DEPRECATED("Prefer calling the constructor of llvm::scope_exit directly.",
+      | ^
+/usr/lib/llvm-22/include/llvm/Support/Compiler.h:250:50: note: expanded from macro 'LLVM_DEPRECATED'
+  250 | #define LLVM_DEPRECATED(MSG, FIX) __attribute__((deprecated(MSG, FIX)))
+      |                                                  ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:360:28: warning: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:360:44)>' is deprecated: Prefer calling the constructor of llvm::scope_exit directly. [-Wdeprecated-declarations]
+  360 |       auto restore = llvm::make_scope_exit([&] { st.callDepth = depth; });
+      |                            ^~~~~~~~~~~~~~~
+      |                            scope_exit
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:397:36: note: in instantiation of function template specialization 'nixev::ScalarJIT::Impl::evaluateLazy(EvalState &, Entry &, mlir::Operation *, Frame *, llvm::ArrayRef<Value *>, Value &, PosPtr, void *&, llvm::function_ref<void ()>)::(lambda)::operator()<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:397:37)>' requested here
+  397 |         auto observed = atCallDepth([&] { return e.lazyPlan->observe(st, closureEnv, args); });
+      |                                    ^
+/usr/lib/llvm-22/include/llvm/ADT/ScopeExit.h:56:1: note: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:360:44)>' has been explicitly marked deprecated here
+   56 | LLVM_DEPRECATED("Prefer calling the constructor of llvm::scope_exit directly.",
+      | ^
+/usr/lib/llvm-22/include/llvm/Support/Compiler.h:250:50: note: expanded from macro 'LLVM_DEPRECATED'
+  250 | #define LLVM_DEPRECATED(MSG, FIX) __attribute__((deprecated(MSG, FIX)))
+      |                                                  ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:433:28: warning: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:433:44)>' is deprecated: Prefer calling the constructor of llvm::scope_exit directly. [-Wdeprecated-declarations]
+  433 |     auto activeRun = llvm::make_scope_exit([&] {
+      |                            ^~~~~~~~~~~~~~~
+      |                            scope_exit
+/usr/lib/llvm-22/include/llvm/ADT/ScopeExit.h:56:1: note: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:433:44)>' has been explicitly marked deprecated here
+   56 | LLVM_DEPRECATED("Prefer calling the constructor of llvm::scope_exit directly.",
+      | ^
+/usr/lib/llvm-22/include/llvm/Support/Compiler.h:250:50: note: expanded from macro 'LLVM_DEPRECATED'
+  250 | #define LLVM_DEPRECATED(MSG, FIX) __attribute__((deprecated(MSG, FIX)))
+      |                                                  ^
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:360:28: warning: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:360:44)>' is deprecated: Prefer calling the constructor of llvm::scope_exit directly. [-Wdeprecated-declarations]
+  360 |       auto restore = llvm::make_scope_exit([&] { st.callDepth = depth; });
+      |                            ^~~~~~~~~~~~~~~
+      |                            scope_exit
+/home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:436:30: note: in instantiation of function template specialization 'nixev::ScalarJIT::Impl::evaluateLazy(EvalState &, Entry &, mlir::Operation *, Frame *, llvm::ArrayRef<Value *>, Value &, PosPtr, void *&, llvm::function_ref<void ()>)::(lambda)::operator()<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:436:31)>' requested here
+  436 |     auto result = atCallDepth([&] { return e.lazyPlan->run(st, closureEnv, args, e.lazyFn, validating); });
+      |                              ^
+/usr/lib/llvm-22/include/llvm/ADT/ScopeExit.h:56:1: note: 'make_scope_exit<(lambda at /home/jim/work/mlir-nix-dense-selectors-20261028/lib/Eval/ScalarJIT.cpp:360:44)>' has been explicitly marked deprecated here
+   56 | LLVM_DEPRECATED("Prefer calling the constructor of llvm::scope_exit directly.",
+      | ^
+/usr/lib/llvm-22/include/llvm/Support/Compiler.h:250:50: note: expanded from macro 'LLVM_DEPRECATED'
+  250 | #define LLVM_DEPRECATED(MSG, FIX) __attribute__((deprecated(MSG, FIX)))
+      |                                                  ^
+5 warnings generated.
+[49/50] Linking CXX static library lib/libNixEval.a
+[50/50] Linking CXX executable bin/mlnix

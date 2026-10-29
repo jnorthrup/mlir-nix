@@ -1,0 +1,10 @@
+lazy-boolean-cps nodes=5/64 leaves=1/16 blocks=18/256 resume-limit=32 entry=4
+destinations: 0=false 1=true 2=deopt; demand=(continuation<<3)|2
+leaf 0 argument
+node 0 predicate leaf=0 tag=11 function=1
+node 1 has_attr leaf=0 symbol=5
+node 2 deopt
+node 3 and a=1 b=2
+node 4 or a=0 b=3
+continuation 3 node=1 true=2 false=0 consumer=nix.has_attr
+continuation 4 node=0 true=1 false=3 consumer=nixty.is_function

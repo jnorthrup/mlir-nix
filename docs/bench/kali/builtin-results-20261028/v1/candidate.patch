@@ -1,0 +1,26 @@
+--- a/lib/Eval/Eval.cpp
++++ b/lib/Eval/Eval.cpp
+@@ -917,8 +917,9 @@
+   }
+   while (true) {
+     forceValue(*cur, pos);
+-    Value *res = (i + 1 == nargs) ? &out : allocValue();
++    Value *res;
+     if (cur->type == VType::Lambda) {
++      res = (i + 1 == nargs) ? &out : allocValue();
+       callLambda(*cur, args[i], *res, pos);
+       i++;
+     } else if (cur->type == VType::PrimOp || cur->type == VType::PrimOpApp) {
+@@ -950,9 +951,12 @@
+       llvm::SmallVector<Value *, 6> all(applied);
+       for (size_t k = 0; k < need; k++) all.push_back(args[i + k]);
+       i += need;
++      // A builtin may consume several arguments. Allocate only the result cell
++      // that survives this application, after its remaining arity is known.
+       res = (i == nargs) ? &out : allocValue();
+       callPrimOp(*op, all.data(), *res, pos);
+     } else if (cur->type == VType::Attrs && cur->attrs->get(s.functor)) {
++      res = (i + 1 == nargs) ? &out : allocValue();
+       const Attr *f = cur->attrs->get(s.functor);
+       Value *self = cur;
+       if (self == &out) { self = allocValue(); *self = *cur; }

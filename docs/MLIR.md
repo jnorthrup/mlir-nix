@@ -7,20 +7,22 @@ schedule, `nixos-toplevel` and `nixpkgs-73`) unless it says kali. Written 2026-1
 
 ## 1. What is MLIR here
 
-The encoding is MLIR; the execution is not.
+The encoding is MLIR. The default execution is interpreted; an opt-in tier now lowers bounded integer graphs, lazy pointer selectors and resumable Boolean graphs through
+typed MLIR and LLVM to native code ([JIT.md](JIT.md)). The counts below describe the earlier interpreter profile.
 
     ODS/IRDL     NixBase.td 225 + NixOps.td 280 lines: 28 ops, 1 type, 1 interface; NixPrims.irdl.mlir 628 lines: 105 primops in 24 dialects
     dialect C++  NixDialect.cpp 515, NixPrimDialects.cpp 252, NixDialect.h 140; passes nix-prims, nix-fold, nix-dce, join-densify
     hand C++     evaluator (lib/Eval, Eval.h, Arena.h) 5,690 lines; front end 3,722; store 2,704; tools 1,187
 
-What the ODS already says: `Pure` on 22 ops, `ConstantLike` on 5, `hasFolder` on 6, `NixModes<strict, tail>` (which operands an op
+What the ODS already says: `Pure` on six literal kinds; fallible/forcing core ops use `NoMemoryEffect` without unconditional
+speculation. `ConstantLike` on 5, `hasFolder` on 6, `NixModes<strict, tail>` (which operands an op
 forces, which it returns), `nix.expr` is `IsolatedFromAbove` (one per file), `nix.expr` and `nix.lambda` are graph regions. Stock
 `cse` and `canonicalize` are sound because identity is declared (`NixFreshVal`, `NixFxUser`).
 
 What is not used, counted as references in `lib/`, `include/` and `tools/`:
 
     bytecode (lazy loading of IsolatedFromAbove ops)      0   in LLVM 22 (kali) and 23 (Mac): BytecodeReader.h `lazyLoad`, isMaterializable, materialize
-    ExecutionEngine / ORC                                  0   libMLIRExecutionEngine.a on both
+    ExecutionEngine / ORC                              opt-in  ScalarJIT.cpp / LazyJIT.cpp, bounded arithmetic, selectors and Boolean continuations
     transform dialect                                      0   libMLIRTransformDialect.a on both; the driver is pipeline text
     PDL / PDLL                                             0   tried at 638f015, lost on every count (COMBINATORS.md)
     dataflow framework, Liveness                           0   libMLIRAnalysis.a on both
@@ -29,10 +31,18 @@ What is not used, counted as references in `lib/`, `include/` and `tools/`:
     canonicalization patterns                              1
 
 The structural gap behind most of these: `nix.lambda` is not `IsolatedFromAbove` (it reads the values it captures), so no
-PassManager can run on a lambda body, no pass runs on several threads, no lambda can be lazily loaded from bytecode, and no lambda is a
-unit a JIT can compile. `nix.lambda` carries `captures` operands only in the deferred form. The MLIR idiom for this is a closure with
+PassManager can run on a lambda body, no pass runs on several threads, and no lambda can be lazily loaded from bytecode. The native tier
+extracts bounded graphs with captures resolved by the host on each call; Boolean continuations return to the host when a persistent cell
+needs forcing. Unsupported branches deoptimize without walking their operands. General compilation still needs closure conversion. `nix.lambda` carries
+`captures` operands only in the deferred form. The MLIR idiom for this is a closure with
 an explicit capture list and a body that takes the captures as block arguments (LangRef: "Closure"); `jaredhoberock/mlir-closure-dialect`
 is a 1,200-byte README of exactly that, with a pass lowering it to a tuple of captures and a private function.
+
+The Boolean tier now completes 201,795 evaluations in a demand nixpkgs-73 profile, with 186,782 host forcing requests.
+Its generated control-flow graph preserves short-circuit paths; 64 consecutive fallbacks retire a kernel without
+invalidating recursive calls still using it. This is bounded native coverage, not a general closure compiler.
+[JIT.md](JIT.md) records the semantics and limits; the [Kali experiment](bench/kali/lazy-boolean-20261028/RESULTS.md)
+separates timing from these untimed counts and from cached reference measurements.
 
 ## 2. The program from the inside
 
@@ -83,7 +93,7 @@ future.
     1     parse a band to its AST            the band is entered            whole file at first import (parser -50% this window)
     2     mint the lambda's ops              first call                     built (MLNIX_DEFER): 5,394 of 29,744 minted
     3     per-lambda counter; cheap caches   the 16th call                   not built
-    4     compile the body                   the ~1000th call               not built
+    4     compile arithmetic / selectors / Booleans the 1024th eligible call      opt-in (JIT.md); other bodies remain interpreted
 
 What the plates give to the thresholds, calls after the threshold and lambdas that reach it:
 
@@ -111,7 +121,7 @@ target (an address in the instruction stream), not rung 3's.
     rung 3: callee cache at apply sites        98.1% / 98.9% of lambda calls hit                <= 2.5% estimated       not built
     rung 3: index cache at select              92.9% / 73.7% hit                                <= 1.6% estimated       not built
     `//` merges                                60% / 74% of attribute cells                     memory first             sweep kMinBase=32, kRatio=8
-    rung 4: compile hot bodies                 337 / 252 lambdas take 90.8% / 89.2% of calls    <= 17.9% (probes) + 2% (dispatch) of the evaluator thread, before the compile cost   not built
+    rung 4: compile hot bodies                 337 / 252 lambdas take 90.8% / 89.2% of calls    <= 17.9% (probes) + 2% (dispatch) of the evaluator thread, before compile cost   arithmetic / selectors / Boolean continuations opt-in; general tier not built
     strictness / cheap eagerness               27% / 32% of thunks never forced                 unknown; needs "certainly forced"   not measured
     stack frames for calls that do not escape  26.9% / 32.7% of frames dead at return           <= 3.5% of RSS, as an upper bound   dropped
     shapes as types (hidden classes)           77% / 84% literal, 100 shapes cover 95%          -4% RSS, select cache already 74-93%   behind the merges

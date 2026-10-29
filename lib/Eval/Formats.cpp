@@ -81,7 +81,7 @@ void EvalState::printValueAsJSON(std::ostream &out, Value &v, bool strict, NixSt
       break;
     }
     if (const Attr *o = v.attrs->get(s.outPath)) {
-      printValueAsJSON(out, *o->value, strict, ctx, copyToStore, o->pos);
+      printValueAsJSON(out, *o->value, strict, ctx, copyToStore, positionOf(*o));
       break;
     }
     out << "{";
@@ -91,9 +91,9 @@ void EvalState::printValueAsJSON(std::ostream &out, Value &v, bool strict, NixSt
       first = false;
       out << nixstore::jsonEscape(symbols[a->name]) << ":";
       try {
-        printValueAsJSON(out, *a->value, strict, ctx, copyToStore, a->pos);
+        printValueAsJSON(out, *a->value, strict, ctx, copyToStore, positionOf(*a));
       } catch (EvalError &e) {
-        e.addTrace(a->pos, "while evaluating attribute '" + symbols[a->name].str() + "'");
+        e.addTrace(positionOf(*a), "while evaluating attribute '" + symbols[a->name].str() + "'");
         throw;
       }
     }
@@ -360,9 +360,9 @@ void showAttrsXML(EvalState &st, XMLWriter &doc, Bindings *attrs, bool strict, b
                   NixStringContext &ctx, std::set<std::string> &drvsSeen) {
   for (const Attr *a : attrs->lexicographicOrder(st.symbols)) {
     XMLWriter::Attrs as{{"name", st.symbols[a->name].str()}};
-    if (location) posToXML(st, as, a->pos);
+    if (location) posToXML(st, as, st.positionOf(*a));
     doc.open("attr", as);
-    toXML(st, doc, *a->value, strict, location, ctx, drvsSeen, a->pos);
+    toXML(st, doc, *a->value, strict, location, ctx, drvsSeen, st.positionOf(*a));
     doc.close();
   }
 }
@@ -390,11 +390,11 @@ void toXML(EvalState &st, XMLWriter &doc, Value &v, bool strict, bool location, 
       XMLWriter::Attrs as;
       std::string drvPath;
       if (const Attr *a = v.attrs->get(st.s.drvPath)) {
-        if (strict) st.forceValue(*a->value, a->pos);
+        if (strict) st.forceValue(*a->value, st.positionOf(*a));
         if (a->value->type == VType::String) as["drvPath"] = drvPath = str(a->value->sv());
       }
       if (const Attr *a = v.attrs->get(st.s.outPath)) {
-        if (strict) st.forceValue(*a->value, a->pos);
+        if (strict) st.forceValue(*a->value, st.positionOf(*a));
         if (a->value->type == VType::String) as["outPath"] = str(a->value->sv());
       }
       doc.open("derivation", as);

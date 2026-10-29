@@ -1,0 +1,12 @@
+From repository root with inherited MLNIX_* settings cleared:
+MLNIX_DEFER=1 MLNIX_JIT=1 MLNIX_JIT_THRESHOLD=1 MLNIX_STATS=1 \
+MLNIX_JIT_DUMP="$PWD/docs/bench/local/curried-20261028/ir-v1" \
+build/bin/mlnix instantiate --eval --strict docs/bench/local/curried-20261028/ir-v1/input.nix
+
+Interpreter/JIT status, stdout and stderr match exactly with stats disabled.
+Output: [ false true false false ]. Exactly-once traces: curried argument once; changed callee argument once.
+The chain-count=3 plan binds three remaining supplied arguments directly. Its current ancestor capture differs
+between a and b, and skipped callee/argument throws remain untouched. Changing the reached callee to a builtin
+misses the guard before forcing its argument; ordinary fallback produces the original trace and result.
+The typed MLIR and optimized LLVM IR retain the actual callee guard and current-closure loads.
+Threshold1 is for inspection; workload measurements use1024.

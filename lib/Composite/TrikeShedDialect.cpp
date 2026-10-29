@@ -24,6 +24,20 @@
 
 namespace composite {
 
+mlir::LogicalResult ClusterOrderOp::verify() {
+  for (auto type : {getKeys().getType(), getOrder().getType()}) {
+    auto memref = llvm::cast<mlir::MemRefType>(type);
+    if (memref.getRank() != 1 || !memref.getElementType().isSignlessInteger(64) ||
+        memref.getMemorySpaceAsInt() != 0)
+      return emitOpError("requires rank-one signless i64 memrefs in host memory");
+    mlir::SmallVector<int64_t> strides;
+    int64_t offset;
+    if (mlir::failed(memref.getStridesAndOffset(strides, offset)))
+      return emitOpError("requires strided memrefs");
+  }
+  return mlir::success();
+}
+
 void TrikeShedDialect::initialize() {
   addTypes<
 #define GET_TYPEDEF_LIST

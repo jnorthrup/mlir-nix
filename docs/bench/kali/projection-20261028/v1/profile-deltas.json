@@ -1,0 +1,426 @@
+{
+  "nixos-toplevel": {
+    "compiled": {
+      "off": 12,
+      "on": 16,
+      "delta": 4
+    },
+    "executions": {
+      "off": 460424,
+      "on": 477563,
+      "delta": 17139
+    },
+    "grace": {
+      "off": 69,
+      "on": 81,
+      "delta": 12
+    },
+    "rejected": {
+      "off": 5342,
+      "on": 5292,
+      "delta": -50
+    },
+    "compile_ns": {
+      "off": 118023382,
+      "on": 156310836,
+      "delta": 38287454
+    },
+    "candidates": {
+      "off": 159,
+      "on": 237,
+      "delta": 78
+    },
+    "boolean_compiled": {
+      "off": 11,
+      "on": 15,
+      "delta": 4
+    },
+    "boolean_executions": {
+      "off": 111694,
+      "on": 128833,
+      "delta": 17139
+    },
+    "boolean_completions": {
+      "off": 111116,
+      "on": 119951,
+      "delta": 8835
+    },
+    "boolean_demands": {
+      "off": 103749,
+      "on": 121840,
+      "delta": 18091
+    },
+    "boolean_resumes": {
+      "off": 277566,
+      "on": 323464,
+      "delta": 45898
+    },
+    "boolean_deopts": {
+      "off": 578,
+      "on": 8882,
+      "delta": 8304
+    },
+    "boolean_grace": {
+      "off": 33,
+      "on": 45,
+      "delta": 12
+    },
+    "boolean_retired": {
+      "off": 1,
+      "on": 5,
+      "delta": 4
+    },
+    "boolean_preflight_attempts": {
+      "off": 470,
+      "on": 794,
+      "delta": 324
+    },
+    "boolean_preflight_deopts": {
+      "off": 459,
+      "on": 779,
+      "delta": 320
+    },
+    "boolean_preflight_rejections": {
+      "off": 106,
+      "on": 90,
+      "delta": -16
+    },
+    "boolean_inline_compiled": {
+      "off": 2,
+      "on": 3,
+      "delta": 1
+    },
+    "boolean_inline_calls": {
+      "off": 62120,
+      "on": 71253,
+      "delta": 9133
+    },
+    "boolean_guard_misses": {
+      "off": 0,
+      "on": 134,
+      "delta": 134
+    },
+    "boolean_depth_entries": {
+      "off": 62120,
+      "on": 71253,
+      "delta": 9133
+    },
+    "boolean_specializations": {
+      "off": 2538,
+      "on": 2115,
+      "delta": -423
+    },
+    "boolean_specialization_deopts": {
+      "off": 2536,
+      "on": 2112,
+      "delta": -424
+    },
+    "boolean_projection_compiled": {
+      "off": 0,
+      "on": 6,
+      "delta": 6
+    },
+    "boolean_projection_requests": {
+      "off": 0,
+      "on": 28689,
+      "delta": 28689
+    },
+    "boolean_projection_forces": {
+      "off": 0,
+      "on": 29769,
+      "delta": 29769
+    },
+    "boolean_projection_flat": {
+      "off": 0,
+      "on": 28689,
+      "delta": 28689
+    },
+    "boolean_saturated_inline_compiled": {
+      "off": 0,
+      "on": 1,
+      "delta": 1
+    },
+    "boolean_saturated_inline_calls": {
+      "off": 0,
+      "on": 9130,
+      "delta": 9130
+    },
+    "curried_executions": {
+      "off": 77366,
+      "on": 69652,
+      "delta": -7714
+    },
+    "curried_completions": {
+      "off": 77366,
+      "on": 67542,
+      "delta": -9824
+    },
+    "curried_deopts": {
+      "off": 0,
+      "on": 2110,
+      "delta": 2110
+    },
+    "curried_rejected": {
+      "off": 298,
+      "on": 281,
+      "delta": -17
+    },
+    "curried_frames_saved": {
+      "off": 154708,
+      "on": 135060,
+      "delta": -19648
+    },
+    "curried_values_saved": {
+      "off": 77354,
+      "on": 67530,
+      "delta": -9824
+    },
+    "curried_arity2": {
+      "off": 161538,
+      "on": 153680,
+      "delta": -7858
+    },
+    "frame_count": {
+      "off": 4790666,
+      "on": 4773413,
+      "delta": -17253
+    },
+    "frame_bytes": {
+      "off": 299481416,
+      "on": 298698024,
+      "delta": -783392
+    },
+    "frame_slots": {
+      "off": 27853845,
+      "on": 27790427,
+      "delta": -63418
+    },
+    "value_count": {
+      "off": 14346932,
+      "on": 14338502,
+      "delta": -8430
+    },
+    "value_bytes": {
+      "off": 344326368,
+      "on": 344124048,
+      "delta": -202320
+    }
+  },
+  "nixpkgs-73": {
+    "compiled": {
+      "off": 9,
+      "on": 14,
+      "delta": 5
+    },
+    "executions": {
+      "off": 571481,
+      "on": 584662,
+      "delta": 13181
+    },
+    "grace": {
+      "off": 54,
+      "on": 69,
+      "delta": 15
+    },
+    "rejected": {
+      "off": 3489,
+      "on": 3458,
+      "delta": -31
+    },
+    "compile_ns": {
+      "off": 72158694,
+      "on": 129737427,
+      "delta": 57578733
+    },
+    "candidates": {
+      "off": 122,
+      "on": 165,
+      "delta": 43
+    },
+    "boolean_compiled": {
+      "off": 8,
+      "on": 13,
+      "delta": 5
+    },
+    "boolean_executions": {
+      "off": 203666,
+      "on": 216847,
+      "delta": 13181
+    },
+    "boolean_completions": {
+      "off": 201807,
+      "on": 209155,
+      "delta": 7348
+    },
+    "boolean_demands": {
+      "off": 186782,
+      "on": 176456,
+      "delta": -10326
+    },
+    "boolean_resumes": {
+      "off": 552451,
+      "on": 604679,
+      "delta": 52228
+    },
+    "boolean_deopts": {
+      "off": 1859,
+      "on": 7692,
+      "delta": 5833
+    },
+    "boolean_grace": {
+      "off": 24,
+      "on": 39,
+      "delta": 15
+    },
+    "boolean_retired": {
+      "off": 1,
+      "on": 3,
+      "delta": 2
+    },
+    "boolean_preflight_attempts": {
+      "off": 392,
+      "on": 655,
+      "delta": 263
+    },
+    "boolean_preflight_deopts": {
+      "off": 384,
+      "on": 642,
+      "delta": 258
+    },
+    "boolean_preflight_rejections": {
+      "off": 73,
+      "on": 83,
+      "delta": 10
+    },
+    "boolean_inline_compiled": {
+      "off": 2,
+      "on": 3,
+      "delta": 1
+    },
+    "boolean_inline_calls": {
+      "off": 162000,
+      "on": 182353,
+      "delta": 20353
+    },
+    "boolean_guard_misses": {
+      "off": 0,
+      "on": 232,
+      "delta": 232
+    },
+    "boolean_depth_entries": {
+      "off": 162000,
+      "on": 182353,
+      "delta": 20353
+    },
+    "boolean_specializations": {
+      "off": 1794,
+      "on": 2243,
+      "delta": 449
+    },
+    "boolean_specialization_deopts": {
+      "off": 1792,
+      "on": 2240,
+      "delta": 448
+    },
+    "boolean_projection_compiled": {
+      "off": 0,
+      "on": 5,
+      "delta": 5
+    },
+    "boolean_projection_requests": {
+      "off": 0,
+      "on": 33296,
+      "delta": 33296
+    },
+    "boolean_projection_forces": {
+      "off": 0,
+      "on": 10019,
+      "delta": 10019
+    },
+    "boolean_projection_flat": {
+      "off": 0,
+      "on": 33296,
+      "delta": 33296
+    },
+    "boolean_saturated_inline_compiled": {
+      "off": 0,
+      "on": 1,
+      "delta": 1
+    },
+    "boolean_saturated_inline_calls": {
+      "off": 0,
+      "on": 20350,
+      "delta": 20350
+    },
+    "curried_compiled": {
+      "off": 3,
+      "on": 4,
+      "delta": 1
+    },
+    "curried_executions": {
+      "off": 188515,
+      "on": 170674,
+      "delta": -17841
+    },
+    "curried_completions": {
+      "off": 188515,
+      "on": 169192,
+      "delta": -19323
+    },
+    "curried_grace": {
+      "off": 9,
+      "on": 12,
+      "delta": 3
+    },
+    "curried_deopts": {
+      "off": 0,
+      "on": 1482,
+      "delta": 1482
+    },
+    "curried_rejected": {
+      "off": 143,
+      "on": 142,
+      "delta": -1
+    },
+    "curried_frames_saved": {
+      "off": 377012,
+      "on": 338360,
+      "delta": -38652
+    },
+    "curried_values_saved": {
+      "off": 188506,
+      "on": 169180,
+      "delta": -19326
+    },
+    "curried_arity2": {
+      "off": 251790,
+      "on": 233948,
+      "delta": -17842
+    },
+    "frame_count": {
+      "off": 2843810,
+      "on": 2815109,
+      "delta": -28701
+    },
+    "frame_bytes": {
+      "off": 257876320,
+      "on": 256602288,
+      "delta": -1274032
+    },
+    "frame_slots": {
+      "off": 26546920,
+      "on": 26445068,
+      "delta": -101852
+    },
+    "value_count": {
+      "off": 11582027,
+      "on": 11560659,
+      "delta": -21368
+    },
+    "value_bytes": {
+      "off": 277968648,
+      "on": 277455816,
+      "delta": -512832
+    }
+  }
+}

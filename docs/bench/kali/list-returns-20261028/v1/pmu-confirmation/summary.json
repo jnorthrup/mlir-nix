@@ -1,0 +1,401 @@
+{
+  "method": "Four equally weighted paired ON-versus-OFF percentage changes per workload, including original off/on pair0; new orders on/off,off/on,on/off. Percent=(ON/OFF-1)*100. Summary is median of paired percentages and full min/max range, not ratio of pooled counts. No selective replacement.",
+  "binary_sha256": "a34739ca7f9dddaf7db70c45fa33c445b3ead6192e8bb5b2736527797b227e14",
+  "output_validation": "PMU tool discards stdout; PMU samples check exit status only. Same commands had full output-hash validation in prior profile/timing series.",
+  "workloads": {
+    "nixos-toplevel": {
+      "pairs": [
+        {
+          "index": 0,
+          "order": [
+            "off",
+            "on"
+          ],
+          "percent_on_vs_off": {
+            "cycles": -0.9016852062927128,
+            "instructions": 0.0004216387827105095,
+            "cache_references": -1.5515513294703465,
+            "cache_misses": -7.126582734789477,
+            "branches": 0.06564828679918033,
+            "branch_misses": 0.008297656726408142
+          },
+          "counts": {
+            "off": {
+              "cycles": 12547634608,
+              "instructions": 19272657861,
+              "cache_references": 682640387,
+              "cache_misses": 112349050,
+              "branches": 3474448628,
+              "branch_misses": 89941055
+            },
+            "on": {
+              "cycles": 12434494443,
+              "instructions": 19272739122,
+              "cache_references": 672048871,
+              "cache_misses": 104342402,
+              "branches": 3476729544,
+              "branch_misses": 89948518
+            }
+          },
+          "files": {
+            "off": "pmu-lists-off-nixos-toplevel.json",
+            "on": "pmu-lists-on-nixos-toplevel.json"
+          },
+          "all_events_running_percent": 100
+        },
+        {
+          "index": 1,
+          "order": [
+            "on",
+            "off"
+          ],
+          "percent_on_vs_off": {
+            "cycles": 2.708237669929292,
+            "instructions": -0.17994033597776848,
+            "cache_references": 5.242877027733739,
+            "cache_misses": 9.360526457818107,
+            "branches": -0.18719001116618283,
+            "branch_misses": 5.543707696197742
+          },
+          "counts": {
+            "off": {
+              "cycles": 12402772723,
+              "instructions": 19296164371,
+              "cache_references": 670258120,
+              "cache_misses": 103889349,
+              "branches": 3480122128,
+              "branch_misses": 89593306
+            },
+            "on": {
+              "cycles": 12738669286,
+              "instructions": 19261442788,
+              "cache_references": 705398929,
+              "cache_misses": 113613939,
+              "branches": 3473607687,
+              "branch_misses": 94560097
+            }
+          },
+          "files": {
+            "off": "pmu-confirmation/pair-1-lists-off-nixos-toplevel.json",
+            "on": "pmu-confirmation/pair-1-lists-on-nixos-toplevel.json"
+          },
+          "all_events_running_percent": 100
+        },
+        {
+          "index": 2,
+          "order": [
+            "off",
+            "on"
+          ],
+          "percent_on_vs_off": {
+            "cycles": -0.09223533327887834,
+            "instructions": -0.2612466939049485,
+            "cache_references": -1.6145191565566153,
+            "cache_misses": -1.1548280442352454,
+            "branches": -0.2931430928537426,
+            "branch_misses": -0.37008514739391707
+          },
+          "counts": {
+            "off": {
+              "cycles": 12382040151,
+              "instructions": 19289921050,
+              "cache_references": 668747717,
+              "cache_misses": 103859705,
+              "branches": 3478830731,
+              "branch_misses": 89643965
+            },
+            "on": {
+              "cycles": 12370619535,
+              "instructions": 19239526769,
+              "cache_references": 657950657,
+              "cache_misses": 102660304,
+              "branches": 3468632779,
+              "branch_misses": 89312206
+            }
+          },
+          "files": {
+            "off": "pmu-confirmation/pair-2-lists-off-nixos-toplevel.json",
+            "on": "pmu-confirmation/pair-2-lists-on-nixos-toplevel.json"
+          },
+          "all_events_running_percent": 100
+        },
+        {
+          "index": 3,
+          "order": [
+            "on",
+            "off"
+          ],
+          "percent_on_vs_off": {
+            "cycles": -0.31165223438934797,
+            "instructions": -0.035457855685505635,
+            "cache_references": -1.3374082946684074,
+            "cache_misses": -1.7133317805893555,
+            "branches": 0.011120806399533834,
+            "branch_misses": 0.5568073827401321
+          },
+          "counts": {
+            "off": {
+              "cycles": 12456363445,
+              "instructions": 19296127382,
+              "cache_references": 678820674,
+              "cache_misses": 105864201,
+              "branches": 3480224240,
+              "branch_misses": 89487858
+            },
+            "on": {
+              "cycles": 12417542910,
+              "instructions": 19289285389,
+              "cache_references": 669742070,
+              "cache_misses": 104050396,
+              "branches": 3480611269,
+              "branch_misses": 89986133
+            }
+          },
+          "files": {
+            "off": "pmu-confirmation/pair-3-lists-off-nixos-toplevel.json",
+            "on": "pmu-confirmation/pair-3-lists-on-nixos-toplevel.json"
+          },
+          "all_events_running_percent": 100
+        }
+      ],
+      "summary": {
+        "cycles": {
+          "median_paired_percent": -0.20194378383411316,
+          "minimum_paired_percent": -0.9016852062927128,
+          "maximum_paired_percent": 2.708237669929292
+        },
+        "instructions": {
+          "median_paired_percent": -0.10769909583163706,
+          "minimum_paired_percent": -0.2612466939049485,
+          "maximum_paired_percent": 0.0004216387827105095
+        },
+        "cache_references": {
+          "median_paired_percent": -1.444479812069377,
+          "minimum_paired_percent": -1.6145191565566153,
+          "maximum_paired_percent": 5.242877027733739
+        },
+        "cache_misses": {
+          "median_paired_percent": -1.4340799124123005,
+          "minimum_paired_percent": -7.126582734789477,
+          "maximum_paired_percent": 9.360526457818107
+        },
+        "branches": {
+          "median_paired_percent": -0.0880346023833245,
+          "minimum_paired_percent": -0.2931430928537426,
+          "maximum_paired_percent": 0.06564828679918033
+        },
+        "branch_misses": {
+          "median_paired_percent": 0.2825525197332701,
+          "minimum_paired_percent": -0.37008514739391707,
+          "maximum_paired_percent": 5.543707696197742
+        }
+      }
+    },
+    "nixpkgs-73": {
+      "pairs": [
+        {
+          "index": 0,
+          "order": [
+            "off",
+            "on"
+          ],
+          "percent_on_vs_off": {
+            "cycles": -3.008383959422123,
+            "instructions": -0.06729231187059259,
+            "cache_references": -2.557940574540607,
+            "cache_misses": -17.111411233504448,
+            "branches": -0.04743024356659298,
+            "branch_misses": -0.8599866299107917
+          },
+          "counts": {
+            "off": {
+              "cycles": 11544805041,
+              "instructions": 17078844047,
+              "cache_references": 560844499,
+              "cache_misses": 117870430,
+              "branches": 3079142948,
+              "branch_misses": 92654580
+            },
+            "on": {
+              "cycles": 11197492978,
+              "instructions": 17067351298,
+              "cache_references": 546498430,
+              "cache_misses": 97701136,
+              "branches": 3077682503,
+              "branch_misses": 91857763
+            }
+          },
+          "files": {
+            "off": "pmu-lists-off-nixpkgs-73.json",
+            "on": "pmu-lists-on-nixpkgs-73.json"
+          },
+          "all_events_running_percent": 100
+        },
+        {
+          "index": 1,
+          "order": [
+            "on",
+            "off"
+          ],
+          "percent_on_vs_off": {
+            "cycles": 0.7912359033185101,
+            "instructions": -0.06879602924368955,
+            "cache_references": 0.6518235977433617,
+            "cache_misses": 3.82374330308044,
+            "branches": -0.040841351073772625,
+            "branch_misses": 0.6291190494274401
+          },
+          "counts": {
+            "off": {
+              "cycles": 11226129101,
+              "instructions": 17062435331,
+              "cache_references": 561859683,
+              "cache_misses": 99691917,
+              "branches": 3074579971,
+              "branch_misses": 92004844
+            },
+            "on": {
+              "cycles": 11314954265,
+              "instructions": 17050697053,
+              "cache_references": 565522017,
+              "cache_misses": 103503880,
+              "branches": 3073324271,
+              "branch_misses": 92583664
+            }
+          },
+          "files": {
+            "off": "pmu-confirmation/pair-1-lists-off-nixpkgs-73.json",
+            "on": "pmu-confirmation/pair-1-lists-on-nixpkgs-73.json"
+          },
+          "all_events_running_percent": 100
+        },
+        {
+          "index": 2,
+          "order": [
+            "off",
+            "on"
+          ],
+          "percent_on_vs_off": {
+            "cycles": -1.919921887937548,
+            "instructions": -0.30076046797917755,
+            "cache_references": 1.357252441551049,
+            "cache_misses": -13.208847326595507,
+            "branches": -0.3596171728796449,
+            "branch_misses": -0.6027135815799389
+          },
+          "counts": {
+            "off": {
+              "cycles": 11500865446,
+              "instructions": 17105931290,
+              "cache_references": 562657599,
+              "cache_misses": 118316645,
+              "branches": 3085256444,
+              "branch_misses": 92049195
+            },
+            "on": {
+              "cycles": 11280057813,
+              "instructions": 17054483411,
+              "cache_references": 570294283,
+              "cache_misses": 102688380,
+              "branches": 3074161332,
+              "branch_misses": 91494402
+            }
+          },
+          "files": {
+            "off": "pmu-confirmation/pair-2-lists-off-nixpkgs-73.json",
+            "on": "pmu-confirmation/pair-2-lists-on-nixpkgs-73.json"
+          },
+          "all_events_running_percent": 100
+        },
+        {
+          "index": 3,
+          "order": [
+            "on",
+            "off"
+          ],
+          "percent_on_vs_off": {
+            "cycles": 1.1297422081177677,
+            "instructions": -0.22483583558778886,
+            "cache_references": -0.4460198595874987,
+            "cache_misses": 1.5522954859435334,
+            "branches": -0.25877276556437456,
+            "branch_misses": 0.2724014023958832
+          },
+          "counts": {
+            "off": {
+              "cycles": 11233168690,
+              "instructions": 17090012764,
+              "cache_references": 558573334,
+              "cache_misses": 99392288,
+              "branches": 3081490814,
+              "branch_misses": 91621775
+            },
+            "on": {
+              "cycles": 11360074538,
+              "instructions": 17051588291,
+              "cache_references": 556081986,
+              "cache_misses": 100935150,
+              "branches": 3073516755,
+              "branch_misses": 91871354
+            }
+          },
+          "files": {
+            "off": "pmu-confirmation/pair-3-lists-off-nixpkgs-73.json",
+            "on": "pmu-confirmation/pair-3-lists-on-nixpkgs-73.json"
+          },
+          "all_events_running_percent": 100
+        }
+      ],
+      "summary": {
+        "cycles": {
+          "median_paired_percent": -0.5643429923095189,
+          "minimum_paired_percent": -3.008383959422123,
+          "maximum_paired_percent": 1.1297422081177677
+        },
+        "instructions": {
+          "median_paired_percent": -0.1468159324157392,
+          "minimum_paired_percent": -0.30076046797917755,
+          "maximum_paired_percent": -0.06729231187059259
+        },
+        "cache_references": {
+          "median_paired_percent": 0.10290186907793153,
+          "minimum_paired_percent": -2.557940574540607,
+          "maximum_paired_percent": 1.357252441551049
+        },
+        "cache_misses": {
+          "median_paired_percent": -5.828275920325987,
+          "minimum_paired_percent": -17.111411233504448,
+          "maximum_paired_percent": 3.82374330308044
+        },
+        "branches": {
+          "median_paired_percent": -0.15310150456548377,
+          "minimum_paired_percent": -0.3596171728796449,
+          "maximum_paired_percent": -0.040841351073772625
+        },
+        "branch_misses": {
+          "median_paired_percent": -0.16515608959202788,
+          "minimum_paired_percent": -0.8599866299107917,
+          "maximum_paired_percent": 0.6291190494274401
+        }
+      }
+    }
+  },
+  "input_sha256": {
+    "pmu-lists-off-nixos-toplevel.json": "bc128b39c04d2ba0f7c272f285d9b6cc7aacf98fb2580b155a126c18b0ef98c9",
+    "pmu-lists-on-nixos-toplevel.json": "8076e0b02b56632a9d3fbd1c789fc6e670abf28dfbf916372b44e8e8a3fb429f",
+    "pmu-confirmation/pair-1-lists-off-nixos-toplevel.json": "c7a8e10e82b521bde2eda864bf0f17b7b4ff1dc28f3ea8e53336733df78331f3",
+    "pmu-confirmation/pair-1-lists-on-nixos-toplevel.json": "e60b0f917ec2fafb1bcf17fb6ac16e8763b899e62e5b6d7bae3aee5e5e520e6e",
+    "pmu-confirmation/pair-2-lists-off-nixos-toplevel.json": "0ccee074738afd4d41bf3c9bd0444a0b0907486de3b3253221b9c46652d53796",
+    "pmu-confirmation/pair-2-lists-on-nixos-toplevel.json": "c68381ee22d991c36d020d04bb931ed264853f34da1d27f2e99d4c18552e8767",
+    "pmu-confirmation/pair-3-lists-off-nixos-toplevel.json": "a30eb6f1b6bc710f06f4ddf236e039f05d37d1edd0284f320b17de424463a144",
+    "pmu-confirmation/pair-3-lists-on-nixos-toplevel.json": "00e2206e0a97ac446a0188306756779a7602b6594a8e68e37a522ce4763cefc3",
+    "pmu-lists-off-nixpkgs-73.json": "7cee4b3ff284450ddce6686ed61194e07154cbf2918ce730103ad30484aefc5e",
+    "pmu-lists-on-nixpkgs-73.json": "295e73532059bff31d90f95c00361db2db920da08289cffc7f3bbf6b04c89c80",
+    "pmu-confirmation/pair-1-lists-off-nixpkgs-73.json": "2183289cff4198d85947e8ab0e8277ba3f4f57b297840f3656f48b2c299108af",
+    "pmu-confirmation/pair-1-lists-on-nixpkgs-73.json": "7f5a670452485ff46e4d70312fdc385c3c9877218da3506dd0e743c33babb285",
+    "pmu-confirmation/pair-2-lists-off-nixpkgs-73.json": "8e563bce5b6868c00a09c5357708b22d5f9f20ee74e98071e8a3e6e594fcf6a2",
+    "pmu-confirmation/pair-2-lists-on-nixpkgs-73.json": "02020df0a453c6381b87b5715225fd78e40ac7b191eaa2f58711ceac63c9a576",
+    "pmu-confirmation/pair-3-lists-off-nixpkgs-73.json": "982576f3da3fd99c764b404d821caa3249d1a424b2c44aed01d999c746416a16",
+    "pmu-confirmation/pair-3-lists-on-nixpkgs-73.json": "91513b0a182a8fa67b2cece59ab4fce717631db29c579e2c9a2abad3183b9c4b"
+  }
+}

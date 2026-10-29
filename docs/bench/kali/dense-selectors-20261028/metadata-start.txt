@@ -1,0 +1,21 @@
+Wed Oct 28 07:06:55 UTC 2026
+ 02:06:55 up 1 day,  8:23,  0 users,  load average: 0.50, 1.76, 1.94
+               total        used        free      shared  buff/cache   available
+Mem:           15963       10250        3253         362        3065        5713
+Swap:           4096           0        4096
+    PID COMMAND         %CPU %MEM
+ 197776 java             179 35.3
+ 205411 sshd-session    12.9  0.0
+ 167973 java            10.4 23.5
+ 205419 bash             9.0  0.0
+ 153343 mesh             0.9  0.1
+ 205406 (udev-worker)    0.3  0.0
+  80255 containerd       0.1  0.2
+     71 systemd-udevd    0.0  0.0
+    211 dockerd          0.0  0.5
+e2afe79429746e202b1adf2ae3acdb0837bea7d55a3d032fd9c97199ccbd254e  /tmp/mlir-nix-dense-selectors-20261028.tar.gz
+2ac530d5f222b72134ed1b12f04a49b23473d7bb88667ff3a2e09f1872d7e279  /tmp/kb/locality-20261028-final/mlnix
+Debian clang version 22.1.8 (1+b2)
+Target: x86_64-pc-linux-gnu
+Thread model: posix
+InstalledDir: /usr/lib/llvm-22/bin

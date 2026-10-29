@@ -1,0 +1,82 @@
+attribute cells: bytes=16 position_rows=143365 position_bytes=2097152
+frame allocations: count=5389911 bytes=315376544 slots=28642246
+value allocations: count=13748079 bytes=329953896
+== instrumented value-tag writes (including stack temporaries; not live heap rows)
+  app           2612476
+  blackhole     6029592
+  int            514227
+  float              14
+  bool          3817061
+  null            12681
+  string        2263278
+  path             5031
+  attrs         1645237
+  list          1213940
+  lambda        1930168
+  primop            105
+  primopapp      154988
+== sea of nodes: 5811 file regions hold 562915 ops (17.4% ever ran, 258116 evals, 358550 thunk cells); 2476 minted bodies hold 53038 ops (44.2% ever ran, 15155782 evals, 27826 thunk cells).  Finer grain mints a cell: the thunk cells are its rows against lambda grain's 2476
+== frame cells: 613062 assigned, 518 to a value with no use at all (0.1%) -- a value no one reads still costs a cell in every frame of its region
+== mlnix ops lowered: 618844
+== `//`: 20900 layered (5547884 entries not copied, 5450435 top entries incl. merges), 250782 flat merges, 4863 layers flattened later
+== lowering 856 ms (the analysis of deferred lambdas included), minted on demand 66 ms
+== read plan: 48918 names pooled; 3610 lambdas skimmed and not yet reached (17274 free names kept)
+== lambda pools: 2891 files, (at, pos, op, withs, names, body), 26825 rows deferred, 2476 drained (body minted on a first call), 24349 never called
+== scopes (7)
+  core        613517
+  ctl           2022
+  text          1705
+  coll           994
+  val            331
+  io             154
+  meta           121
+== continents (11)
+  core        613517
+  nixctl        2022
+  nixstr        1697
+  nixlist        773
+  nixnum         251
+  nixattr        221
+  nixpath        122
+  nixfmt         121
+  nixty           80
+  nixstore        32
+  nixctx           8
+== dialects (22)
+  nix         613517
+  nixerr        1676
+  nixstr        1650
+  nixlistfn      618
+  nixload        339
+  nixnum         251
+  nixattr        207
+  nixlist        155
+  nixjson        118
+  nixpath         71
+  nixty           67
+  nixfs           51
+  nixre           37
+  nixstore        32
+  nixattrfn       14
+  nixrefl         13
+  nixver          10
+  nixctx           8
+  nixctl           6
+  nixtoml          2
+  nixtrace         1
+  nixxml           1
+== top ops
+  nix.str                  122439
+  nix.select               102243
+  nix.attrs                101210
+  nix.apply                 94586
+  nix.with_var              53313
+  nix.lambda                29745
+  nix.list                  26586
+  nix.path                  16418
+  nix.formal                16069
+  nix.concat_strings        12463
+  nix.return                 8287
+  nix.int                    4646
+  nix.concat_lists           3342
+  nix.bool                   3337

@@ -1,0 +1,8 @@
+2026-10-28T11:16:42.066409+00:00
+loadavg 1.16 1.10 0.67 1/245 231161
+total        used        free      shared  buff/cache   available
+Mem:           15963        1404       13897         765        1627       14558
+Swap:           4096           0        4096
+Relevant processes; CPU is lifetime average, not an instantaneous utilization sample:
+    PID    PPID COMMAND             ELAPSED %CPU %MEM
+No java/mlnix/build processes present

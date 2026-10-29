@@ -1,0 +1,13 @@
+Run from repository root after a Release build:
+MLNIX_DEFER=1 MLNIX_JIT=1 MLNIX_JIT_THRESHOLD=1 MLNIX_STATS=1 \
+MLNIX_JIT_DUMP="$PWD/docs/bench/local/calls-20261028/inline-ir" \
+build/bin/mlnix instantiate --eval --strict docs/bench/local/calls-20261028/inline-ir/input.nix
+
+JIT disabled/enabled runs without statistics produced identical status, stdout and stderr.
+Expected output: [ false true false false ]. Expected traces, once each in order:
+inlined argument once; guarded argument once. The unused field remains lazy.
+The original predicate and the inlined wrapper have separate kernels. The latter contains
+an actual LLVM callee identity guard, the callee Boolean graph, Enter/Leave continuations,
+and an opaque fallback for the functor branch. Replacing the callee with a builtin misses
+the guard and returns to interpretation before demanding its argument.
+Threshold1 is for inspection; real workload measurements use1024.

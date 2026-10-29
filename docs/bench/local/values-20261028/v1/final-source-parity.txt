@@ -1,0 +1,6 @@
+Frozen source/build/test files: 1174 byte-identical to Values V1 archive.
+Protected incoming files: all 13 byte-identical to incoming snapshot.
+3d54905419b293a778a4c91a26d6b8d01b729906c634f68822b1b5cf69b5d1c5  /tmp/mlir-nix-values-v1-20261028.tar.gz
+2b2f4d6b25927e4138662cc05104b2673271df845bec350ea572704dda2324e0  /Users/jim/work/mlir-nix/build/bin/mlnix
+2b2f4d6b25927e4138662cc05104b2673271df845bec350ea572704dda2324e0  /tmp/mlnix-locality/mlnix-values-v1
+Read-only consistency review only; no evaluator/reference workloads rerun.

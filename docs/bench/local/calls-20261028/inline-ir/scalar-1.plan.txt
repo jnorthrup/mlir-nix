@@ -1,0 +1,17 @@
+lazy-boolean-cps nodes=7/64 leaves=2/16 blocks=26/256 resume-limit=32 inline-calls=1 inline-depth-limit=4 entry=7
+destinations: 0=false 1=true 2=deopt; resume=destination+1 (0=entry)
+statuses: 2=demand 5=enter 6=leave 7=guard-miss; continuation in upper bits
+leaf 0 context=0 current-closure capture
+leaf 1 context=0 argument
+node 0 predicate leaf=1 tag=11 function=1
+node 1 has_attr leaf=1 symbol=5
+node 2 deopt
+node 3 and a=1 b=2
+node 4 or a=0 b=3
+node 5 call callee-leaf=0 context=1 body=4
+node 6 not a=5
+continuation 3 node=5 action=2 true=0 false=0 consumer=nix.apply
+continuation 4 node=5 action=2 true=1 false=1 consumer=nix.apply
+continuation 5 node=1 action=0 true=2 false=4 consumer=nix.has_attr
+continuation 6 node=0 action=0 true=3 false=5 consumer=nixty.is_function
+continuation 7 node=5 action=1 true=6 false=2 consumer=nix.apply

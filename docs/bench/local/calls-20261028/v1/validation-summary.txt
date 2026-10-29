@@ -1,0 +1,21 @@
+Guarded call compilation: local validation, 2026-10-28
+macOS / LLVM-MLIR 23.1.1
+Focused gate: 236 exact JIT/interpreter comparisons; see check-jit.txt.
+All prior scalar/pointer/Boolean/admission/retirement gates retained.
+New coverage: current closure captures, target guards, lazy argument order, logical depth, inline retirement and ablation.
+
+eager: 479/479 semantic; 221/479 exact against stored suite expectations.
+eager: all1434 prior files unchanged; new fixture rc0, stdout true, no stderr.
+eager saved-file manifest SHA256: 19e8b6526a6b61c0156bfade9768131275cd0aa3ca5c4273142bca5471b3ddda
+demand: 479/479 semantic; 221/479 exact against stored suite expectations.
+demand: all1434 prior files unchanged; new fixture rc0, stdout true, no stderr.
+demand saved-file manifest SHA256: 19e8b6526a6b61c0156bfade9768131275cd0aa3ca5c4273142bca5471b3ddda
+
+Full suite commands:
+MLNIX_JIT=1 MLNIX_JIT_THRESHOLD=1 python3 scripts/run-lang-tests.py --save /tmp/mlnix-locality/calls-v1-eager
+MLNIX_DEFER=1 MLNIX_JIT=1 MLNIX_JIT_THRESHOLD=1 python3 scripts/run-lang-tests.py --save /tmp/mlnix-locality/calls-v1-demand
+
+Profile commands use default threshold1024, MLNIX_DEFER=1, MLNIX_STATS=1, MLNIX_JIT_PROFILE=1 and readonly benchmark stores.
+Inline-off is MLNIX_JIT=1 MLNIX_JIT_INLINE=0; inline-on leaves MLNIX_JIT_INLINE absent.
+Local profiles are diagnostic and not end-to-end timing samples.
+No Nix or Lix executable invoked.

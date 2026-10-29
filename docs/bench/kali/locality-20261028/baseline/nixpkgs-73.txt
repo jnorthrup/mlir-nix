@@ -1,0 +1,15 @@
+x86_64 | 8 threads | Intel(R) Core(TM) i7-6820HK CPU @ 2.70GHz
+  Nix 2.35.4: nix-instantiate (Nix) 2.35.4
+  Lix 2.91.3: nix-instantiate (Lix, like Nix) 2.91.3
+start-up (--eval -E 1), median of 5: Nix 2.35.4 41 ms, Lix 2.91.3 28 ms, mlnix 30 ms, mlnix demand 30 ms
+
+== nixpkgs-73  (5 interleaved rounds, 80 s; output sha256 5e8fff662dff; identical output from all: yes)
+   Nix 2.35.4     min  3.80s  median  4.08s   peak RSS   597 MB   cpu 4.55s   thunks 4.8M
+   Lix 2.91.3     min  4.47s  median  4.51s   peak RSS   757 MB   cpu 4.40s   thunks 4.8M
+   mlnix          min  3.63s  median  3.68s   peak RSS  1392 MB
+   mlnix demand   min  3.45s  median  3.70s   peak RSS  1270 MB
+   mlnix / Nix 2.35.4   median x0.90
+   mlnix / Lix 2.91.3   median x0.82
+   mlnix demand / Nix 2.35.4   median x0.91
+   mlnix demand / Lix 2.91.3   median x0.82
+

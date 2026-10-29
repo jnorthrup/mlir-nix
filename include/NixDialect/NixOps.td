@@ -13,6 +13,11 @@
 // forward/cyclic SSA references, and all lexical scoping is resolved at
 // lowering time.  Only `with` remains dynamic (`nix.with_var`).
 //
+// Memory effects and speculation are separate contracts. NoMemoryEffect permits
+// value numbering; it does not promise that forcing a thunk terminates without
+// errors or effects from its lazy operands. Only scalar literals are always
+// speculatable. Fallible/forcing ops remain conservative even with constant
+// operands; a folding pass may first replace them with a proven scalar literal.
 //===----------------------------------------------------------------------===//
 
 #ifndef NIX_OPS_TD
@@ -40,7 +45,7 @@ def Nix_ExprOp : Nix_Op<"expr", [
   let assemblyFormat = "$sym_name attr-dict-with-keyword $body";
 }
 
-def Nix_ReturnOp : Nix_Op<"return", [Terminator, Pure, NixModes<[], [0]>,
+def Nix_ReturnOp : Nix_Op<"return", [Terminator, NoMemoryEffect, NixModes<[], [0]>,
     ParentOneOf<["ExprOp", "LambdaOp"]>]> {
   let summary = "result of the enclosing expression / lambda body";
   let arguments = (ins NixVal:$value);
@@ -88,7 +93,7 @@ def Nix_LambdaOp : Nix_Op<"lambda", [SingleBlock,
   }];
 }
 
-def Nix_FormalOp : Nix_Op<"formal", [Pure]> {
+def Nix_FormalOp : Nix_Op<"formal", [NoMemoryEffect]> {
   let summary = "bind one formal of a pattern lambda";
   let description = [{
     `arg.name` if the argument set has the attribute, otherwise `default`.
@@ -146,14 +151,14 @@ def Nix_PathOp : Nix_Op<"path", [Pure]> {
   let assemblyFormat = "$value attr-dict";
 }
 
-def Nix_BuiltinOp : Nix_Op<"builtin", [Pure]> {
+def Nix_BuiltinOp : Nix_Op<"builtin", [NoMemoryEffect]> {
   let summary = "reference to an entry of the global base environment";
   let arguments = (ins Nix_NameProp:$name);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$name attr-dict";
 }
 
-def Nix_WithVarOp : Nix_Op<"with_var", [Pure]> {
+def Nix_WithVarOp : Nix_Op<"with_var", [NoMemoryEffect]> {
   let summary = "dynamically scoped variable lookup through `with` scopes";
   let description = [{
     Looks `name` up in each scope operand in order (innermost `with` first).
@@ -194,7 +199,7 @@ def Nix_AttrsOp : Nix_Op<"attrs", [AttrSizedOperandSegments]> {
 // Elimination forms
 //===----------------------------------------------------------------------===//
 
-def Nix_SelectOp : Nix_Op<"select", [Pure, AttrSizedOperandSegments, NixModes<[0], []>]> {
+def Nix_SelectOp : Nix_Op<"select", [NoMemoryEffect, AttrSizedOperandSegments, NixModes<[0], []>]> {
   let summary = "attribute path selection `e.a.b or d`";
   let description = [{
     `path` has one element per path component: a name for a literal component
@@ -212,7 +217,7 @@ def Nix_SelectOp : Nix_Op<"select", [Pure, AttrSizedOperandSegments, NixModes<[0
   let hasVerifier = 1;
 }
 
-def Nix_HasAttrOp : Nix_Op<"has_attr", [Pure, NixModes<[0], []>]> {
+def Nix_HasAttrOp : Nix_Op<"has_attr", [NoMemoryEffect, NixModes<[0], []>]> {
   let summary = "attribute path test `e ? a.b`";
   let description = [{ `path`/`dyn_keys` as in `nix.select`. }];
   let arguments = !con((ins NixVal:$base, Variadic<NixVal>:$dyn_keys, Nix_NamesProp:$path), NixPos);
@@ -228,13 +233,13 @@ def Nix_ApplyOp : Nix_Op<"apply", NixFxUser> {
   let assemblyFormat = "$callee `(` $args `)` attr-dict";
 }
 
-def Nix_IfOp : Nix_Op<"if", [Pure, NixModes<[0], [1, 2]>]> {
+def Nix_IfOp : Nix_Op<"if", [NoMemoryEffect, NixModes<[0], [1, 2]>]> {
   let arguments = !con((ins NixVal:$cond, NixVal:$then_value, NixVal:$else_value), NixPos);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$cond `then` $then_value `else` $else_value attr-dict";
 }
 
-def Nix_AssertOp : Nix_Op<"assert", [Pure, NixModes<[0], [1]>]> {
+def Nix_AssertOp : Nix_Op<"assert", [NoMemoryEffect, NixModes<[0], [1]>]> {
   let arguments = !con((ins NixVal:$cond, NixVal:$body, OptionalAttr<StrAttr>:$text), NixPos);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$cond `in` $body attr-dict";
@@ -245,17 +250,17 @@ def Nix_AssertOp : Nix_Op<"assert", [Pure, NixModes<[0], [1]>]> {
 // __lessThan exactly as upstream Nix does, so they remain overridable).
 //===----------------------------------------------------------------------===//
 
-class Nix_BinOp<string mnemonic, list<Trait> traits = [Pure]> : Nix_Op<mnemonic, traits> {
+class Nix_BinOp<string mnemonic, list<Trait> traits = [NoMemoryEffect]> : Nix_Op<mnemonic, traits> {
   let arguments = !con((ins NixVal:$lhs, NixVal:$rhs), NixPos);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$lhs `,` $rhs attr-dict";
 }
 
-def Nix_EqOp      : Nix_BinOp<"eq", [Pure, NixModes<[0, 1], []>]>;
-def Nix_NeqOp     : Nix_BinOp<"neq", [Pure, NixModes<[0, 1], []>]>;
-def Nix_AndOp     : Nix_BinOp<"and", [Pure, NixModes<[0, 1], []>]>;
-def Nix_OrOp      : Nix_BinOp<"or", [Pure, NixModes<[0, 1], []>]>;
-def Nix_ImplOp    : Nix_BinOp<"impl", [Pure, NixModes<[0, 1], []>]>;
+def Nix_EqOp      : Nix_BinOp<"eq", [NoMemoryEffect, NixModes<[0, 1], []>]>;
+def Nix_NeqOp     : Nix_BinOp<"neq", [NoMemoryEffect, NixModes<[0, 1], []>]>;
+def Nix_AndOp     : Nix_BinOp<"and", [NoMemoryEffect, NixModes<[0, 1], []>]>;
+def Nix_OrOp      : Nix_BinOp<"or", [NoMemoryEffect, NixModes<[0, 1], []>]>;
+def Nix_ImplOp    : Nix_BinOp<"impl", [NoMemoryEffect, NixModes<[0, 1], []>]>;
 // `a // b` and `a ++ b` allocate a new attribute set / list.
 class Nix_FreshBinOp<string mnemonic> : Nix_BinOp<mnemonic, [NixModes<[0, 1], []>]> {
   let results = (outs NixFreshVal:$result);
@@ -263,13 +268,13 @@ class Nix_FreshBinOp<string mnemonic> : Nix_BinOp<mnemonic, [NixModes<[0, 1], []
 def Nix_UpdateOp  : Nix_FreshBinOp<"update">;
 def Nix_ConcatListsOp : Nix_FreshBinOp<"concat_lists">;
 
-def Nix_NotOp : Nix_Op<"not", [Pure, NixModes<[0], []>]> {
+def Nix_NotOp : Nix_Op<"not", [NoMemoryEffect, NixModes<[0], []>]> {
   let arguments = !con((ins NixVal:$operand), NixPos);
   let results = (outs NixVal:$result);
   let assemblyFormat = "$operand attr-dict";
 }
 
-def Nix_ConcatStringsOp : Nix_Op<"concat_strings", [Pure]> {
+def Nix_ConcatStringsOp : Nix_Op<"concat_strings", [NoMemoryEffect]> {
   let summary = "`+` (force_string = false) and string interpolation (true)";
   let arguments = !con((ins Variadic<NixVal>:$parts, UnitAttr:$force_string), NixPos);
   let results = (outs NixVal:$result);

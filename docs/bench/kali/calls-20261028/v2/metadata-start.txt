@@ -1,0 +1,7 @@
+Wed Oct 28 09:18:52 UTC 2026
+ 04:18:52 up 1 day, 10:35,  0 users,  load average: 0.00, 0.07, 0.19
+               total        used        free      shared  buff/cache   available
+Mem:           15963        7149        8667         571         920        8814
+Swap:           4096           0        4096
+af5cbebee803f37d72b8a1e98cf5b55a03b49e4ca6481e65522b3e8a260553b5  /tmp/mlir-nix-calls-v2-20261028.tar.gz
+8e4549f55f54ff813973c5d75070b84b48d8b8b4e6db691fedf50f2ed29e88bd  /tmp/kb/calls-20261028-v1/mlnix

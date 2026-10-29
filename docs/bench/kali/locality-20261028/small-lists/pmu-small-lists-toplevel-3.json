@@ -1,0 +1,58 @@
+{
+  "command": [
+    "env",
+    "MLNIX_DEFER=1",
+    "/tmp/kb/locality-20261028-small-lists/mlnix",
+    "instantiate",
+    "--readonly-mode",
+    "--eval",
+    "--strict",
+    "test/nixos-toplevel.nix",
+    "--arg",
+    "nixpkgs",
+    "./.cache/nixpkgs"
+  ],
+  "exit_code": 0,
+  "wall_seconds": 4.004269461991498,
+  "cpu_seconds": 4.3182849999999995,
+  "peak_rss_mib": 1327.3125,
+  "scope": "user-space, inherited threads/children",
+  "events": {
+    "cycles": {
+      "raw": 11779042192,
+      "enabled_ns": 4307368000,
+      "running_ns": 4307368000,
+      "scaled": 11779042192
+    },
+    "instructions": {
+      "raw": 18429113554,
+      "enabled_ns": 4307309400,
+      "running_ns": 4307309400,
+      "scaled": 18429113554
+    },
+    "cache_references": {
+      "raw": 600678987,
+      "enabled_ns": 4307271900,
+      "running_ns": 4307271900,
+      "scaled": 600678987
+    },
+    "cache_misses": {
+      "raw": 108705720,
+      "enabled_ns": 4307256200,
+      "running_ns": 4307256200,
+      "scaled": 108705720
+    },
+    "branches": {
+      "raw": 3309484855,
+      "enabled_ns": 4307256200,
+      "running_ns": 4307256200,
+      "scaled": 3309484855
+    },
+    "branch_misses": {
+      "raw": 83345037,
+      "enabled_ns": 4307256200,
+      "running_ns": 4307256200,
+      "scaled": 83345037
+    }
+  }
+}

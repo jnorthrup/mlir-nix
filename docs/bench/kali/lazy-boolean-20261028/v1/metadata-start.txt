@@ -1,0 +1,7 @@
+Wed Oct 28 07:57:42 UTC 2026
+ 02:57:42 up 1 day,  9:14,  0 users,  load average: 0.06, 0.06, 0.38
+               total        used        free      shared  buff/cache   available
+Mem:           15963       10686        5133         443         790        5276
+Swap:           4096           0        4096
+0ada688e366987b7c7680f259ed342d3e850eb2e468a29645702d4a2c5e58a50  /tmp/mlir-nix-lazy-boolean-20261028.tar.gz
+ef85d2ef489348f7f8aeaf9c3e042aa3159f418745c9cb5af10d92b837ebcbad  /tmp/kb/dense-selectors-v2-20261028/mlnix

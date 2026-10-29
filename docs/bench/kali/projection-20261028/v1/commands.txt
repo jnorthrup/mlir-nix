@@ -1,0 +1,13 @@
+Measured-run launcher: commands-clean-v1.sh. Initial failed incremental attempt: commands-v1.sh. No credentials or unrelated environment.
+Frozen archive: /tmp/mlir-nix-projection-v1-20261028.tar.gz (SHA256 7b3187487ba5658fc24cbc1ed8e7ed73bed30f5da3b0af401f8948f57a9663db, 938097 bytes).
+Preserved baseline: /tmp/kb/curried-20261028-dispatch-v2/mlnix (SHA256 de551d73456085ea01fe1770d6011ceb99106b0d077ed9d5be2750fe4c6465ae).
+Candidate: /tmp/kb/projection-20261028-v1/mlnix. Frozen source overlay reuses isolated build tree /home/jim/work/mlir-nix-dense-selectors-20261028, serialized by /tmp/kb/gen.lock. Parked builtin-results candidate is not applied.
+
+The launcher clears MLNIX_JIT, MLNIX_JIT_INLINE, MLNIX_JIT_CURRIED, MLNIX_JIT_PROJECTION, MLNIX_DEFER, MLNIX_STATS, MLNIX_PIPELINE, MLNIX_PRIMS_IRDL, MLNIX_JIT_THRESHOLD, MLNIX_JIT_DUMP and MLNIX_JIT_PROFILE.
+Untimed candidate profiles use MLNIX_JIT=1, MLNIX_DEFER=1, MLNIX_STATS=1, MLNIX_JIT_PROFILE=1 and temporary store/state roots. Arms are MLNIX_JIT_PROJECTION=0 and PROJECTION absent (default enabled). Threshold remains absent (default 1024); INLINE and CURRIED remain absent (defaults). Full output SHA256 must match saved Kali goldens; per-location profile rows are retained.
+Five rotating paired rounds compare candidate PROJECTION=0 / default with JIT=1 in both. Five paired rounds compare candidate JIT absent / JIT=1. Three paired rounds compare preserved dispatch V2 / candidate with JIT=1; three paired controls compare them with JIT absent. All timings use MLNIX_DEFER=1. Stats and profiling remain absent from timings.
+Separate PMU pairs compare candidate PROJECTION=0 / default with JIT=1 in both. The PMU command array does not repeat inherited environment; settings are explicit in the launcher and filename.
+Kali full goldens remain 2057239a9017fb18a37976ec6c96ad31ee36847cfa2107f146d4fac427f0cd86 and 5e8fff662dffa4eab642b75e78028fb54204cd15ec1a9972c2cafe2306234959. Mac-local output is not used as the Kali oracle.
+No Nix/Lix binaries, old broad suites, or unrelated benchmark jobs are invoked.
+
+Clean retry: commands-clean-v1.sh produced all reported checks, profiles and timings. The first commands-v1.sh attempt stopped at link with undefined EvalState::selectField, because preserved archive mtimes caused Ninja to reuse an older Eval.cpp.o. Initial incremental logs are retained with an initial-incremental prefix. Every archived regular file is compared byte for byte before cmake --build build --target clean; the full isolated tree is then rebuilt without changing source. verified-archive-files.sha256 and cache-invalidation.txt retain evidence. No tests or timings ran before the initial link failure.

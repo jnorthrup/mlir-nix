@@ -1,0 +1,3 @@
+eager: 45 exact comparisons; scalar/pointer/grace/type/overflow/budget guards verified
+demand: 45 exact comparisons; scalar/pointer/grace/type/overflow/budget guards verified
+JIT: 90 exact comparisons passed

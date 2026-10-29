@@ -1,0 +1,24 @@
+Saturated curried native calls V1: local validation, 2026-10-28
+macOS / LLVM-MLIR 23.1.1
+300 exact eager/demand JIT/interpreter comparisons passed, including29 new curried cases.
+
+eager: 480/480 semantic; 222/480 stored exact expectations.
+eager: all 1,437 prior output/error/status files unchanged; new curried fixture returns true without stderr.
+eager manifest SHA256: 292dd6ddb40e34c9f4acc38d2e805b16efd09ed8caeb3d8ef4b4e51f72638f89
+demand: 480/480 semantic; 222/480 stored exact expectations.
+demand: all 1,437 prior output/error/status files unchanged; new curried fixture returns true without stderr.
+demand manifest SHA256: 292dd6ddb40e34c9f4acc38d2e805b16efd09ed8caeb3d8ef4b4e51f72638f89
+
+Commands:
+MLNIX_JIT=1 MLNIX_JIT_THRESHOLD=1 python3 scripts/run-lang-tests.py --save /tmp/mlnix-locality/curried-v1-eager
+MLNIX_DEFER=1 MLNIX_JIT=1 MLNIX_JIT_THRESHOLD=1 python3 scripts/run-lang-tests.py --save /tmp/mlnix-locality/curried-v1-demand
+python3 scripts/check-jit.py
+
+Local diagnostic profiles: MLNIX_DEFER=1 MLNIX_JIT=1 MLNIX_STATS=1 MLNIX_JIT_PROFILE=1, default threshold1024.
+Curried off additionally sets MLNIX_JIT_CURRIED=0; on leaves it absent. Clear inherited MLNIX_* settings first.
+MLNIX_STORE_ROOT=/tmp/mlnix-np-root MLNIX_STATE_DIR=/tmp/mlnix-np-state
+build/bin/mlnix instantiate --readonly-mode --eval --strict --json test/nixpkgs-drvs.nix --argstr system x86_64-linux
+Both profile output SHA256: 5e8fff662dffa4eab642b75e78028fb54204cd15ec1a9972c2cafe2306234959
+Three native curried kernels: removeFunctions predicate(163020 calls), assertMsg(25078), overridable-check predicate(3486).
+Curried completions188515, grace9; actual frame and Value counts each fall by188506, 9048288 requested bytes combined.
+No Nix/Lix executable invoked. Allocation counts are not wall time or RSS.

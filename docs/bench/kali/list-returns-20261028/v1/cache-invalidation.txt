@@ -1,0 +1,3 @@
+All 1886 archived regular files match the extracted checkout byte for byte.
+The entire isolated build directory is cleaned before compilation to prevent preserved archive mtimes from reusing stale objects.
+Source bytes and preserved Values V1 baseline are not changed.

@@ -1,0 +1,173 @@
+Persistent value returns V1 — saved local profile analysis, 2026-10-28
+
+Evidence only: no evaluator/test/workload/reference rerun, and no core/test edit.
+All profiles use demand scheduling. jit-off disables JIT; values-off enables
+JIT with MLNIX_JIT_VALUES=0; values-on enables JIT with values at their default.
+The two JIT arms retain projections, inlining and currying. Threshold is 1024.
+These are diagnostic allocation/coverage profiles, not throughput measurements.
+
+Compatibility with frozen Projection V1:
+For each workload, profile-values-off exactly matches every previously existing
+jit aggregate counter in docs/bench/local/projection-20261028/v1/profile-projection-on-*.txt,
+except compile_ns. All four added lazy_value counters are zero. Frame counts,
+requested bytes and slots, and Value counts/requested bytes match exactly.
+After sorting rows and removing value_completions=0, NixOS location rows also
+match. Nixpkgs differs only at the top-60 cutoff: two zero-native 6,766-call
+check-meta.nix rows tie (lines146 and480); sorting ranks by calls without a
+stable tie-break, so one replaces the other. This is not an aggregate mismatch.
+
+Exact JIT aggregates (columns: NixOS values-off/on; nixpkgs values-off/on):
+compiled                                       16           16 |           14           16
+compile_ns                               55395580     53782166 |     47411499     54828665
+executions                                 477569       655206 |       584662       678507
+selector_executions                        128048       111692 |       233126       207160
+boolean_compiled                               15           15 |           13           15
+boolean_executions                         128833       322826 |       216847       336658
+boolean_completions                        119951       263615 |       209155       238722
+boolean_deopts                               8882        59211 |         7692        97936
+boolean_demands                            121840       354138 |       176456       311154
+boolean_resumes                            323464       757165 |       604679       856209
+boolean_retired                                 5            4 |            3            5
+boolean_preflight_attempts                    794           98 |          655          163
+boolean_preflight_deopts                      779           83 |          642          148
+boolean_preflight_rejections                   90           53 |           83           50
+boolean_inline_calls                        71253        71253 |       182353       182353
+boolean_guard_misses                          134          134 |          232          232
+boolean_projection_compiled                     6            7 |            5            4
+boolean_projection_requests                 28689       132627 |        33296        35339
+boolean_projection_forces                   29769       159168 |        10019        15041
+boolean_saturated_inline_calls               9130         9130 |        20350        20350
+lazy_value_compiled                             0            9 |            0            5
+lazy_value_completions                          0       161457 |            0        36337
+lazy_value_grace                                0           27 |            0           15
+curried_compiled                                4            4 |            4            6
+curried_completions                         67542        88233 |       169192       194143
+curried_deopts                               2110        51954 |         1482        91793
+
+All JIT profiles: zero mismatches (including value mismatches), compile failures
+and projection-peek deopts; curried candidates=256. Lookup routes remain flat,
+with zero layered/cached_flat counts. Pointer identity/capture counts do not
+change. Callback inline/guard counts and saturated-inline calls are unchanged.
+Thus changed callback targets do not explain the new fallbacks.
+
+Value coverage and scope:
+Value-return engines complete 161,457 / 36,337 times, including 27 / 15 grace
+comparisons: 161,430 / 36,322 trusted cell returns. These are subsets of existing
+boolean_completions; curried value returns are subsets of both. Bool payloads
+also count as values. No per-runtime-type histogram exists, so these counts
+must not be described as exclusively non-Bool returns or as measured counts
+for every supported kind.
+Visible productive NixOS projections in .cache/nixpkgs/lib/modules.nix:
+* :851:22 `v: v.unmatchedDefns`: 41,797 value completions, zero deopts.
+* :846:37 `v: v.matchedOptions`: 27,787 value completions, zero deopts.
+  Their source structures carry lists and attribute sets respectively; this
+  kind attribution comes from source, not a type-tag counter.
+* :273:68 `_: v: v.value`: 18,881 value completions, zero deopts, compared with
+  1,857 Boolean completions and 2,110 deopts before. The prior curried entry
+  stopped recording at4,991 calls; the new one reaches19,905, consistent with
+  no longer retiring after a non-Bool miss streak. In nixpkgs this same entry
+  stops at1,024 calls with zero compilation, so that workload has no such win.
+Only104,827 /25,975 value completions appear in printed location rows; remaining
+56,630 /10,362 cannot be attributed from these saved top-60 lists. Unary records
+are additionally capped at4,096 for NixOS (214,363 dropped profile calls);
+nixpkgs records3,537 with zero dropped calls. Aggregates are not truncated.
+The442-case gate independently validates null/Bool/int/float/string/context/path,
+shallow attrs/lists, existing closures and primitive/partial-primitive values;
+it establishes semantics, not each kind's frequency in these workloads.
+
+New mixed-path fallbacks:
+All locations below are generic two-argument saturated shapes, not name matches.
+Location                         NixOS Done/Deopt        nixpkgs Done/Deopt
+lib/attrsets.nix:1353:19          16,318 / 51,579         25,737 / 90,857
+lib/lists.nix:811:15                 44 /    375             17 /    155
+lib/strings.nix:736:20          no native plan              221 /    781
+These are optionalAttrs/optionals/optionalString: `cond: value: if cond then
+value else {}` / [] / "". Value tails make the true branch eligible; local
+empty constructors remain opaque, causing false-branch Deopt. optionalAttrs
+fallback rates are75.97% /77.93%; the other admitted selectors are similarly
+low-yield. Consecutive-miss retirement does not bound a mixed miss rate.
+The existing pointer selector already supports both branches after ordinary
+currying. The new partial plan therefore adds failed native dispatch on many
+calls that the pointer tier already handles successfully.
+
+Accounting without double-counting replacement:
+Pointer selector calls drop128,048 ->111,692 (NixOS, -16,356) and
+233,126 ->207,160 (nixpkgs, -25,966). Exactly:
+  NixOS: (16,318-3) + (44-3) =16,356 trusted new optional value returns.
+  nixpkgs: (25,737-3) + (221-3) + (17-3) =25,966.
+These successes replace pointer-tier execution; they are not additional unique
+native work. Curried counters and semantic frames_saved must not be added to
+aggregate value/pointer counts as independent allocation savings.
+NixOS general deopts rise8,882 ->59,211 (+50,329). New curried optional deopts
+51,954 minus removed2,110 old v.value deopts explain+49,844; net non-curried
+residual is+485. Nixpkgs rises7,692 ->97,936 (+90,244): new optional91,793
+minus the no-longer-compiled v.value's1,482 gives+90,311, with a net non-curried
+residual of-67. Do not assign these residuals to unprinted locations.
+
+Budget pressure:
+Both values-on profiles use all16 compile slots (values-off16 /14). Retiring
+code does not refund attempts. NixOS customisation.nix:254:24 falls from182
+completions to a1,024-call zero-compiled entry; its asserts.nix:50:15 curried
+plan (previous12,513 completions) is no longer among the four compiled entries.
+Nixpkgs modules.nix:273:68 falls from1,024 completions to zero at the threshold.
+This is consistent with admission/budget displacement, not a logged cause:
+there are no per-entry refusal reason / compile-order records. The separate
+256 curried candidate cap remains saturated in all JIT arms.
+
+Measured allocation requests (JIT off -> values off -> values on):
+nixos-toplevel:
+  frame_count  5389929 -> 4773425 -> 4625426; increment -147999 (-3.100%)
+  frame_bytes  315377456 -> 298698792 -> 294340200; increment -4358592 (-1.459%)
+  frame_slots  28642324 -> 27790499 -> 27541673; increment -248826 (-0.895%)
+  value_count  14424328 -> 14338544 -> 14317853; increment -20691 (-0.144%)
+  value_bytes  346183872 -> 344125056 -> 343628472; increment -496584 (-0.144%)
+nixpkgs-73:
+  frame_count  3763348 -> 2814579 -> 2786039; increment -28540 (-1.014%)
+  frame_bytes  282745328 -> 256585328 -> 255900368; increment -684960 (-0.267%)
+  frame_slots  27816470 -> 26444008 -> 26415468; increment -28540 (-0.108%)
+  value_count  11769738 -> 11559864 -> 11534919; increment -24945 (-0.216%)
+  value_bytes  282473712 -> 277436736 -> 276838056; increment -598680 (-0.216%)
+Requested bytes are not RSS. Relative to JIT-off, values-on saves764,503 /
+977,309 frames (14.184% /25.969%) and106,475 /234,819 Values (0.738% /1.995%).
+Incremental value-tier savings are147,999 /28,540 frames and20,691 /24,945
+Values. These net changes already include replacement and admission effects;
+they are the appropriate allocation evidence, not summed semantic counters.
+Native resumes nevertheless grow323,464 ->757,165 and604,679 ->856,209;
+actual host force actions grow121,840 ->354,138 and176,456 ->311,154. More
+coverage and fewer allocations do not by themselves establish lower wall time.
+
+Next conservative work suggested by evidence, not implemented here:
+Keep arbitrary persistent/projection returns. Before widening callbacks, avoid
+admitting partial saturated value plans that compete with an existing complete
+pointer selector, or add explicit safe empty-result recipes covering their
+other branch. A generic recipe would need fresh-result/identity and shallow
+grace rules, not permission to return local temporary SSA storage. A bounded
+post-oracle yield sample / rolling deopt budget can also keep mixed low-yield
+plans from occupying compile slots indefinitely. Preserve source positions,
+laziness, one oracle execution and active native-run lifetime pins.
+
+Provenance / read-only reproduction:
+Inputs: the six profile-*.txt/.out pairs in this directory; projection V1's
+profile-projection-on-*.txt; check-jit.txt; suite-parity.txt; current
+lib/Eval/ScalarJIT.cpp admission/retirement/stats and lib/Eval/LazyJIT.cpp.
+Source inspection: sed -n '1338,1360p' .cache/nixpkgs/lib/attrsets.nix;
+sed -n '801,817p' .cache/nixpkgs/lib/lists.nix;
+sed -n '728,742p' .cache/nixpkgs/lib/strings.nix;
+sed -n '832,857p' .cache/nixpkgs/lib/modules.nix.
+Python parses each saved `jit:` or allocation line with
+  dict((k,int(v)) for k,v in re.findall(r'(\w+)=(\d+)', line))
+Compare intersection of old/new counter keys excluding compile_ns; require
+new lazy_value_* fields zero. Compare allocation lines verbatim. Compare sorted
+location rows after deleting ` value_completions=0`, noting top-60 ties. Deltas
+are on-minus-off and percentages (on/off-1)*100. Output SHA uses hashlib.sha256.
+All three output arms match for each workload (including the JIT-off control):
+nixos-toplevel: f1cfa7cd14649110397a1d1c728d2db80435f2d7bdc084885b8c748a57e6b9bf
+nixpkgs-73: 5e8fff662dffa4eab642b75e78028fb54204cd15ec1a9972c2cafe2306234959
+The local NixOS golden is host-specific and is not substituted for Kali's saved golden.
+Input profile SHA-256:
+935a2e4145ef1a9d67b028c157274d001b7e489a04816cd9b90d073a97efb93c  profile-jit-off-nixos-toplevel.txt
+634ebaf1bff0e411fb83c9013ffb2265bb108dfeca20d4ddcb12f584f513cc6c  profile-values-off-nixos-toplevel.txt
+6be7acba7a80eb7b1acf65a1e2a710d9577035f26a33d8b300ec429d7b96e2c9  profile-values-on-nixos-toplevel.txt
+d0cd7478a94c9937841a33c40d1651d852f84e7f34201ce8fe6c2bd41df49e9b  profile-jit-off-nixpkgs-73.txt
+c3a82c6f8bbe82276d79df681b67de2bfab42e3fc3c93ed8e033026de6d06ba9  profile-values-off-nixpkgs-73.txt
+05ce752bb084b32067c9ac6edeb655413b43e4afe84b2b7366d599e761d605e2  profile-values-on-nixpkgs-73.txt

@@ -1,0 +1,20 @@
+Builtin result allocation V1: local validation, 2026-10-28
+macOS / LLVM-MLIR 23.1.1
+240 exact eager/demand JIT/interpreter comparisons passed.
+
+eager: 479/479 semantic; 221/479 stored exact expectations.
+eager: all 1,437 saved status/output/error files byte-identical to Calls V2.
+eager manifest SHA256: a0b3554008547decb84c8091c432ad1f52b056faa2111b21690037fa1a592b43
+demand: 479/479 semantic; 221/479 stored exact expectations.
+demand: all 1,437 saved status/output/error files byte-identical to Calls V2.
+demand manifest SHA256: a0b3554008547decb84c8091c432ad1f52b056faa2111b21690037fa1a592b43
+
+Commands:
+MLNIX_JIT=1 MLNIX_JIT_THRESHOLD=1 python3 scripts/run-lang-tests.py --save /tmp/mlnix-locality/builtin-results-v1-eager
+MLNIX_DEFER=1 MLNIX_JIT=1 MLNIX_JIT_THRESHOLD=1 python3 scripts/run-lang-tests.py --save /tmp/mlnix-locality/builtin-results-v1-demand
+python3 scripts/check-jit.py
+
+Untimed local demand nixpkgs profile (JIT disabled) has the original golden full output hash.
+Values: 11,457,084 rows / 274,970,016 requested bytes (previous 11,769,738 / 282,473,712).
+Reduction: 312,654 Value rows / 7,503,696 requested bytes. Frame allocations unchanged.
+No Nix/Lix executable invoked. These are allocation counts, not timing or RSS.

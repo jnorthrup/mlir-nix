@@ -1,0 +1,20 @@
+Local source HEAD: 46182e5b41a88d96f619b53f923bd6aafb7f46a2 plus initial dirty TrikeShed changes
+6181c2a58fadedf3969dc0ba34b7db1e51dfd7e1f8f55e8855e976d95d6dad9d  /tmp/mlir-nix-locality-source.tar.gz
+f8939ee9c907ab21332a4c97aca079256fcfd9daccf5d048c7371cf606ca64d0  build/bin/mlnix
+Linux kali 6.18.54.1-microsoft-standard-WSL2 #1 SMP PREEMPT_DYNAMIC Tue Oct  6 19:13:07 UTC 2026 x86_64 GNU/Linux
+Debian clang version 22.1.8 (1+b2)
+Target: x86_64-pc-linux-gnu
+Thread model: posix
+InstalledDir: /usr/lib/llvm-22/bin
+nix-instantiate (Nix) 2.35.4
+nix-instantiate (Lix, like Nix) 2.91.3
+System type: x86_64-linux
+Additional system types: i686-linux, x86_64-v1-linux, x86_64-v2-linux, x86_64-v3-linux
+Features: gc, signed-caches
+System configuration file: /etc/nix/nix.conf
+User configuration files: /home/jim/.config/nix/nix.conf:/etc/xdg/nix/nix.conf
+Store directory: /nix/store
+State directory: /nix/var/nix
+Data directory: /nix/store/kr0ip6s6vbllsadkvbgqm70m7gkyywwc-lix-2.91.3/share
+LIX_BIN=/nix/store/kr0ip6s6vbllsadkvbgqm70m7gkyywwc-lix-2.91.3/bin/nix-instantiate
+NIX_BIN=/nix/store/8lza1b8nnci8lmm4q68p0l33pg975s0q-nix-2.35.4/bin/nix-instantiate

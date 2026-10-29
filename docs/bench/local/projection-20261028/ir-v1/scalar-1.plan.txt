@@ -1,0 +1,14 @@
+lazy-boolean-cps nodes=4/64 leaves=3/16 blocks=19/256 resume-limit=32 inline-calls=0 saturated-inline-calls=0 projections=0 inline-depth-limit=4 chain-count=2 entry=5
+destinations: 0=false 1=true 2=deopt; resume=destination+1 (0=entry)
+statuses: 2=demand 5=depth-overflow 7=guard-miss; continuation in upper bits
+call entry/leave bookkeeping stays in native control flow
+leaf 0 context=0 current-closure capture
+leaf 1 context=0 argument=1
+leaf 2 context=0 current-closure capture
+node 0 leaf leaf=0
+node 1 predicate leaf=1 tag=5 function=0
+node 2 leaf leaf=2
+node 3 if a=0 b=1 c=2
+continuation 3 node=1 action=0 true=1 false=0 consumer=nixty.is_bool
+continuation 4 node=2 action=0 true=1 false=0 consumer=nix.if
+continuation 5 node=0 action=0 true=3 false=4 consumer=nix.if

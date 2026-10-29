@@ -1,0 +1,13 @@
+01:21:47 build rc=0, error lines: 0
+01:21:47 done
+01:22:43 lang eager (rc=0): TOTAL        semantic  473/473   exact  215/473
+01:22:59 lang demand (rc=0): TOTAL        semantic  473/473   exact  215/473
+01:23:00 mlir tests (rc=0): mlir tests: 13 passed, 0 failed, 4 run lines skipped (cse-dynamic-ops)
+01:23:00 primops (rc=0): primops: 105 registered, 105 declared
+01:23:06 difftest eager (rc=0): 72/72 identical to Nix 2.35.4;71/72 identical to Lix 2.91.3;
+01:23:13 difftest demand (rc=0): 72/72 identical to Nix 2.35.4;71/72 identical to Lix 2.91.3;
+01:23:13 done
+Corrected eager gates (MLNIX_DEFER absent):
+TOTAL        semantic  473/473   exact  215/473
+72/72 identical to Nix 2.35.4
+71/72 identical to Lix 2.91.3

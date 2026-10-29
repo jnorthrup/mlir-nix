@@ -1,0 +1,48 @@
+jit: compiled=1 executions=8 grace=3 rejected=0 type_misses=0 overflows=0 mismatches=0 compile_failures=0 candidates=1 pointer_compiled=1 identity_executions=8 capture_executions=0 selector_executions=0 pointer_grace=3 pointer_mismatches=0
+attribute cells: bytes=16 position_rows=1 position_bytes=8
+== value heap by facet: 150 rows allocated (0 MB), 144 of them with a final state; thunk and blackhole tags are a force's transient marks
+  app                 8  row 24 B  facet 16 B      0.0 ->    0.0 MB
+  blackhole          11  (transient)
+  int                20  row 24 B  facet  8 B      0.0 ->    0.0 MB
+  bool                2  row 24 B  facet  1 B      0.0 ->    0.0 MB
+  null                1  row 24 B  facet  0 B      0.0 ->    0.0 MB
+  string              3  row 24 B  facet 20 B      0.0 ->    0.0 MB
+  attrs               2  row 24 B  facet  8 B      0.0 ->    0.0 MB
+  list                3  row 24 B  facet 12 B      0.0 ->    0.0 MB
+  primop            105  row 24 B  facet  8 B      0.0 ->    0.0 MB
+  final states at 24 B a row: 0 MB; on facet-sized rows: 0 MB.  A force re-types a row in place, so a row must fit the largest facet: the uniform 24-B row is the price of call-by-need, and this measures it.
+== sea of nodes: 6 file regions hold 35 ops (11.4% ever ran, 4 evals, 11 thunk cells); 0 minted bodies hold 0 ops (0.0% ever ran, 0 evals, 0 thunk cells).  Finer grain mints a cell: the thunk cells are its rows against lambda grain's 0
+== frame cells: 33 assigned, 0 to a value with no use at all (0.0%) -- a value no one reads still costs a cell in every frame of its region
+== mlnix ops lowered: 37
+== `//`: 0 layered (0 entries not copied, 0 top entries incl. merges), 0 flat merges, 0 layers flattened later
+== lowering 2 ms (the analysis of deferred lambdas included), minted on demand 0 ms
+== scopes (3)
+  core            30
+  coll             6
+  io               1
+== continents (4)
+  core            30
+  nixlist          5
+  nixstore         1
+  nixattr          1
+== dialects (5)
+  nix             30
+  nixlistfn        4
+  nixstore         1
+  nixlist          1
+  nixattr          1
+== top ops
+  nix.return                    6
+  nix.select                    5
+  nix.lambda                    4
+  nix.attrs                     3
+  nix.update                    3
+  nix.int                       2
+  nix.expr                      2
+  nixlistfn.map                 2
+  nix.str                       2
+  nixstore.derivation_strict        1
+  nixlistfn.foldl_strict        1
+  nix.list                      1
+  nix.builtin                   1
+  nix.formal                    1

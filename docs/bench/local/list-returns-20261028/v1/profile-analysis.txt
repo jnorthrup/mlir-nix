@@ -1,0 +1,178 @@
+List-return recipes V1 — saved local profile analysis, 2026-10-28
+
+No evaluator, test, benchmark or reference execution was performed for this analysis.
+Inputs are the six saved candidate profiles and prior Values V1 profiles. All arms
+use demand mode; native profiles use default threshold 1024. LISTS off means JIT1
+with MLNIX_JIT_LISTS=0; LISTS on means JIT1 with LISTS absent. JIT-off is separate.
+These diagnose coverage and allocation requests; they are not paired timing results.
+
+Compatibility control:
+For both workloads, every prior Values V1 JIT aggregate except compile_ns matches
+LISTS-off exactly. All actual frame/Value counts, requested bytes and frame slots
+also match. Candidate JIT-off allocation counters match prior JIT-off. The three
+new list counters are all zero with LISTS disabled. All six outputs match the saved
+local goldens; all mismatch and compiler-failure counters remain zero.
+
+  nixos-toplevel: 59 old aggregate keys equal (of 60, compile_ns excluded)
+  nixpkgs-73: 59 old aggregate keys equal (of 60, compile_ns excluded)
+
+Exact aggregate counts (LISTS off -> on):
+nixos-toplevel:
+  compiled                                         16 ->           16
+  compile_ns                               66,754,751 ->   55,029,583
+  candidates                                      254 ->          256
+  boolean_completions                         329,354 ->      389,506
+  boolean_deopts                                7,460 ->        7,257
+  boolean_demands                             369,581 ->      425,298
+  boolean_resumes                             786,660 ->      902,262
+  boolean_retired                                   4 ->            2
+  boolean_preflight_attempts                       56 ->           16
+  boolean_preflight_deopts                         40 ->            0
+  boolean_preflight_rejections                     51 ->           51
+  boolean_inline_calls                         71,250 ->       71,250
+  boolean_guard_misses                            134 ->          134
+  boolean_projection_requests                 132,627 ->      132,627
+  boolean_saturated_inline_calls                9,130 ->        9,130
+  selector_executions                          45,983 ->       45,983
+  lazy_value_compiled                              10 ->           10
+  lazy_value_completions                      227,199 ->      287,351
+  lazy_empty_completions                       62,724 ->       98,946
+  lazy_list_compiled                                0 ->            2
+  lazy_list_completions                             0 ->       23,930
+  lazy_list_handle_lookups                          0 ->            0
+  curried_compiled                                  3 ->            3
+  curried_completions                         100,982 ->      161,134
+  curried_deopts                                  139 ->            0
+  curried_candidates                              256 ->          256
+  curried_rejected                                264 ->          263
+nixpkgs-73:
+  compiled                                         16 ->           16
+  compile_ns                               48,324,873 ->   48,706,375
+  candidates                                      189 ->          191
+  boolean_completions                         492,101 ->      509,238
+  boolean_deopts                               19,293 ->        2,091
+  boolean_demands                             470,862 ->      470,863
+  boolean_resumes                           1,196,516 ->    1,196,387
+  boolean_retired                                   3 ->            2
+  boolean_preflight_attempts                      143 ->          143
+  boolean_preflight_deopts                        128 ->          128
+  boolean_preflight_rejections                     35 ->           35
+  boolean_inline_calls                        182,353 ->      182,353
+  boolean_guard_misses                            232 ->          232
+  boolean_projection_requests                  26,093 ->       26,093
+  boolean_saturated_inline_calls               20,350 ->       20,350
+  selector_executions                             223 ->          223
+  lazy_value_compiled                               6 ->            6
+  lazy_value_completions                      290,291 ->      307,428
+  lazy_empty_completions                      231,429 ->      231,428
+  lazy_list_compiled                                0 ->            2
+  lazy_list_completions                             0 ->       17,138
+  lazy_list_handle_lookups                          0 ->            0
+  curried_compiled                                  7 ->            7
+  curried_completions                         452,713 ->      469,850
+  curried_deopts                               17,137 ->            0
+  curried_candidates                              256 ->          256
+  curried_rejected                                111 ->          111
+
+Coverage and remaining fallbacks:
+lib/lists.nix:777 defines optional = cond: elem: if cond then [elem] else [].
+The curried arity-2 plan is the observed hot list-return route. NixOS calls grow
+1,215 -> 61,208, completions 33 -> 60,185 and fallbacks 139 -> 0. Its 23,927
+nonempty-list completions leave 36,258 empty completions. This previously retired
+partial plan now stays productive. The package plan retains 69,793 calls while
+completions grow 51,633 -> 68,770 and fallbacks 17,137 -> 0; 17,137 completions
+are nonempty lists, with the remaining 51,633 empty. These are actual saturated
+arity-2 entries, not saturation inferred from unary call counts.
+
+The aggregate records two list-capable engines per workload and 23,930 / 17,138
+list completions, including grace. Only 23,927 / 17,137 are attributed to printed
+curried rows; the residual 3 / 1 list completions are not located by these top-60
+rows. Old optional unary :777:20 rows had 3 completions and 64 / 65 fallbacks;
+they disappear from the new top-call listing, which alone does not establish a
+rejection or absence of execution. Total fallback reductions are exactly 139+64
+and 17,137+65. All shared printed rows other than optional retain their native
+coverage counts. No durable-capture handle fallback is exercised here:
+lazy_list_handle_lookups is zero in both workloads.
+
+NixOS remaining visible fallbacks are modules.nix:802:13 (5,995) and the filterAttrs
+callback attrsets.nix:657:53 (134): 6,129 of 7,257, with residual 1,128 not assigned.
+Package remaining visible fallbacks are that callback (232) of 2,091, residual
+1,859 unassigned. Callback guard misses stay 134 / 232; saturated inline calls
+stay 9,130 / 20,350. The extension does not remove those unrelated costs.
+
+Admission and dispatch:
+Total compiled engines remain 16 on both workloads; curried engines remain 3 / 7.
+Value-capable engines remain 10 / 6. Both workloads still reach the 256 curried
+candidate cap. NixOS scalar/pointer/unary candidates reach 256 (previously 254);
+package candidates rise 189 -> 191. Retirement drops 4 -> 2 / 3 -> 2. NixOS
+preflight attempts fall 56 -> 16 and preflight deopts 40 -> 0. Native coverage of
+other shared printed plans is unchanged. These profiles show optional continuing
+after the old retirement point, not evidence of extra compiled engine admission
+or displacement of another productive plan. Per-entry compile order and refusal
+reasons are not logged. Prior unadmitted NixOS optionals/optionalString entries
+remain without completions in the printed curried rows.
+
+NixOS native invocations increase 115,602 and host demands 55,717 as coverage grows;
+package invocations decrease 129 and demands increase by one. These costs need
+paired full-process timing. Diagnostic compile_ns samples cannot establish a
+compile-time improvement or end-to-end speedup.
+
+Accounting:
+Nonempty list and empty-recipe completions are disjoint subsets of value completions,
+which in turn are subsets of aggregate lazy-graph completions. Curried counts overlap
+with these; they must not be added. NixOS ON: 287,351 value completions = 164,475
+persistent-cell + 98,946 empty-recipe + 23,930 nonempty-list. Package ON: 307,428 =
+58,862 + 231,428 + 17,138. Persistent-cell totals and pointer selector executions
+are unchanged. Value completions include Boolean values and grace, not exclusively
+non-Bool results. Actual allocator counters below already include replacements.
+
+Actual allocations (JIT off / LISTS off / LISTS on):
+nixos-toplevel:
+  frame_count     5,389,929 / 4,612,644 / 4,492,340
+  frame_bytes     315,377,456 / 294,033,432 / 291,146,136
+  frame_slots     28,642,324 / 27,528,891 / 27,408,587
+  value_count     14,424,328 / 14,305,101 / 14,244,949
+  value_bytes     346,183,872 / 343,322,424 / 341,878,776
+  LISTS on minus off:
+    frame_count     -120,304 (-2.608%)
+    frame_bytes     -2,887,296 (-0.982%)
+    frame_slots     -120,304 (-0.437%)
+    value_count     -60,152 (-0.420%)
+    value_bytes     -1,443,648 (-0.420%)
+  Combined frame + Value requested bytes saved: 4,330,944
+nixpkgs-73:
+  frame_count     3,763,348 / 2,481,030 / 2,446,756
+  frame_bytes     282,745,328 / 248,589,304 / 247,766,728
+  frame_slots     27,816,470 / 26,111,603 / 26,077,329
+  value_count     11,769,738 / 11,276,352 / 11,259,215
+  value_bytes     282,473,712 / 270,632,448 / 270,221,160
+  LISTS on minus off:
+    frame_count     -34,274 (-1.381%)
+    frame_bytes     -822,576 (-0.331%)
+    frame_slots     -34,274 (-0.131%)
+    value_count     -17,137 (-0.152%)
+    value_bytes     -411,288 (-0.152%)
+  Combined frame + Value requested bytes saved: 1,233,864
+
+Thus LISTS on removes 120,304 / 34,274 frame allocations and 60,152 / 17,137 Value
+allocations, saving 4,330,944 / 1,233,864 requested bytes versus LISTS off. These are
+evaluator frame and Value allocation requests, excluding allocator overhead, list
+buffer allocation and retained pages; they are not peak RSS. Semantic frames_saved
+counters are not substitutes for these measured requests.
+
+Visibility and provenance:
+NixOS unary profiling hits its 4,096-entry cap with 214,363 dropped profile calls;
+nixpkgs has 3,537 entries and no dropped calls. Both print only the 60 highest-call
+unary and curried rows; aggregate counters are not truncated. Empty/list kinds are
+distinguished by the result protocol, not inferred from runtime tags. Source checks:
+lib/Eval/ScalarJIT.cpp updates lazy_list_completions only for nonzero listSize and
+also includes that result in lazy_value_completions; lib/Eval/LazyJIT.cpp increments
+listHandleLookups only when a durable captured cell requires st.lookup. The optional
+source shape is .cache/nixpkgs/lib/lists.nix:777. No source was modified.
+
+profile-analysis.json retains parsed aggregate/allocator/printed-row evidence,
+all nonidentical counter deltas, compatibility assertions and input SHA-256 hashes.
+Extraction uses re.findall(r"(\w+)=(\d+)", line); deltas are on-minus-off.
+Local output SHA-256 (NixOS remains distinct from the unchanged Kali golden):
+  nixos-toplevel: f1cfa7cd14649110397a1d1c728d2db80435f2d7bdc084885b8c748a57e6b9bf
+  nixpkgs-73: 5e8fff662dffa4eab642b75e78028fb54204cd15ec1a9972c2cafe2306234959

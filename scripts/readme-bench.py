@@ -23,9 +23,9 @@ TOOL = re.compile(r"^\s+(Nix [\d.]+|Lix [\d.]+|mlnix demand|mlnix)\s+min\s+([\d.
 HEAD = re.compile(r"^== (\S+)\s+\((\d+) interleaved rounds, .*identical output from all: (yes|no)\)")
 MEDIAN = re.compile(r"^\s+(mlnix demand|mlnix) / (Nix|Lix) [\d.]+\s+median x([\d.]+)")
 STARTUP = re.compile(r"^start-up \(.*\), median of (\d+): (.*)$")
-LANG = re.compile(r"lang (eager|demand): TOTAL\s+semantic\s+(\d+/\d+)\s+exact\s+(\d+/\d+)")
-FILECHECK = re.compile(r"mlir tests: mlir tests: (.*)$")
-PRIMOPS = re.compile(r"primops: primops: (\d+) registered, (\d+) declared")
+LANG = re.compile(r"lang (eager|demand)(?: \(rc=0\))?: TOTAL\s+semantic\s+(\d+/\d+)\s+exact\s+(\d+/\d+)")
+FILECHECK = re.compile(r"mlir tests(?: \(rc=0\))?: mlir tests: (.*)$")
+PRIMOPS = re.compile(r"primops(?: \(rc=0\))?: primops: (\d+) registered, (\d+) declared")
 DIFFTEST = re.compile(r"difftest (eager|demand) \(rc=\d+\): (.*?);?$")
 
 

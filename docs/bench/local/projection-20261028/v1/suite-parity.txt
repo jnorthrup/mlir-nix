@@ -1,0 +1,2 @@
+eager: all 1440 prior output/error/status files byte-identical; new projection fixture returns true with no stderr. Manifest SHA256 1f1f83d4ef6d5d58519c72d45a9c6a02abb8579664f8c0aac8ffd9e4bad94578
+demand: all 1440 prior output/error/status files byte-identical; new projection fixture returns true with no stderr. Manifest SHA256 1f1f83d4ef6d5d58519c72d45a9c6a02abb8579664f8c0aac8ffd9e4bad94578

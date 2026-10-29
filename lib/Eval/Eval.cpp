@@ -3,6 +3,7 @@
 #include "Nix/Prefetch.h"
 #include <bit>
 #include "Nix/Eval.h"
+#include "Nix/ScalarJIT.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Transforms/Passes.h"
@@ -23,6 +24,7 @@
 #include <cstring>
 #include <exception>
 #include <iostream>
+#include <limits>
 #include <pthread.h>
 #include <sstream>
 #include <sys/stat.h>
@@ -241,6 +243,7 @@ void EvalState::copyContext(const Value &v, NixStringContext &ctx) {
 EvalState::EvalState(EvalSettings st, std::shared_ptr<nixstore::Store> store)
     : settings(std::move(st)), store(std::move(store)) {
   statsEnabled = getenv("MLNIX_STATS") != nullptr;
+  scalarJIT = ScalarJIT::create();
   settings.mapSources = !getenv("MLNIX_NOMMAP"); // ablation switch: read and copy every file, as before
   inPlaceEnabled = !getenv("MLNIX_NOINPLACE"); // ablation switch: every operand gets a thunk, as before
   settings.deferBodies = getenv("MLNIX_DEFER") != nullptr; // sea-of-nodes schedule: mint bodies on first call
@@ -287,6 +290,13 @@ EvalState::EvalState(EvalSettings st, std::shared_ptr<nixstore::Store> store)
 }
 
 void EvalState::printStats() {
+  if (scalarJIT) scalarJIT->printStats();
+  llvm::errs() << "attribute cells: bytes=" << sizeof(Attr)
+               << " position_rows=" << attributePositions.size()
+               << " position_bytes=" << attributePositions.cells.capacity() * sizeof(PosPtr) << "\n";
+  llvm::errs() << "frame allocations: count=" << nFrames << " bytes=" << nFrameBytes
+               << " slots=" << nFrameSlots << '\n';
+  llvm::errs() << "value allocations: count=" << nVT[14] << " bytes=" << nVT[14] * sizeof(Value) << '\n';
   // How many ops of real programs live where: per tier of the dialect hierarchy
   // (scope > continent > dialect), read from the IRDL declaration.
   auto *core = ctx.getLoadedDialect<nd::NixDialect>();
@@ -309,33 +319,16 @@ void EvalState::printStats() {
     llvm::errs() << "== " << title << " (" << m.size() << ")\n";
     for (auto &[n, c] : sorted(m)) llvm::errs() << "  " << llvm::format("%-9s", n.c_str()) << llvm::format("%9zu", c) << "\n";
   };
-  // The value heap by facet: what the rows of the value cursor hold.  A force re-types a row in place, so a
-  // facet's count is what its rows ended as; thunk and blackhole are a force's transient marks, not a row's state.
-  // The two byte columns price the layout: every row is 24 B, and what the row would be if the facet were the
-  // pool (the payload words it needs, no tag column -- the pool is the tag).
+  // These writes include stack temporaries and repeated mutations of a cell. They
+  // describe evaluator work, not a live-heap census or a per-facet allocation count.
   {
     static const char *nm[] = {"thunk", "app", "blackhole", "int", "float", "bool", "null", "string", "path",
                                "attrs", "list", "lambda", "primop", "primopapp"};
-    static const bool transient[] = {true, false, true, false, false, false, false, false, false,
-                                     false, false, false, false, false};
-    static const size_t facetRow[] = {16, 16, 0, 8, 8, 1, 0, 20, 12, 8, 12, 16, 8, 16}; // payload words only
-    uint64_t finalRows = 0, bytes24 = 0, bytesFacet = 0;
-    for (int i = 0; i < 14; i++)
-      if (!transient[i]) { finalRows += nVT[i]; bytes24 += nVT[i] * sizeof(Value); bytesFacet += nVT[i] * facetRow[i]; }
-    llvm::errs() << "== value heap by facet: " << nVT[14] << " rows allocated ("
-                 << llvm::format("%.0f", nVT[14] * sizeof(Value) / 1e6) << " MB), " << finalRows
-                 << " of them with a final state; thunk and blackhole tags are a force's transient marks\n";
+    llvm::errs() << "== instrumented value-tag writes (including stack temporaries; not live heap rows)\n";
     for (int i = 0; i < 14; i++)
       if (nVT[i]) {
-        llvm::errs() << "  " << llvm::format("%-11s", nm[i]) << llvm::format("%10llu", (unsigned long long)nVT[i]);
-        if (transient[i]) llvm::errs() << "  (transient)\n";
-        else llvm::errs() << llvm::format("  row %2zu B  facet %2zu B  %7.1f -> %6.1f MB\n", sizeof(Value),
-                                          facetRow[i], nVT[i] * sizeof(Value) / 1e6, nVT[i] * facetRow[i] / 1e6);
+        llvm::errs() << "  " << llvm::format("%-11s", nm[i]) << llvm::format("%10llu", (unsigned long long)nVT[i]) << '\n';
       }
-    llvm::errs() << "  final states at 24 B a row: " << llvm::format("%.0f MB", bytes24 / 1e6)
-                 << "; on facet-sized rows: " << llvm::format("%.0f MB", bytesFacet / 1e6)
-                 << ".  A force re-types a row in place, so a row must fit the largest facet: the uniform 24-B row"
-                 << " is the price of call-by-need, and this measures it.\n";
   }
   { // The sea of nodes against its schedule: the ops the index holds against the ops that ever ran,
     // file code against the bodies demand minted.  The thunk cells are finer grain's rows.
@@ -556,6 +549,7 @@ RegionInfo *EvalState::regionInfo(Region *r) {
 Frame *EvalState::newFrame(RegionInfo *ri, Frame *up) {
   size_t sz = sizeof(Frame) + ri->numSlots * sizeof(Value *);
   auto *f = static_cast<Frame *>(alloc.Allocate(sz, alignof(Frame)));
+  if (statsEnabled) { ++nFrames; nFrameBytes += sz; nFrameSlots += ri->numSlots; }
   f->up = up;
   f->info = ri;
   memset(f->slots, 0, ri->numSlots * sizeof(Value *));
@@ -694,7 +688,7 @@ void EvalState::forceValueDeep(Value &v) {
         try {
           rec(*a.value);
         } catch (EvalError &e) {
-          e.addTrace(a.pos, "while evaluating the attribute '" + symbols[a.name].str() + "'");
+          e.addTrace(positionOf(a), "while evaluating the attribute '" + symbols[a.name].str() + "'");
           throw;
         }
       }
@@ -812,8 +806,6 @@ void EvalState::callLambda(Value &fun, Value *arg, Value &out, PosPtr pos) {
   auto lam = cast<nd::LambdaOp>(fun.thunk.op);
   std::optional<uint64_t> deferred = lam.getBodyIndex();
   RegionInfo *ri = deferred ? bodyOf(nixfe::BodyIndex(*deferred)) : regionInfo(&lam.getBody());
-  Frame *f = newFrame(ri, fun.thunk.env);
-  f->slots[0] = arg;
   auto fnName = [&]() -> std::string {
     if (auto n = lam.getName()) return "function '" + n->str() + "'";
     return "function 'anonymous lambda'";
@@ -855,7 +847,14 @@ void EvalState::callLambda(Value &fun, Value *arg, Value &out, PosPtr pos) {
   if (callDepth >= settings.maxCallDepth)
     throw StackOverflowError("stack overflow; max-call-depth exceeded", pos);
   DepthGuard g(callDepth);
-  evalTail(f, ri->result, out, pos);
+  auto interpret = [&] {
+    Frame *f = newFrame(ri, fun.thunk.env);
+    f->slots[0] = arg;
+    evalTail(f, ri->result, out, pos);
+  };
+  if (scalarJIT && scalarJIT->accepts(ri->jitEntry))
+    scalarJIT->evaluate(*this, lam, ri->result, fun.thunk.env, *arg, out, pos, ri->jitEntry, interpret);
+  else interpret();
 }
 
 void EvalState::callPrimOp(const PrimOp &op, Value **args, Value &out, PosPtr pos) {
@@ -907,7 +906,7 @@ mlir::Attribute EvalState::foldPrimOp(llvm::StringRef key, llvm::ArrayRef<mlir::
   }
 }
 
-void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out, PosPtr pos) {
+void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out, PosPtr pos, bool allowCurried) {
   Value *cur = &fun;
   size_t i = 0;
   Value tmp;
@@ -918,6 +917,21 @@ void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out,
   }
   while (true) {
     forceValue(*cur, pos);
+    if (allowCurried && scalarJIT && nargs - i >= 2 && nargs - i <= 4 && cur->type == VType::Lambda) {
+      auto lambda = cast<nd::LambdaOp>(cur->thunk.op);
+      if (!lambda.getFormals() && scalarJIT->acceptsSaturated(nullptr)) {
+        // This outer body is reached by the ordinary call as well. Descendant
+        // bodies are only inspected after the interpreter oracle has run them.
+        auto deferred = lambda.getBodyIndex();
+        RegionInfo *ri = deferred ? bodyOf(nixfe::BodyIndex(*deferred)) : regionInfo(&lambda.getBody());
+        if (scalarJIT->acceptsSaturated(ri->curriedEntry, unsigned(nargs - i))) {
+          auto interpret = [&] { callFunction(*cur, nargs - i, args + i, out, pos, false); };
+          if (scalarJIT->evaluateSaturated(*this, lambda, ri->result, cur->thunk.env,
+                                         llvm::ArrayRef<Value *>(args + i, nargs - i), out, pos,
+                                         ri->curriedEntry, interpret)) return;
+        }
+      }
+    }
     Value *res = (i + 1 == nargs) ? &out : allocValue();
     if (cur->type == VType::Lambda) {
       callLambda(*cur, args[i], *res, pos);
@@ -1014,15 +1028,42 @@ void EvalState::autoCallFunction(const std::map<std::string, Value *> &autoArgs,
 // Op semantics
 //===----------------------------------------------------------------------===//
 
+PosIdx EvalState::positionIndex(PosPtr pos) {
+  if (!pos) return 0;
+  auto it = dynamicPositions.find(pos);
+  if (it != dynamicPositions.end()) return it->second;
+  if (attributePositions.cells.size() >= std::numeric_limits<PosIdx>::max())
+    throw EvalError("attribute position table exhausted");
+  PosIdx index = attributePositions.append(pos);
+  dynamicPositions.emplace(pos, index);
+  return index;
+}
+
+PosIdx EvalState::positionBase(nd::AttrsOp op) {
+  auto positions = op.getPositions();
+  size_t count = std::min(positions.size(), op.getNames().size());
+  if (!count) return 0;
+  auto it = attrPositionBases.find(op.getOperation());
+  if (it != attrPositionBases.end()) return it->second;
+  if (count > std::numeric_limits<PosIdx>::max() - attributePositions.cells.size())
+    throw EvalError("attribute position table exhausted");
+  PosIdx base = attributePositions.size();
+  for (size_t i = 0; i < count; ++i)
+    attributePositions.append(nd::posOfWord(uint64_t(positions[i])));
+  attrPositionBases.try_emplace(op.getOperation(), base);
+  return base;
+}
+
 void EvalState::evalAttrs(nd::AttrsOp op, Frame *env, Value &out) {
   auto names = op.getNames();
   auto values = op.getValues();
   auto dynNames = op.getDynNames();
   auto positions = op.getPositions(); // one position word per name, or none
+  PosIdx posBase = positionBase(op);
   BindingsBuilder bb(*this);
   for (size_t i = 0; i < names.size(); i++) {
-    PosPtr p = i < positions.size() ? nd::posOfWord(uint64_t(positions[i])) : nullptr;
-    bb.insert(symbolOf(names[i]), lookup(env, values[i]), p);
+    PosIdx p = i < positions.size() ? posBase + i : 0;
+    bb.insertIndexed(symbolOf(names[i]), lookup(env, values[i]), p);
   }
   if (dynNames.empty()) {
     mkAttrs(out, bb.finish());
@@ -1103,6 +1144,14 @@ Symbol EvalState::pathSymbol(const nixfe::Name &comp, mlir::OperandRange dyn, un
   return symbols.create(forceStringNoCtx(*lookup(env, dyn[nextDyn++]), pos, "while evaluating an attribute name"));
 }
 
+Value *EvalState::selectField(Value &base, Symbol key, PosPtr pos) {
+  forceValue(base, pos);
+  if (base.type != VType::Attrs)
+    throwTypeError("a set", base, pos, "while selecting an attribute");
+  if (const Attr *attr = base.attrs->get(key)) return attr->value;
+  throw EvalError("attribute '" + std::string(symbols[key].str()) + "' missing", pos);
+}
+
 void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
   if (statsEnabled && env) {
     ++env->info->nEvals;
@@ -1127,17 +1176,14 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
         unsigned nextDyn = 0;
         for (const nixfe::Name &comp : sel.getPath()) {
           Symbol sym = pathSymbol(comp, dyn, nextDyn, env, pos);
+          if (!def) {
+            cur = selectField(*cur, sym, pos);
+            continue;
+          }
           forceValue(*cur, pos);
-          if (def) {
-            if (cur->type != VType::Attrs) return copyFrom(lookup(env, def));
-          } else if (cur->type != VType::Attrs) {
-            throwTypeError("a set", *cur, pos, "while selecting an attribute");
-          }
+          if (cur->type != VType::Attrs) return copyFrom(lookup(env, def));
           const Attr *a = cur->attrs->get(sym);
-          if (!a) {
-            if (def) return copyFrom(lookup(env, def));
-            throw EvalError("attribute '" + std::string(symbols[sym].str()) + "' missing", pos);
-          }
+          if (!a) return copyFrom(lookup(env, def));
           cur = a->value;
         }
         copyFrom(cur);

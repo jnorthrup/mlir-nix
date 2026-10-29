@@ -1,0 +1,61 @@
+trace: inlined argument once
+trace: guarded argument once
+jit: compiled=2 executions=13 grace=6 rejected=2 type_misses=0 overflows=0 mismatches=0 compile_failures=0 compile_ns=11112958 candidates=2 pointer_compiled=0 identity_executions=0 capture_executions=0 selector_executions=0 pointer_grace=0 pointer_mismatches=0 boolean_compiled=2 boolean_executions=13 boolean_completions=10 boolean_demands=4 boolean_resumes=24 boolean_deopts=3 boolean_grace=6 boolean_mismatches=0 boolean_retired=0 boolean_preflight_attempts=2 boolean_preflight_deopts=0 boolean_preflight_rejections=0 boolean_inline_compiled=1 boolean_inline_calls=7 boolean_guard_misses=1 boolean_depth_entries=7 boolean_specializations=1 boolean_specialization_deopts=0
+attribute cells: bytes=16 position_rows=3 position_bytes=32
+frame allocations: count=20 bytes=776 slots=57
+value allocations: count=153 bytes=3672
+== instrumented value-tag writes (including stack temporaries; not live heap rows)
+  blackhole          21
+  int                 2
+  bool               34
+  null                2
+  string              6
+  attrs               5
+  list                3
+  lambda              9
+  primop            105
+== sea of nodes: 3 file regions hold 50 ops (38.0% ever ran, 19 evals, 25 thunk cells); 4 minted bodies hold 15 ops (60.0% ever ran, 29 evals, 2 thunk cells).  Finer grain mints a cell: the thunk cells are its rows against lambda grain's 4
+== frame cells: 63 assigned, 1 to a value with no use at all (1.6%) -- a value no one reads still costs a cell in every frame of its region
+== mlnix ops lowered: 67
+== `//`: 0 layered (0 entries not copied, 0 top entries incl. merges), 0 flat merges, 0 layers flattened later
+== lowering 0 ms (the analysis of deferred lambdas included), minted on demand 0 ms
+== read plan: 5 names pooled; 0 lambdas skimmed and not yet reached (1 free names kept)
+== lambda pools: 2 files, (at, pos, op, withs, names, body), 8 rows deferred, 4 drained (body minted on a first call), 4 never called
+== scopes (5)
+  core            54
+  ctl              7
+  coll             4
+  io               1
+  val              1
+== continents (6)
+  core            54
+  nixctl           7
+  nixlist          3
+  nixstore         1
+  nixty            1
+  nixattr          1
+== dialects (9)
+  nix             54
+  nixctl           4
+  nixtrace         2
+  nixlistfn        2
+  nixstore         1
+  nixty            1
+  nixlist          1
+  nixattr          1
+  nixerr           1
+== top ops
+  nix.apply                    11
+  nix.lambda                    9
+  nix.return                    7
+  nix.str                       5
+  nix.attrs                     4
+  nixctl.seq                    4
+  nix.select                    3
+  nix.update                    2
+  nixlistfn.map                 2
+  nix.list                      2
+  nixtrace.trace                2
+  nix.expr                      2
+  nix.bool                      2
+  nixstore.derivation_strict        1

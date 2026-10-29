@@ -1,0 +1,203 @@
+jit: compiled=9 executions=571481 grace=54 rejected=3489 type_misses=0 overflows=0 mismatches=0 compile_failures=0 compile_ns=31311250 candidates=122 pointer_compiled=1 identity_executions=122890 capture_executions=11799 selector_executions=233126 pointer_grace=30 pointer_mismatches=0 boolean_compiled=8 boolean_executions=203666 boolean_completions=201807 boolean_demands=186782 boolean_resumes=552451 boolean_deopts=1859 boolean_grace=24 boolean_mismatches=0 boolean_retired=1 boolean_preflight_attempts=392 boolean_preflight_deopts=384 boolean_preflight_rejections=73 boolean_inline_compiled=2 boolean_inline_calls=162000 boolean_guard_misses=0 boolean_depth_entries=162000 boolean_specializations=1794 boolean_specialization_deopts=1792 boolean_projection_compiled=0 boolean_projection_requests=0 boolean_projection_forces=0 boolean_projection_deopts=0 boolean_projection_flat=0 boolean_projection_layered=0 boolean_projection_cached_flat=0 boolean_saturated_inline_compiled=0 boolean_saturated_inline_calls=0 curried_candidates=256 curried_compiled=3 curried_executions=188515 curried_completions=188515 curried_grace=9 curried_deopts=0 curried_rejected=143 curried_frames_saved=377012 curried_values_saved=188506 curried_arity2=251790 curried_arity3=14453 curried_arity4=3163
+jit-profile: kernels=3537 dropped_calls=0
+jit-shape: calls=229306 ready=229306 integers=0 root=nix.attrs boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/pkgs/top-level/splice.nix:40:15
+jit-shape: calls=168382 ready=168382 integers=0 root=nix.not boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/attrsets.nix:657:53
+jit-shape: calls=146410 ready=96 integers=0 root=nix.if(capture,argument,nix.attrs) boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/attrsets.nix:1353:25
+jit-shape: calls=146410 ready=17891 integers=0 root=nix.lambda boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/attrsets.nix:1353:19
+jit-shape: calls=90944 ready=90720 integers=0 root=nix.if(nixty.is_string,nix.and,nix.apply) boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/meta.nix:241:15
+jit-shape: calls=86148 ready=86148 integers=0 root=nix.lambda boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/lists.nix:345:11
+jit-shape: calls=86148 ready=10 integers=0 root=nixlistfn.gen_list boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/lists.nix:345:14
+jit-shape: calls=81659 ready=1822 integers=0 root=nix.if(capture,nix.apply,nix.lambda) boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/trivial.nix:825:18
+jit-shape: calls=81659 ready=0 integers=0 root=nix.lambda boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/trivial.nix:825:12
+jit-shape: calls=81659 ready=4272 integers=0 root=argument boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/trivial.nix:825:50
+jit-shape: calls=81256 ready=81256 integers=0 root=nix.lambda boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/pkgs/stdenv/generic/make-derivation.nix:388:20
+jit-shape: calls=81256 ready=0 integers=0 root=nix.apply boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/pkgs/stdenv/generic/make-derivation.nix:388:26
+jit-shape: calls=74367 ready=74140 integers=0 root=nix.apply boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/strings.nix:769:11
+jit-shape: calls=74362 ready=74362 integers=0 root=nix.lambda boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/strings.nix:769:5
+jit-shape: calls=69793 ready=8087 integers=0 root=nix.lambda boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/lists.nix:777:14
+jit-shape: calls=69793 ready=41011 integers=0 root=nix.if(capture,nix.list,nix.list) boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/lists.nix:777:20
+jit-shape: calls=56995 ready=17707 integers=0 root=nix.lambda boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/lists.nix:811:15
+jit-shape: calls=56995 ready=22 integers=0 root=nix.if(capture,argument,nix.list) boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/lists.nix:811:21
+jit-shape: calls=37040 ready=37040 integers=0 root=nix.and boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/pkgs/development/haskell-modules/configuration-common.nix:3275:22
+jit-shape: calls=37040 ready=37040 integers=0 root=nix.and boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/pkgs/development/haskell-modules/configuration-common.nix:3316:25
+jit-shape: calls=33819 ready=0 integers=0 root=argument boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/trivial.nix:40:8
+jit-shape: calls=32790 ready=10666 integers=0 root=nix.if(capture,argument,nix.str) boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/strings.nix:736:26
+jit-shape: calls=32789 ready=2352 integers=0 root=nix.lambda boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/strings.nix:736:20
+jit-shape: calls=31895 ready=30379 integers=0 root=nix.eq boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/attrsets.nix:1288:18
+jit-shape: calls=26705 ready=26705 integers=26705 root=nix.apply boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/lists.nix:345:29
+jit-shape: calls=25083 ready=1937 integers=0 root=nix.if(nix.or,nix.select,argument) boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/attrsets.nix:1782:13
+jit-shape: calls=22443 ready=0 integers=0 root=nix.lambda boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/pkgs/stdenv/generic/make-derivation.nix:390:11
+jit-shape: calls=22443 ready=0 integers=0 root=nix.if(nix.or,argument,nix.if) boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/pkgs/stdenv/generic/make-derivation.nix:390:18
+jit-shape: calls=17210 ready=17149 integers=0 root=nix.attrs boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=«nix-internal»/derivation-internal.nix:19:29
+jit-shape: calls=16448 ready=16448 integers=0 root=nix.attrs boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/customisation.nix:390:33
+jit-shape: calls=14313 ready=14313 integers=0 root=nix.and boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/attrsets.nix:1664:7
+jit-shape: calls=14116 ready=14116 integers=0 root=nix.and boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:977:22
+jit-shape: calls=13340 ready=0 integers=0 root=nix.neq boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/pkgs/build-support/fetchurl/default.nix:144:17
+jit-shape: calls=12822 ready=12822 integers=0 root=capture boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/trivial.nix:989:17
+jit-shape: calls=12780 ready=4700 integers=0 root=nix.or boolean_completions=11757 boolean_demands=7073 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/trivial.nix:1023:16
+jit-shape: calls=12671 ready=0 integers=0 root=nix.apply boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/pkgs/stdenv/generic/make-derivation.nix:433:19
+jit-shape: calls=11244 ready=5622 integers=0 root=nix.if(nix.eq,nix.select,capture) boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:1245:9
+jit-shape: calls=10742 ready=10742 integers=0 root=nix.select(nixlist.head:value.) boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=«nix-internal»/derivation-internal.nix:2:1
+jit-shape: calls=10543 ready=9812 integers=0 root=nix.assert boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/attrsets.nix:1660:14
+jit-shape: calls=9806 ready=9759 integers=0 root=nix.lambda boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/lists.nix:277:5
+jit-shape: calls=9806 ready=4993 integers=4947 root=nixctl.seq boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/lists.nix:277:9
+jit-shape: calls=9754 ready=4542 integers=0 root=nix.apply boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/lists.nix:1951:19
+jit-shape: calls=9509 ready=0 integers=0 root=nix.lambda boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/customisation.nix:383:16
+jit-shape: calls=9509 ready=6 integers=0 root=nix.lambda boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/customisation.nix:383:5
+jit-shape: calls=9509 ready=78 integers=0 root=nix.update boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/customisation.nix:383:26
+jit-shape: calls=9175 ready=9135 integers=0 root=nixlist.elem boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/lists.nix:1923:31
+jit-shape: calls=9099 ready=9097 integers=0 root=nix.apply boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/lists.nix:469:12
+jit-shape: calls=9054 ready=9054 integers=0 root=nix.assert boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/pkgs/stdenv/generic/make-derivation.nix:247:5
+jit-shape: calls=9054 ready=9054 integers=0 root=nix.lambda boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/pkgs/stdenv/generic/make-derivation.nix:657:5
+jit-shape: calls=9054 ready=9054 integers=0 root=nix.assert boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/pkgs/stdenv/generic/make-derivation.nix:676:5
+jit-shape: calls=8914 ready=8914 integers=0 root=nix.not boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/lists.nix:1951:30
+jit-shape: calls=8894 ready=8793 integers=0 root=nix.update boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/pkgs/stdenv/generic/make-derivation.nix:202:5
+jit-shape: calls=7868 ready=1142 integers=0 root=nix.if(nixty.is_function,nix.apply,nix.apply) boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/pkgs/stdenv/generic/make-derivation.nix:65:5
+jit-shape: calls=7387 ready=7153 integers=0 root=nix.lambda boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/attrsets.nix:1660:5
+jit-shape: calls=7075 ready=6301 integers=0 root=nix.lambda boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/attrsets.nix:977:19
+jit-shape: calls=7075 ready=128 integers=0 root=nix.attrs boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/attrsets.nix:977:25
+jit-shape: calls=6922 ready=6781 integers=0 root=nix.and boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/meta.nix:291:15
+jit-shape: calls=6921 ready=6548 integers=0 root=nix.lambda boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/meta.nix:291:5
+jit-shape: calls=6841 ready=0 integers=0 root=nix.lambda boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/pkgs/stdenv/generic/make-derivation.nix:388:9
+jit-shape: calls=6766 ready=6766 integers=0 root=nix.and boolean_completions=0 boolean_demands=0 boolean_deopts=0 boolean_inline_calls=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/pkgs/stdenv/generic/check-meta.nix:78:11
+jit-curried: arity=2 calls=163020 completions=161997 grace=3 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/systems/default.nix:46:41
+jit-curried: arity=2 calls=25078 completions=24055 grace=3 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/asserts.nix:50:15
+jit-curried: arity=2 calls=3486 completions=2463 grace=3 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/customisation.nix:254:24
+jit-curried: arity=2 calls=1091 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/attrsets.nix:1489:9
+jit-curried: arity=2 calls=1089 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/strings.nix:736:20
+jit-curried: arity=2 calls=1087 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/pkgs/stdenv/generic/check-meta.nix:78:5
+jit-curried: arity=2 calls=1087 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/lists.nix:811:15
+jit-curried: arity=2 calls=1087 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/pkgs/stdenv/generic/make-derivation.nix:390:11
+jit-curried: arity=2 calls=1087 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/trivial.nix:825:12
+jit-curried: arity=4 calls=1087 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:376:9
+jit-curried: arity=2 calls=1087 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/strings.nix:1887:20
+jit-curried: arity=2 calls=1087 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/fixed-points.nix:512:7
+jit-curried: arity=2 calls=1087 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/attrsets.nix:1353:19
+jit-curried: arity=2 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/attrsets.nix:1219:14
+jit-curried: arity=2 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/options.nix:499:5
+jit-curried: arity=2 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/attrsets.nix:1660:5
+jit-curried: arity=3 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/trivial.nix:825:12
+jit-curried: arity=3 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/lists.nix:568:5
+jit-curried: arity=2 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/strings.nix:769:5
+jit-curried: arity=2 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/strings.nix:2265:5
+jit-curried: arity=2 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/lists.nix:777:14
+jit-curried: arity=2 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/attrsets.nix:1256:15
+jit-curried: arity=2 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/customisation.nix:383:16
+jit-curried: arity=2 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/strings.nix:1853:18
+jit-curried: arity=3 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:707:5
+jit-curried: arity=2 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/meta.nix:291:5
+jit-curried: arity=3 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/trivial.nix:893:16
+jit-curried: arity=4 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:457:9
+jit-curried: arity=2 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:460:13
+jit-curried: arity=2 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/trivial.nix:987:21
+jit-curried: arity=3 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:562:5
+jit-curried: arity=2 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/systems/parse.nix:438:5
+jit-curried: arity=2 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/attrsets.nix:591:14
+jit-curried: arity=3 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:1044:5
+jit-curried: arity=2 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/pkgs/stdenv/generic/make-derivation.nix:388:20
+jit-curried: arity=2 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:1288:5
+jit-curried: arity=2 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:932:5
+jit-curried: arity=3 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/lists.nix:277:5
+jit-curried: arity=2 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:935:9
+jit-curried: arity=2 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/pkgs/stdenv/generic/make-derivation.nix:657:5
+jit-curried: arity=2 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:273:68
+jit-curried: arity=3 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:1094:22
+jit-curried: arity=2 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:1246:29
+jit-curried: arity=2 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/trivial.nix:524:9
+jit-curried: arity=3 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/customisation.nix:383:5
+jit-curried: arity=2 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/attrsets.nix:977:19
+jit-curried: arity=2 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/lists.nix:345:11
+jit-curried: arity=2 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/attrsets.nix:657:17
+jit-curried: arity=3 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/pkgs/build-support/trivial-builders/default.nix:28:5
+jit-curried: arity=2 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/customisation.nix:240:15
+jit-curried: arity=2 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/attrsets.nix:1079:20
+jit-curried: arity=3 calls=1024 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/lists.nix:638:5
+jit-curried: arity=2 calls=970 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/fixed-points.nix:320:5
+jit-curried: arity=2 calls=962 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/pkgs/shells/bash/5.nix:20:5
+jit-curried: arity=2 calls=902 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/pkgs/stdenv/generic/make-derivation.nix:94:13
+jit-curried: arity=2 calls=825 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/lists.nix:1865:20
+jit-curried: arity=2 calls=768 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/types.nix:833:32
+jit-curried: arity=2 calls=764 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/lists.nix:741:25
+jit-curried: arity=2 calls=748 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/pkgs/development/interpreters/python/mk-python-derivation.nix:273:9
+jit-curried: arity=2 calls=743 completions=0 grace=0 deopts=0 projection_requests=0 projection_forces=0 saturated_inline_calls=0 at=/Users/jim/work/mlir-nix/.cache/nixpkgs/lib/types.nix:80:5
+attribute cells: bytes=16 position_rows=104540 position_bytes=1048576
+frame allocations: count=2843280 bytes=257859360 slots=26545860
+value allocations: count=11581232 bytes=277949568
+== instrumented value-tag writes (including stack temporaries; not live heap rows)
+  thunk               4
+  app           2809876
+  blackhole     3873936
+  int            281280
+  bool          2758632
+  null             2377
+  string        2247748
+  path             4278
+  attrs         1011310
+  list           776629
+  lambda        1047131
+  primop            105
+  primopapp       43574
+== sea of nodes: 2395 file regions hold 315435 ops (14.2% ever ran, 395916 evals, 178084 thunk cells); 2315 minted bodies hold 67797 ops (47.3% ever ran, 8965429 evals, 37099 thunk cells).  Finer grain mints a cell: the thunk cells are its rows against lambda grain's 2315
+== frame cells: 382059 assigned, 460 to a value with no use at all (0.1%) -- a value no one reads still costs a cell in every frame of its region
+== mlnix ops lowered: 384405
+== `//`: 40671 layered (12400410 entries not copied, 9002115 top entries incl. merges), 142409 flat merges, 9506 layers flattened later
+== lowering 356 ms (the analysis of deferred lambdas included), minted on demand 38 ms
+== read plan: 44831 names pooled; 1072 lambdas skimmed and not yet reached (9936 free names kept)
+== lambda pools: 1173 files, (at, pos, op, withs, names, body), 22154 rows deferred, 2315 drained (body minted on a first call), 19839 never called
+== scopes (7)
+  core        381435
+  ctl           1916
+  text           440
+  coll           430
+  val            112
+  io              60
+  meta            12
+== continents (11)
+  core        381435
+  nixctl        1916
+  nixstr         436
+  nixlist        288
+  nixattr        142
+  nixnum          61
+  nixty           51
+  nixpath         47
+  nixstore        13
+  nixfmt          12
+  nixctx           4
+== dialects (21)
+  nix         381435
+  nixerr        1657
+  nixstr         412
+  nixload        253
+  nixlistfn      209
+  nixattr        139
+  nixlist         79
+  nixnum          61
+  nixty           42
+  nixfs           37
+  nixstore        13
+  nixre           13
+  nixver          11
+  nixjson         11
+  nixpath         10
+  nixrefl          9
+  nixctl           5
+  nixctx           4
+  nixattrfn        3
+  nixtrace         1
+  nixtoml          1
+== top ops
+  nix.str                   89138
+  nix.attrs                 62156
+  nix.apply                 54253
+  nix.with_var              36576
+  nix.select                32008
+  nix.lambda                23376
+  nix.list                  19046
+  nix.formal                17716
+  nix.path                  15048
+  nix.int                    9371
+  nix.return                 4710
+  nix.concat_strings         4704
+  nix.concat_lists           3018
+  nixerr.throw               1649

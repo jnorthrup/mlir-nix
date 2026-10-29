@@ -1,0 +1,30 @@
+Local validation: lazy Boolean compiler with adaptive retirement, 2026-10-28
+Platform: macOS; LLVM/MLIR 23.1.1.
+Evaluator SHA256: 17b3e5cd330acef23602533987697e295cfd578cf636a330de290a5f29a48d39
+Source archive SHA256: 47d7f80c07ea6decd79c9912537ba038764dbd9f9d3c98cd103e3460d4325e2b
+Focused test script SHA256: 3aca2eef60f6077872c8c1d65d663ad4807b87b10b9a971743c63bb00243fce7
+
+Completed command: /opt/homebrew/bin/python3 -B scripts/check-jit.py
+eager: 87 exact comparisons; scalar/pointer/Boolean/demand/deopt/grace/budget guards verified
+demand: 87 exact comparisons; scalar/pointer/Boolean/demand/deopt/grace/budget guards verified
+JIT: 174 exact comparisons passed
+Independent Boolean oracles check stdout, diagnostic fragments and ordered trace lines.
+Retirement proofs cover 80 effects across 64 deopts, nested active continuation resume, and exception cleanup.
+
+Saved full-suite evidence, read back without rerunning tests:
+eager: 478 cases / 1,434 files; all 1,431 files from 477 prior selector cases are byte-identical; no missing files.
+eager: new eval-okay-jit-boolean fixture has rc=0, stdout="true\n", stderr empty.
+eager full saved-file manifest SHA256: a09364991be376279d613c385b233088fe51a4e54550c819627969d994f9efdc
+demand: 478 cases / 1,434 files; all 1,431 files from 477 prior selector cases are byte-identical; no missing files.
+demand: new eval-okay-jit-boolean fixture has rc=0, stdout="true\n", stderr empty.
+demand full saved-file manifest SHA256: a09364991be376279d613c385b233088fe51a4e54550c819627969d994f9efdc
+Comparison directories: /tmp/mlnix-locality/{selector,boolean}-candidate-{eager,demand}.
+Manifest format: sorted filename, NUL, content SHA256, newline; hash the resulting UTF-8 bytes.
+
+Untimed demand nixpkgs-73 profile:
+jit: compiled=8 executions=571661 grace=42 rejected=3481 type_misses=0 overflows=0 mismatches=0 compile_failures=0 candidates=60 pointer_compiled=1 identity_executions=122890 capture_executions=11799 selector_executions=233126 pointer_grace=30 pointer_mismatches=0 boolean_compiled=7 boolean_executions=203846 boolean_completions=201795 boolean_demands=186782 boolean_resumes=399620 boolean_deopts=2051 boolean_grace=12 boolean_mismatches=0 boolean_retired=4
+Output SHA256: 5e8fff662dffa4eab642b75e78028fb54204cd15ec1a9972c2cafe2306234959
+The output is byte-identical to the earlier Boolean profile (before retirement).
+Counters for demands/resumes exclude runs that throw before returning their RunResult.
+These are correctness and native-coverage results, not timing measurements.
+No Nix or Lix executable was invoked for this validation.

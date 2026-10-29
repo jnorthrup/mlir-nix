@@ -1,0 +1,9 @@
+Actual runner: commands-v1.sh (no credentials or unrelated environment).
+Working source/build: /home/jim/work/mlir-nix-dense-selectors-20261028, overlaid with frozen Boolean v1 archive.
+Preserved selector V2 baseline: /tmp/kb/dense-selectors-v2-20261028/mlnix.
+Boolean V1 binary: /tmp/kb/lazy-boolean-20261028-v1/mlnix.
+
+Build/test/timing environment explicitly clears MLNIX_JIT, MLNIX_DEFER, MLNIX_STATS, MLNIX_PIPELINE, MLNIX_PRIMS_IRDL, MLNIX_JIT_THRESHOLD, MLNIX_JIT_DUMP and MLNIX_JIT_PROFILE.
+Untimed profiles set MLNIX_JIT=1, MLNIX_DEFER=1, MLNIX_STATS=1, MLNIX_JIT_PROFILE=1 and the temporary readonly benchmark store/state paths.
+Timing arms both set MLNIX_JIT=1 and MLNIX_DEFER=1; profiling and stats remain absent. Three rotating interleaved rounds per workload compare preserved selector V2 ON with Boolean V1 ON.
+The existing /tmp/kb/gen.lock serializes the entire run. No Nix/Lix binary paths or reference executions occur.

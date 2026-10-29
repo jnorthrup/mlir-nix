@@ -1,0 +1,1 @@
+Reference Nix/Lix runs skipped at user request; reuse prior baseline/small-list records.

@@ -1,0 +1,3 @@
+eager: 21 exact comparisons; native/grace/type/overflow/budget guards verified
+demand: 21 exact comparisons; native/grace/type/overflow/budget guards verified
+JIT: 42 exact comparisons passed

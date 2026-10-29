@@ -1,0 +1,421 @@
+{
+  "nixos-toplevel": {
+    "executions": {
+      "off": 477563,
+      "on": 603479,
+      "delta": 125916
+    },
+    "rejected": {
+      "off": 5292,
+      "on": 5276,
+      "delta": -16
+    },
+    "compile_ns": {
+      "off": 129967432,
+      "on": 130036629,
+      "delta": 69197
+    },
+    "candidates": {
+      "off": 237,
+      "on": 254,
+      "delta": 17
+    },
+    "selector_executions": {
+      "off": 128048,
+      "on": 45983,
+      "delta": -82065
+    },
+    "boolean_executions": {
+      "off": 128833,
+      "on": 336814,
+      "delta": 207981
+    },
+    "boolean_completions": {
+      "off": 119951,
+      "on": 329354,
+      "delta": 209403
+    },
+    "boolean_demands": {
+      "off": 121840,
+      "on": 369581,
+      "delta": 247741
+    },
+    "boolean_resumes": {
+      "off": 323464,
+      "on": 786660,
+      "delta": 463196
+    },
+    "boolean_deopts": {
+      "off": 8882,
+      "on": 7460,
+      "delta": -1422
+    },
+    "boolean_retired": {
+      "off": 5,
+      "on": 4,
+      "delta": -1
+    },
+    "boolean_preflight_attempts": {
+      "off": 794,
+      "on": 56,
+      "delta": -738
+    },
+    "boolean_preflight_deopts": {
+      "off": 779,
+      "on": 40,
+      "delta": -739
+    },
+    "boolean_preflight_rejections": {
+      "off": 90,
+      "on": 51,
+      "delta": -39
+    },
+    "boolean_inline_compiled": {
+      "off": 3,
+      "on": 2,
+      "delta": -1
+    },
+    "boolean_inline_calls": {
+      "off": 71253,
+      "on": 71250,
+      "delta": -3
+    },
+    "boolean_depth_entries": {
+      "off": 71253,
+      "on": 71250,
+      "delta": -3
+    },
+    "boolean_specializations": {
+      "off": 2115,
+      "on": 1155,
+      "delta": -960
+    },
+    "boolean_specialization_deopts": {
+      "off": 2112,
+      "on": 1152,
+      "delta": -960
+    },
+    "boolean_projection_compiled": {
+      "off": 6,
+      "on": 7,
+      "delta": 1
+    },
+    "boolean_projection_requests": {
+      "off": 28689,
+      "on": 132627,
+      "delta": 103938
+    },
+    "boolean_projection_forces": {
+      "off": 29769,
+      "on": 159168,
+      "delta": 129399
+    },
+    "boolean_projection_flat": {
+      "off": 28689,
+      "on": 132627,
+      "delta": 103938
+    },
+    "lazy_value_compiled": {
+      "off": 0,
+      "on": 10,
+      "delta": 10
+    },
+    "lazy_value_completions": {
+      "off": 0,
+      "on": 227199,
+      "delta": 227199
+    },
+    "lazy_value_grace": {
+      "off": 0,
+      "on": 30,
+      "delta": 30
+    },
+    "lazy_empty_completions": {
+      "off": 0,
+      "on": 62724,
+      "delta": 62724
+    },
+    "curried_compiled": {
+      "off": 4,
+      "on": 3,
+      "delta": -1
+    },
+    "curried_executions": {
+      "off": 69652,
+      "on": 101121,
+      "delta": 31469
+    },
+    "curried_completions": {
+      "off": 67542,
+      "on": 100982,
+      "delta": 33440
+    },
+    "curried_grace": {
+      "off": 12,
+      "on": 9,
+      "delta": -3
+    },
+    "curried_deopts": {
+      "off": 2110,
+      "on": 139,
+      "delta": -1971
+    },
+    "curried_rejected": {
+      "off": 281,
+      "on": 264,
+      "delta": -17
+    },
+    "curried_frames_saved": {
+      "off": 135060,
+      "on": 201946,
+      "delta": 66886
+    },
+    "curried_values_saved": {
+      "off": 67530,
+      "on": 100973,
+      "delta": 33443
+    },
+    "curried_arity2": {
+      "off": 153680,
+      "on": 184855,
+      "delta": 31175
+    },
+    "frame_count": {
+      "off": 4773413,
+      "on": 4612632,
+      "delta": -160781
+    },
+    "frame_bytes": {
+      "off": 298698024,
+      "on": 294032664,
+      "delta": -4665360
+    },
+    "frame_slots": {
+      "off": 27790427,
+      "on": 27528819,
+      "delta": -261608
+    },
+    "value_count": {
+      "off": 14338502,
+      "on": 14305059,
+      "delta": -33443
+    },
+    "value_bytes": {
+      "off": 344124048,
+      "on": 343321416,
+      "delta": -802632
+    }
+  },
+  "nixpkgs-73": {
+    "compiled": {
+      "off": 14,
+      "on": 16,
+      "delta": 2
+    },
+    "executions": {
+      "off": 584662,
+      "on": 646306,
+      "delta": 61644
+    },
+    "grace": {
+      "off": 69,
+      "on": 75,
+      "delta": 6
+    },
+    "rejected": {
+      "off": 3458,
+      "on": 3433,
+      "delta": -25
+    },
+    "compile_ns": {
+      "off": 112703972,
+      "on": 122624883,
+      "delta": 9920911
+    },
+    "candidates": {
+      "off": 165,
+      "on": 189,
+      "delta": 24
+    },
+    "selector_executions": {
+      "off": 233126,
+      "on": 223,
+      "delta": -232903
+    },
+    "boolean_compiled": {
+      "off": 13,
+      "on": 15,
+      "delta": 2
+    },
+    "boolean_executions": {
+      "off": 216847,
+      "on": 511394,
+      "delta": 294547
+    },
+    "boolean_completions": {
+      "off": 209155,
+      "on": 492101,
+      "delta": 282946
+    },
+    "boolean_demands": {
+      "off": 176456,
+      "on": 470862,
+      "delta": 294406
+    },
+    "boolean_resumes": {
+      "off": 604679,
+      "on": 1196516,
+      "delta": 591837
+    },
+    "boolean_deopts": {
+      "off": 7692,
+      "on": 19293,
+      "delta": 11601
+    },
+    "boolean_grace": {
+      "off": 39,
+      "on": 45,
+      "delta": 6
+    },
+    "boolean_preflight_attempts": {
+      "off": 655,
+      "on": 143,
+      "delta": -512
+    },
+    "boolean_preflight_deopts": {
+      "off": 642,
+      "on": 128,
+      "delta": -514
+    },
+    "boolean_preflight_rejections": {
+      "off": 83,
+      "on": 35,
+      "delta": -48
+    },
+    "boolean_specializations": {
+      "off": 2243,
+      "on": 1219,
+      "delta": -1024
+    },
+    "boolean_specialization_deopts": {
+      "off": 2240,
+      "on": 1216,
+      "delta": -1024
+    },
+    "boolean_projection_compiled": {
+      "off": 5,
+      "on": 2,
+      "delta": -3
+    },
+    "boolean_projection_requests": {
+      "off": 33296,
+      "on": 26093,
+      "delta": -7203
+    },
+    "boolean_projection_forces": {
+      "off": 10019,
+      "on": 0,
+      "delta": -10019
+    },
+    "boolean_projection_flat": {
+      "off": 33296,
+      "on": 26093,
+      "delta": -7203
+    },
+    "lazy_value_compiled": {
+      "off": 0,
+      "on": 6,
+      "delta": 6
+    },
+    "lazy_value_completions": {
+      "off": 0,
+      "on": 290291,
+      "delta": 290291
+    },
+    "lazy_value_grace": {
+      "off": 0,
+      "on": 18,
+      "delta": 18
+    },
+    "lazy_empty_completions": {
+      "off": 0,
+      "on": 231429,
+      "delta": 231429
+    },
+    "curried_compiled": {
+      "off": 4,
+      "on": 7,
+      "delta": 3
+    },
+    "curried_executions": {
+      "off": 170674,
+      "on": 469850,
+      "delta": 299176
+    },
+    "curried_completions": {
+      "off": 169192,
+      "on": 452713,
+      "delta": 283521
+    },
+    "curried_grace": {
+      "off": 12,
+      "on": 21,
+      "delta": 9
+    },
+    "curried_deopts": {
+      "off": 1482,
+      "on": 17137,
+      "delta": 15655
+    },
+    "curried_rejected": {
+      "off": 142,
+      "on": 111,
+      "delta": -31
+    },
+    "curried_frames_saved": {
+      "off": 338360,
+      "on": 905384,
+      "delta": 567024
+    },
+    "curried_values_saved": {
+      "off": 169180,
+      "on": 452692,
+      "delta": 283512
+    },
+    "curried_arity2": {
+      "off": 233948,
+      "on": 532741,
+      "delta": 298793
+    },
+    "curried_arity4": {
+      "off": 3163,
+      "on": 3100,
+      "delta": -63
+    },
+    "frame_count": {
+      "off": 2815109,
+      "on": 2481560,
+      "delta": -333549
+    },
+    "frame_bytes": {
+      "off": 256602288,
+      "on": 248606264,
+      "delta": -7996024
+    },
+    "frame_slots": {
+      "off": 26445068,
+      "on": 26112663,
+      "delta": -332405
+    },
+    "value_count": {
+      "off": 11560659,
+      "on": 11277147,
+      "delta": -283512
+    },
+    "value_bytes": {
+      "off": 277455816,
+      "on": 270651528,
+      "delta": -6804288
+    }
+  }
+}

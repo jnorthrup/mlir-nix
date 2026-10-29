@@ -1,0 +1,5 @@
+Candidate parked after paired Kali throughput regressions in both JIT modes.
+The working implementation matches all 1168 source/test/build files in the frozen Calls V2 archive.
+Rebuilt local binary matches the preserved Calls V2 SHA256: 7c9475f29ec2639e8f3f3798da431a0f5cab896e93020ee28bc4bf3e26d54fca
+No broad test rerun after restoration: source and binary match the already validated snapshot exactly.
+All 13 incoming user files remain byte-identical to the initial preserved snapshot.

@@ -1,0 +1,2 @@
+06:11:31 build rc=0, error lines: 0
+06:11:31 done

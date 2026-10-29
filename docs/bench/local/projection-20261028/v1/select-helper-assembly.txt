@@ -1,0 +1,56 @@
+Local static assembly evidence; no workload execution.
+
+Binary: /Users/jim/work/mlir-nix/build/bin/mlnix
+SHA-256: 24fcd57d7ed1016085fadfd1ccf5beca466cef683ac499d1f77a6a7ef212c38b
+
+Target: Mach-O arm64. This is evidence for the local binary only; it does not establish Kali x86_64 behavior or a timing regression.
+
+Conclusion: evalOp contains an out-of-line selectField call in its no-default Select path loop. The helper hot path uses a 0x90-byte stack frame, three paired saves/restores, and calls forceValue and Bindings::get.
+
+Command: /Library/Developer/CommandLineTools/usr/bin/llvm-objdump --disassemble --demangle --start-address=0x1000223bc --stop-address=0x100028a88 build/bin/mlnix
+Excerpt:
+100023268: 9101e280    	add	x0, x20, #0x78
+10002326c: 97ffc36c    	bl	0x10001401c <nixev::SymbolTable::create(llvm::StringRef)>
+100023270: aa0003e2    	mov	x2, x0
+100023274: 11000408    	add	w8, w0, #0x1
+100023278: b9000328    	str	w8, [x25]
+10002327c: aa1403e0    	mov	x0, x20
+100023280: aa1603e1    	mov	x1, x22
+100023284: aa1703e3    	mov	x3, x23
+100023288: 94001600    	bl	0x100028a88 <nixev::EvalState::selectField(nixev::Value&, unsigned int, void const*)>
+10002328c: aa0003f6    	mov	x22, x0
+100023290: 91004339    	add	x25, x25, #0x10
+100023294: f100435a    	subs	x26, x26, #0x10
+100023298: 54fffb01    	b.ne	0x1000231f8 <nixev::EvalState::evalOp(mlir::Operation*, nixev::Frame*, nixev::Value&)+0xe3c>
+
+Command: /Library/Developer/CommandLineTools/usr/bin/llvm-objdump --disassemble --demangle --start-address=0x100028a88 --stop-address=0x100028ae8 build/bin/mlnix
+
+build/bin/mlnix:	file format mach-o arm64
+
+Disassembly of section __TEXT,__text:
+
+0000000100028a88 <nixev::EvalState::selectField(nixev::Value&, unsigned int, void const*)>:
+100028a88: d10243ff    	sub	sp, sp, #0x90
+100028a8c: a90657f6    	stp	x22, x21, [sp, #0x60]
+100028a90: a9074ff4    	stp	x20, x19, [sp, #0x70]
+100028a94: a9087bfd    	stp	x29, x30, [sp, #0x80]
+100028a98: 910203fd    	add	x29, sp, #0x80
+100028a9c: aa0303f3    	mov	x19, x3
+100028aa0: aa0203f5    	mov	x21, x2
+100028aa4: aa0103f6    	mov	x22, x1
+100028aa8: aa0003f4    	mov	x20, x0
+100028aac: aa0303e2    	mov	x2, x3
+100028ab0: 97ffee27    	bl	0x10002434c <nixev::EvalState::forceValue(nixev::Value&, void const*)>
+100028ab4: 394002c8    	ldrb	w8, [x22]
+100028ab8: 7100251f    	cmp	w8, #0x9
+100028abc: 54000161    	b.ne	0x100028ae8 <nixev::EvalState::selectField(nixev::Value&, unsigned int, void const*)+0x60>
+100028ac0: f94006c0    	ldr	x0, [x22, #0x8]
+100028ac4: aa1503e1    	mov	x1, x21
+100028ac8: 97ffc4fb    	bl	0x100019eb4 <nixev::Bindings::get(unsigned int) const>
+100028acc: b4000200    	cbz	x0, 0x100028b0c <nixev::EvalState::selectField(nixev::Value&, unsigned int, void const*)+0x84>
+100028ad0: f9400400    	ldr	x0, [x0, #0x8]
+100028ad4: a9487bfd    	ldp	x29, x30, [sp, #0x80]
+100028ad8: a9474ff4    	ldp	x20, x19, [sp, #0x70]
+100028adc: a94657f6    	ldp	x22, x21, [sp, #0x60]
+100028ae0: 910243ff    	add	sp, sp, #0x90
+100028ae4: d65f03c0    	ret

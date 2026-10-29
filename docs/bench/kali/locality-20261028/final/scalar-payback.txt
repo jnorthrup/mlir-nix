@@ -1,0 +1,14 @@
+schedule=demand; JIT threshold=1024; compilation included
+native validation (untimed): jit: compiled=1 executions=3073 grace=3 rejected=0 type_misses=0 overflows=0 mismatches=0 compile_failures=0 candidates=1
+== 1000 calls (3 interleaved rounds; all outputs match arithmetic oracle 450ba176bd5d)
+  interpreter      wall min 0.034s median 0.035s cpu median 0.031s RSS max 0.068GB
+  scalar JIT       wall min 0.031s median 0.033s cpu median 0.031s RSS max 0.070GB
+  JIT / interpreter wall median x0.931
+== 100000 calls (3 interleaved rounds; all outputs match arithmetic oracle 9982be0251f7)
+  interpreter      wall min 0.076s median 0.078s cpu median 0.078s RSS max 0.097GB
+  scalar JIT       wall min 0.055s median 0.056s cpu median 0.053s RSS max 0.104GB
+  JIT / interpreter wall median x0.717
+== 1000000 calls (3 interleaved rounds; all outputs match arithmetic oracle 7666df9e16d6)
+  interpreter      wall min 0.506s median 0.574s cpu median 0.592s RSS max 0.290GB
+  scalar JIT       wall min 0.205s median 0.205s cpu median 0.209s RSS max 0.196GB
+  JIT / interpreter wall median x0.357

@@ -1,0 +1,25 @@
+x86_64 | 8 threads | Intel(R) Core(TM) i7-6820HK CPU @ 2.70GHz
+  Nix 2.35.4: cached same-host measurements; reference binary not invoked
+  Lix 2.91.3: cached same-host measurements; reference binary not invoked
+start-up (--eval -E 1), median of 5: mlnix 33 ms, mlnix demand 32 ms
+
+== nixos-toplevel  (3 interleaved rounds, 25 s; pinned: Nix 2.35.4, Lix 2.91.3; output sha256 2057239a9017; identical output from all: yes)
+   Nix 2.35.4     min  3.70s  median  4.10s   peak RSS   628 MB   [pinned: cached, best of 3 generations, drift 4.1%]
+   Lix 2.91.3     min  4.42s  median  4.65s   peak RSS   755 MB   [pinned: cached, best of 3 generations, drift 2.9%]
+   mlnix          min  4.02s  median  4.12s   peak RSS  1378 MB
+   mlnix demand   min  4.03s  median  4.31s   peak RSS  1266 MB
+   mlnix / Nix 2.35.4   median x1.00
+   mlnix / Lix 2.91.3   median x0.89
+   mlnix demand / Nix 2.35.4   median x1.05
+   mlnix demand / Lix 2.91.3   median x0.93
+
+== nixpkgs-73  (3 interleaved rounds, 22 s; pinned: Nix 2.35.4, Lix 2.91.3; output sha256 5e8fff662dff; identical output from all: yes)
+   Nix 2.35.4     min  3.46s  median  3.85s   peak RSS   609 MB   [pinned: cached, best of 3 generations, drift 3.5%]
+   Lix 2.91.3     min  4.31s  median  4.53s   peak RSS   757 MB   [pinned: cached, best of 3 generations, drift 1.2%]
+   mlnix          min  3.49s  median  3.50s   peak RSS  1296 MB
+   mlnix demand   min  3.42s  median  3.46s   peak RSS  1172 MB
+   mlnix / Nix 2.35.4   median x0.91
+   mlnix / Lix 2.91.3   median x0.77
+   mlnix demand / Nix 2.35.4   median x0.90
+   mlnix demand / Lix 2.91.3   median x0.76
+

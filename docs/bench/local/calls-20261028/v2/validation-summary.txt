@@ -1,0 +1,24 @@
+Guarded calls V2: local validation, 2026-10-28
+macOS / LLVM-MLIR 23.1.1
+Focused gate: 240 exact JIT/interpreter comparisons; see check-jit.txt.
+Additional tests preserve logical call depth while forcing inside an inline callee and restore caller depth after leaving.
+
+eager: 479/479 semantic; 221/479 exact against stored suite expectations.
+eager: all 1,437 saved output/error/status files byte-identical to Calls V1.
+eager saved-file manifest SHA256: a0b3554008547decb84c8091c432ad1f52b056faa2111b21690037fa1a592b43
+demand: 479/479 semantic; 221/479 exact against stored suite expectations.
+demand: all 1,437 saved output/error/status files byte-identical to Calls V1.
+demand saved-file manifest SHA256: a0b3554008547decb84c8091c432ad1f52b056faa2111b21690037fa1a592b43
+
+Full suite commands:
+MLNIX_JIT=1 MLNIX_JIT_THRESHOLD=1 python3 scripts/run-lang-tests.py --save /tmp/mlnix-locality/calls-v2-eager
+MLNIX_DEFER=1 MLNIX_JIT=1 MLNIX_JIT_THRESHOLD=1 python3 scripts/run-lang-tests.py --save /tmp/mlnix-locality/calls-v2-demand
+
+Frozen source archive: /tmp/mlir-nix-calls-v2-20261028.tar.gz
+Source SHA256: af5cbebee803f37d72b8a1e98cf5b55a03b49e4ca6481e65522b3e8a260553b5
+Preserved local binary: /tmp/mlnix-locality/mlnix-calls-v2
+Binary SHA256: 7c9475f29ec2639e8f3f3798da431a0f5cab896e93020ee28bc4bf3e26d54fca
+
+Default-threshold demand nixpkgs profile full output SHA256: 5e8fff662dffa4eab642b75e78028fb54204cd15ec1a9972c2cafe2306234959
+Native inline calls: 161,997; resumes: 561,236 (V1 885,230); zero mismatches and compiler failures.
+Local profiles are diagnostic and not end-to-end timing samples. No Nix or Lix executable invoked.

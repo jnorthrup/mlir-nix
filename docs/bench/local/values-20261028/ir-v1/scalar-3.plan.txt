@@ -1,0 +1,28 @@
+lazy-boolean-cps nodes=7/64 leaves=5/16 blocks=46/256 resume-limit=32 inline-calls=2 saturated-inline-calls=1 projections=1 value-returns=2 inline-depth-limit=4 chain-count=1 entry=13
+destinations: 0=false 1=true 2=deopt; resume=destination+1 (0=entry)
+value terminal: 4294967295 (no resume entry)
+empty result codes: 17=attrs 18=list 19=string
+statuses: 2=demand 5=depth-overflow 6=value 7=guard-miss; continuation in upper bits
+call entry/leave bookkeeping stays in native control flow
+leaf 0 context=0 current-closure capture
+leaf 1 context=0 current-closure capture
+leaf 2 context=0 argument=0
+leaf 3 context=2 current-closure capture
+leaf 4 context=2 projection base=2 symbol=4
+node 0 leaf leaf=3
+node 1 leaf leaf=4
+node 2 empty recipe=list code=18
+node 3 if a=0 b=1 c=2
+node 4 call callee-leaf=1 context=2 arity=1 body=3
+node 5 call callee-leaf=0 context=1 arity=2 body=4
+continuation 3 node=5 action=2 true=1 false=1 consumer=nix.apply
+continuation 4 node=5 action=2 true=0 false=0 consumer=nix.apply
+continuation 5 node=5 action=2 true=4294967295 false=4294967295 consumer=nix.apply
+continuation 6 node=4 action=2 true=3 false=3 consumer=nix.apply
+continuation 7 node=4 action=2 true=4 false=4 consumer=nix.apply
+continuation 8 node=4 action=2 true=5 false=5 consumer=nix.apply
+continuation 9 node=1 action=3 true=8 false=8 consumer=nix.if
+continuation 10 node=2 action=4 true=8 false=8 consumer=nix.if
+continuation 11 node=0 action=0 true=9 false=10 consumer=nix.if
+continuation 12 node=4 action=1 true=11 false=2 consumer=nix.apply
+continuation 13 node=5 action=1 true=12 false=2 consumer=nix.apply

@@ -1,0 +1,61 @@
+trace: curried argument once
+trace: changed callee argument once
+jit: compiled=3 executions=15 grace=9 rejected=3 type_misses=0 overflows=0 mismatches=0 compile_failures=0 compile_ns=18073959 candidates=2 pointer_compiled=0 identity_executions=0 capture_executions=0 selector_executions=0 pointer_grace=0 pointer_mismatches=0 boolean_compiled=3 boolean_executions=15 boolean_completions=13 boolean_demands=1 boolean_resumes=25 boolean_deopts=2 boolean_grace=9 boolean_mismatches=0 boolean_retired=0 boolean_preflight_attempts=3 boolean_preflight_deopts=0 boolean_preflight_rejections=0 boolean_inline_compiled=2 boolean_inline_calls=8 boolean_guard_misses=2 boolean_depth_entries=8 boolean_specializations=2 boolean_specialization_deopts=0 curried_candidates=1 curried_compiled=1 curried_executions=8 curried_completions=7 curried_grace=3 curried_deopts=1 curried_rejected=0 curried_frames_saved=12 curried_values_saved=8 curried_arity2=0 curried_arity3=8 curried_arity4=0
+attribute cells: bytes=16 position_rows=1 position_bytes=8
+frame allocations: count=19 bytes=776 slots=59
+value allocations: count=153 bytes=3672
+== instrumented value-tag writes (including stack temporaries; not live heap rows)
+  blackhole          19
+  int                 2
+  bool               26
+  null                2
+  string              6
+  attrs               3
+  list                3
+  lambda             10
+  primop            105
+== sea of nodes: 3 file regions hold 55 ops (34.5% ever ran, 19 evals, 28 thunk cells); 5 minted bodies hold 19 ops (36.8% ever ran, 24 evals, 2 thunk cells).  Finer grain mints a cell: the thunk cells are its rows against lambda grain's 5
+== frame cells: 72 assigned, 0 to a value with no use at all (0.0%) -- a value no one reads still costs a cell in every frame of its region
+== mlnix ops lowered: 76
+== `//`: 0 layered (0 entries not copied, 0 top entries incl. merges), 0 flat merges, 0 layers flattened later
+== lowering 0 ms (the analysis of deferred lambdas included), minted on demand 0 ms
+== read plan: 10 names pooled; 0 lambdas skimmed and not yet reached (6 free names kept)
+== lambda pools: 2 files, (at, pos, op, withs, names, body), 8 rows deferred, 5 drained (body minted on a first call), 3 never called
+== scopes (5)
+  core            60
+  ctl             10
+  coll             4
+  io               1
+  val              1
+== continents (6)
+  core            60
+  nixctl          10
+  nixlist          3
+  nixstore         1
+  nixty            1
+  nixattr          1
+== dialects (9)
+  nix             60
+  nixctl           4
+  nixerr           4
+  nixtrace         2
+  nixlistfn        2
+  nixstore         1
+  nixty            1
+  nixlist          1
+  nixattr          1
+== top ops
+  nix.apply                    13
+  nix.lambda                    9
+  nix.str                       8
+  nix.return                    8
+  nixerr.throw                  4
+  nixctl.seq                    4
+  nix.select                    3
+  nix.list                      2
+  nix.not                       2
+  nix.update                    2
+  nixlistfn.map                 2
+  nixtrace.trace                2
+  nix.expr                      2
+  nix.bool                      2

@@ -8,9 +8,10 @@
 #   GEN_OUT   directory for logs and results             (default /tmp/gen-out)
 #   NIX_BIN   reference nix-instantiate, the oracle      (required for gates, bench)
 #   LIX_BIN   second reference nix-instantiate           (optional)
+#   BENCH_OVER  fraction past a pinned record at which an mlnix run is stopped (default 0.2; raise it when the host drifts)
 #
 # Each benchmark job stays under 180 s of wall time; results land in $GEN_OUT/summary.txt.
-set -u
+set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 OUT=${GEN_OUT:-/tmp/gen-out}
 mkdir -p "$OUT"
@@ -36,34 +37,59 @@ stage_build() {
   [ $rc -eq 0 ] || { grep -m10 'error:' "$OUT/build.log" | cut -c1-260; return 1; }
 }
 
+# Keep each complete log and propagate the producer's status: a successful grep or
+# summary line must never turn a failed correctness gate into a benchmark result.
+check_refs() {
+  [ -n "${NIX_BIN:-}" ] && [ -x "$NIX_BIN" ] || { say "NIX_BIN must name an executable reference"; return 1; }
+  [ -z "${LIX_BIN:-}" ] || [ -x "$LIX_BIN" ] || { say "LIX_BIN must name an executable reference"; return 1; }
+}
+
 stage_gates() {
-  local sched
+  check_refs || return 1
+  local sched rc failed=0
   for sched in eager demand; do
-    local env=()
-    [ $sched = demand ] && env=(MLNIX_DEFER=1)
-    say "lang $sched: $(env "${env[@]}" python3 scripts/run-lang-tests.py 2>&1 | grep -E '^TOTAL')"
+    local schedule_env=(-u MLNIX_DEFER)
+    [ "$sched" = demand ] && schedule_env=(MLNIX_DEFER=1)
+    env "${schedule_env[@]}" python3 scripts/run-lang-tests.py > "$OUT/lang-$sched.txt" 2>&1
+    rc=$?
+    say "lang $sched (rc=$rc): $(grep -E '^TOTAL' "$OUT/lang-$sched.txt")"
+    [ $rc -eq 0 ] || failed=1
   done
-  say "mlir tests: $(LLVM_BIN=$LLVM_PREFIX/bin python3 scripts/run-mlir-tests.py 2>&1 | tail -1)"
-  say "primops: $(python3 scripts/check-prims.py 2>&1 | tail -1)"
+  LLVM_BIN=$LLVM_PREFIX/bin python3 scripts/run-mlir-tests.py > "$OUT/mlir-tests.txt" 2>&1
+  rc=$?
+  say "mlir tests (rc=$rc): $(tail -1 "$OUT/mlir-tests.txt")"
+  [ $rc -eq 0 ] || failed=1
+  python3 scripts/check-prims.py > "$OUT/primops.txt" 2>&1
+  rc=$?
+  say "primops (rc=$rc): $(tail -1 "$OUT/primops.txt")"
+  [ $rc -eq 0 ] || failed=1
   for sched in eager demand; do
-    local env=()
-    [ $sched = demand ] && env=(MLNIX_DEFER=1)
-    env "${env[@]}" python3 scripts/difftest.py --native "${refs[@]}" > "$OUT/difftest-$sched.txt" 2>&1
-    say "difftest $sched (rc=$?): $(grep -E '^[0-9]+/[0-9]+ identical' "$OUT/difftest-$sched.txt" | tr '\n' ';')"
+    local schedule_env=(-u MLNIX_DEFER)
+    [ "$sched" = demand ] && schedule_env=(MLNIX_DEFER=1)
+    env "${schedule_env[@]}" python3 scripts/difftest.py --native "${refs[@]}" > "$OUT/difftest-$sched.txt" 2>&1
+    rc=$?
+    say "difftest $sched (rc=$rc): $(grep -E '^[0-9]+/[0-9]+ identical' "$OUT/difftest-$sched.txt" | tr '\n' ';')"
+    [ $rc -eq 0 ] || failed=1
   done
+  return $failed
 }
 
 stage_bench() {
-  local w
+  check_refs || return 1
+  local w rc failed=0
   for w in nixos-toplevel nixpkgs-73; do
     say "bench $w"
-    # a competitor left behind (scripts/benchref.py) is not timed again; an mlnix run past 1.2x its record is stopped, its state kept
+    # Reuse accepted same-host Nix/Lix timings without invoking those binaries. Missing records fail the comparison.
+    # An mlnix run past 1.2x a pinned record is stopped, its state kept
     # on disk: a core is the size of the run (3 GB), and /tmp is RAM on kali, where two of them slowed the rounds after them
-    timeout 180 python3 scripts/vs-nix.py --native --demand --budget 165 --auto-pin --cap --diag "$HOME/kb-diag/$(basename "$OUT")" \
+    timeout 180 python3 scripts/vs-nix.py --native --demand --budget 165 --reuse-refs --auto-pin --cap --over "${BENCH_OVER:-0.2}" --diag "$HOME/kb-diag/$(basename "$OUT")" \
       --workload $w "${refs[@]}" \
       > "$OUT/$w.txt" 2>&1
-    say "$w rc=$?"
+    rc=$?
+    say "$w rc=$rc"
+    [ $rc -eq 0 ] || failed=1
   done
+  return $failed
 }
 
 stage_prof() {

@@ -1,0 +1,21 @@
+Actual launchers are retained without credentials or unrelated environment:
+
+commands-v1.sh: frozen archive extraction, isolated release build, 90 JIT checks, language/MLIR/primop gates, paired evaluations, cached references, stats, and native OFF/ON PMU.
+commands-dense-pmu.sh: separate original OFF / dense candidate OFF PMU pairs.
+metadata-probe.py: one-second current CPU-use sample for Java processes, host load and memory; no command lines or private environment read.
+v2/commands-v2.sh: frozen v2 overlay, incremental release build, 90 JIT checks, OFF/ON demand timing, v1 ON / v2 ON timing and PMU.
+
+All launchers use /tmp/kb/gen.lock for serialization.
+Original baseline: /tmp/kb/locality-20261028-final/mlnix
+V1: /tmp/kb/dense-selectors-20261028/mlnix
+V2: /tmp/kb/dense-selectors-v2-20261028/mlnix
+
+Environment handling:
+MLNIX_DEFER is a presence flag: eager removes it; demand sets MLNIX_DEFER=1.
+Native OFF removes MLNIX_JIT; native ON sets MLNIX_JIT=1.
+Timing and PMU runs remove MLNIX_STATS. Stats runs set MLNIX_STATS=1 separately.
+MLNIX_PIPELINE, MLNIX_PRIMS_IRDL, MLNIX_JIT_THRESHOLD and MLNIX_JIT_DUMP are removed at launch.
+PMU runs set MLNIX_STORE_ROOT=/tmp/mlnix-np-root and MLNIX_STATE_DIR=/tmp/mlnix-np-state.
+PMU JSON command arrays show the executed command, not the wrapper's inherited environment; ON/OFF follows the named launcher arm.
+
+The V1 cached-reference invocation sets MLNIX_JIT=1 and uses --reuse-refs with Nix 2.35.4=/no-reference-execution/nix and Lix 2.91.3=/no-reference-execution/lix. These deliberately nonexistent paths prove stable evaluator binaries cannot run successfully. Accepted same-host historical records under docs/bench/kali are reused. No reference invocations appear in V2.

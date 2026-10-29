@@ -1,0 +1,7 @@
+Wed Oct 28 10:15:04 UTC 2026
+ 05:15:04 up 1 day, 11:31,  0 users,  load average: 0.10, 0.12, 0.23
+               total        used        free      shared  buff/cache   available
+Mem:           15963        7249        8566         668        1018        8714
+Swap:           4096           0        4096
+77d0788b1a5355acd3d7d9511c69c150c030b5b18446e7b6d6817415b56dec71  /tmp/mlir-nix-curried-dispatch-v2-20261028.tar.gz
+919d653831c6b034770dd9312f7cfdf305c075b7e01ee87fd33d56f4de8a95bc  /tmp/kb/curried-20261028-v1/mlnix

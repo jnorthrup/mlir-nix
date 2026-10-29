@@ -32,18 +32,48 @@ What the ops mean is attached from outside. Evaluation is one `NixEvalOpInterfac
 another consumer can attach its own model the same way ([docs/FABRIC.md](docs/FABRIC.md)). The optimizer is MLIR pass-pipeline text
 (`MLNIX_PIPELINE`), and the primop set is data: `MLNIX_PRIMS_IRDL=file` swaps the declaration without a rebuild.
 
-**Where it stands, and where it goes.** The encoding is MLIR; the execution is not yet: the evaluator is hand-written C++ walking those
-ops, and [docs/MLIR.md](docs/MLIR.md) counts what is dialect and what is C++. The aim is to keep moving what the evaluator does by hand
+**Dense attribute rows.** Each evaluator attribute is 16 bytes: a name, a position index and a Value pointer. Cold source positions
+live in a per-evaluator TrikeShed `MutableSeries`; repeated evaluations of one source definition reuse its position range. The MLIR
+`positions` property is unchanged. Demand-mode RSS fell 5.3% on NixOS and 8.3% on nixpkgs-73 against the saved evaluator;
+timing was mixed across schedules. The [attribute layout report](docs/bench/kali/dense-selectors-20261028/RESULTS.md) records the comparisons.
+
+**Guarded native execution.** `MLNIX_JIT=1` lowers hot integer graphs, lazy value selectors and demand graphs through typed MLIR to LLVM.
+Demand graphs include short-circuit operators, type predicates, static attribute existence checks and bounded calls guarded
+against the actual closure. Native code inspects persistent
+cells and returns a continuation when an argument or capture needs forcing; the host performs that demand with the original error
+context, then resumes native code. Unsupported branches return to the interpreter. A nonforcing check of already evaluated cells
+delays compilation until a reached path can finish natively. The first three native completions receive interpreter validation without
+forcing an additional branch, and 64 consecutive fallbacks retire an unproductive kernel after active calls return.
+Inlined calls retain the current callee's captures and logical call depth; ordinary entry and return stay in generated control flow.
+Saturated chains with two to four remaining arguments bind their formals directly to persistent cells, eliminating intermediate
+closures and frames. Partial applications retain their ordinary environments, and each curried stage has the original sequential
+call depth. `MLNIX_JIT_CURRIED=0` disables this tier independently. Inline calls accept one to four arguments; lazy one-key
+projections bind selected arguments without allocating temporary thunks. Only a reached consumer demands the key, set and field,
+in that order, preserving traces and errors. `MLNIX_JIT_PROJECTION=0` provides a separate ablation.
+Tail paths can now return existing values or recipes for fresh empty sets, lists and strings through the same checked call scopes.
+Fields and elements stay lazy; grace compares shallow results without additional forcing. `MLNIX_JIT_VALUES=0` disables these returns.
+Lists of one to four persistent handles can also return without forcing any element; `MLNIX_JIT_LISTS=0` disables this extension.
+It saves another 120,304 / 34,274 frames and 60,152 / 17,137 Value allocations on NixOS / nixpkgs-73. Paired wall time changes
++1.2% / −7.6%, but minima do not support the large package median gain; peak RSS does not fall. Whole-JIT-off/on wall time rises
+6.5% / 4.0%, so the native tier remains opt-in. The
+[current Kali report](docs/bench/kali/list-returns-20261028/RESULTS.md) separates allocation savings from runtime and peak-memory costs,
+and compares with cached Nix/Lix references without rerunning them. Broader projection paths, general escaping closures and
+collection fusion remain future work.
+[docs/JIT.md](docs/JIT.md) describes the guards, resource bounds, retirement and inspectable intermediate representations.
+
+**Where it stands, and where it goes.** The default evaluator is hand-written C++ walking MLIR ops, with the optional native tier above.
+[docs/MLIR.md](docs/MLIR.md) counts what is dialect and what is C++. The aim is to keep moving what the evaluator does by hand
 into dialects, passes, interfaces and declarations ([docs/FABRIC.md](docs/FABRIC.md) tracks what moved and what it bought), and to grow
 dialects, interface models and tools around Nix that do more than evaluate it; evaluating is the first function, and none of the others
 exists yet beyond the query and opt tools. The next steps the measurements support:
 
-- Make `nix.lambda` an isolated unit (closure conversion). Until then no pass can run on a lambda body, no pass can use several threads, a
-  lambda cannot be loaded lazily from bytecode, and nothing can compile one ([docs/MLIR.md](docs/MLIR.md)).
+- Make `nix.lambda` an isolated unit (closure conversion). Until then no pass can run directly on a lambda body and a lambda cannot be
+  loaded lazily from bytecode. The native tier extracts bounded graphs whose captures are resolved
+  by the host on each call; arbitrary calls and local lazy values still need general closure conversion ([docs/MLIR.md](docs/MLIR.md)).
 - Subsume the library code that sits on the border. Of the lambda calls of a NixOS evaluation, 91% run inside nixpkgs' `lib`, which is
   Nix code over the primops, and 18 small functions of it are 31% of the calls ([docs/LIBRARY.md](docs/LIBRARY.md) has the map, a bound on
   what moving them across is worth, and the design).
-- Keep the footprint down: `mlnix` still holds more than twice Nix's peak memory (the RSS column below), and the fill-then-drain
+- Keep the footprint down: `mlnix` still holds about twice Nix's peak memory, and the fill-then-drain
   containers of the evaluator are mapped in [docs/FILL-DRAIN.md](docs/FILL-DRAIN.md).
 - Collapse the primop set into its declaration: it is declared once in IRDL and registered again in C++, and `scripts/check-prims.py` only
   checks that the two agree. And give the syntax a dialect of its own (Google's JSIR is the existence proof, [docs/MLIR.md](docs/MLIR.md)).
@@ -60,6 +90,9 @@ workloads evaluate the same nixpkgs, the `nixos-25.05` branch tarball with sha25
 (`test/nixos-toplevel.nix`, `test/nixpkgs-drvs.nix`). `demand` is `MLNIX_DEFER=1`. The min is the steadier figure here: the host's load moves
 medians by several percent. Each commit is built, gated and timed by `scripts/kali-gen.sh`; the raw output is kept in
 [docs/bench/kali](docs/bench/kali), and the section below is rendered from it by `scripts/readme-bench.py`.
+
+For new iterations against these stable references, add `--reuse-refs`. Only the changed `mlnix` arms run; Nix/Lix timings and their
+output oracle come from accepted same-host records, labeled as cached. No reference startup, RSS or version process is invoked.
 
 <!-- bench:begin -->
 <!-- generated by scripts/readme-bench.py from docs/bench/kali/; edit those files or the script, not this block -->
@@ -129,6 +162,7 @@ The tools: `mlnix` (the evaluator and a `nix-instantiate`, `nix-build` and `nix-
     python3 scripts/run-mlir-tests.py     # FileCheck tests of the dialects and passes
     python3 scripts/check-prims.py        # every primop is both registered and declared
     python3 scripts/difftest.py           # the same expressions through mlnix and reference Nix (container "nixref", or --native)
+    python3 scripts/check-jit.py          # exact JIT/interpreter parity, lazy demands, grace, retirement and compilation limits
 
 Set `MLNIX_DEFER=1` to run any of them on the demand schedule. `scripts/ab.py` times two builds against each other, interleaved, and
 compares the hash of their output.
@@ -138,6 +172,7 @@ compares the hash of their output.
 | | |
 |---|---|
 | [SEA-OF-NODES](docs/SEA-OF-NODES.md) | demand-minted lambda bodies |
+| [JIT](docs/JIT.md) | guarded arithmetic, selectors and resumable Boolean/call graphs through MLIR and LLVM |
 | [COMPOSITE](docs/COMPOSITE.md) | TrikeShed's PRELOAD in C++: what is built, what consumes it |
 | [FABRIC](docs/FABRIC.md) | the dialect fabric: logic moved into dialects, what it bought |
 | [MLIR](docs/MLIR.md) | what is MLIR here and what is C++, the dynamic profile, the MLIR survey |

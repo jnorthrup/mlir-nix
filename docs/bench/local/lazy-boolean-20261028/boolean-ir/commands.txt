@@ -1,0 +1,12 @@
+Run from repository root after a Release build. No reference executable is used.
+
+MLNIX_DEFER=1 MLNIX_JIT=1 MLNIX_JIT_THRESHOLD=1 MLNIX_STATS=1 \
+MLNIX_JIT_DUMP="$PWD/docs/bench/local/lazy-boolean-20261028/boolean-ir" \
+build/bin/mlnix instantiate --eval --strict docs/bench/local/lazy-boolean-20261028/boolean-ir/input.nix
+
+The same input was run with JIT disabled and enabled (without statistics); exit,
+stdout and stderr matched byte for byte. Expected stdout: [ true false true ].
+Expected trace: native argument once, exactly once. The unused field stays lazy.
+The functor branch deoptimizes and the returned function re-enters the predicate.
+Files capture the CPS plan, typed MLIR, LLVM-dialect MLIR and optimized LLVM IR.
+Threshold 1 is for inspection; real workload timing uses the default 1,024.

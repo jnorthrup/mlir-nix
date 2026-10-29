@@ -2,9 +2,12 @@
 
 mlnix evaluates Nix by interpreting MLIR. A Nix file is lowered into ops of the `nix` dialect, the evaluator walks those ops, and the ops,
 their effects and their strictness are declared in ODS and IRDL, with a pass pipeline and FileCheck tests around them. What is not MLIR
-is the interpreter itself, the values it makes, the front end and the store: they are C++. Nothing is compiled (no LLVM lowering, no
-ExecutionEngine): the sea of nodes here is a schedule for *minting* IR (`docs/SEA-OF-NODES.md`), and the interpreter is the only
-executor. This file tracks the move of logic from that C++ into dialects, passes, interfaces and declarations, what that bought
+is the interpreter itself, the values it makes, the front end and the store: they are C++. The default executor is the interpreter;
+the opt-in [native tier](JIT.md) extracts supported hot arithmetic graphs, lazy pointer selectors and Boolean continuations into typed MLIR and lowers them through LLVM to native code.
+Boolean code returns demand requests to the host, which preserves lazy forcing and diagnostic context; unsupported branches deoptimize.
+The [current experiment](bench/kali/lazy-boolean-20261028/RESULTS.md) records coverage and cost separately.
+The sea-of-nodes schedule still decides when to *mint* the original IR (`docs/SEA-OF-NODES.md`). This file tracks the move of logic
+from that C++ into dialects, passes, interfaces and declarations, what that bought
 (measured), and what is next. Numbers are from `scripts/bench.py` on the NixOS toplevel and 73-package evaluations; nothing here is
 aspirational unless it says so.
 

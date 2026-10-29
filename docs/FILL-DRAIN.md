@@ -93,11 +93,11 @@ Reading it:
 
 | # | pair | translation | evidence | status |
 |---|---|---|---|---|
-|  1 | `Attr` cell 24 -> 16 B | the pos in a cell is a 32-bit handle into an append-only table (the WAL of positions); AttrsOp carries a base, not an array | spike: max RSS -6.3%, peak footprint -6.7%, wall -0.7 / -1.2 (demand) -1.7 / -1.0 (eager); hashes identical | spike `exp/dense-attr` f6a8d0b; real change `exp/attr-pos-table`  |
+|  1 | `Attr` cell 24 -> 16 B | a 32-bit index into a cold, per-evaluator `MutableSeries` of positions; each evaluated AttrsOp reuses a range; the IR keeps its positions array | Kali demand RSS -5.3% / -8.3%, eager -4.9% / -7.6%; timing mixed across schedules; copied positions and diagnostics unchanged | implemented 2026-10-28; [current Kali experiment](bench/kali/dense-selectors-20261028/RESULTS.md); earlier `exp/dense-attr` / `exp/attr-pos-table` histories are prior experiments |
 |  2 | `callFunction all` | no fill when `applied` is empty: pass `args + i` | 1.14M / 0.47M copies of mean 1.7 cells | tried with 3 and 4: neutral (`exp/fd-calls`): demand toplevel -0.5%, nixpkgs-73 -0.1%, 25 runs |
 |  3 | `evalOp` apply args | a fixed array for up to 4 operands, the SmallVector only past that | 3.2M / 2.1M fills, 0.1% over | tried with 2 and 4: neutral  |
 |  4 | `mkString` | an overload without a context: the default argument builds a `std::set` per string | 2.26M / 2.25M calls | tried with 2 and 3: neutral  |
-|  5 | lists of at most 2 cells | stored in the Value, behind `std::span<Value *> Value::list()`; the 72 `list.elems` and 54 `listSize()` sites go through the span first | 1.2M / 0.8M lists, mean 1.5 / 2.0 cells | not started; about 0.9% of memory (estimate)  |
+|  5 | lists of at most 2 cells | prototype stored two pointers inside the unchanged 24-byte Value; accessors selected inline or external cells | 1.2M / 0.8M lists, mean 1.5 / 2.0 cells | tried and reverted (2026-10-28): neutral to slightly regressive; Kali nixpkgs-73 wall +3.9% eager / +2.0% demand for only about -0.3% RSS; [eager](bench/kali/locality-20261028/small-lists/ab-eager.txt), [demand](bench/kali/locality-20261028/small-lists/ab-demand.txt) |
 |  6 | `evalConcatStrings` | a `SmallString<256>` scratch that string parts append to from `sv()`, drained once into the arena | 67k / 76k fills, 11 / 20 MB | not started; under 0.5% (estimate)  |
 |  7 | the derivation path | flat records filled in order, one sorted drain into the ATerm; a `Derivation` moved, not copied | 3.4% of the thread in map/set frames, 1.5% copying a `Derivation` (profile, inlined frames missing, so a lower bound) | not counted dynamically yet  |
 |  8 | `PosPtr` | the tag in the low bit of an aligned pointer, not bit 62 | CHERI (section 8) | after 1  |

@@ -1,0 +1,10 @@
+Initial persistent-only value-return candidate, preserved before empty-recipe extension.
+442 exact checks passed (221 per schedule);482/482 semantic and224 stored exact expectations per full schedule.
+All1443 prior output/error/status files per schedule unchanged; newvaluesfixture true/no stderr.
+Six local profiles passed saved local goldens. VALUES=0 preserves Projection V1 counters except compile_ns.
+This candidate is not the final Values V1 and was not sent to Kali.
+Profile analysis identified optionalAttrs empty false-arm fallbacks, motivating empty result recipes.
+Source /tmp/mlir-nix-values-initial-20261028.tar.gz (1181633 bytes)
+SHA256 9892afdb3b6842ad014c2751f33a16ad10a9196d5cdffb3323808d4176e0f1a4
+Binary /tmp/mlnix-locality/mlnix-values-initial (37807656 bytes)
+SHA256 a5f5789bc59a9bc41b1d8b30972c3ba5a647905b633b7ec89bdd035c9f4d0029

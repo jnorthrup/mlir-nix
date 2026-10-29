@@ -32,6 +32,7 @@ namespace mlir { class PassManager; }
 #include <memory>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "Nix/Arena.h"
@@ -61,15 +62,18 @@ struct Value;
 struct Frame;
 struct RegionInfo;
 struct EvalState;
+class ScalarJIT;
 
-/// Opaque position: an mlir::Location's opaque pointer (or null).
+/// Opaque position: a packed source word, an mlir::Location pointer, or null.
 using PosPtr = const void *;
+using PosIdx = uint32_t;
 
 struct Attr {
   Symbol name;
+  PosIdx pos; // index into the owning EvalState's cold position series; zero means absent
   Value *value;
-  PosPtr pos;
 };
+static_assert(sizeof(Attr) == 16, "four attribute cells per 64-byte cache line");
 
 struct Bindings {
   /// `size_` of a layered set (below).
@@ -220,6 +224,10 @@ struct RegionInfo {
   /// they were made from.
   const Symbol *formalSyms = nullptr;
   mlir::Operation *formalsOf = nullptr;
+  /// Stable entry owned by this evaluator's optional JIT; closure values are resolved at each call.
+  void *jitEntry = nullptr;
+  /// Optional arity-indexed JIT cache, owned by ScalarJIT and never an environment.
+  void *curriedEntry = nullptr;
   /// MLNIX_STATS: what this region's sea of nodes holds.  nOps its body's ops; nThunks its cells that start as
   /// thunks (finer-grain deferral would mint those, so they are its rows); nEvals its ops' evals (a region called
   /// N times counts N times); everRan the distinct ops that ran, one bit an op, opIdx the op -> bit.
@@ -330,6 +338,7 @@ struct EvalState {
   /// The demand schedule's optimizer: devirtualization (the default pipeline's one stage) with its
   /// pattern set frozen once.  A lambda body is not IsolatedFromAbove, so no PassManager runs on it.
   std::unique_ptr<mlir::FrozenRewritePatternSet> devirt;
+  std::unique_ptr<ScalarJIT> scalarJIT; // opt-in, guarded native tier; initialized without an MLIR/LLVM context
   Arena alloc;
 
   // Frequently used symbols.
@@ -363,6 +372,16 @@ struct EvalState {
   const char *copyString(std::string_view s);
   const StringContext *makeContext(const NixStringContext &c);
 
+  /// Attribute positions are cold metadata. Repeated evaluation of a source attrset reuses
+  /// one range of indices; copying an Attr copies its index without copying or interning a position.
+  /// The MLIR positions property is unchanged by this runtime layout; table indices never enter the IR.
+  PosPtr positionOf(const Attr &a) const { return attributePositions[a.pos]; }
+  PosIdx positionIndex(PosPtr pos);
+  PosIdx positionBase(mlir::nix::AttrsOp op);
+  cp::MutableSeries<PosPtr> attributePositions{{nullptr}};
+  std::unordered_map<PosPtr, PosIdx> dynamicPositions;
+  llvm::DenseMap<mlir::Operation *, PosIdx> attrPositionBases;
+
   // -- Value construction ------------------------------------------------
   void mkInt(Value &v, int64_t n) { if (statsEnabled) ++nVT[unsigned(VType::Int)];  v.type = VType::Int; v.integer = n; }
   void mkFloat(Value &v, double d) { if (statsEnabled) ++nVT[unsigned(VType::Float)];  v.type = VType::Float; v.fpoint = d; }
@@ -385,7 +404,8 @@ struct EvalState {
   /// Builder for attribute sets.
   struct BindingsBuilder {
     BindingsBuilder(EvalState &st) : st(st) {}
-    void insert(Symbol s, Value *v, PosPtr pos = nullptr) { attrs.push_back({s, v, pos}); }
+    void insertIndexed(Symbol s, Value *v, PosIdx pos) { attrs.push_back({s, pos, v}); }
+    void insert(Symbol s, Value *v, PosPtr pos = nullptr) { insertIndexed(s, v, st.positionIndex(pos)); }
     void insert(llvm::StringRef name, Value *v, PosPtr pos = nullptr) { insert(st.symbols.create(name), v, pos); }
     Value &alloc(llvm::StringRef name, PosPtr pos = nullptr) {
       Value *v = st.allocValue();
@@ -416,10 +436,13 @@ struct EvalState {
   std::string_view forceString(Value &v, NixStringContext &ctx, PosPtr pos = nullptr,
                                std::string_view errorCtx = "");
   std::string_view forceStringNoCtx(Value &v, PosPtr pos = nullptr, std::string_view errorCtx = "");
+  /// Force/check a selection base and return its existing, unforced field cell.
+  /// Dynamic-key validation precedes this operation; the caller forces the result.
+  Value *selectField(Value &base, Symbol key, PosPtr pos);
   void copyContext(const Value &v, NixStringContext &ctx);
 
   // -- Calls -----------------------------------------------------------------
-  void callFunction(Value &fun, size_t nargs, Value **args, Value &out, PosPtr pos);
+  void callFunction(Value &fun, size_t nargs, Value **args, Value &out, PosPtr pos, bool allowCurried = true);
   void callFunction(Value &fun, Value &arg, Value &out, PosPtr pos) {
     Value *a = &arg;
     callFunction(fun, 1, &a, out, pos);
@@ -553,8 +576,9 @@ struct EvalState {
   llvm::DenseMap<void *, Slot> slotMap;
   uint64_t nUpdLayered = 0, nUpdMerged = 0, nUpdBase = 0, nUpdTop = 0; // MLNIX_STATS: `//` as a layer / a flat merge, entries not copied / copied
   uint64_t nDemandMinted = 0; // MLNIX_STATS: lambda bodies minted on first call
-  uint64_t nVT[15] = {}; // MLNIX_STATS: values by facet, every write of the tag counted (a force re-types a thunk once);
-                         // [14] is allocations, the rows the value cursor ever appended
+  uint64_t nVT[15] = {}; // MLNIX_STATS: instrumented tag writes, including stack values and repeated retyping;
+                         // [14] alone counts allocated Value rows, not tag writes
+  uint64_t nFrames = 0, nFrameBytes = 0, nFrameSlots = 0; // requested frame storage, excluding arena overhead
   uint64_t nSlotsAssigned = 0, nSlotsNoRead = 0; // MLNIX_STATS: frame cells assigned, and those given to a value with no use at all
   uint64_t nsLower = 0, nsMint = 0; // MLNIX_STATS: time lowering files (analysis of deferred lambdas included) / minting bodies on demand
   llvm::DenseMap<mlir::Region *, RegionInfo *> regionInfos;

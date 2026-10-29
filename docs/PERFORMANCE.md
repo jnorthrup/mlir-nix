@@ -5,6 +5,26 @@ interlocking dialect team-ups." Here is the examination, against what is measure
 against what the families promise. The rule stays: a team-up needs a consumer, and it has to win
 its interleaved A/B with identical result hashes or it goes in the failures column.
 
+## Retaining individual A/B measurements
+
+`scripts/ab.py --samples PATH` creates a new JSONL file before starting any child and refuses to overwrite
+an existing file. Each record is flushed after that child's timing and `wait4` measurement finish; the
+measurement boundaries, rotating A/B order and summary are unchanged. Failed and mismatching samples
+remain available. The file records only explicit arm environment overrides, with credential-like keys
+redacted; inherited environment and source/host provenance belong in the separate launcher manifest.
+
+Records contain `workload`, one-based `round`, `arm` (`A`/`B`), within-pair `position` (`1`/`2`), globally
+increasing one-based `sequence`, `binary`, `environment`, `status`, `returncode`, full `stdout_sha256`,
+`wall_seconds`, `cpu_seconds` (user + system) and `peak_rss_gb` (decimal GB). `status: completed` means the
+child exited, not that its result was accepted: require zero return codes and identical full hashes before
+analyzing a workload. A `startup_error` record includes `error` and null measurements, return code and hash.
+
+Group consecutive records by `(sequence - 1) // 2` to reconstruct pairs independently of summary output;
+`workload` and `round` identify their purpose, while `position` preserves which arm ran first. For each
+accepted pair, compute `100 * (B / A - 1)` for the desired metric, then retain all paired changes and their
+median/range. This differs from the summary's ratio of arm medians. Preserve both measures and the execution
+order when investigating variance; do not replace a noisy median with a selected favorable round.
+
 The figures below that came from `MLNIX_STATS` (calls per lambda, thunks per kind of op, call-site monomorphism, literal-set
 shapes, frame slots, the resolution ladder) were read from counters that are no longer in the evaluator: they are in the history
 before the commit that cut them (`git log -S statCall`), and the tool keeps the op histogram, the `//` layers, the lowering and
@@ -39,15 +59,22 @@ also reads 30 to 50% higher than the tree's in the same profile on both schedule
 
 Two runs of the same expression touch the same files; cold, 29% of the run was the disk (docs/IO.md).
 
-The value heap by facet (MLNIX_STATS, this branch, toplevel demand): 14,424,328 rows allocated (346 MB at
-24 B); the final states are bool 3.82M, app 2.61M, string 2.26M, lambda 1.93M, attrs 1.65M, list 1.21M,
-int 0.51M, primopapp 0.15M -- ~340 MB of rows, ~156 MB on facet-sized rows (the payload words each facet
-needs, no tag column).  The blackhole mark is written 6.03M times; it is a force's transient mark, not a
-row's state.  The missing half is the price of call-by-need, not a layout bug: a force re-types the row in
-place because frames, list cells and applications hold the row's address, so the row must fit the largest
-facet.  A facet pool -- a cursor per facet, rows addressed by index -- would halve the heap but turns every
-reference into an indirection, which the one-bit-per-row experiment already measured and lost.  Measured,
-the 24-B row stands.
+An earlier demand profile allocated 14,424,328 `Value` rows, or 346 MB of requested 24-byte payload storage.
+Its per-type counters (including 3.82M Boolean writes) count instrumented tag writes, including stack temporaries and repeated retyping.
+They are not a census of final heap states. The earlier 340 MB versus 156 MB facet calculation derived from those writes was therefore
+not a valid memory-saving estimate. New statistics report actual Value allocations and requested frame count/bytes/slots separately;
+allocator overhead and retained pages still require measured RSS.
+
+A forced Value keeps its address because frames, lists and applications can share it. A facet pool addressed by index would change
+that reference representation; any proposed space saving must be measured against its extra indirection. The existing Value remains
+24 bytes. The [Boolean experiment](bench/kali/lazy-boolean-20261028/RESULTS.md) demonstrates why native completion counts and fewer
+tag writes alone cannot establish a heap reduction.
+
+A later [builtin result-allocation experiment](bench/kali/builtin-results-20261028/RESULTS.md) removed actual unused rows by choosing
+the result slot only after builtin arity was known. It saved 676,207 / 312,654 Value allocations (16.23 / 7.50 MB of requested storage)
+on NixOS / nixpkgs-73, with unchanged frames and output. JIT-disabled RSS fell 1.1% / 0.4%, but paired median wall time rose 1.4% / 4.4%;
+the JIT-enabled series was also slower. The patch is parked and the source restored. Fewer allocations alone did not justify keeping
+that change in the default path.
 
 ## Where a run goes now (Mac, demand schedule, nixos-toplevel, after the call-path commit)
 

@@ -9,6 +9,8 @@
 //             unless it is a global alias)
 //   nix.fx    effect class: pure | user (runs user code / traces) | fs (reads files)
 //             | env (reads the environment) | store (writes the store) | import
+//             "pure" describes memory effects, not permission to speculate:
+//             primops may still throw, diverge, or force effectful lazy operands.
 //   nix.fold  the primop may be evaluated at compile time on scalar constants
 //   nix.fresh the result is a newly allocated list / attribute set with observable
 //             identity: the op is pure but equal calls must not be merged (a
