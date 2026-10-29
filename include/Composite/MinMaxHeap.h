@@ -116,7 +116,7 @@ private:
   /// so the walk is straight-line code.
   template <class B> constexpr void climb(uint32_t from, B before) {
 #if COMPOSITE_PEDANTIC
-    foldN<kLevels>(Walk{from, true}, [&](Walk w, uint32_t) __attribute__((always_inline)) -> Walk {
+    foldN<kLevels>(Walk{from, true}, [&](Walk w, uint32_t) -> Walk {
       if (!w.live || w.i < 3) return Walk{w.i, false};
       uint32_t g = (w.i - 3) / 4;
       if (!before(a[w.i], a[g])) return Walk{w.i, false};
@@ -154,11 +154,11 @@ private:
       i = m;
     }
 #else
-    foldN<kLevels>(Walk{from, true}, [&](Walk w, uint32_t) __attribute__((always_inline)) -> Walk {
+    foldN<kLevels>(Walk{from, true}, [&](Walk w, uint32_t) -> Walk {
       uint32_t i = w.i, l = 2 * i + 1;
       if (!w.live || l >= n) return Walk{i, false};
-      auto kin = vec<6>([&](uint32_t k) __attribute__((always_inline)) { return k < 2 ? l + k : 4 * i + 1 + k; });
-      uint32_t m = foldN<5>(l, [&](uint32_t best, uint32_t k) __attribute__((always_inline)) -> uint32_t {
+      auto kin = vec<6>([&](uint32_t k) { return k < 2 ? l + k : 4 * i + 1 + k; });
+      uint32_t m = foldN<5>(l, [&](uint32_t best, uint32_t k) -> uint32_t {
         uint32_t x = kin[k + 1];
         return x < n && before(a[x], a[best]) ? x : best;
       });

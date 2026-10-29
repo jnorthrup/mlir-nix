@@ -980,12 +980,12 @@ static void trySimRelease(EvalState &st, Frame *f) {
   st.simFree[n].append(st.allocClock()); ++st.nSimReleased; st.nSimReleasedBytes += sizeof(Frame) + n * sizeof(Value *);
 }
 /// A thunk (or, pinned, a closure) now refers to this frame.
-[[gnu::noinline, gnu::cold]] void EvalState::markCaptured(Frame *f) { ++frameWords(f)[1]; }
-[[gnu::noinline, gnu::cold]] void EvalState::markPinned(Frame *f) { frameWords(f)[0] = 1; }
+void EvalState::markCaptured(Frame *f) { ++frameWords(f)[1]; }
+void EvalState::markPinned(Frame *f) { frameWords(f)[0] = 1; }
 /// A thunk over this frame has been forced: it holds its value now, not the frame.
-[[gnu::noinline, gnu::cold]] void EvalState::statUnref(Frame *f) { uint64_t *w = frameWords(f); if (w[1]) --w[1]; trySimRelease(*this, f); }
+void EvalState::statUnref(Frame *f) { uint64_t *w = frameWords(f); if (w[1]) --w[1]; trySimRelease(*this, f); }
 /// A call has returned.
-[[gnu::noinline, gnu::cold]] void EvalState::statReturn(Frame *f) {
+void EvalState::statReturn(Frame *f) {
   uint64_t *w = frameWords(f);
   w[2] &= ~uint64_t(1);
   if (w[0] || w[1]) ++nSimCaptured;
@@ -1036,13 +1036,13 @@ static Slot::How howOf(Operation *op) {
 }
 
 /// MLNIX_STATS: the first read of a frame slot.  Cold and out of line, so lookup() carries one test and one call, not the census.
-[[gnu::noinline, gnu::cold]] void EvalState::statTouch(Frame *f, RegionInfo *ri, unsigned idx) {
+void EvalState::statTouch(Frame *f, RegionInfo *ri, unsigned idx) {
   ++nSlotsTouched; ++nTouchAt[idx < 16 ? idx : 16]; ++nClsTouched[srcClassOf(ri)];
   reinterpret_cast<uint64_t *>(f->slots + ri->numSlots)[idx / 64] |= uint64_t(1) << (idx % 64);
   ++nTouchedBy[ri->numSlots <= 1 ? 0 : ri->numSlots <= 3 ? 1 : ri->numSlots <= 8 ? 2 : ri->numSlots <= 16 ? 3 : ri->numSlots <= 64 ? 4 : 5];
 }
 
-[[gnu::noinline, gnu::cold]] void EvalState::statHops(Frame *f, RegionInfo *ri, bool hit) {
+void EvalState::statHops(Frame *f, RegionInfo *ri, bool hit) {
   unsigned h = 0;
   while (f && f->info != ri) { f = f->up(); ++h; }
   ++nLookups; nLookupHits += hit; ++nHopHist[h < 5 ? h : 5];
@@ -1353,36 +1353,35 @@ void EvalState::callLambda(Value &fun, Value *arg, Value &out, PosPtr pos) {
 }
 
 //===----------------------------------------------------------------------===//
-// Cold error paths: the messages are built here, out of line, so no string code sits in the hot functions below.
+// Error paths: the messages are built here, in functions of their own, and the compiler decides what to inline.
 //===----------------------------------------------------------------------===//
 
-#define NIX_COLD [[noreturn, gnu::cold, gnu::noinline]]
 static std::string lambdaDesc(nd::LambdaOp lam) {
   if (auto n = lam.getName()) return "function '" + n->str() + "'";
   return "function 'anonymous lambda'";
 }
-NIX_COLD static void throwMissingArg(nd::LambdaOp lam, llvm::StringRef formal, PosPtr pos) {
+[[noreturn]] static void throwMissingArg(nd::LambdaOp lam, llvm::StringRef formal, PosPtr pos) {
   throw EvalError(lambdaDesc(lam) + " called without required argument '" + formal.str() + "'", pos).addTrace(nd::posOfOp(lam), "from call site");
 }
-NIX_COLD static void throwUnexpectedArg(nd::LambdaOp lam, llvm::StringRef name, PosPtr pos) {
+[[noreturn]] static void throwUnexpectedArg(nd::LambdaOp lam, llvm::StringRef name, PosPtr pos) {
   throw EvalError(lambdaDesc(lam) + " called with unexpected argument '" + name.str() + "'", pos).addTrace(nd::posOfOp(lam), "from call site");
 }
-NIX_COLD static void throwUndefinedVariable(const nixfe::Name &n, PosPtr pos) { throw EvalError("undefined variable '" + n.toString() + "'", pos); }
-NIX_COLD static void throwMissingFormal(const nixfe::Name &n, PosPtr pos) { throw EvalError("missing formal argument '" + n.toString() + "'", pos); }
-NIX_COLD static void throwCannotEvaluate(mlir::Operation *o, PosPtr pos) {
+[[noreturn]] static void throwUndefinedVariable(const nixfe::Name &n, PosPtr pos) { throw EvalError("undefined variable '" + n.toString() + "'", pos); }
+[[noreturn]] static void throwMissingFormal(const nixfe::Name &n, PosPtr pos) { throw EvalError("missing formal argument '" + n.toString() + "'", pos); }
+[[noreturn]] static void throwCannotEvaluate(mlir::Operation *o, PosPtr pos) {
   throw EvalError("internal error: cannot evaluate operation '" + o->getName().getStringRef().str() + "'", pos);
 }
-NIX_COLD static void throwAssertFailed(nd::AssertOp a, PosPtr pos) {
+[[noreturn]] static void throwAssertFailed(nd::AssertOp a, PosPtr pos) {
   std::string txt = a.getText() ? a.getText()->str() : "?";
   throw AssertionError("assertion '" + txt + "' failed", pos);
 }
-NIX_COLD static void throwIntOverflow(int64_t n, int64_t m, PosPtr pos) {
+[[noreturn]] static void throwIntOverflow(int64_t n, int64_t m, PosPtr pos) {
   throw EvalError("integer overflow in adding " + std::to_string(n) + " + " + std::to_string(m), pos);
 }
-NIX_COLD static void throwCannotAdd(const char *type, const char *to, PosPtr pos) {
+[[noreturn]] static void throwCannotAdd(const char *type, const char *to, PosPtr pos) {
   throw EvalError(std::string("cannot add ") + type + " to " + to, pos);
 }
-NIX_COLD static void throwAttrMissing(llvm::StringRef name, PosPtr pos) { throw EvalError("attribute '" + name.str() + "' missing", pos); }
+[[noreturn]] static void throwAttrMissing(llvm::StringRef name, PosPtr pos) { throw EvalError("attribute '" + name.str() + "' missing", pos); }
 
 void EvalState::callLambdaIn(Value &fun, RegionInfo *ri, Value *arg, Value &out, PosPtr pos) {
   auto lam = cast<nd::LambdaOp>(fun.thunk.op);
@@ -1555,7 +1554,7 @@ std::string EvalState::shapeOf(RegionInfo *ri, unsigned depth) {
 
 /// `c: x: if c then [x] else []` / `if c then x else {}` called with both arguments: the same work as the two calls with the frames and the
 /// closure between them gone.  Out of line, so the loop that calls it stays small.
-[[gnu::noinline]] void EvalState::applySelector(unsigned shape, RegionInfo *ri, Value **a, Value &dest, PosPtr pos) {
+void EvalState::applySelector(unsigned shape, RegionInfo *ri, Value **a, Value &dest, PosPtr pos) {
   if (forceBool(*a[0], ri->selPos, "while evaluating a branch condition")) {
     if (shape == 2) { mkList(dest, 1); dest.list.elems[0] = a[1]; }
     else { forceValue(*a[1], pos); dest = *a[1]; }
@@ -1567,14 +1566,14 @@ std::string EvalState::shapeOf(RegionInfo *ri, unsigned depth) {
 
 /// The opt-in JIT's saturated chain of 2 to 4 unary lambdas: true when native code ran the whole call.  Out of line: the loop that
 /// asks is the evaluator's hottest, and a run without MLNIX_JIT never gets here.
-[[gnu::noinline]] bool EvalState::jitChain(nd::LambdaOp lambda, RegionInfo *ri, Value &cur, size_t n, Value **args, Value &out, PosPtr pos) {
+bool EvalState::jitChain(nd::LambdaOp lambda, RegionInfo *ri, Value &cur, size_t n, Value **args, Value &out, PosPtr pos) {
   if (!scalarJIT->acceptsSaturated(nullptr) || !scalarJIT->acceptsSaturated(ri->curriedEntry, unsigned(n))) return false;
   // This outer body is reached by the ordinary call as well. Descendant bodies are only inspected after the interpreter oracle has run them.
   auto interpret = [&] { callFunction(cur, n, args, out, pos, false); };
   return scalarJIT->evaluateSaturated(*this, lambda, ri->result, cur.thunk.env, llvm::ArrayRef<Value *>(args, n), out, pos, ri->curriedEntry, interpret);
 }
 
-[[gnu::cold, gnu::noinline]] void EvalState::notAFunction(Value &cur, PosPtr pos) {
+void EvalState::notAFunction(Value &cur, PosPtr pos) {
   throw EvalError(std::string("attempt to call something which is not a function but ") + showType(cur) + ": " + printValueForTrace(cur), pos);
 }
 
@@ -1778,7 +1777,7 @@ void EvalState::evalAttrs(nd::AttrsOp op, Frame *env, Value &out) {
 }
 
 /// Dynamic attributes are inserted one by one with duplicate checks: out of line, where the std::map lives.
-[[gnu::noinline]] void EvalState::evalAttrsDynamic(nd::AttrsOp op, Frame *env, Value &out) {
+void EvalState::evalAttrsDynamic(nd::AttrsOp op, Frame *env, Value &out) {
   auto names = op.getNames();
   auto values = op.getValues();
   auto dynNames = op.getDynNames();

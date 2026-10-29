@@ -1,7 +1,7 @@
 #include <type_traits>
 // Pack.h: every primitive shape unitizes into a Dense, the packed word compares as the tuple does, and a nest reads back.
 // Build like minmax-check.cc.
-#include "Composite/StdBind.h" // structured bindings of a packed pair
+#include "Nix/StdBind.h" // structured bindings of a packed pair
 #include "Composite/Mutable.h"
 #include <cstdio>
 #include <cstdlib>

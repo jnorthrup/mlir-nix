@@ -1,12 +1,12 @@
 //===- StdBind.h - the one place the algebra meets the standard library --------------===//
 //
-// The algebra (Composite/*.h) includes nothing.  A structured binding is the language asking `std::tuple_size`, which only a standard header
+// The algebra (Composite/*.h) includes nothing, so this adapter is on the Nix side of the line.  A structured binding is the language asking `std::tuple_size`, which only a standard header
 // declares, so the glue that lets `auto [x, y] = a |j| b` destructure a packed pair lives here, in the headers of the code that wants it.
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef COMPOSITE_STDBIND_H
-#define COMPOSITE_STDBIND_H
+#ifndef NIX_STDBIND_H
+#define NIX_STDBIND_H
 
 #include "Composite/Pack.h"
 #include "Composite/CharSeries.h"

@@ -24,9 +24,6 @@
   using size_t = __SIZE_TYPE__;                                                                                        \
   using u128 = unsigned __int128;
 
-/// A transform over a handful of registers must dissolve into its caller: a call per fold step costs more than the step.
-#define COMPOSITE_INLINE [[gnu::always_inline]] inline
-
 namespace composite {
 COMPOSITE_TYPES
 
@@ -44,11 +41,11 @@ template <class T> struct RemoveCv<const volatile T> { using type = T; };
 template <class T> using bare_t = typename RemoveCv<remove_ref_t<T>>::type;
 
 /// mv and fw are std::move and std::forward as the casts they are (short names, so an argument of a std type never makes the call ambiguous).
-template <class T> COMPOSITE_INLINE constexpr remove_ref_t<T> &&mv(T &&t) noexcept { return static_cast<remove_ref_t<T> &&>(t); }
-template <class T> COMPOSITE_INLINE constexpr T &&fw(remove_ref_t<T> &t) noexcept { return static_cast<T &&>(t); }
-template <class T> COMPOSITE_INLINE constexpr T &&fw(remove_ref_t<T> &&t) noexcept { return static_cast<T &&>(t); }
+template <class T> constexpr remove_ref_t<T> &&mv(T &&t) noexcept { return static_cast<remove_ref_t<T> &&>(t); }
+template <class T> constexpr T &&fw(remove_ref_t<T> &t) noexcept { return static_cast<T &&>(t); }
+template <class T> constexpr T &&fw(remove_ref_t<T> &&t) noexcept { return static_cast<T &&>(t); }
 /// The old value out, a new one in.
-template <class T, class U> COMPOSITE_INLINE constexpr T exchange(T &x, U &&v) {
+template <class T, class U> constexpr T exchange(T &x, U &&v) {
   T old = mv(x);
   x = fw<U>(v);
   return old;
@@ -117,7 +114,7 @@ template <class T, size_t N> struct Arr {
 /// evaluator prints through LLVM's stream; a test prints through stdio); the trap that follows is a compiler builtin.
 using TodoSink = void (*)(const char *what);
 inline TodoSink todoSink = nullptr;
-[[noreturn, gnu::cold, gnu::noinline]] inline void TODO(const char *what) {
+[[noreturn]] inline void TODO(const char *what) {
   if (todoSink) todoSink(what);
   __builtin_trap();
 }

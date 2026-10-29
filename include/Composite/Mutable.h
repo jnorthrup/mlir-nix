@@ -52,7 +52,7 @@ template <class T> struct Growable {
   }
   void dropLast() { p[--n].~T(); }
   /// Capacity for at least `need` cells: the buffer doubles (4 to start), the cells move across, the old buffer goes back.
-  [[gnu::noinline]] void grow(size_t need) {
+  void grow(size_t need) {
     static_assert(alignof(T) <= 16, "the buffer comes from the default operator new"); // here, where a recursive T is complete
     size_t nc = cap ? size_t(cap) * 2 : 4;
     if (nc < need) nc = need;
@@ -165,7 +165,7 @@ template <class T, uint32_t K = 6> struct Chunked {
   }
   void dropLast() { at(--n).~T(); }
   /// One more chunk: the escape.  Only the table of pointers may be relocated (a memcpy of pointers).
-  [[gnu::noinline]] void openChunk() {
+  void openChunk() {
     if (chunks == tabCap) {
       uint32_t nc = tabCap ? tabCap * 2 : 4;
       T **q = static_cast<T **>(::operator new(size_t(nc) * sizeof(T *)));

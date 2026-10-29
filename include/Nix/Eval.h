@@ -44,7 +44,7 @@ namespace mlir { class PassManager; }
 #include <vector>
 
 #include "Composite/CharSeries.h"
-#include "Composite/StdBind.h"
+#include "Nix/StdBind.h"
 #include "Nix/Arena.h"
 
 namespace nixev {

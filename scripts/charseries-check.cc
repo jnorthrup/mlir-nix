@@ -1,6 +1,6 @@
 // CharSeries, as ../TrikeShed/src/commonMain/kotlin/borg/trikeshed/lib/CharSeries.kt specifies it: windows that never copy and flatten,
 // the cursor verbs, equality by the content of pos..limit, no hash, and the lazy split.  Build like minmax-check.cc.
-#include "Composite/StdBind.h"
+#include "Nix/StdBind.h"
 #include <cstdio>
 #include <cstdlib>
 #include <string>

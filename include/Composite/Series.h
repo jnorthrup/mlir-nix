@@ -130,7 +130,7 @@ template <uint32_t N, class F> struct Marks<Join<Size<N>, F>> {
 /// algebra owns; first-match, contains, argmin, drain and the level walks of the funnel are folds with a state.
 /// The straight-line walk of a constant-size Series: step K, then K+1, halted step by step; the recursion is the unrolling.
 template <uint32_t K, uint32_t N, class S, class T, class F, class H>
-COMPOSITE_INLINE constexpr void unroll(const S &xs, T &acc, F &f, H &halt) {
+constexpr void unroll(const S &xs, T &acc, F &f, H &halt) {
   if constexpr (K < N) {
     if (!halt(acc)) {
       acc = f(mv(acc), xs[K]);
@@ -139,7 +139,7 @@ COMPOSITE_INLINE constexpr void unroll(const S &xs, T &acc, F &f, H &halt) {
   }
 }
 template <class S, class T, class F, class H>
-COMPOSITE_INLINE constexpr T fold(const S &xs, T init, F f, H halt) {
+constexpr T fold(const S &xs, T init, F f, H halt) {
   if constexpr (Marks<S>::constant) {
     unroll<0, Marks<S>::size>(xs, init, f, halt); // a constant size: the walk is straight-line code
   } else {
@@ -147,7 +147,7 @@ COMPOSITE_INLINE constexpr T fold(const S &xs, T init, F f, H halt) {
   }
   return init;
 }
-template <class S, class T, class F> COMPOSITE_INLINE constexpr T fold(const S &xs, T init, F f) {
+template <class S, class T, class F> constexpr T fold(const S &xs, T init, F f) {
   return fold(xs, mv(init), mv(f), [](const T &) { return false; });
 }
 
