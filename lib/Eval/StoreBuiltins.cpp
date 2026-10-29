@@ -129,7 +129,8 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
           else if (i->name == st.s.outputs) {
             st.forceList(*i->value, pos, "");
             auto strs = i->value->values() |cp::α| [&](Value &e) { return str(st.forceStringNoCtx(e, pos)); };
-            std::vector<std::string> ss(strs.begin(), strs.end());
+            composite::MutableSeries<std::string> ss;
+            for (uint32_t k = 0, n = strs.size(); k < n; k++) ss.append(strs[k]);
             handleOutputs(ss);
           }
           static const char *legacy[] = {"allowedReferences", "allowedRequisites", "disallowedReferences",

@@ -54,7 +54,7 @@ struct FilePool {
   composite::Cursor<uint32_t, Pos, mlir::Operation *, uint32_t, ::join::TwInt, nixev::RegionInfo *> rows{PoolCol{}};
   composite::MutableSeries<llvm::StringRef> nameCol; // the names of every row, one after another
   llvm::DenseMap<uint32_t, Seen> seen;
-  std::vector<FreeName> freeCol;
+  composite::MutableSeries<FreeName> freeCol;
 
   FilePool(uint32_t file, std::shared_ptr<Origin> origin, const ParseOptions &po)
       : file(file), origin(std::move(origin)), opts(po) {
@@ -73,7 +73,7 @@ struct FilePool {
   void drain(uint32_t row) { rows.col<PoolCol::Op>().drain(row); }
   void see(uint32_t at, uint32_t end, Pos endPos, llvm::ArrayRef<FreeName> free) {
     seen[at] = Seen{end, endPos, ::join::TwInt(uint32_t(freeCol.size()), uint32_t(free.size()))};
-    freeCol.insert(freeCol.end(), free.begin(), free.end());
+    for (const FreeName &f : free) freeCol.append(f);
   }
 };
 

@@ -590,7 +590,7 @@ struct Set {
   composite::MutableSeries<Def> defs; // in the order written until the set is made, then ordered by name
   composite::MutableSeries<Dyn> dyns;
   composite::MutableSeries<Node> froms;     // the sources of `inherit (e) ...`
-  std::vector<uint32_t> index; // over a handful of defs: open addressing over positions in `defs`, plus one
+  composite::MutableSeries<uint32_t> index; // over a handful of defs: open addressing over positions in `defs`, plus one
   bool rec = false, ordered = true;
   Pos pos;
   Scope *scope = nullptr;  // rec or let: its names, bound before its values are parsed
@@ -1229,13 +1229,13 @@ struct Parser {
   }
   /// The first component of the path of each statement of band r, read once: what the bindings after a `rec` literal
   /// give it is looked for among the statements whose path starts as its own.
-  llvm::DenseMap<uint32_t, std::vector<Name>> firsts;
+  llvm::DenseMap<uint32_t, composite::MutableSeries<Name>> firsts;
   Name firstOf(uint32_t r, uint32_t j) {
     auto [it, fresh] = firsts.try_emplace(r);
     if (fresh)
       for (uint32_t k = 0, n = bands->stmts(r).size(); k < n; k++) {
         Head hd = headOf(r, k);
-        it->second.push_back(hd.path.empty() ? Name() : hd.path[0]);
+        it->second.append(hd.path.empty() ? Name() : hd.path[0]);
       }
     return it->second[j];
   }
@@ -1812,7 +1812,7 @@ struct Parser {
       header(h, ns, Value());
       FilePool::Seen s = seen->second;
       pl.seen.erase(seen);
-      free.names.assign(pl.freeCol.begin() + s.free.first(), pl.freeCol.begin() + s.free.first() + s.free.second());
+      for (uint32_t k = s.free.first(), e = k + s.free.second(); k < e; k++) free.names.push_back(pl.freeCol[k]); // (LLVM's SmallVector)
       jump(s.end, s.endPos);
     } else {
       lambdaBody(h, Value());

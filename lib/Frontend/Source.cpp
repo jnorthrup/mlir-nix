@@ -3,7 +3,7 @@
 #include "Nix/Source.h"
 #include <fcntl.h>
 #include <mutex>
-#include <vector>
+#include "Composite/Mutable.h"
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -13,9 +13,9 @@ namespace nixfe {
 /// A Source is never freed: a Name, and so the IR, may be a slice of it.
 static std::shared_ptr<const Source> retain(std::shared_ptr<const Source> s) {
   static std::mutex m;
-  static auto *all = new std::vector<std::shared_ptr<const Source>>();
+  static auto *all = new composite::MutableSeries<std::shared_ptr<const Source>>();
   std::lock_guard<std::mutex> g(m);
-  all->push_back(s);
+  all->append(s);
   return s;
 }
 
