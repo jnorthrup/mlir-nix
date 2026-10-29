@@ -408,17 +408,20 @@ void registerBuiltins(EvalState &state) {
     st.forceList(*args[1], pos, "while evaluating the second argument (the list of strings to concat) passed to builtins.concatStringsSep");
     // The result is the series of its pieces: strings are windows over their own bytes, the separator one window, coerced elements
     // (paths, sets with outPath) the only text made; one arena buffer, written once.
-    llvm::SmallVector<composite::CharWindow, 16> pieces;
-    std::deque<std::string> owned;
-    for (size_t i = 0; i < args[1]->listSize(); i++) {
-      if (i) pieces.push_back(composite::window(sep));  // a window on the separator's own arena bytes
+    size_t ne = args[1]->listSize(), np = ne ? 2 * ne - 1 : 0, nv = 0;
+    composite::CharWindow stackPieces[32];
+    composite::CharWindow *pieces = np <= 32 ? stackPieces : static_cast<composite::CharWindow *>(st.alloc.Allocate(np * sizeof(composite::CharWindow), alignof(composite::CharWindow)));
+    std::string scratch;
+    for (size_t i = 0; i < ne; i++) {
+      if (i) pieces[nv++] = composite::window(sep);  // a window on the separator's own arena bytes
       Value &e = *args[1]->list.elems[i];
       st.forceValue(e, pos);
-      owned.emplace_back();
-      pieces.push_back(st.coerceToWindow(e, ctx, false, true, pos,
-                                         "while evaluating one element of the list of strings to concat passed to builtins.concatStringsSep", owned.back()));
+      composite::CharWindow w = st.coerceToWindow(e, ctx, false, true, pos,
+          "while evaluating one element of the list of strings to concat passed to builtins.concatStringsSep", scratch);
+      if (w.size() && w.data() == scratch.data()) w = composite::CharWindow(st.copyString(scratch), w.size()); // coerced text lives in the arena
+      pieces[nv++] = w;
     }
-    st.mkStringOf(v, pieces, st.makeContext(ctx));
+    st.mkStringOf(v, llvm::ArrayRef<composite::CharWindow>(pieces, nv), st.makeContext(ctx));
   });
   S.addPrimOp("__replaceStrings", 3, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[0], pos, "while evaluating the first argument passed to builtins.replaceStrings");

@@ -49,7 +49,7 @@ struct Prefaulter {
     if (disabled) return;
     {
       std::lock_guard<std::mutex> g(m);
-      queue.emplace_back(p, n);
+      queue.append({p, n});
     }
     cv.notify_one();
   }
@@ -58,9 +58,9 @@ struct Prefaulter {
       std::pair<char *, size_t> job;
       {
         std::unique_lock<std::mutex> g(m);
-        if (!cv.wait(g, st, [this] { return !queue.empty(); })) return; // closed, and empty
-        job = queue.front();
-        queue.pop_front();
+        if (!cv.wait(g, st, [this] { return head < queue.size(); })) return; // closed, and empty
+        job = queue.drain(head++);
+        if (head == queue.size()) { queue.clear(); head = 0; } // drained: start over
       }
       touch(job.first, job.second);
     }
@@ -76,7 +76,8 @@ struct Prefaulter {
   const bool disabled = getenv("MLNIX_NO_PREFAULT") != nullptr;
   std::mutex m;
   std::condition_variable_any cv;
-  std::deque<std::pair<char *, size_t>> queue;
+  composite::MutableSeries<std::pair<char *, size_t>, composite::Chunked<std::pair<char *, size_t>>> queue; // appended; the helper drains from `head`
+  uint32_t head = 0;
   std::jthread worker = disabled ? std::jthread() : std::jthread([this](std::stop_token st) { run(st); }); // last: built last, stopped first
 };
 

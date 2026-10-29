@@ -653,7 +653,7 @@ struct EvalState {
   // paid a hash probe (lookup, operand and evalTail were 16.6% of the CPU of a NixOS evaluation on Kali).  A slot is rewritten in place
   // when a value's address is indexed again, so the cache never holds a stale one.
   llvm::DenseMap<void *, Slot *> slotMap;
-  std::deque<Slot> slotStore;
+  cp::MutableSeries<Slot, cp::Chunked<Slot>> slotStore; // a Slot never moves: the slots are held by address
   struct SlotCacheEntry { void *key = nullptr; Slot *slot = nullptr; };
   static constexpr size_t kSlotCache = 8192;
   SlotCacheEntry slotCache[kSlotCache];
@@ -674,7 +674,7 @@ struct EvalState {
 #endif
   void setSlot(void *key, const Slot &slot) {
     Slot *&p = slotMap[key];
-    if (!p) { slotStore.push_back(slot); p = &slotStore.back(); }
+    if (!p) { slotStore.append(slot); p = &slotStore.back(); }
     else *p = slot;
   }
   uint64_t nUpdLayered = 0, nUpdMerged = 0, nUpdBase = 0, nUpdTop = 0; // MLNIX_STATS: `//` as a layer / a flat merge, entries not copied / copied

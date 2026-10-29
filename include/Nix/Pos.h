@@ -19,6 +19,7 @@
 #define NIX_POS_H
 
 #include <cstdint>
+#include "Composite/Mutable.h"
 #include <deque>
 #include <mutex>
 #include <string>
@@ -57,7 +58,7 @@ struct FileTable {
   uint32_t add(const std::string &name) {
     std::lock_guard<std::mutex> g(m);
     auto [it, fresh] = ids.try_emplace(name, uint32_t(names.size() + 1));
-    if (fresh) names.push_back(name);
+    if (fresh) names.append(name);
     return it->second;
   }
   std::string name(uint32_t id) const {
@@ -67,7 +68,7 @@ struct FileTable {
 
   mutable std::mutex m;
   std::unordered_map<std::string, uint32_t> ids;
-  std::deque<std::string> names;
+  composite::MutableSeries<std::string, composite::Chunked<std::string>> names;
 };
 
 } // namespace nixfe

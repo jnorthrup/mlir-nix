@@ -148,13 +148,13 @@ struct Lexer : public lex::Rules {
   const ParseOptions &opts;
   /// Texts that are not slices of the input (unescaped strings, `''$`, ...), appended and never
   /// mutated.  Deque: entries do not move.  The four fixed ones are kFixed (a span of second() 1).
-  std::deque<std::string> derived;
+  composite::MutableSeries<std::string, composite::Chunked<std::string>> derived;
   static constexpr std::string_view kFixed[] = {"$", "''", "'", "~/"};
   enum Fixed : uint32_t { F_DOLLAR, F_TWO_QUOTES, F_QUOTE, F_HOME };
   void setSlice(Token &t, size_t from, size_t to) { t.span = join::TwInt(uint32_t(from), uint32_t(to)); }
   void setFixed(Token &t, Fixed f) { t.derived = true; t.span = join::TwInt(uint32_t(f), 1); }
   void setDerived(Token &t, std::string s) {
-    derived.push_back(std::move(s));
+    derived.append(std::move(s));
     t.derived = true;
     t.span = join::TwInt(uint32_t(derived.size() - 1), 0);
   }
@@ -681,10 +681,11 @@ struct Parser {
     for (uint32_t i = 0; i < names.second(); i++) bindTo(lex, Name::of(pool.nameCol[names.first() + i]), caps[withs + i]);
     // `with` never binds lexically and a lexical binding beats every `with`, so the flat map plus the with-chain
     // (outermost pushed first, so the walk meets the innermost first) is the same scope extensionally.
-    std::deque<Scope> frames;
+    composite::MutableSeries<Scope, composite::Chunked<Scope>> frames;
     sc = &lex;
     for (unsigned i = withs; i-- > 0;) {
-      Scope &f = frames.emplace_back();
+      frames.emplace();
+      Scope &f = frames.back();
       f.parent = sc;
       f.isWith = true;
       f.with = caps[i];
@@ -717,9 +718,9 @@ struct Parser {
   /// the body of such a lambda when that is a lambda too (`self: super: ...`).  Its body is parsed once, not skimmed
   /// at the import and parsed again at the call.
   uint32_t eagerAt = ~0u;
-  std::deque<Set> sets;
+  composite::MutableSeries<Set, composite::Chunked<Set>> sets; // a Set never moves: sets are held by address while more are made
   composite::MutableSeries<uint32_t> freeSets;
-  std::deque<Scope> recScopes; // a rec set's scope lives until the set is made
+  composite::MutableSeries<Scope, composite::Chunked<Scope>> recScopes; // a rec set's scope lives until the set is made
   /// Every binding of the parse: the scopes' rows, a fixed buffer that only grows while the parse runs.
   composite::Cursor<Name, uint32_t, Value> binds{BindCol{}};
   /// Show: the text of each node printed, a row each.
@@ -1297,7 +1298,7 @@ struct Parser {
       freeSets.pop();
     } else {
       si = uint32_t(sets.size());
-      sets.emplace_back();
+      sets.emplace();
     }
     Set &s = sets[si];
     s.pos = pos;
@@ -1608,7 +1609,8 @@ struct Parser {
       si = newSet(pos, into->values, into->outer);
       sets[si].into = into;
     } else if (rec) {
-      Scope &rs = recScopes.emplace_back();
+      recScopes.emplace();
+      Scope &rs = recScopes.back();
       rs.parent = sc;
       if (mode != Mode::Show) {
         adds(band, 0, {}, rs); // its names: its statements', then those that bindings after it give it
