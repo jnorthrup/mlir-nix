@@ -968,34 +968,44 @@ void registerBuiltins(EvalState &state) {
   });
   S.addPrimOp("__partition", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.partition");
-    composite::MutableSeries<Value *> right, wrong;
-    for (Value *e : args[1]->items()) {
-      st.forceValue(*e, pos);
+    // Each element's side, in stack bytes (the arena past 64), then two lists of exactly their sizes filled in list order: no heap series.
+    size_t n = args[1]->listSize(), nr = 0;
+    Value **elems = args[1]->list.elems;
+    bool stackSide[64];
+    bool *side = n <= 64 ? stackSide : static_cast<bool *>(st.alloc.Allocate(n, 1));
+    for (size_t i = 0; i < n; i++) {
+      st.forceValue(*elems[i], pos);
       Value r;
-      st.callFunction(*args[0], *e, r, pos);
-      if (st.forceBool(r, pos, "while evaluating the return value of the partition function passed to builtins.partition")) right.append(e);
-      else wrong.append(e);
+      st.callFunction(*args[0], *elems[i], r, pos);
+      side[i] = st.forceBool(r, pos, "while evaluating the return value of the partition function passed to builtins.partition");
+      nr += side[i];
     }
     EvalState::BindingsBuilder bb(st);
     Value &rv = bb.alloc(st.s.right);
-    st.mkList(rv, right);
+    st.mkList(rv, nr);
     Value &wv = bb.alloc(st.s.wrong);
-    st.mkList(wv, wrong);
+    st.mkList(wv, n - nr);
+    for (size_t i = 0, a = 0, b = 0; i < n; i++) (side[i] ? rv.list.elems[a++] : wv.list.elems[b++]) = elems[i];
     st.mkAttrs(v, bb.finish());
   });
   S.addPrimOp("__groupBy", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.groupBy");
-    std::map<Symbol, composite::MutableSeries<Value *>> m;
+    // (group, element) pairs in list order, in one buffer; a stable sort by group keeps each group's elements in list order: no tree.
+    struct KV { Symbol key; Value *value; };
+    composite::MutableSeries<KV> kv;
+    kv.reserve(args[1]->listSize());
     for (Value *e : args[1]->items()) {
       Value r;
       st.callFunction(*args[0], *e, r, pos);
-      Symbol key = st.symbols.create(st.forceStringNoCtx(r, pos, "while evaluating the return value of the grouping function passed to builtins.groupBy"));
-      m[key].append(e);
+      kv.append({st.symbols.create(st.forceStringNoCtx(r, pos, "while evaluating the return value of the grouping function passed to builtins.groupBy")), e});
     }
+    cp::sortRows(kv.data(), kv.size(), [](const KV &x, const KV &y) { return x.key < y.key; });
     EvalState::BindingsBuilder bb(st);
-    for (auto &[k, vals] : m) {
-      Value &l = bb.alloc(k);
-      st.mkList(l, vals);
+    for (uint32_t i = 0, n = kv.size(); i < n;) {
+      uint32_t j = i;
+      while (j < n && kv[j].key == kv[i].key) j++;
+      st.mkList(bb.alloc(kv[i].key), cp::series(kv.data() + i, j - i) |cp::α| [](const KV &x) { return x.value; });
+      i = j;
     }
     st.mkAttrs(v, bb.finish());
   });
