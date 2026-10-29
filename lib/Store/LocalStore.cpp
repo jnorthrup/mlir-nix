@@ -28,6 +28,7 @@
 #include <sys/time.h>
 #include <sys/wait.h>
 #include <condition_variable>
+#include <exception>
 #include <mutex>
 #include <thread>
 #include <unistd.h>
