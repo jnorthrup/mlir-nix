@@ -636,7 +636,7 @@ struct EvalState {
   // a recycled frame is almost always still in L1 (docs/FRAME-BYTES.md: 97 to 98% of reuses are within 32 KiB of allocation).
   static constexpr unsigned kRecycleMax = 64;
   Frame *freeFrames[kRecycleMax] = {};
-  bool recycleOn = true;  // MLNIX_NORECYCLE turns it off
+  bool recycleOn = false;  // MLNIX_RECYCLE=1 turns it on: it trades a little time for memory (docs/FRAME-BYTES.md)
   void recycleFrame(Frame *f) {
     unsigned n = f->info->numSlots;
     if (n >= kRecycleMax) return;

@@ -82,8 +82,18 @@ arena and have not been accounted by use.
 A frame that returns with no thunk or closure made over it can never be reached again. `Frame` carries a captured bit in the low bit of
 its `up` pointer, set at the only two places a frame pointer enters a value (a thunk or closure cell in `lookup`, a closure in
 `evalDefinition`); such a frame is pushed on a per-slot-count free stack when its call returns normally, and `newFrame` reuses it.
-`MLNIX_NORECYCLE` turns it off. On the Mac (relative, minimum of 7): peak RSS 1,190 to 1,153 MB on nixos-toplevel (-3.1%), 1,097 to
-1,074 MB on nixpkgs-drvs (-2.1%), as the simulation below predicted; time unchanged. Output is identical with it on and off.
+It is opt-in, `MLNIX_RECYCLE=1`, because on Kali it trades time for memory. Same boot, three interleaved rounds, demand, minimum of 5,
+against live Nix:
+
+| | nixos-toplevel | peak RSS | nixpkgs-73 | peak RSS |
+|---|---|---|---|---|
+| recycling on | 3.84, 3.67, 3.71 s | 1,141 MB | 3.32, 3.37, 3.34 s | 1,090 MB |
+| recycling off | 3.64, 3.64, 3.62 s | 1,177 to 1,180 MB | 3.38, 3.30, 3.36 s | 1,112 to 1,113 MB |
+
+The memory saving is exact and what the simulation below predicted (-36 to -39 MB, -22 MB). The time is not: on nixos-toplevel every round
+with recycling is slower, by 1 to 6%; on nixpkgs-73 there is no difference. The arena's prefault thread already makes fresh memory cheap,
+so reusing an L1-hot frame saves no bandwidth, and the captured-bit store on every thunk and the free-list pop cost a little. With it off,
+the captured bit is not even written. Output is identical with it on and off.
 
 `MLNIX_STATS=1` simulates allocators that would go further. Each keeps a free list per slot count and records how many bytes were
 allocated between a frame's release and its reuse:

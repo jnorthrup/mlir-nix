@@ -279,7 +279,7 @@ EvalState::EvalState(EvalSettings st, std::shared_ptr<nixstore::Store> store)
   settings.mapSources = !getenv("MLNIX_NOMMAP"); // ablation switch: read and copy every file, as before
   stackFramesOn = !getenv("MLNIX_NOSTACKFRAMES"); // ablation switch: every call's frame is in the arena, as before
   composite::todoSink = [](const char *what) { llvm::errs() << "TODO: " << what << "\n"; };
-  recycleOn = !getenv("MLNIX_NORECYCLE"); // ablation switch: every frame is fresh arena memory, as before
+  recycleOn = getenv("MLNIX_RECYCLE") != nullptr; // opt-in: -2 to -3% peak memory, +1 to +4% time on Kali (docs/FRAME-BYTES.md)
   selectorsOn = !getenv("MLNIX_NOSELECTORS"); // ablation switch: every curried selector runs as two calls, as before
   inPlaceEnabled = !getenv("MLNIX_NOINPLACE"); // ablation switch: every operand gets a thunk, as before
   settings.deferBodies = getenv("MLNIX_DEFER") != nullptr; // sea-of-nodes schedule: mint bodies on first call
@@ -926,7 +926,7 @@ Value *EvalState::lookup(Frame *f, mlir::Value v) {
   nv->type = s.how == Slot::Lambda ? VType::Lambda : VType::Thunk;
   nv->thunk.op = op;
   nv->thunk.env = f;
-  if (f) f->capture();
+  if (recycleOn && f) f->capture();
   if (statsEnabled && f) [[unlikely]] {
     if (nv->type == VType::Lambda) markPinned(f);
     else if (isProjection(op)) ++nProjThunks;          // in the simulated world this thunk holds (base cell, path), not the frame
@@ -949,7 +949,7 @@ void EvalState::evalDefinition(mlir::Operation *def, Frame *f, Value &dest) {
     dest.type = VType::Lambda; if (statsEnabled) ++nVT[unsigned(VType::Lambda)];
     dest.thunk.op = def;
     dest.thunk.env = f;
-    if (f) f->capture();
+    if (recycleOn && f) f->capture();
     if (statsEnabled && f) [[unlikely]] markPinned(f);
   } else {
     evalOp(def, f, dest);
