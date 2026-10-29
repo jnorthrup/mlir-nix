@@ -1798,14 +1798,26 @@ static size_t sortRowsFirstWins(Attr *rows, size_t n) {
   return cp::uniqueFirst(rows, n, attrName);
 }
 
+// The operands of the hottest ops, read from the op directly: the generated accessors (getBase, getDynKeys, getArgs, ...) each sum the operand
+// segments in an out-of-line call, two or three times an evaluation.  A select's segments are (base, dynamic keys, default); an attribute set's
+// (values, dynamic names, dynamic values); has_attr, formal and apply are one operand and then the rest.
+struct SelectOperands { mlir::Value base; mlir::OperandRange dyn; mlir::Value def; };
+static SelectOperands selectOperands(nd::SelectOp sel) {
+  const auto &sz = sel.getProperties().operandSegmentSizes;
+  mlir::OperandRange all = sel->getOperands();
+  return {all[0], all.slice(1, unsigned(sz[1])), sz[2] ? all[1 + unsigned(sz[1])] : mlir::Value()};
+}
+static mlir::OperandRange attrsValues(nd::AttrsOp a) { return a->getOperands().take_front(unsigned(a.getProperties().operandSegmentSizes[0])); }
+static bool attrsDynamic(nd::AttrsOp a) { return a.getProperties().operandSegmentSizes[1] != 0; }
+
 void EvalState::evalAttrs(nd::AttrsOp op, Frame *env, Value &out) {
-  if (!op.getDynNames().empty()) return evalAttrsDynamic(op, env, out);
+  if (attrsDynamic(op)) return evalAttrsDynamic(op, env, out);
   auto names = op.getNames();
   size_t n = names.size();
   if (statsEnabled) [[unlikely]] { ++nBuilders; nBuilderRows += n; if (n > 12) { ++nBuildersBig; nBuilderBigRows += n; } }
   // A set of size 0 is the one constant: every empty set is the same cell.
   if (n == 0) { if (statsEnabled) ++nEmptyShared; return mkAttrs(out, vEmptyAttrs.attrs); }
-  auto values = op.getValues();
+  mlir::OperandRange values = attrsValues(op);
   auto positions = op.getPositions(); // one position word per name, or none
   PosIdx posBase = positionBase(op);
   // The names are known, so the set is allocated at its size and the rows are written where they stay, already in name order (the literal's
@@ -1973,10 +1985,9 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
       })
       .Case<nd::AttrsOp>([&](nd::AttrsOp a) { evalAttrs(a, env, out); })
       .Case<nd::SelectOp>([&](nd::SelectOp sel) {
-        mlir::OperandRange dyn = sel.getDynKeys();
+        auto [base, dyn, def] = selectOperands(sel);
         Value tb;
-        Value *cur = dyn.empty() ? &operand(env, sel.getBase(), tb) : lookup(env, sel.getBase());
-        mlir::Value def = sel.getDefaultValue();
+        Value *cur = dyn.empty() ? &operand(env, base, tb) : lookup(env, base);
         unsigned nextDyn = 0;
         for (const nixfe::Name &comp : sel.getPath()) {
           Symbol sym = pathSymbol(comp, dyn, nextDyn, env, pos);
@@ -1996,9 +2007,9 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
         copyFrom(cur);
       })
       .Case<nd::HasAttrOp>([&](nd::HasAttrOp h) {
-        mlir::OperandRange dyn = h.getDynKeys();
+        mlir::OperandRange dyn = h->getOperands().drop_front(1);
         Value tb;
-        Value *cur = dyn.empty() ? &operand(env, h.getBase(), tb) : lookup(env, h.getBase());
+        Value *cur = dyn.empty() ? &operand(env, h->getOperand(0), tb) : lookup(env, h->getOperand(0));
         unsigned nextDyn = 0;
         for (const nixfe::Name &comp : h.getPath()) {
           forceValue(*cur, pos);
@@ -2011,8 +2022,8 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
         mkBool(out, true);
       })
       .Case<nd::ApplyOp>([&](nd::ApplyOp ap) {
-        Value *f = lookupImpl(env, ap.getCallee(), true);  // callFunction forces the callee before anything else it does
-        auto as = ap.getArgs();
+        Value *f = lookupImpl(env, ap->getOperand(0), true);  // callFunction forces the callee before anything else it does
+        mlir::OperandRange as = ap->getOperands().drop_front(1);
         auto cells = as |cp::α| [&](mlir::Value a) { return lookup(env, a); }; // the argument cells, a series; drained into a stack array (arena past six)
         size_t na = cells.size();
         Value *buf[6];
@@ -2102,7 +2113,7 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
         throwUndefinedVariable(w.getName(), pos);
       })
       .Case<nd::FormalOp>([&](nd::FormalOp f) {
-        Value *arg = lookup(env, f.getArg());
+        Value *arg = lookup(env, f->getOperand(0));
         forceAttrs(*arg, pos);
         if (const Attr *a = arg->attrs->get(symbolOf(f.getName()))) return copyFrom(a->value);
         if (!f.getDefaultValue()) throwMissingFormal(f.getName(), pos);
