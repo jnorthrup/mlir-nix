@@ -145,7 +145,6 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
             st.warn("In derivation '" + drvName + "': setting structured attributes via '__json' is deprecated, and may be disallowed in future versions of Nix. Set '__structuredAttrs = true' instead.");
             drv.structuredAttrs = s;
           } else {
-            drv.env[key] = s;
             if (i->name == st.s.builder) drv.builder = s;
             else if (i->name == st.s.system) drv.platform = s;
             else if (i->name == st.s.outputHash) outputHash = s;
@@ -158,6 +157,9 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
               while (is >> w) ss.append(w);
               handleOutputs(ss);
             }
+            // Last, once nothing above can throw: the attributes come in name order, the map's own, so the key and the value move in at the
+            // end with no search and no copy (a build script was copied twice here).
+            drv.env.emplace_hint(drv.env.end(), std::move(key), std::move(s));
           }
         }
       } catch (EvalError &e) {
