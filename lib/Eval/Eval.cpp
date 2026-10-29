@@ -2198,11 +2198,13 @@ void evalHasAttr(EvalState &st, Node *n, Frame *env, Value &out) {
   Value tb;
   Value *cur = n->nDyn ? st.lookup(env, x[0]) : &st.operand(env, x[0], tb);
   unsigned nextDyn = 0;
+  bool first = true; // the first name has the node's row guess
   for (const nixfe::Name &comp : cast<nd::HasAttrOp>(n->def).getPath()) {
     st.forceValue(*cur, pos);
     Symbol sym = st.pathSymbol(comp, dyn, nextDyn, env, pos);
     if (cur->type != VType::Attrs) return st.mkBool(out, false);
-    const Attr *a = cur->attrs->get(sym);
+    const Attr *a = first ? cur->attrs->getGuess(sym, n->rowGuess) : cur->attrs->get(sym);
+    first = false;
     if (!a) return st.mkBool(out, false);
     cur = a->value;
   }
@@ -2266,7 +2268,7 @@ void evalFormal(EvalState &st, Node *n, Frame *env, Value &out) {
   PosPtr pos = n->pos();
   Value *arg = st.lookup(env, n->operands[0]);
   st.forceAttrs(*arg, pos);
-  if (const Attr *a = arg->attrs->get(st.symbolOf(f.getName()))) return copyFrom(st, a->value, out, pos);
+  if (const Attr *a = arg->attrs->getGuess(st.symbolOf(f.getName()), n->rowGuess)) return copyFrom(st, a->value, out, pos);
   if (n->nOperands < 2) throwMissingFormal(f.getName(), pos);
   copyFrom(st, st.lookupImpl(env, n->operands[1], true), out, pos);
 }

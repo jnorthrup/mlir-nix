@@ -351,7 +351,7 @@ struct Node {
   mlir::Operation *def;     // the op that defines the value; a block argument's lambda (kind Arg)
   union {
     const PrimOp *prim = nullptr; // Prim: what the op runs
-    uint32_t rowGuess;            // Select: the row its first name was found at last (Bindings::getGuess)
+    uint32_t rowGuess;            // Select, HasAttr, Formal: the row its (first) name was found at last (Bindings::getGuess)
   };
   EvalFn eval = nullptr;    // what evaluating the op is
   static constexpr uint8_t kDefault = 1, kDynamic = 1, kForceString = 1;
