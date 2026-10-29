@@ -263,15 +263,16 @@ void Store::cacheDerivation(const std::string &drvPath, const Derivation &drv) {
   drvCache[drvPath] = drv;
 }
 
-std::string Store::writeDerivation(const Derivation &drv) {
-  std::string path = computeDerivationPath(drv);
-  drvCache[path] = drv;
-  if (settings.readOnly) return path;
-  addTextToStore(drv.name + ".drv", drv.unparse(false), drvReferences(drv));
+std::string Store::writeDerivation(Derivation &&drv) {
+  std::string text = drv.unparse(false); // once: its hash names the path, and it is what a store that writes stores
+  std::set<std::string> refs = drvReferences(drv);
+  std::string path = makeTextPath(settings.storeDir, drv.name + ".drv", hashString(HashAlgo::SHA256, text), refs);
+  const Derivation &kept = drvCache.insert_or_assign(path, std::move(drv)).first->second;
+  if (!settings.readOnly) addTextToStore(kept.name + ".drv", text, refs);
   return path;
 }
 
-Derivation Store::readDerivation(const std::string &drvPath) {
+const Derivation &Store::readDerivation(const std::string &drvPath) {
   auto it = drvCache.find(drvPath);
   if (it != drvCache.end()) return it->second;
   std::string name = storePathName(drvPath);
@@ -279,9 +280,7 @@ Derivation Store::readDerivation(const std::string &drvPath) {
     throw Error("store path '" + baseNameOf(drvPath) + "' is not a valid derivation path");
   std::string real = toReal(drvPath);
   if (!pathExists(real)) throw Error("path '" + drvPath + "' is not valid");
-  Derivation d = parseDerivation(readFile(real), name.substr(0, name.size() - 4));
-  drvCache[drvPath] = d;
-  return d;
+  return drvCache.insert_or_assign(drvPath, parseDerivation(readFile(real), name.substr(0, name.size() - 4))).first->second;
 }
 
 std::map<std::string, Hash> Store::hashDerivationModulo(const Derivation &drv, bool maskOutputs) {
@@ -347,7 +346,7 @@ std::set<std::string> Store::computeFSClosure(const std::set<std::string> &paths
     }
     if (includeOutputs && p.size() > 4 && p.substr(p.size() - 4) == ".drv") {
       try {
-        Derivation d = readDerivation(p);
+        const Derivation &d = readDerivation(p);
         for (auto &[n, o] : d.outputs)
           if (!o.path.empty() && isValidPath(o.path)) todo.append(o.path);
       } catch (Error &) {

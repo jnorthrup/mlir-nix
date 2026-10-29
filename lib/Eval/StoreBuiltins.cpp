@@ -174,7 +174,7 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
         for (auto &j : refs) {
           drv.inputSrcs.insert(j);
           if (isDrvPath(j)) {
-            auto dd = st.store->readDerivation(j);
+            const auto &dd = st.store->readDerivation(j);
             for (auto &[n, o] : dd.outputs) drv.inputDrvs[j].insert(n);
           }
         }
@@ -230,13 +230,13 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
 
     std::string drvPath;
     try {
-      drvPath = st.store->writeDerivation(drv);
+      drvPath = st.store->writeDerivation(std::move(drv));
     } catch (nixstore::Error &e) {
       throw EvalError(e.what(), pos);
     }
     EvalState::BindingsBuilder bb(st);
     st.mkString(bb.alloc(st.s.drvPath), drvPath, NixStringContext{"=" + drvPath});
-    addOutputsToResult(st, bb, drvPath, drv);
+    addOutputsToResult(st, bb, drvPath, st.store->readDerivation(drvPath)); // the derivation as the store keeps it, not a copy
     st.mkAttrs(v, bb.finish());
   } catch (EvalError &e) {
     e.addTrace(nullptr, "while evaluating derivation '" + drvName + "'\n  whose name attribute is located at " +

@@ -129,6 +129,29 @@ template <class T, uint32_t N> struct Inline {
   constexpr void dropLast() { --n; }
 };
 
+/// The borrowed body: cells over memory the caller owns (an arena, a stack array), a count and a capacity.  Full is full, and nothing is
+/// freed: the memory's owner decides its life, so a series that lives as long as an arena puts its cells there instead of on the heap.
+template <class T> struct Over {
+  static constexpr bool growable = false;
+  static constexpr bool contiguous = true;
+  T *p = nullptr;
+  uint32_t n = 0, cap = 0;
+  constexpr Over() = default;
+  constexpr Over(T *mem, uint32_t capacity) : p(mem), cap(capacity) {}
+  constexpr T *base() { return p; }
+  constexpr const T *base() const { return p; }
+  constexpr T &at(uint32_t i) { return p[i]; }
+  constexpr const T &at(uint32_t i) const { return p[i]; }
+  constexpr T *first() { return p; }
+  constexpr T *last() { return p + n; }
+  constexpr const T *first() const { return p; }
+  constexpr const T *last() const { return p + n; }
+  constexpr uint32_t count() const { return n; }
+  constexpr bool room() const { return n < cap; }
+  constexpr void put(T v) { ::new (At{p + n}) T(mv(v)); ++n; }
+  constexpr void dropLast() { p[--n].~T(); }
+};
+
 /// The chunked body: a table of fixed chunks of 2^K cells.  A cell never moves: when a chunk is full the next append opens a new one (the
 /// overflow escapes into it), and only the small table of chunk pointers is ever relocated.  So a pointer to a cell stays good across any
 /// number of appends, which is what a std::deque was used for, and nothing is copied when the series grows.  A series of chunks reads as
@@ -214,6 +237,8 @@ private:
 
 template <class T, class Body = Growable<T>> struct MutableSeries : Body {
   constexpr MutableSeries() = default;
+  /// A series over a body made elsewhere: Over(memory, capacity) borrows cells the caller owns.
+  constexpr explicit MutableSeries(Body b) : Body(mv(b)) {}
   explicit MutableSeries(size_t n) requires Body::growable { this->sizeTo(n); }
   MutableSeries(size_t n, const T &v) requires Body::growable { this->fill(n, v); }
   /// A brace list of cells, `{"a", "b"}`: appended in order.  Not for integer cells, where `(n, v)` already means n copies of v.

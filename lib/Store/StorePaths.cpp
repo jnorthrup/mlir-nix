@@ -655,27 +655,34 @@ std::string Derivation::unparse(bool maskOutputs,
   }
   s += "],[";
   first = true;
-  // The environment in key order, plus `__json` when there are structured attributes: views, not a copy of every value.
-  std::map<std::string_view, std::string_view> envAll;
+  // The environment in key order, with `__json` (the structured attributes, which win over an env entry of that name) at its place in
+  // that order: env is a sorted map, so the walk slots it in; nothing is copied and no map is built.
   size_t envBytes = 0;
-  for (auto &[k, v] : env) {
-    envAll.emplace_hint(envAll.end(), k, v);
-    envBytes += k.size() + v.size() + 8;
-  }
-  if (structuredAttrs) {
-    envAll["__json"] = *structuredAttrs;
-    envBytes += structuredAttrs->size() + 16;
-  }
+  for (auto &[k, v] : env) envBytes += k.size() + v.size() + 8;
+  if (structuredAttrs) envBytes += structuredAttrs->size() + 16;
   s.reserve(s.size() + envBytes);
-  for (auto &[k, v] : envAll) {
+  auto isOutput = [&](std::string_view k) {
+    for (auto &[name, o] : outputs)
+      if (name == k) return true;
+    return false;
+  };
+  auto entry = [&](std::string_view k, std::string_view v) {
     if (!first) s += ',';
     first = false;
     s += '(';
     appendEscaped(s, k);
     s += ',';
-    appendEscaped(s, maskOutputs && outputs.count(std::string(k)) ? std::string_view() : v);
+    appendEscaped(s, maskOutputs && isOutput(k) ? std::string_view() : v);
     s += ')';
+  };
+  constexpr std::string_view kJson = "__json";
+  bool json = structuredAttrs.has_value();
+  for (auto &[k, v] : env) {
+    if (json && std::string_view(k) >= kJson) { entry(kJson, *structuredAttrs); json = false; }
+    if (structuredAttrs && k == kJson) continue;
+    entry(k, v);
   }
+  if (json) entry(kJson, *structuredAttrs);
   s += "])";
   return s;
 }

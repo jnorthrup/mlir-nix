@@ -688,13 +688,20 @@ void registerBuiltins(EvalState &state) {
   S.addPrimOp("removeAttrs", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceAttrs(*args[0], pos, "while evaluating the first argument passed to builtins.removeAttrs");
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.removeAttrs");
-    std::set<Symbol> rm;
-    for (size_t i = 0; i < args[1]->listSize(); i++)
-      rm.insert(st.symbols.create(st.forceStringNoCtx(*args[1]->list.elems[i], pos, "while evaluating the values of the second argument passed to builtins.removeAttrs")));
+    // The names to drop, sorted once; the set's rows are sorted by name too, so dropping them is one merge walk, no tree.
+    size_t nr = args[1]->listSize();
+    Symbol stackRm[16];
+    Symbol *rm = nr <= 16 ? stackRm : static_cast<Symbol *>(st.alloc.Allocate(nr * sizeof(Symbol), alignof(Symbol)));
+    for (size_t i = 0; i < nr; i++)
+      rm[i] = st.symbols.create(st.forceStringNoCtx(*args[1]->list.elems[i], pos, "while evaluating the values of the second argument passed to builtins.removeAttrs"));
+    cp::sortRows(rm, nr, [](Symbol x, Symbol y) { return x < y; });
     Bindings *b = st.allocBindings(args[0]->attrs->size());
-    size_t n = 0;
-    for (auto &a : *args[0]->attrs)
-      if (!rm.count(a.name)) b->attrs[n++] = a;
+    size_t n = 0, k = 0;
+    for (auto &a : *args[0]->attrs) {
+      while (k < nr && rm[k] < a.name) k++;
+      if (k < nr && rm[k] == a.name) continue;
+      b->attrs[n++] = a;
+    }
     b->size_ = n;
     st.mkAttrs(v, b);
   });
@@ -775,17 +782,28 @@ void registerBuiltins(EvalState &state) {
   });
   S.addPrimOp("__zipAttrsWith", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.zipAttrsWith");
-    std::map<Symbol, composite::MutableSeries<Value *>> m;
+    // Every (name, value) of every set, in list order, in one buffer; a stable sort by name groups each name's values and keeps them in
+    // list order: no tree, no series per name.
+    struct NV { Symbol name; Value *value; };
+    size_t total = 0;
     for (Value &e : args[1]->values()) {
       st.forceAttrs(e, pos, "while evaluating a value of the list passed as second argument to builtins.zipAttrsWith");
-      for (auto &a : *e.attrs) m[a.name].append(a.value);
+      total += e.attrs->size();
     }
+    composite::MutableSeries<NV> all;
+    all.reserve(total);
+    for (Value &e : args[1]->values())
+      for (auto &a : *e.attrs) all.append({a.name, a.value});
+    cp::sortRows(all.data(), all.size(), [](const NV &x, const NV &y) { return x.name < y.name; });
     EvalState::BindingsBuilder bb(st);
-    for (auto &[sym, vals] : m) {
-      Value *name = st.newString(st.symbols[sym]);
+    for (uint32_t i = 0, n = all.size(); i < n;) {
+      uint32_t j = i;
+      while (j < n && all[j].name == all[i].name) j++;
+      Value *name = st.newString(st.symbols[all[i].name]);
       Value *list = st.allocValue();
-      st.mkList(*list, vals);
-      bb.insert(sym, st.mkAppValue(st.mkAppValue(args[0], name), list));
+      st.mkList(*list, cp::series(all.data() + i, j - i) |cp::α| [](const NV &x) { return x.value; });
+      bb.insert(all[i].name, st.mkAppValue(st.mkAppValue(args[0], name), list));
+      i = j;
     }
     st.mkAttrs(v, bb.finish());
   });

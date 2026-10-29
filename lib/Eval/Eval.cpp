@@ -132,11 +132,13 @@ Bindings *EvalState::updateAttrs(Bindings *a, Bindings *b) {
     else { nUpdMerged++; nUpdTop += baseSize + b->size_; }
   }
   if (baseSize >= kMinBase && b->size_ * kRatio <= baseSize && depth < kMaxDepth) {
-    if (statsEnabled) nLayerBytes += sizeof(Bindings) + sizeof(Bindings::Layer);
+    uint32_t nsel = uint32_t(baseSize + b->size_); // the selection's words, at most one a row of either side: in the arena, as the layer is
+    if (statsEnabled) nLayerBytes += sizeof(Bindings) + sizeof(Bindings::Layer) + nsel * sizeof(uint32_t);
     void *mem = alloc.Allocate(sizeof(Bindings) + sizeof(Bindings::Layer), alignof(Bindings));
     auto *r = new (mem) Bindings();
     r->size_ = Bindings::kLayered;
-    auto *L = new (static_cast<void *>(r->attrs)) Bindings::Layer{b, a, nullptr, &alloc, {}, uint32_t(depth + 1)};
+    auto *words = static_cast<uint32_t *>(alloc.Allocate(nsel * sizeof(uint32_t), alignof(uint32_t)));
+    auto *L = new (static_cast<void *>(r->attrs)) Bindings::Layer{b, a, nullptr, &alloc, cp::Sel(words, nsel), uint32_t(depth + 1)};
     // The rows of the layer, in name order, as a selection (Series.h `Bits`, the dialect's `trikeshed.select`): one bit a
     // row, side 1 for the top.  Both sides are sorted and both are read as Series, so a `base` that is itself a layer is
     // read through its own selection: one walk, no row copied, an equal name shadowed by the top.  The two names in the
@@ -145,7 +147,6 @@ Bindings *EvalState::updateAttrs(Bindings *a, Bindings *b) {
     auto rb = a->rows();
     auto rt = b->rows();
     uint32_t nb = uint32_t(baseSize), nt = uint32_t(b->size_);
-    L->sel.words.reserve(size_t(nb) + nt);
     uint32_t i = 0, j = 0;
     bool haveB = nb > 0, haveT = nt > 0;
     Symbol bn{}, tn{};
@@ -511,6 +512,13 @@ void EvalState::printStats() {
     if (f) fclose(f);
     llvm::errs() << llvm::format("== resident at exit: %.0f MB anonymous (arena %.0f + %.0f MB of heap, IR and the rest), %.0f MB file-backed (mapped sources and the binary); high-water mark %.0f MB\n",
                                  anon / 1024.0, alloc.getTotalMemory() / 1048576.0, anon / 1024.0 - alloc.getTotalMemory() / 1048576.0, file / 1024.0, hwm / 1024.0);
+  }
+  { // This thread (the evaluator's: the state is torn down where it ran): user and kernel time, what it waited for, the faults it took.
+    struct rusage ru;
+    if (getrusage(RUSAGE_THREAD, &ru) == 0)
+      llvm::errs() << llvm::format("== evaluator thread: user %.2f s, system %.2f s; %ld voluntary context switches (it blocked), %ld involuntary; %ld minor faults, %ld major\n",
+                                   ru.ru_utime.tv_sec + ru.ru_utime.tv_usec / 1e6, ru.ru_stime.tv_sec + ru.ru_stime.tv_usec / 1e6, ru.ru_nvcsw, ru.ru_nivcsw,
+                                   ru.ru_minflt, ru.ru_majflt);
   }
 #endif
   if (!pools.empty()) {

@@ -228,9 +228,11 @@ struct Store {
                                       FileIngestionMethod method, HashAlgo algo,
                                       const PathFilter &filter = nullptr);
 
-  std::string writeDerivation(const Derivation &drv);
+  /// The derivation's path; the derivation moves into the cache (readDerivation hands it back by reference).
+  std::string writeDerivation(Derivation &&drv);
   std::string computeDerivationPath(const Derivation &drv) const;
-  Derivation readDerivation(const std::string &drvPath);
+  /// The cached derivation, read from the store the first time: by reference, kept as long as the store.
+  const Derivation &readDerivation(const std::string &drvPath);
   /// For derivations we instantiated in read-only mode.
   void cacheDerivation(const std::string &drvPath, const Derivation &drv);
 

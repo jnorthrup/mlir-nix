@@ -50,8 +50,11 @@ template <class T, class Mint> T anchor(MutableSeries<T> &cells, uint32_t i, Min
 /// sequential reads -- still left the run 7% slower than this form.  The bit is the wrong side of the trade while the
 /// rows are read one at a time.
 struct Sel {
-  MutableSeries<uint32_t> words; // `row << 1 | side`
+  MutableSeries<uint32_t, Over<uint32_t>> words; // `row << 1 | side`, in memory the owner gives (a layer's: its arena), sized once
   uint32_t rows = 0;
+
+  Sel() = default;
+  Sel(uint32_t *mem, uint32_t capacity) : words(Over<uint32_t>(mem, capacity)) {}
 
   uint32_t size() const { return rows; }
   /// Accumulate one row: where it lies, and which set it comes from.
