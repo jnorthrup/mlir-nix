@@ -295,7 +295,36 @@ void EvalState::printStats() {
                << " position_rows=" << attributePositions.size()
                << " position_bytes=" << attributePositions.cells.capacity() * sizeof(PosPtr) << "\n";
   llvm::errs() << "frame allocations: count=" << nFrames << " bytes=" << nFrameBytes
-               << " slots=" << nFrameSlots << '\n';
+               << " slots=" << nFrameSlots << " touched=" << nSlotsTouched
+               << llvm::format(" (%.1f%% of the slots a frame carries are ever read)", nFrameSlots ? 100.0 * nSlotsTouched / nFrameSlots : 0.0) << '\n';
+  if (nFrames) {
+    llvm::errs() << "== frames by slot count / first touches by slot index (index 16: 16 or more):\n";
+    for (unsigned i = 0; i <= 16; ++i)
+      llvm::errs() << llvm::format("   %2u%s  frames %9llu (%5.1f%%)   touches %9llu (%5.1f%%)\n", i, i == 16 ? "+" : " ",
+                                   (unsigned long long)nFramesBySize[i], 100.0 * nFramesBySize[i] / nFrames,
+                                   (unsigned long long)nTouchAt[i], nSlotsTouched ? 100.0 * nTouchAt[i] / nSlotsTouched : 0.0);
+  }
+  if (nFrames) {
+    static const char *names[kSrcClasses] = {"?", "nixpkgs/lib", "nixos/modules", "nixpkgs/pkgs", "other"};
+    llvm::errs() << "== frames by the file that defines the lambda:\n";
+    for (unsigned c = 1; c < kSrcClasses; ++c)
+      llvm::errs() << llvm::format("   %-14s frames %9llu (%5.1f%%)  slots %10llu (%5.1f%%)  touched %5.1f%% of its slots\n", names[c],
+                                   (unsigned long long)nClsFrames[c], 100.0 * nClsFrames[c] / nFrames,
+                                   (unsigned long long)nClsSlots[c], 100.0 * nClsSlots[c] / nFrameSlots,
+                                   nClsSlots[c] ? 100.0 * nClsTouched[c] / nClsSlots[c] : 0.0);
+  }
+  if (nFrames) {
+    std::vector<RegionInfo *> top;
+    for (auto &kv : regionInfos) if (kv.second->calls) top.push_back(kv.second);
+    std::sort(top.begin(), top.end(), [](RegionInfo *a, RegionInfo *b) { return a->calls > b->calls; });
+    llvm::errs() << "== the 40 lambdas that make the most frames (calls, slots, where):\n";
+    uint64_t cum = 0;
+    for (size_t i = 0; i < top.size() && i < 40; ++i) {
+      cum += top[i]->calls;
+      llvm::errs() << llvm::format("   %9llu %2u slots  cum %5.1f%%  ", (unsigned long long)top[i]->calls, top[i]->numSlots, 100.0 * cum / nFrames)
+                   << showPos(nd::posOfOp(top[i]->region->getParentOp())) << "\n";
+    }
+  }
   llvm::errs() << "value allocations: count=" << nVT[14] << " bytes=" << nVT[14] * sizeof(Value) << '\n';
   // How many ops of real programs live where: per tier of the dialect hierarchy
   // (scope > continent > dialect), read from the IRDL declaration.
@@ -546,10 +575,23 @@ RegionInfo *EvalState::regionInfo(Region *r) {
   return regionInfos[r];
 }
 
+unsigned EvalState::srcClassOf(RegionInfo *ri) {
+  if (ri->srcClass) return ri->srcClass;
+  unsigned c = 4;
+  if (auto f = nd::decodePos(nd::posOfOp(ri->region->getParentOp()))) {
+    const std::string &p = f->file;
+    c = p.find("nixpkgs/lib/") != std::string::npos ? 1 : p.find("nixos/modules/") != std::string::npos ? 2
+        : p.find("nixpkgs/pkgs/") != std::string::npos ? 3 : 4;
+  }
+  return ri->srcClass = uint8_t(c);
+}
+
 Frame *EvalState::newFrame(RegionInfo *ri, Frame *up) {
   size_t sz = sizeof(Frame) + ri->numSlots * sizeof(Value *);
   auto *f = static_cast<Frame *>(alloc.Allocate(sz, alignof(Frame)));
-  if (statsEnabled) { ++nFrames; nFrameBytes += sz; nFrameSlots += ri->numSlots; }
+  if (statsEnabled) { ++nFrames; nFrameBytes += sz; nFrameSlots += ri->numSlots; ++nFramesBySize[ri->numSlots < 16 ? ri->numSlots : 16];
+    ++ri->calls;
+    unsigned c = srcClassOf(ri); ++nClsFrames[c]; nClsSlots[c] += ri->numSlots; }
   f->up = up;
   f->info = ri;
   memset(f->slots, 0, ri->numSlots * sizeof(Value *));
@@ -574,6 +616,7 @@ Value *EvalState::lookup(Frame *f, mlir::Value v) {
   Value *noCell = nullptr; // an in-place value reached through lookup(): its one use gets its own thunk
   Value *&slot = idx == kNoSlot ? noCell : f->slots[idx];
   if (slot) return slot;
+  if (statsEnabled && idx != kNoSlot) { ++nSlotsTouched; ++nTouchAt[idx < 16 ? idx : 16]; ++nClsTouched[srcClassOf(ri)]; }
   Operation *op = s.def;
   if (!op) throw EvalError("internal error: unbound block argument");
   if (s.how == Slot::Unknown) s.how = howOf(op);

@@ -228,6 +228,8 @@ struct RegionInfo {
   void *jitEntry = nullptr;
   /// Optional arity-indexed JIT cache, owned by ScalarJIT and never an environment.
   void *curriedEntry = nullptr;
+  uint64_t calls = 0; // MLNIX_STATS: frames made for this region
+  uint8_t srcClass = 0; // MLNIX_STATS: where the region's code is defined, once classified (EvalState::srcClassOf); 0 unclassified
   /// MLNIX_STATS: what this region's sea of nodes holds.  nOps its body's ops; nThunks its cells that start as
   /// thunks (finer-grain deferral would mint those, so they are its rows); nEvals its ops' evals (a region called
   /// N times counts N times); everRan the distinct ops that ran, one bit an op, opIdx the op -> bit.
@@ -579,6 +581,11 @@ struct EvalState {
   uint64_t nVT[15] = {}; // MLNIX_STATS: instrumented tag writes, including stack values and repeated retyping;
                          // [14] alone counts allocated Value rows, not tag writes
   uint64_t nFrames = 0, nFrameBytes = 0, nFrameSlots = 0; // requested frame storage, excluding arena overhead
+  uint64_t nTouchAt[17] = {}, nFramesBySize[17] = {}; // MLNIX_STATS: first touches by slot index (16 = 16 or more), frames by slot count
+  static constexpr unsigned kSrcClasses = 5; // 1 nixpkgs lib, 2 nixos modules, 3 pkgs, 4 other
+  uint64_t nClsFrames[kSrcClasses] = {}, nClsSlots[kSrcClasses] = {}, nClsTouched[kSrcClasses] = {};
+  unsigned srcClassOf(RegionInfo *ri);
+  uint64_t nSlotsTouched = 0; // MLNIX_STATS: frame slots that were ever read (a cell made on first touch), of nFrameSlots allocated
   uint64_t nSlotsAssigned = 0, nSlotsNoRead = 0; // MLNIX_STATS: frame cells assigned, and those given to a value with no use at all
   uint64_t nsLower = 0, nsMint = 0; // MLNIX_STATS: time lowering files (analysis of deferred lambdas included) / minting bodies on demand
   llvm::DenseMap<mlir::Region *, RegionInfo *> regionInfos;
