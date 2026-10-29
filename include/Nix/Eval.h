@@ -746,6 +746,10 @@ struct EvalState {
     e = {key, it->second};
     return e.node;
   }
+  /// indexRegion: the records of the values of the blocks being indexed (an operand in its own block is found here, in a map the size of the
+  /// block, not in the map of every value); emptied when the outermost body is done.
+  llvm::DenseMap<void *, Node *> blockNodes;
+  unsigned indexDepth = 0;
   void setNode(void *key, Node *n) {
     nodeMap[key] = n;
     NodeCacheEntry &e = nodeCache[(reinterpret_cast<uintptr_t>(key) >> 4) & (kNodeCache - 1)];

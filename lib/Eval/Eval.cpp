@@ -955,6 +955,21 @@ void EvalState::indexRegion(Region &r) {
   unsigned slot = 0;
   auto *core = ctx.getLoadedDialect<nd::NixDialect>();
   auto newNode = [&] { return ::new (alloc.Allocate(sizeof(Node), alignof(Node))) Node{}; };
+  // A value is found by the ops of its own block in blockNodes.  Only a value read from somewhere else (a nested body, a lambda's capture list,
+  // whose body may not be minted yet, or an op evaluated through the interface model) is in the map of every value, and every value is when
+  // a JIT, which reads any value by its address, is on.
+  ++indexDepth;
+  bool everyValue = scalarJIT != nullptr;
+  auto publish = [&](mlir::Value v, Node *n) {
+    void *key = v.getAsOpaquePointer();
+    blockNodes[key] = n;
+    bool elsewhere = everyValue;
+    for (mlir::OpOperand &u : v.getUses()) {
+      Operation *o = u.getOwner();
+      if (elsewhere || o->getBlock() != &blk || o->getNumRegions() || (o->getDialect() != core && !core->primOf(o))) { elsewhere = true; break; }
+    }
+    if (elsewhere) setNode(key, n);
+  };
   for (BlockArgument a : blk.getArguments()) {
     if (statsEnabled) { ++nSlotsAssigned; if (a.use_empty()) ++nSlotsNoRead; }
     Node *n = newNode();
@@ -965,7 +980,7 @@ void EvalState::indexRegion(Region &r) {
     n->ri = ri;
     n->def = nullptr;
     n->pos = nd::posOfOp(r.getParentOp()); // a block argument was made where its lambda is
-    setNode(a.getAsOpaquePointer(), n);
+    publish(a, n);
   }
   // Every value's record first: an op may read a value defined after it (a graph region) or from a body nested in it.
   for (Operation &op : blk) {
@@ -993,7 +1008,7 @@ void EvalState::indexRegion(Region &r) {
       n->ri = ri;
       n->def = &op;
       n->pos = nd::posOfOp(&op);
-      setNode(res.getAsOpaquePointer(), n);
+      publish(res, n);
     }
   }
   ri->numSlots = slot;
@@ -1005,18 +1020,24 @@ void EvalState::indexRegion(Region &r) {
       if (!nested.empty()) indexRegion(nested);
   }
   // Then each op's operands, as the records of the values they name (an operand not indexed stays null: its use is an internal error).
+  auto recordOf = [&](mlir::Value v) {
+    void *key = v.getAsOpaquePointer();
+    auto it = blockNodes.find(key);
+    return it != blockNodes.end() ? it->second : nodeOf(key);
+  };
   for (Operation &op : blk) {
     unsigned k = op.getNumOperands();
     if (op.getNumResults() == 0 || k == 0) continue;
     auto **ops = static_cast<Node **>(alloc.Allocate(k * sizeof(Node *), alignof(Node *)));
-    for (unsigned i = 0; i < k; i++) ops[i] = nodeOf(op.getOperand(i).getAsOpaquePointer());
+    for (unsigned i = 0; i < k; i++) ops[i] = recordOf(op.getOperand(i));
     for (mlir::Value res : op.getResults()) {
-      Node *n = nodeOf(res.getAsOpaquePointer());
+      Node *n = recordOf(res);
       n->operands = ops;
       n->nOperands = k;
     }
   }
-  if (ri->result) ri->resultNode = nodeOf(ri->result.getAsOpaquePointer());
+  if (ri->result) ri->resultNode = recordOf(ri->result);
+  if (--indexDepth == 0) blockNodes.clear();
   if (statsEnabled) {
     ri->nOps = uint32_t(blk.getOperations().size());
     ri->everRan.assign((ri->nOps + 63) / 64, 0);
