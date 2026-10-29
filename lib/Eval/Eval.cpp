@@ -299,6 +299,7 @@ void EvalState::copyContext(const Value &v, NixStringContext &ctx) {
 EvalState::EvalState(EvalSettings st, std::shared_ptr<nixstore::Store> store)
     : settings(std::move(st)), store(std::move(store)) {
   statsEnabled = getenv("MLNIX_STATS") != nullptr;
+  recordEdges = statsEnabled && getenv("MLNIX_STATS_EDGES");
   if (getenv("MLNIX_STATS_IMPORTS")) nixfe::pathLiterals = new std::unordered_set<std::string>();
   Bindings::countGets = statsEnabled;
   scalarJIT = ScalarJIT::create();
@@ -626,6 +627,13 @@ void EvalState::printStats() {
                  << nix << " end in .nix), " << litHit << " of them led to an evaluated file (precision "
                  << llvm::format("%.1f", 100.0 * litHit / std::max<size_t>(1, nixfe::pathLiterals->size())) << "%, of the .nix ones' neighbours not separated)\n";
   }
+  if (recordEdges && epochEvals.size() > 1) { // the epochs' work and which later epoch needed what an earlier one forced, for a schedule simulation
+    if (FILE *f = fopen(getenv("MLNIX_STATS_EDGES"), "w")) {
+      for (uint32_t i = 0; i < epochEvals.size(); i++) fprintf(f, "w %u %llu\n", i, (unsigned long long)epochEvals[i]);
+      for (uint64_t e : epochEdges) fprintf(f, "e %u %u\n", uint32_t(e >> 32), uint32_t(e));
+      fclose(f);
+    }
+  }
   if (epochEvals.size() > 1) { // how the work divides among the attributes the driver visited: a serial prefix or a flat spread
     uint64_t tot = 0, mx = 0;
     for (uint64_t e : epochEvals) { tot += e; mx = std::max(mx, e); }
@@ -766,6 +774,7 @@ void EvalState::addPrimOpClosure(const std::string &name, unsigned arity,
 }
 
 void EvalState::registerPrimOp(const std::string &name, PrimOp *p) {
+  if (p->arity > kMaxPrimArity) llvm::report_fatal_error("a primop with more arguments than EvalState::kMaxPrimArity");
   Value *v = allocValue();
   if (p->arity == 0) {
     // A constant computed by calling fn immediately.
@@ -1161,7 +1170,15 @@ struct DepthGuard {
 };
 } // namespace
 
+void EvalState::epochTouch(const Value &v) {
+  uint32_t cur = epochEvals.size() - 1;
+  if (v.type == VType::Thunk || v.type == VType::App) { forcedBy[&v] = cur; return; } // about to be forced here
+  auto it = forcedBy.find(&v);
+  if (it != forcedBy.end() && it->second != cur) epochEdges.insert(uint64_t(it->second) << 32 | cur);
+}
+
 void EvalState::forceValue(Value &v, PosPtr pos) {
+  if (recordEdges && !epochEvals.empty()) [[unlikely]] epochTouch(v);
   if (statsEnabled && lastThunk) [[unlikely]] {
     if (&v == lastThunk && v.type == VType::Thunk) { ++nImmediate; ++immediateByOp[v.thunk.op->getName().getStringRef()]; }
     lastThunk = nullptr;
@@ -1331,17 +1348,45 @@ void EvalState::callLambda(Value &fun, Value *arg, Value &out, PosPtr pos) {
   callLambdaIn(fun, infoOf(cast<nd::LambdaOp>(fun.thunk.op)), arg, out, pos);
 }
 
+//===----------------------------------------------------------------------===//
+// Cold error paths: the messages are built here, out of line, so no string code sits in the hot functions below.
+//===----------------------------------------------------------------------===//
+
+#define NIX_COLD [[noreturn, gnu::cold, gnu::noinline]]
+static std::string lambdaDesc(nd::LambdaOp lam) {
+  if (auto n = lam.getName()) return "function '" + n->str() + "'";
+  return "function 'anonymous lambda'";
+}
+NIX_COLD static void throwMissingArg(nd::LambdaOp lam, llvm::StringRef formal, PosPtr pos) {
+  throw EvalError(lambdaDesc(lam) + " called without required argument '" + formal.str() + "'", pos).addTrace(nd::posOfOp(lam), "from call site");
+}
+NIX_COLD static void throwUnexpectedArg(nd::LambdaOp lam, llvm::StringRef name, PosPtr pos) {
+  throw EvalError(lambdaDesc(lam) + " called with unexpected argument '" + name.str() + "'", pos).addTrace(nd::posOfOp(lam), "from call site");
+}
+NIX_COLD static void throwUndefinedVariable(const nixfe::Name &n, PosPtr pos) { throw EvalError("undefined variable '" + n.toString() + "'", pos); }
+NIX_COLD static void throwMissingFormal(const nixfe::Name &n, PosPtr pos) { throw EvalError("missing formal argument '" + n.toString() + "'", pos); }
+NIX_COLD static void throwCannotEvaluate(mlir::Operation *o, PosPtr pos) {
+  throw EvalError("internal error: cannot evaluate operation '" + o->getName().getStringRef().str() + "'", pos);
+}
+NIX_COLD static void throwAssertFailed(nd::AssertOp a, PosPtr pos) {
+  std::string txt = a.getText() ? a.getText()->str() : "?";
+  throw AssertionError("assertion '" + txt + "' failed", pos);
+}
+NIX_COLD static void throwIntOverflow(int64_t n, int64_t m, PosPtr pos) {
+  throw EvalError("integer overflow in adding " + std::to_string(n) + " + " + std::to_string(m), pos);
+}
+NIX_COLD static void throwCannotAdd(const char *type, const char *to, PosPtr pos) {
+  throw EvalError(std::string("cannot add ") + type + " to " + to, pos);
+}
+NIX_COLD static void throwAttrMissing(llvm::StringRef name, PosPtr pos) { throw EvalError("attribute '" + name.str() + "' missing", pos); }
+
 void EvalState::callLambdaIn(Value &fun, RegionInfo *ri, Value *arg, Value &out, PosPtr pos) {
   auto lam = cast<nd::LambdaOp>(fun.thunk.op);
-  auto fnName = [&]() -> std::string {
-    if (auto n = lam.getName()) return "function '" + n->str() + "'";
-    return "function 'anonymous lambda'";
-  };
   if (auto formals = lam.getFormals()) {
     try {
       forceAttrs(*arg, pos, "while evaluating the value passed for the lambda argument");
     } catch (EvalError &e) {
-      e.addTrace(nd::posOfOp(lam), "while calling " + fnName());
+      e.addTrace(nd::posOfOp(lam), "while calling " + lambdaDesc(lam));
       throw;
     }
     auto defs = *lam.getFormalDefaults();
@@ -1357,18 +1402,14 @@ void EvalState::callLambdaIn(Value &fun, RegionInfo *ri, Value *arg, Value &out,
     for (size_t i = 0; i < formals->size(); i++) {
       if (arg->attrs->get(formalSyms[i])) nFound++;
       else if (!defs[i])
-        throw EvalError(fnName() + " called without required argument '" +
-                            cast<StringAttr>((*formals)[i]).getValue().str() + "'", pos)
-            .addTrace(nd::posOfOp(lam), "from call site");
+        throwMissingArg(lam, cast<StringAttr>((*formals)[i]).getValue(), pos);
     }
     if (!lam.getEllipsis() && nFound != arg->attrs->size()) {
       for (auto &a : *arg->attrs) {
         bool known = false;
         for (Attribute fa : *formals)
           if (cast<StringAttr>(fa).getValue() == symbols[a.name]) { known = true; break; }
-        if (!known)
-          throw EvalError(fnName() + " called with unexpected argument '" + symbols[a.name].str() + "'", pos)
-              .addTrace(nd::posOfOp(lam), "from call site");
+        if (!known) throwUnexpectedArg(lam, symbols[a.name], pos);
       }
     }
   }
@@ -1529,6 +1570,10 @@ std::string EvalState::shapeOf(RegionInfo *ri, unsigned depth) {
   return scalarJIT->evaluateSaturated(*this, lambda, ri->result, cur.thunk.env, llvm::ArrayRef<Value *>(args, n), out, pos, ri->curriedEntry, interpret);
 }
 
+[[gnu::cold, gnu::noinline]] void EvalState::notAFunction(Value &cur, PosPtr pos) {
+  throw EvalError(std::string("attempt to call something which is not a function but ") + showType(cur) + ": " + printValueForTrace(cur), pos);
+}
+
 void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out, PosPtr pos, bool allowCurried) {
   Value *cur = &fun;
   size_t i = 0;
@@ -1568,16 +1613,13 @@ void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out,
       callLambdaIn(*cur, curRI, args[i], *res, pos);
       i++;
     } else if (cur->type == VType::PrimOp || cur->type == VType::PrimOpApp) {
-      // Collect already-applied arguments.
-      llvm::SmallVector<Value *, 6> applied;
+      // The arguments applied so far are a chain of PrimOpApp cells, the newest outermost: count it to find the primop, then fill a fixed array from
+      // the back, and drain the arguments of this call in after them.
+      size_t applied = 0;
       Value *p = cur;
-      while (p->type == VType::PrimOpApp) {
-        applied.push_back(p->app.right);
-        p = p->app.left;
-      }
-      std::reverse(applied.begin(), applied.end());
+      while (p->type == VType::PrimOpApp) { ++applied; p = p->app.left; }
       const PrimOp *op = p->primOp;
-      size_t need = op->arity - applied.size();
+      size_t need = op->arity - applied;
       size_t avail = nargs - i;
       if (avail < need) {
         // Partial application.
@@ -1593,11 +1635,15 @@ void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out,
         }
         return;
       }
-      llvm::SmallVector<Value *, 6> all(applied);
-      for (size_t k = 0; k < need; k++) all.push_back(args[i + k]);
+      Value *all[kMaxPrimArity];
+      {
+        size_t k = applied;
+        for (Value *q = cur; q->type == VType::PrimOpApp; q = q->app.left) all[--k] = q->app.right;
+      }
+      cp::drain(cp::series(args + i, uint32_t(need)), all + applied);
       i += need;
       res = (i == nargs) ? &out : allocValue();
-      callPrimOp(*op, all.data(), *res, pos);
+      callPrimOp(*op, all, *res, pos);
     } else if (cur->type == VType::Attrs && cur->attrs->get(s.functor)) {
       const Attr *f = cur->attrs->get(s.functor);
       Value *self = cur;
@@ -1611,9 +1657,7 @@ void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out,
       }
       i++;
     } else {
-      throw EvalError(std::string("attempt to call something which is not a function but ") +
-                          showType(*cur) + ": " + printValueForTrace(*cur),
-                      pos);
+      notAFunction(*cur, pos);
     }
     if (i >= nargs) return;
     if (res == &stackCells[0] || res == &stackCells[1]) {
@@ -1704,7 +1748,13 @@ void EvalState::evalAttrs(nd::AttrsOp op, Frame *env, Value &out) {
     mkAttrs(out, bb.finish());
     return;
   }
-  // Dynamic attributes are inserted one by one with duplicate checks.
+  evalAttrsDynamic(op, env, out, bb);
+}
+
+/// Dynamic attributes are inserted one by one with duplicate checks: out of line, where the std::map lives.
+[[gnu::noinline]] void EvalState::evalAttrsDynamic(nd::AttrsOp op, Frame *env, Value &out, BindingsBuilder &bb) {
+  auto names = op.getNames();
+  auto dynNames = op.getDynNames();
   std::map<Symbol, PosPtr> seen;
   for (size_t i = 0; i < names.size(); i++)
     seen[symbolOf(names[i])] = nullptr;
@@ -1733,8 +1783,12 @@ void EvalState::evalConcatStrings(nd::ConcatStringsOp op, Frame *env, Value &out
   auto parts = op.getParts();
   bool forceString = op.getForceString();
   NixStringContext context;
-  llvm::SmallVector<composite::CharWindow, 8> views;
-  std::deque<std::string> owned;
+  // The windows of the parts: a stack array (the arena past sixteen parts).  A part that must be coerced (a number, a path, a set with __toString)
+  // makes text in `scratch`, which is copied into the arena at once, so no part owns anything and nothing is a heap list.
+  size_t np = parts.size(), nv = 0;
+  composite::CharWindow stackViews[16];
+  composite::CharWindow *views = np <= 16 ? stackViews : static_cast<composite::CharWindow *>(alloc.Allocate(np * sizeof(composite::CharWindow), alignof(composite::CharWindow)));
+  std::string scratch;
   size_t total = 0;
   int64_t n = 0;
   double nf = 0;
@@ -1747,24 +1801,23 @@ void EvalState::evalConcatStrings(nd::ConcatStringsOp op, Frame *env, Value &out
     if (first) firstType = v->type;
     if (firstType == VType::Int) {
       if (v->type == VType::Int) {
-        if (__builtin_add_overflow(n, v->integer, &n))
-          throw EvalError("integer overflow in adding " + std::to_string(n) + " + " + std::to_string(v->integer), ppos);
+        if (__builtin_add_overflow(n, v->integer, &n)) throwIntOverflow(n, v->integer, ppos);
       } else if (v->type == VType::Float) {
         firstType = VType::Float;
         nf = (double)n;
         nf += v->fpoint;
       } else {
-        throw EvalError(std::string("cannot add ") + showType(*v) + " to an integer", ppos);
+        throwCannotAdd(showType(*v), "an integer", ppos);
       }
     } else if (firstType == VType::Float) {
       if (v->type == VType::Int) nf += (double)v->integer;
       else if (v->type == VType::Float) nf += v->fpoint;
-      else throw EvalError(std::string("cannot add ") + showType(*v) + " to a float", ppos);
+      else throwCannotAdd(showType(*v), "a float", ppos);
     } else {
-      // a string is a window on its own bytes; only a coerced piece makes text, in the back of `owned`
-      owned.emplace_back();
-      views.push_back(coerceToWindow(*v, context, false, firstType == VType::String, ppos, "while evaluating a path segment", owned.back(), !first));
-      total += views.back().size();
+      composite::CharWindow w = coerceToWindow(*v, context, false, firstType == VType::String, ppos, "while evaluating a path segment", scratch, !first);
+      if (w.size() && w.data() == scratch.data()) { w = composite::CharWindow(copyString(scratch), w.size()); } // text made here lives in the arena
+      views[nv++] = w;
+      total += w.size();
     }
     first = false;
   }
@@ -1776,10 +1829,10 @@ void EvalState::evalConcatStrings(nd::ConcatStringsOp op, Frame *env, Value &out
       throw EvalError("a string that refers to a store path cannot be appended to a path", pos);
     std::string str;
     str.reserve(total);
-    for (const composite::CharWindow &piece : views) str += piece.view();
+    for (size_t k = 0; k < nv; k++) str += views[k].view();
     return mkPath(out, nixfe::canonPath(str));
   }
-  mkStringOf(out, views, makeContext(context));
+  mkStringOf(out, llvm::ArrayRef<composite::CharWindow>(views, nv), makeContext(context));
 }
 
 Symbol EvalState::pathSymbol(const nixfe::Name &comp, mlir::OperandRange dyn, unsigned &nextDyn, Frame *env,
@@ -1793,7 +1846,7 @@ Value *EvalState::selectField(Value &base, Symbol key, PosPtr pos) {
   if (base.type != VType::Attrs)
     throwTypeError("a set", base, pos, "while selecting an attribute");
   if (const Attr *attr = base.attrs->get(key)) return attr->value;
-  throw EvalError("attribute '" + std::string(symbols[key].str()) + "' missing", pos);
+  throwAttrMissing(symbols[key], pos);
 }
 
 void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
@@ -1855,8 +1908,12 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
       .Case<nd::ApplyOp>([&](nd::ApplyOp ap) {
         Value *f = lookupImpl(env, ap.getCallee(), true);  // callFunction forces the callee before anything else it does
         auto as = ap.getArgs();
-        auto args = llvm::to_vector<4>(llvm::map_range(as, [&](mlir::Value a) { return lookup(env, a); }));
-        callFunction(*f, args.size(), args.data(), out, pos);
+        auto cells = as |cp::α| [&](mlir::Value a) { return lookup(env, a); }; // the argument cells, a series; drained into a stack array (arena past six)
+        size_t na = cells.size();
+        Value *buf[6];
+        Value **args = na <= 6 ? buf : allocList(na);
+        cp::drain(cells, args);
+        callFunction(*f, na, args, out, pos);
       })
       .Case<nd::IfOp>([&](nd::IfOp i) {
         Value tc;
@@ -1866,10 +1923,7 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
       .Case<nd::AssertOp>([&](nd::AssertOp a) {
         Value tc;
         bool c = forceBool(operand(env, a.getCond(), tc), pos, "in the condition of the assert statement");
-        if (!c) {
-          std::string txt = a.getText() ? a.getText()->str() : "?";
-          throw AssertionError("assertion '" + txt + "' failed", pos);
-        }
+        if (!c) throwAssertFailed(a, pos);
         evalTail(env, a.getBody(), out, pos);
       })
       .Case<nd::NotOp>([&](nd::NotOp n) {
@@ -1940,13 +1994,13 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
           forceAttrs(*sv, nd::posOfValue(sc), "while evaluating the first subexpression of a with expression");
           if (const Attr *a = sv->attrs->get(sym)) return copyFrom(a->value);
         }
-        throw EvalError("undefined variable '" + w.getName().toString() + "'", pos);
+        throwUndefinedVariable(w.getName(), pos);
       })
       .Case<nd::FormalOp>([&](nd::FormalOp f) {
         Value *arg = lookup(env, f.getArg());
         forceAttrs(*arg, pos);
         if (const Attr *a = arg->attrs->get(symbolOf(f.getName()))) return copyFrom(a->value);
-        if (!f.getDefaultValue()) throw EvalError("missing formal argument '" + f.getName().toString() + "'", pos);
+        if (!f.getDefaultValue()) throwMissingFormal(f.getName(), pos);
         copyFrom(lookupImpl(env, f.getDefaultValue(), true));
       })
       .Case<nd::IntOp>([&](nd::IntOp i) { mkInt(out, i.getValue()); })
@@ -1960,7 +2014,7 @@ void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
         // Everything else (all primop ops of the continent dialects) runs
         // through the externally attached NixEvalOpInterface model.
         if (auto e = dyn_cast<nd::NixEvalOpInterface>(o)) return e.eval(*this, env, out);
-        throw EvalError("internal error: cannot evaluate operation '" + o->getName().getStringRef().str() + "'", pos);
+        throwCannotEvaluate(o, pos);
       });
 }
 

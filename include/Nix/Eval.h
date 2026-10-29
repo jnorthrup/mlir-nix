@@ -542,6 +542,8 @@ struct EvalState {
   void realiseContext(const NixStringContext &ctx, PosPtr pos);
 
   // -- Builtins -----------------------------------------------------------------
+  /// The arguments of a primop call are gathered in a fixed array of this many cells (checked once, when a primop is registered).
+  static constexpr unsigned kMaxPrimArity = 8;
   void addPrimOp(const std::string &name, unsigned arity, PrimFn fn);
   /// For a primop that captures (a registering loop's parameter).
   void addPrimOpClosure(const std::string &name, unsigned arity, std::function<void(EvalState &, Value **, Value &, PosPtr)> fn);
@@ -677,6 +679,10 @@ struct EvalState {
   composite::MutableSeries<std::pair<std::string, size_t>> evaluatedFiles; // MLNIX_STATS_IMPORTS: files evalFile'd, with how many path literals had been lowered by then
   composite::MutableSeries<uint64_t> epochEvals; // MLNIX_STATS: evalOp calls per epoch (one epoch a derivation attribute the driver visits)
   void beginEpoch() { if (statsEnabled) epochEvals.append(0); }
+  llvm::DenseMap<const Value *, uint32_t> forcedBy; // MLNIX_STATS_EDGES: the epoch that first forced a cell
+  llvm::DenseSet<uint64_t> epochEdges;              // MLNIX_STATS_EDGES: (earlier epoch << 32 | later epoch) when the later one touched a cell the earlier one forced
+  bool recordEdges = false;
+  void epochTouch(const Value &v);
   uint64_t nMaskBytes = 0, nLayerBytes = 0, nMergeBytes = 0, nCtxBytes = 0, nFormalBytes = 0; // MLNIX_STATS: arena bytes the by-use line did not name before
   uint64_t nLookups = 0, nLookupHits = 0, nHopHist[6] = {}; // MLNIX_STATS: lookupImpl calls, those answered by a filled slot, and the frame hops to the defining region (0, 1, 2, 3, 4, 5 or more)
   llvm::DenseMap<const void *, std::pair<llvm::StringRef, std::array<uint64_t, 2>>> cellsByKind; // MLNIX_STATS: cells lookup made, by defining op: [evaluated at once, left a thunk]
@@ -764,6 +770,8 @@ struct EvalState {
   llvm::DenseMap<mlir::Operation *, Value *> constCache;
   void indexRegion(mlir::Region &r);
   void evalConcatStrings(mlir::nix::ConcatStringsOp op, Frame *env, Value &out);
+  void evalAttrsDynamic(mlir::nix::AttrsOp op, Frame *env, Value &out, BindingsBuilder &bb);
+  [[noreturn]] void notAFunction(Value &cur, PosPtr pos); // cold: builds the message
   void evalAttrs(mlir::nix::AttrsOp op, Frame *env, Value &out);
   RegionInfo *mintLambda(nixfe::FilePool &p, uint32_t row);
   RegionInfo *bodyOf(nixfe::BodyIndex idx);
