@@ -824,11 +824,14 @@ int realMain(int argc, char **argv) {
     o.store.readOnly = true;
     auto store = std::make_shared<nixstore::Store>(o.store);
     EvalState st(std::move(o.eval), store);
-    composite::MutableSeries<std::pair<std::string, unsigned>> v;
+    using Entry = composite::bare_t<decltype(*st.baseEnv.begin())>;
+    composite::MutableSeries<const Entry *> v; // the entries where they lie, ordered by name
     for (auto &e : st.baseEnv)
-      if (e.getValue()->type == VType::PrimOp) v.append({e.getKey().str(), e.getValue()->primOp->arity});
-    std::sort(v.begin(), v.end());
-    for (auto &[k, a] : v) std::cout << k << " " << a << "\n";
+      if (e.getValue()->type == VType::PrimOp) v.append(&e);
+    composite::sortRows(v.data(), v.size(), [](const Entry *a, const Entry *b) {
+      return composite::lessChars(composite::series(a->getKey().data(), uint32_t(a->getKey().size())), composite::series(b->getKey().data(), uint32_t(b->getKey().size())));
+    });
+    for (const Entry *e : v) std::cout << e->getKey().str() << " " << e->getValue()->primOp->arity << "\n";
     return 0;
   }
   if (cmd == "store") return cmdStore(argc, argv, 2);

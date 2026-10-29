@@ -867,7 +867,7 @@ void ScalarJIT::printStats() const {
   if (p.profiling) {
     composite::MutableSeries<const Impl::Profile *> ranked;
     for (const auto &entry : p.profiles) ranked.append(&entry.second);
-    std::sort(ranked.begin(), ranked.end(), [](const auto *a, const auto *b) { return a->calls > b->calls; });
+    composite::sortRows(ranked.data(), ranked.size(), [](const auto *a, const auto *b) { return a->calls > b->calls; });
     llvm::errs() << "jit-profile: kernels=" << ranked.size() << " dropped_calls=" << p.profileDropped << '\n';
     for (size_t i = 0; i < std::min<size_t>(ranked.size(), 60); ++i) {
       const auto &r = *ranked[i];
@@ -884,7 +884,7 @@ void ScalarJIT::printStats() const {
     }
     composite::MutableSeries<const Impl::Entry *> saturated;
     for (const auto &entry : p.curriedEntries) saturated.append(entry.get());
-    std::sort(saturated.begin(), saturated.end(), [](const auto *a, const auto *b) {
+    composite::sortRows(saturated.data(), saturated.size(), [](const auto *a, const auto *b) {
       return a->curriedCalls > b->curriedCalls;
     });
     for (size_t i = 0; i < std::min<size_t>(saturated.size(), 60); ++i) {
@@ -907,9 +907,9 @@ void ScalarJIT::printStats() const {
     llvm::errs() << "jit-deopt-profile: aggregate=" << p.booleanDeopts
                  << " recorded_unary=" << recordedUnaryDeopts
                  << " recorded_curried=" << recordedCurriedDeopts << '\n';
-    std::sort(ranked.begin(), ranked.end(), [](const auto *a, const auto *b) {
+    composite::sortRows(ranked.data(), ranked.size(), [](const auto *a, const auto *b) {
       if (a->booleanDeopts != b->booleanDeopts) return a->booleanDeopts > b->booleanDeopts;
-      return a->location < b->location;
+      return composite::lessChars(composite::chars(a->location), composite::chars(b->location));
     });
     for (size_t i = 0; i < std::min<size_t>(ranked.size(), 20) && ranked[i]->booleanDeopts; ++i) {
       const auto &r = *ranked[i];
@@ -917,9 +917,9 @@ void ScalarJIT::printStats() const {
                    << " demands=" << r.booleanDemands << " deopts=" << r.booleanDeopts
                    << " root=" << r.shape << " at=" << r.location << '\n';
     }
-    std::sort(saturated.begin(), saturated.end(), [](const auto *a, const auto *b) {
+    composite::sortRows(saturated.data(), saturated.size(), [](const auto *a, const auto *b) {
       if (a->curriedDeopts != b->curriedDeopts) return a->curriedDeopts > b->curriedDeopts;
-      return a->curriedLocation < b->curriedLocation;
+      return composite::lessChars(composite::chars(a->curriedLocation), composite::chars(b->curriedLocation));
     });
     for (size_t i = 0; i < std::min<size_t>(saturated.size(), 20) && saturated[i]->curriedDeopts; ++i) {
       const auto &e = *saturated[i];

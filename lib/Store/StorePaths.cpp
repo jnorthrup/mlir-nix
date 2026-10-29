@@ -1,6 +1,7 @@
 //===- StorePaths.cpp - NAR, store paths, ATerm derivations, utilities ----===//
 
 #include "Composite/Mutable.h"
+#include "Composite/Rows.h"
 #include "Nix/Prefetch.h"
 #include "Nix/Store.h"
 
@@ -296,8 +297,13 @@ struct NarWriter {
         names.append(n);
       }
       closedir(d);
-      std::sort(names.begin(), names.end());
-      for (auto &n : names) {
+      composite::MutableSeries<const std::string *> order; // the names stay where they are: rows of pointers to them are sorted
+      for (auto &n : names) order.append(&n);
+      composite::sortRows(order.data(), order.size(), [](const std::string *a, const std::string *b) {
+        return composite::lessChars(composite::series(a->data(), uint32_t(a->size())), composite::series(b->data(), uint32_t(b->size())));
+      });
+      for (const std::string *np : order) {
+        const std::string &n = *np;
         std::string child = path + "/" + n;
         if (filter && !filter(child)) continue;
         str("entry");

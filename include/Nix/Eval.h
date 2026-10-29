@@ -63,6 +63,8 @@ struct SymbolTable {
     return id;
   }
   llvm::StringRef operator[](Symbol s) const { return names[s]; }
+  /// The name's bytes as the hot Series<char>: what an ordering by name reads.
+  auto chars(Symbol s) const { llvm::StringRef r = names[s]; return composite::series(r.data(), uint32_t(r.size())); }
   size_t size() const { return names.size(); }
 
   llvm::StringMap<Symbol> map;

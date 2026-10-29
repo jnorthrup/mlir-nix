@@ -151,6 +151,15 @@ template <class S, class T, class F> constexpr T fold(const S &xs, T init, F f) 
   return fold(xs, mv(init), mv(f), [](const T &) { return false; });
 }
 
+/// The order of two Series<char> as memcmp has it (unsigned bytes, then the shorter first): a fold to the first difference.  Text with a
+/// cursor (CharSeries) is cast down to its Series<char> first, so an ordering needs nothing past this header and the cursor is dead.
+template <class A, class B> constexpr bool lessChars(const A &a, const B &b) {
+  uint32_t na = uint32_t(a.size()), nb = uint32_t(b.size());
+  auto diffs = (na < nb ? na : nb) |j| [&](uint32_t i) { return int(uint8_t(a[i])) - int(uint8_t(b[i])); };
+  int d = fold(diffs, 0, [](int, int x) { return x; }, [](int x) { return x != 0; });
+  return d != 0 ? d < 0 : na < nb;
+}
+
 } // namespace composite
 
 #endif

@@ -14,6 +14,7 @@
 
 #include "Composite/Views.h"
 #include "Composite/Pack.h"
+#include "Composite/Rows.h"
 #include "Nix/Confix.h"
 #include "Nix/LexRules.h"
 #include "Nix/MLIRGen.h"
@@ -29,7 +30,6 @@
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
-#include <deque>
 #include <map>
 #include <optional>
 #include <sstream>
@@ -1326,7 +1326,7 @@ struct Parser {
   /// The defs ordered by name: the order of the set's ops and of `--parse`.
   void order(Set &s) {
     if (s.ordered) return;
-    std::sort(s.defs.begin(), s.defs.end(), [](const Def &a, const Def &b) { return a.name.str() < b.name.str(); });
+    composite::sortRows(s.defs.data(), s.defs.size(), [](const Def &a, const Def &b) { return composite::lessChars(a.name.chars(), b.name.chars()); });
     s.index.clear();
     s.ordered = true;
   }
@@ -1937,17 +1937,7 @@ struct Parser {
 
   void validate(Hdr &h, Pos pos) {
     auto &fs = h.fs;
-    auto byName = [](const Formal &a, const Formal &b) { return a.name.str() < b.name.str(); };
-    if (fs.size() > 24) {
-      std::stable_sort(fs.begin(), fs.end(), byName);
-    } else { // insertion: stable, and std::stable_sort allocates a buffer even for two
-      for (size_t i = 1; i < fs.size(); i++) {
-        Formal f = std::move(fs[i]);
-        size_t j = i;
-        for (; j > 0 && byName(f, fs[j - 1]); j--) fs[j] = std::move(fs[j - 1]);
-        fs[j] = std::move(f);
-      }
-    }
+    composite::sortRows(fs.data(), fs.size(), [](const Formal &a, const Formal &b) { return composite::lessChars(a.name.chars(), b.name.chars()); });
     const Formal *dup = nullptr;
     for (size_t i = 0; i + 1 < fs.size(); i++)
       if (fs[i].name == fs[i + 1].name) {

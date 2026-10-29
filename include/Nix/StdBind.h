@@ -28,6 +28,8 @@ constexpr std::string_view view(const CharSeries &c) { return {c.data() + c.pos,
 /// The other way: a window, or a cursor over it, on the characters of a std::string_view (nothing is copied).
 constexpr CharWindow window(std::string_view s) { return CharWindow(s.data(), uint32_t(s.size())); }
 constexpr CharSeries cseries(std::string_view s) { return CharSeries(s.data(), uint32_t(s.size())); }
+/// Or as the hot Series<char>, with no cursor at all: what an ordering or a fold over the bytes wants.
+constexpr auto chars(std::string_view s) { return series(s.data(), uint32_t(s.size())); }
 } // namespace composite
 
 #endif

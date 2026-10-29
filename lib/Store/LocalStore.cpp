@@ -14,6 +14,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "Composite/Mutable.h"
+#include "Composite/Rows.h"
 #include "Nix/Store.h"
 
 #include <algorithm>
@@ -103,8 +104,15 @@ composite::MutableSeries<std::string> Store::allValidPaths() {
     if (pathExists(toReal(p))) res.append(p);
   }
   closedir(d);
-  std::sort(res.begin(), res.end());
-  return res;
+  composite::MutableSeries<std::string *> order; // rows of pointers are sorted, then each path moves once, into its place
+  for (auto &p : res) order.append(&p);
+  composite::sortRows(order.data(), order.size(), [](const std::string *a, const std::string *b) {
+    return composite::lessChars(composite::series(a->data(), uint32_t(a->size())), composite::series(b->data(), uint32_t(b->size())));
+  });
+  composite::MutableSeries<std::string> sorted;
+  sorted.reserve(res.size());
+  for (std::string *p : order) sorted.append(std::move(*p));
+  return sorted;
 }
 
 std::set<std::string> Store::queryReferrers(const std::string &path) {

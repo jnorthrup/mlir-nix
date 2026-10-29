@@ -428,11 +428,13 @@ void toXML(EvalState &st, XMLWriter &doc, Value &v, bool strict, bool location, 
       if (auto n = lam.getArgName()) pa["name"] = n->str();
       if (lam.getEllipsis()) pa["ellipsis"] = "1";
       doc.open("attrspat", pa);
-      composite::MutableSeries<std::string> names;
+      composite::MutableSeries<llvm::StringRef> names; // the formals' bytes are the attributes' own: windows on them are sorted
       ArrayAttr formals = *lam.getFormals();
-      for (Attribute f : formals) names.append(cast<StringAttr>(f).getValue().str());
-      std::sort(names.begin(), names.end());
-      for (auto &n : names) doc.empty("attr", {{"name", n}});
+      for (Attribute f : formals) names.append(cast<StringAttr>(f).getValue());
+      composite::sortRows(names.data(), names.size(), [](llvm::StringRef a, llvm::StringRef b) {
+        return composite::lessChars(composite::series(a.data(), uint32_t(a.size())), composite::series(b.data(), uint32_t(b.size())));
+      });
+      for (llvm::StringRef n : names) doc.empty("attr", {{"name", n.str()}});
       doc.close();
     } else {
       doc.empty("varpat", {{"name", lam.getArgName() ? lam.getArgName()->str() : ""}});

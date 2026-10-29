@@ -16,6 +16,7 @@
 #ifndef NIX_NAME_H
 #define NIX_NAME_H
 
+#include "Composite/Series.h"
 #include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Allocator.h"
@@ -45,6 +46,8 @@ struct Name {
   }
 
   llvm::StringRef str() const { return {data, size}; }
+  /// The bytes as the hot Series<char>.
+  constexpr auto chars() const { return composite::series(data, size); }
   std::string toString() const { return str().str(); }
   bool isNull() const { return data == nullptr; }
   /// Same bytes; the null Name is not the empty one.

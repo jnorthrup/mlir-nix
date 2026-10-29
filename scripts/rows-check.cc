@@ -1,11 +1,13 @@
 // Rows: find, stable sort, unique-first and union against the standard library as the oracle, on random runs of every length up to 300.
 // Build like minmax-check.cc.
 #include "Composite/Rows.h"
+#include "Composite/Series.h"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <new>
 #include <random>
+#include <string>
 #include <vector>
 using namespace composite;
 static long live = 0; // blocks from operator new not yet given back: the unwind of a throwing comparator must leave it where it was
@@ -60,6 +62,14 @@ int main() {
     require(want.size() == un, "union count");
     for (size_t i = 0; i < un; i++) require(out[i].key == want[i].key && out[i].tag == want[i].tag, "union rows, y wins");
   }
-  std::printf("PASS rows: findRow, stable sortRows (in place, into, and unwound by a throwing comparator with nothing left allocated), uniqueFirst and union against the standard library on 4000 random runs of up to 300 rows\n");
+  // lessChars over Series<char> (Series.h) against std::string's order: memcmp's, unsigned bytes, then the shorter first
+  for (int round = 0; round < 20000; round++) {
+    std::string a(rng() % 6, '\0'), b(rng() % 6, '\0');
+    for (auto &ch : a) ch = char(rng() % 4 == 0 ? 0x80 + rng() % 4 : 'a' + rng() % 3);
+    for (auto &ch : b) ch = char(rng() % 4 == 0 ? 0x80 + rng() % 4 : 'a' + rng() % 3);
+    auto sa = series(a.data(), uint32_t(a.size())), sb = series(b.data(), uint32_t(b.size()));
+    require(lessChars(sa, sb) == (a < b) && lessChars(sb, sa) == (b < a), "lessChars is std::string's order");
+  }
+  std::printf("PASS rows: findRow, stable sortRows (in place, into, and unwound by a throwing comparator with nothing left allocated), uniqueFirst, union and lessChars against the standard library on 4000 random runs of up to 300 rows\n");
   return 0;
 }
