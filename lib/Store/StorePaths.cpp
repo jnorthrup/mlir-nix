@@ -572,7 +572,31 @@ static char *escapeInto(char *w, std::string_view s) {
     constexpr Escapes() { e[uint8_t('"')] = '"'; e[uint8_t('\\')] = '\\'; e[uint8_t('\n')] = 'n'; e[uint8_t('\r')] = 'r'; e[uint8_t('\t')] = 't'; }
   };
   static constexpr Escapes kEsc;
-  for (unsigned char c : s) {
+  // Sixteen bytes at a time (the compilers' vector extension: SSE2 or NEON, no intrinsics): a block with none of the five bytes ATerm
+  // escapes, as nearly all of a build script is, is copied whole; a block with one goes through the table a byte at a time.
+  typedef unsigned char Block __attribute__((vector_size(16)));
+  typedef unsigned long long Halves __attribute__((vector_size(16)));
+  const char *p = s.data(), *end = p + s.size();
+  for (; end - p >= 16; p += 16) {
+    Block b;
+    std::memcpy(&b, p, 16);
+    Block hit = (b == '"') | (b == '\\') | (b == '\n') | (b == '\r') | (b == '\t');
+    Halves h = (Halves)hit;
+    if ((h[0] | h[1]) == 0) {
+      std::memcpy(w, p, 16);
+      w += 16;
+      continue;
+    }
+    for (int i = 0; i < 16; i++) {
+      unsigned char c = uint8_t(p[i]);
+      char e = kEsc.e[c];
+      w[0] = e ? '\\' : char(c);
+      w[1] = e;
+      w += 1 + (e != 0);
+    }
+  }
+  for (; p < end; p++) {
+    unsigned char c = uint8_t(*p);
     char e = kEsc.e[c];
     w[0] = e ? '\\' : char(c);
     w[1] = e;
