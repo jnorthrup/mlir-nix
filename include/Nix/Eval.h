@@ -96,6 +96,8 @@ struct Bindings {
     uint32_t depth = 1;                 // how many layers the walk from here can pass through
   };
   static inline uint64_t flattened = 0; // MLNIX_STATS
+  static inline bool countGets = false; // MLNIX_STATS: get() calls and binary-search steps by set size (1, 2-3, 4-7, ... 2^k)
+  static inline uint64_t getCalls[16] = {}, getSteps[16] = {}, getMiss[16] = {}, getLayered = 0;
   static inline uint64_t merged = 0, mergedCells = 0; // MLNIX_STATS: flat sets made by mergeBindings, and their cells
   bool layered() const { return size_ == kLayered; }
   Layer &layer() const { return *reinterpret_cast<Layer *>(const_cast<Attr *>(attrs)); }
@@ -637,6 +639,7 @@ struct EvalState {
   uint64_t nVT[15] = {}; // MLNIX_STATS: instrumented tag writes, including stack values and repeated retyping;
                          // [14] alone counts allocated Value rows, not tag writes
   uint64_t nFrames = 0, nFrameBytes = 0, nFrameSlots = 0; // requested frame storage, excluding arena overhead
+  std::vector<std::pair<std::string, size_t>> evaluatedFiles; // MLNIX_STATS_IMPORTS: files evalFile'd, with how many path literals had been lowered by then
   uint64_t nLookups = 0, nLookupHits = 0, nHopHist[6] = {}; // MLNIX_STATS: lookupImpl calls, those answered by a filled slot, and the frame hops to the defining region (0, 1, 2, 3, 4, 5 or more)
   llvm::DenseMap<const void *, std::pair<llvm::StringRef, std::array<uint64_t, 2>>> cellsByKind; // MLNIX_STATS: cells lookup made, by defining op: [evaluated at once, left a thunk]
   llvm::DenseMap<const void *, std::pair<llvm::StringRef, uint64_t>> evalsByKind; // MLNIX_STATS: evalOp calls by op kind

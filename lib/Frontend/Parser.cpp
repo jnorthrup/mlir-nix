@@ -36,6 +36,7 @@
 #include <variant>
 
 namespace nixfe {
+std::unordered_set<std::string> *pathLiterals = nullptr;
 using composite::α;
 
 namespace {
@@ -2365,6 +2366,7 @@ struct Parser {
       if (lit.size() > 1 && lit.back() == '/') path += '/';
     }
     if (mode == Mode::Show) return text(path, K_EXPR, pos);
+    if (pathLiterals && mode == Mode::Gen) pathLiterals->insert(path);
     return mk(K_EXPR, pos, mode == Mode::Gen ? Value(nd::PathOp::create(b, noLoc(), valTy(), Name::persist(path))) : Value());
   }
 

@@ -68,18 +68,23 @@ void EvalState::statSelect(const void *site, const Bindings *b, Symbol key, bool
 
 const Attr *Bindings::get(Symbol s) const {
   if (layered()) {
+    if (countGets) ++getLayered;
     const Layer &L = layer();
     if (L.flat) return L.flat->get(s);
     if (const Attr *a = L.top->get(s)) return a; // top shadows base
     return L.base->get(s);                       // and base may be a layer itself: the chain is walked, not flattened
   }
   size_t lo = 0, hi = size_;
+  unsigned steps = 0;
   while (lo < hi) {
     size_t mid = (lo + hi) / 2;
     if (attrs[mid].name < s) lo = mid + 1;
     else hi = mid;
+    ++steps;
   }
-  if (lo < size_ && attrs[lo].name == s) return &attrs[lo];
+  bool found = lo < size_ && attrs[lo].name == s;
+  if (countGets) { unsigned b = size_ ? std::min(15, 63 - std::countl_zero(uint64_t(size_))) : 0; ++getCalls[b]; getSteps[b] += steps; getMiss[b] += !found; }
+  if (found) return &attrs[lo];
   return nullptr;
 }
 
@@ -291,6 +296,8 @@ void EvalState::copyContext(const Value &v, NixStringContext &ctx) {
 EvalState::EvalState(EvalSettings st, std::shared_ptr<nixstore::Store> store)
     : settings(std::move(st)), store(std::move(store)) {
   statsEnabled = getenv("MLNIX_STATS") != nullptr;
+  if (getenv("MLNIX_STATS_IMPORTS")) nixfe::pathLiterals = new std::unordered_set<std::string>();
+  Bindings::countGets = statsEnabled;
   scalarJIT = ScalarJIT::create();
   settings.mapSources = !getenv("MLNIX_NOMMAP"); // ablation switch: read and copy every file, as before
   composite::todoSink = [](const char *what) { llvm::errs() << "TODO: " << what << "\n"; };
@@ -585,6 +592,30 @@ void EvalState::printStats() {
                  << llvm::format("%.1f", mOps ? 100.0 * mRan / mOps : 0.0) << "% ever ran, " << mEvals << " evals, "
                  << mTh << " thunk cells).  Finer grain mints a cell: the thunk cells are its rows against lambda grain's "
                  << mR << "\n";
+  }
+  { uint64_t tc = 0, ts = 0; for (int i = 0; i < 16; i++) { tc += Bindings::getCalls[i]; ts += Bindings::getSteps[i]; }
+    if (tc) {
+      llvm::errs() << "== Bindings::get on flat sets: " << tc << " calls (+" << Bindings::getLayered << " entered through a layer), " << ts << " binary-search steps; by set size:\n";
+      for (int i = 0; i < 16; i++)
+        if (Bindings::getCalls[i])
+          llvm::errs() << "  size " << llvm::format("%6u", 1u << i) << "+  calls " << llvm::format("%10llu", (unsigned long long)Bindings::getCalls[i]) << llvm::format("  %5.1f%%", 100.0 * Bindings::getCalls[i] / tc)
+                       << "  steps " << llvm::format("%11llu", (unsigned long long)Bindings::getSteps[i]) << llvm::format("  (%4.1f a call)", double(Bindings::getSteps[i]) / Bindings::getCalls[i])
+                       << "  misses " << llvm::format("%5.1f%%", 100.0 * Bindings::getMiss[i] / Bindings::getCalls[i]) << '\n';
+    } }
+  if (nixfe::pathLiterals) { // how predictable is the next file: a file is predicted if a literal naming it (or its directory) was lowered before it was evaluated
+    size_t pred = 0, firstSeen = 0, nix = 0;
+    std::unordered_set<std::string> hit;
+    for (auto &ef : evaluatedFiles) {
+      std::string dir = nixstore::dirOf(ef.first);
+      bool p = nixfe::pathLiterals->count(ef.first) || nixfe::pathLiterals->count(dir) || nixfe::pathLiterals->count(dir + "/");
+      pred += p; if (p) { hit.insert(ef.first); hit.insert(dir); hit.insert(dir + "/"); }
+    }
+    for (auto &l : *nixfe::pathLiterals) nix += l.size() > 4 && l.compare(l.size() - 4, 4, ".nix") == 0;
+    size_t litHit = 0; for (auto &l : *nixfe::pathLiterals) litHit += hit.count(l);
+    llvm::errs() << "== import prediction: " << evaluatedFiles.size() << " files evaluated, " << pred << " named by a path literal lowered earlier (recall "
+                 << llvm::format("%.1f", evaluatedFiles.empty() ? 0.0 : 100.0 * pred / evaluatedFiles.size()) << "%); " << nixfe::pathLiterals->size() << " distinct path literals ("
+                 << nix << " end in .nix), " << litHit << " of them led to an evaluated file (precision "
+                 << llvm::format("%.1f", 100.0 * litHit / std::max<size_t>(1, nixfe::pathLiterals->size())) << "%, of the .nix ones' neighbours not separated)\n";
   }
   if (nLookups) {
     llvm::errs() << "== lookupImpl: " << nLookups << " calls, " << nLookupHits << " answered by a filled slot ("
@@ -2485,6 +2516,7 @@ Value *EvalState::evalFile(const std::string &pathIn) {
     origin->path = logical;
     origin->baseDir = nixstore::dirOf(logical);
     nixprefetch::note('F', resolved.c_str());
+    if (nixfe::pathLiterals) evaluatedFiles.push_back({logical, nixfe::pathLiterals->size()});
     origin->text = settings.mapSources ? nixfe::Source::mapFile(resolved) : nullptr;
     if (!origin->text) origin->text = nixfe::Source::fromString(readSource(resolved));
     origins.push_back(origin);

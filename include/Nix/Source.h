@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <unordered_set>
 #include <ostream>
 #include <stdexcept>
 #include <string>
@@ -21,6 +22,9 @@
 #include "Nix/Name.h"
 
 namespace nixfe {
+/// MLNIX_STATS_IMPORTS: when set, the parser adds every path literal it lowers (canonical text) to this set.
+extern std::unordered_set<std::string> *pathLiterals;
+
 
 struct Pos {
   uint32_t line = 0, col = 0;
