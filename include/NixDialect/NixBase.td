@@ -105,7 +105,9 @@ def Nix_Dialect : Dialect {
     /// Operand modalities, collected from the `NixModes` traits of the ops: bit i of
     /// `strict` says operand i is forced before the op returns and never retained;
     /// bit i of `tail` says the op's result is that operand's value.
-    struct OperandModes { unsigned strict = 0, tail = 0; };
+    /// `first`: one more than the operand a continent op always forces before anything else it does (0: none), from nix.first.  Its
+    /// evaluator may make that operand's cell evaluated, where a lazy one would be forced the moment the op starts.
+    struct OperandModes { unsigned strict = 0, tail = 0; unsigned first = 0; };
     ::llvm::DenseMap<const void *, OperandModes> operandModes; // by OperationName
     OperandModes modesOf(::mlir::OperationName n) const {
       auto it = operandModes.find(n.getAsOpaquePointer());

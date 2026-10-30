@@ -215,7 +215,13 @@ LogicalResult mlir::nix::loadPrimDialects(MLIRContext *ctx, NixDialect &core) {
 
       // nix.strict: every operand is forced before the op returns and none is kept, the modes a core op declares with NixModes.
       if (opOp->hasAttr("nix.strict"))
-        core.operandModes[name.getAsOpaquePointer()] = {arity >= 32 ? ~0u : (1u << arity) - 1, 0u};
+        core.operandModes[name.getAsOpaquePointer()] = {arity >= 32 ? ~0u : (1u << arity) - 1, 0u, arity == 1 ? 1u : 0u};
+      // nix.first: the operand the primop forces before anything else it does (its own first step, every time).
+      if (auto first = opOp->getAttrOfType<IntegerAttr>("nix.first")) {
+        if (first.getInt() < 0 || unsigned(first.getInt()) >= arity)
+          return opOp.emitError("nix.first names no operand");
+        core.operandModes[name.getAsOpaquePointer()].first = unsigned(first.getInt()) + 1;
+      }
       if (!core.registerPrim(key.getValue(), arity, name, *fx, foldable, fresh))
         return opOp.emitError("duplicate nix.key '") << key.getValue() << "'";
 

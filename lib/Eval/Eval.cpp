@@ -916,7 +916,11 @@ static void describe(Node *n, Operation *op, const nd::NixDialect *core) {
       .Case<nd::PathOp>([](auto) { return NodeKind::Path; })
       .Case<nd::BuiltinOp>([](auto) { return NodeKind::Builtin; })
       .Case<nd::LambdaOp>([](auto) { return NodeKind::Lambda; })
-      .Default([&](Operation *o) { return core->primOf(o) ? NodeKind::Prim : NodeKind::Other; }); // a primop is found at its first evaluation
+      .Default([&](Operation *o) {
+        if (!core->primOf(o)) return NodeKind::Other;
+        n->flags = uint8_t(core->modesOf(o->getName()).first); // the operand the primop forces first, plus one (nix.first)
+        return NodeKind::Prim;                                // the primop itself is found at its first evaluation
+      });
 }
 
 void EvalState::unindexed() { throw EvalError("internal error: unindexed SSA value"); }
@@ -1259,7 +1263,7 @@ Value *EvalState::makeCell(Frame *f, Node *s, bool forced) {
   if (s->kind == NodeKind::Arg) throw EvalError("internal error: unbound block argument");
   if (s->how == Node::Const || s->how == Node::Builtin) return slot = makeFixed(s);
   Value *nv = allocValue();
-  bool eager = forced && s->how == Node::Thunk && (idx != kNoSlot || s->promo == Promotion::Once);
+  bool eager = forced && s->how == Node::Thunk && (idx != kNoSlot || s->promo == Promotion::Once || s->promo == Promotion::InPlace);
   if (eager) {
     slot = nv;
     if (statsEnabled) [[unlikely]] statCell(f, s, nv, true);
@@ -1646,10 +1650,13 @@ void EvalState::callPrimOp(const PrimOp &op, Value **args, Value &out, PosPtr po
   try {
     op.call(*this, args, out, pos);
   } catch (EvalError &e) {
-    if (op.name != "throw" && op.name != "abort" && op.name != "addErrorContext")
-      e.addTrace(pos, "while calling the '" + op.name + "' builtin");
+    tracePrimOp(op, e, pos);
     throw;
   }
+}
+
+void EvalState::tracePrimOp(const PrimOp &op, EvalError &e, PosPtr pos) {
+  if (op.name != "throw" && op.name != "abort" && op.name != "addErrorContext") e.addTrace(pos, "while calling the '" + op.name + "' builtin");
 }
 
 const PrimOp *EvalState::primOpByKey(llvm::StringRef key) {
@@ -2010,7 +2017,7 @@ void EvalState::evalAttrsDynamic(Node *node, Frame *env, Value &out) {
   for (size_t i = 0; i < names.size(); i++)
     seen[symbolOf(names[i])] = nullptr;
   for (size_t j = 0; j < nDynNames; j++) {
-    Value *nv = lookup(env, dynNames[j]);
+    Value *nv = lookupForced(env, dynNames[j]); // forced next: a cell made here is made evaluated
     PosPtr p = dynNames[j]->pos();
     forceValue(*nv, p);
     if (nv->type == VType::Null) continue;
@@ -2047,7 +2054,7 @@ void EvalState::evalConcatStrings(Node *node, Frame *env, Value &out) {
   VType firstType = VType::String;
   for (Node *pv : parts) {
     PosPtr ppos = pv->pos();
-    Value *v = lookup(env, pv);
+    Value *v = lookupForced(env, pv); // a part is forced now: one made here is made evaluated, not a thunk forced on the next line
     forceValue(*v, ppos);
     if (first) firstType = v->type;
     if (firstType == VType::Int) {
@@ -2091,7 +2098,7 @@ void EvalState::evalConcatStrings(Node *node, Frame *env, Value &out) {
 Symbol EvalState::pathSymbol(const nixfe::Name &comp, Node *const *dyn, unsigned &nextDyn, Frame *env,
                              PosPtr pos) {
   if (!comp.isNull()) return symbolOf(comp);
-  return symbolOfString(forceStringNoCtx(*lookup(env, dyn[nextDyn++]), pos, "while evaluating an attribute name"));
+  return symbolOfString(forceStringNoCtx(*lookupForced(env, dyn[nextDyn++]), pos, "while evaluating an attribute name"));
 }
 
 Value *EvalState::selectField(Value &base, Symbol key, PosPtr pos, uint32_t &guess) {
@@ -2295,7 +2302,19 @@ void evalAssert(EvalState &st, Node *n, Frame *env, Value &out) {
 void evalPrim(EvalState &st, Node *n, Frame *env, Value &out) { // an op of a continent dialect: its primop, found once, on its operands' cells
   if (!n->prim) n->prim = st.primFor(n->def);
   Value *args[8];
-  for (unsigned i = 0; i < n->nOperands; i++) args[i] = st.lookup(env, n->operands[i]);
+  unsigned first = n->flags; // the operand the primop forces before anything else, plus one: its cell is made evaluated, not a thunk
+  for (unsigned i = 0; i < n->nOperands; i++) {
+    if (i + 1 != first) [[likely]] {
+      args[i] = st.lookup(env, n->operands[i]);
+      continue;
+    }
+    try {
+      args[i] = st.lookupForced(env, n->operands[i]);
+    } catch (EvalError &e) { // where the primop would have forced it: under the frame callPrimOp gives the primop's own errors
+      st.tracePrimOp(*n->prim, e, n->pos());
+      throw;
+    }
+  }
   st.callPrimOp(*n->prim, args, out, n->pos());
 }
 

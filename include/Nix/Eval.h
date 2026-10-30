@@ -688,6 +688,8 @@ struct EvalState {
   /// Call a primop on already-collected arguments, adding the
   /// "while calling the 'X' builtin" trace like upstream.
   void callPrimOp(const PrimOp &op, Value **args, Value &out, PosPtr pos);
+  /// The frame a primop's error gets: "while calling the 'name' builtin" (not for throw, abort and addErrorContext).
+  void tracePrimOp(const PrimOp &op, EvalError &e, PosPtr pos);
   const PrimOp *primOpByKey(llvm::StringRef key);
   /// The primop an IRDL-defined continent op stands for (cached per op name).
   const PrimOp *primFor(mlir::Operation *op);
@@ -745,6 +747,8 @@ struct EvalState {
   /// next computed key (operand), forced to a string.
   Symbol pathSymbol(const nixfe::Name &comp, Node *const *dyn, unsigned &nextDyn, Frame *env, PosPtr pos);
   Value *lookup(Frame *f, Node *v) { return lookupImpl(f, v, false); }
+  /// The same for a consumer that forces the cell next: one it makes is evaluated now, not a thunk (a cell already there is as it is).
+  Value *lookupForced(Frame *f, Node *v) { return lookupImpl(f, v, true); }
   /// The same from the SSA value: one hash probe to find its record (the JITs, the primop model, the cold paths).
   Value *lookup(Frame *f, mlir::Value v) { return lookupImpl(f, nodeOfValue(v), false); }
   Node *nodeOfValue(mlir::Value v) {

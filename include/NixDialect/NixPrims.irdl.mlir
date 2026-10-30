@@ -14,6 +14,8 @@
 //   nix.fold  the primop may be evaluated at compile time on scalar constants
 //   nix.strict every operand is forced before the op returns and none is kept (the NixModes of a core op, for a continent op):
 //             the evaluator's frameless rule (EvalState::stackFrameOK) reads it
+//   nix.first  the operand the primop forces before anything else it does, every time (an op with one strict operand: that one):
+//             the evaluator makes that operand's cell evaluated instead of a thunk it would force at once
 //   nix.fresh the result is a newly allocated list / attribute set with observable
 //             identity: the op is pure but equal calls must not be merged (a
 //             MemAlloc effect on the result, like memref.alloc)
@@ -30,7 +32,7 @@
 
 // ---- scope val ------------------------------------------------------------
 irdl.dialect @nixnum attributes {nix.summary = "Arithmetic and ordering", nix.scope = "val", nix.continent = "nixnum"} {
-  irdl.operation @add attributes {nix.key = "__add", nix.fx = "pure", nix.fold} {
+  irdl.operation @add attributes {nix.key = "__add", nix.fx = "pure", nix.fold, nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v, a1: %v)
     irdl.results(r: %v)
@@ -40,7 +42,7 @@ irdl.dialect @nixnum attributes {nix.summary = "Arithmetic and ordering", nix.sc
     irdl.operands(a0: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @div attributes {nix.key = "__div", nix.fx = "pure", nix.fold} {
+  irdl.operation @div attributes {nix.key = "__div", nix.fx = "pure", nix.fold, nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v, a1: %v)
     irdl.results(r: %v)
@@ -50,17 +52,17 @@ irdl.dialect @nixnum attributes {nix.summary = "Arithmetic and ordering", nix.sc
     irdl.operands(a0: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @less_than attributes {nix.key = "__lessThan", nix.fx = "pure", nix.fold} {
+  irdl.operation @less_than attributes {nix.key = "__lessThan", nix.fx = "pure", nix.fold, nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v, a1: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @mul attributes {nix.key = "__mul", nix.fx = "pure", nix.fold} {
+  irdl.operation @mul attributes {nix.key = "__mul", nix.fx = "pure", nix.fold, nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v, a1: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @sub attributes {nix.key = "__sub", nix.fx = "pure", nix.fold} {
+  irdl.operation @sub attributes {nix.key = "__sub", nix.fx = "pure", nix.fold, nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v, a1: %v)
     irdl.results(r: %v)
@@ -134,7 +136,7 @@ irdl.dialect @nixty attributes {nix.summary = "Type predicates", nix.scope = "va
 }
 
 irdl.dialect @nixrefl attributes {nix.summary = "Reflection: typeOf, functionArgs", nix.scope = "val", nix.continent = "nixty"} {
-  irdl.operation @function_args attributes {nix.key = "__functionArgs", nix.fx = "pure", nix.fresh} {
+  irdl.operation @function_args attributes {nix.key = "__functionArgs", nix.fx = "pure", nix.fresh, nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v)
     irdl.results(r: %v)
@@ -148,22 +150,22 @@ irdl.dialect @nixrefl attributes {nix.summary = "Reflection: typeOf, functionArg
 
 // ---- scope coll ------------------------------------------------------------
 irdl.dialect @nixlist attributes {nix.summary = "Lists: structure and access", nix.scope = "coll", nix.continent = "nixlist"} {
-  irdl.operation @concat_lists attributes {nix.key = "__concatLists", nix.fx = "pure", nix.fresh} {
+  irdl.operation @concat_lists attributes {nix.key = "__concatLists", nix.fx = "pure", nix.fresh, nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @elem attributes {nix.key = "__elem", nix.fx = "pure"} {
+  irdl.operation @elem attributes {nix.key = "__elem", nix.fx = "pure", nix.first = 1 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v, a1: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @elem_at attributes {nix.key = "__elemAt", nix.fx = "pure"} {
+  irdl.operation @elem_at attributes {nix.key = "__elemAt", nix.fx = "pure", nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v, a1: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @head attributes {nix.key = "__head", nix.fx = "pure"} {
+  irdl.operation @head attributes {nix.key = "__head", nix.fx = "pure", nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v)
     irdl.results(r: %v)
@@ -173,7 +175,7 @@ irdl.dialect @nixlist attributes {nix.summary = "Lists: structure and access", n
     irdl.operands(a0: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @tail attributes {nix.key = "__tail", nix.fx = "pure", nix.fresh} {
+  irdl.operation @tail attributes {nix.key = "__tail", nix.fx = "pure", nix.fresh, nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v)
     irdl.results(r: %v)
@@ -181,57 +183,57 @@ irdl.dialect @nixlist attributes {nix.summary = "Lists: structure and access", n
 }
 
 irdl.dialect @nixlistfn attributes {nix.summary = "Lists: higher-order (run user functions)", nix.scope = "coll", nix.continent = "nixlist"} {
-  irdl.operation @all attributes {nix.key = "__all", nix.fx = "user"} {
+  irdl.operation @all attributes {nix.key = "__all", nix.fx = "user", nix.first = 1 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v, a1: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @any attributes {nix.key = "__any", nix.fx = "user"} {
+  irdl.operation @any attributes {nix.key = "__any", nix.fx = "user", nix.first = 1 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v, a1: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @concat_map attributes {nix.key = "__concatMap", nix.fx = "user"} {
+  irdl.operation @concat_map attributes {nix.key = "__concatMap", nix.fx = "user", nix.first = 1 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v, a1: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @filter attributes {nix.key = "__filter", nix.fx = "user"} {
+  irdl.operation @filter attributes {nix.key = "__filter", nix.fx = "user", nix.first = 1 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v, a1: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @foldl_strict attributes {nix.key = "__foldl'", nix.fx = "user"} {
+  irdl.operation @foldl_strict attributes {nix.key = "__foldl'", nix.fx = "user", nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v, a1: %v, a2: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @gen_list attributes {nix.key = "__genList", nix.fx = "user"} {
+  irdl.operation @gen_list attributes {nix.key = "__genList", nix.fx = "user", nix.first = 1 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v, a1: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @generic_closure attributes {nix.key = "__genericClosure", nix.fx = "user"} {
+  irdl.operation @generic_closure attributes {nix.key = "__genericClosure", nix.fx = "user", nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @group_by attributes {nix.key = "__groupBy", nix.fx = "user"} {
+  irdl.operation @group_by attributes {nix.key = "__groupBy", nix.fx = "user", nix.first = 1 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v, a1: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @map attributes {nix.key = "map", nix.fx = "user"} {
+  irdl.operation @map attributes {nix.key = "map", nix.fx = "user", nix.first = 1 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v, a1: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @partition attributes {nix.key = "__partition", nix.fx = "user"} {
+  irdl.operation @partition attributes {nix.key = "__partition", nix.fx = "user", nix.first = 1 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v, a1: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @sort attributes {nix.key = "__sort", nix.fx = "user"} {
+  irdl.operation @sort attributes {nix.key = "__sort", nix.fx = "user", nix.first = 1 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v, a1: %v)
     irdl.results(r: %v)
@@ -239,42 +241,42 @@ irdl.dialect @nixlistfn attributes {nix.summary = "Lists: higher-order (run user
 }
 
 irdl.dialect @nixattr attributes {nix.summary = "Attribute sets: structure and access", nix.scope = "coll", nix.continent = "nixattr"} {
-  irdl.operation @attr_names attributes {nix.key = "__attrNames", nix.fx = "pure", nix.fresh} {
+  irdl.operation @attr_names attributes {nix.key = "__attrNames", nix.fx = "pure", nix.fresh, nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @attr_values attributes {nix.key = "__attrValues", nix.fx = "pure", nix.fresh} {
+  irdl.operation @attr_values attributes {nix.key = "__attrValues", nix.fx = "pure", nix.fresh, nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @cat_attrs attributes {nix.key = "__catAttrs", nix.fx = "pure", nix.fresh} {
+  irdl.operation @cat_attrs attributes {nix.key = "__catAttrs", nix.fx = "pure", nix.fresh, nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v, a1: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @get_attr attributes {nix.key = "__getAttr", nix.fx = "pure"} {
+  irdl.operation @get_attr attributes {nix.key = "__getAttr", nix.fx = "pure", nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v, a1: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @has_attr attributes {nix.key = "__hasAttr", nix.fx = "pure"} {
+  irdl.operation @has_attr attributes {nix.key = "__hasAttr", nix.fx = "pure", nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v, a1: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @intersect_attrs attributes {nix.key = "__intersectAttrs", nix.fx = "pure", nix.fresh} {
+  irdl.operation @intersect_attrs attributes {nix.key = "__intersectAttrs", nix.fx = "pure", nix.fresh, nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v, a1: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @list_to_attrs attributes {nix.key = "__listToAttrs", nix.fx = "pure", nix.fresh} {
+  irdl.operation @list_to_attrs attributes {nix.key = "__listToAttrs", nix.fx = "pure", nix.fresh, nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @remove_attrs attributes {nix.key = "removeAttrs", nix.fx = "pure", nix.fresh} {
+  irdl.operation @remove_attrs attributes {nix.key = "removeAttrs", nix.fx = "pure", nix.fresh, nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v, a1: %v)
     irdl.results(r: %v)
@@ -287,12 +289,12 @@ irdl.dialect @nixattr attributes {nix.summary = "Attribute sets: structure and a
 }
 
 irdl.dialect @nixattrfn attributes {nix.summary = "Attribute sets: higher-order", nix.scope = "coll", nix.continent = "nixattr"} {
-  irdl.operation @map_attrs attributes {nix.key = "__mapAttrs", nix.fx = "user"} {
+  irdl.operation @map_attrs attributes {nix.key = "__mapAttrs", nix.fx = "user", nix.first = 1 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v, a1: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @zip_attrs_with attributes {nix.key = "__zipAttrsWith", nix.fx = "user"} {
+  irdl.operation @zip_attrs_with attributes {nix.key = "__zipAttrsWith", nix.fx = "user", nix.first = 1 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v, a1: %v)
     irdl.results(r: %v)
@@ -301,7 +303,7 @@ irdl.dialect @nixattrfn attributes {nix.summary = "Attribute sets: higher-order"
 
 // ---- scope text ------------------------------------------------------------
 irdl.dialect @nixstr attributes {nix.summary = "Strings: slicing, replace, coercion", nix.scope = "text", nix.continent = "nixstr"} {
-  irdl.operation @concat_strings_sep attributes {nix.key = "__concatStringsSep", nix.fx = "pure"} {
+  irdl.operation @concat_strings_sep attributes {nix.key = "__concatStringsSep", nix.fx = "pure", nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v, a1: %v)
     irdl.results(r: %v)
@@ -311,7 +313,7 @@ irdl.dialect @nixstr attributes {nix.summary = "Strings: slicing, replace, coerc
     irdl.operands(a0: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @replace_strings attributes {nix.key = "__replaceStrings", nix.fx = "pure"} {
+  irdl.operation @replace_strings attributes {nix.key = "__replaceStrings", nix.fx = "pure", nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v, a1: %v, a2: %v)
     irdl.results(r: %v)
@@ -321,12 +323,12 @@ irdl.dialect @nixstr attributes {nix.summary = "Strings: slicing, replace, coerc
     irdl.operands(a0: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @substring attributes {nix.key = "__substring", nix.fx = "pure", nix.fold} {
+  irdl.operation @substring attributes {nix.key = "__substring", nix.fx = "pure", nix.fold, nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v, a1: %v, a2: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @to_string attributes {nix.key = "toString", nix.fx = "pure", nix.fold} {
+  irdl.operation @to_string attributes {nix.key = "toString", nix.fx = "pure", nix.fold, nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v)
     irdl.results(r: %v)
@@ -344,7 +346,7 @@ irdl.dialect @nixver attributes {nix.summary = "Versions and derivation names", 
     irdl.operands(a0: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @split_version attributes {nix.key = "__splitVersion", nix.fx = "pure", nix.fresh} {
+  irdl.operation @split_version attributes {nix.key = "__splitVersion", nix.fx = "pure", nix.fresh, nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v)
     irdl.results(r: %v)
@@ -352,12 +354,12 @@ irdl.dialect @nixver attributes {nix.summary = "Versions and derivation names", 
 }
 
 irdl.dialect @nixre attributes {nix.summary = "Regular expressions: match, split", nix.scope = "text", nix.continent = "nixstr"} {
-  irdl.operation @match attributes {nix.key = "__match", nix.fx = "pure", nix.fresh} {
+  irdl.operation @match attributes {nix.key = "__match", nix.fx = "pure", nix.fresh, nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v, a1: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @split attributes {nix.key = "__split", nix.fx = "pure", nix.fresh} {
+  irdl.operation @split attributes {nix.key = "__split", nix.fx = "pure", nix.fresh, nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v, a1: %v)
     irdl.results(r: %v)
@@ -399,12 +401,12 @@ irdl.dialect @nixctx attributes {nix.summary = "String context", nix.scope = "te
 
 // ---- scope io ------------------------------------------------------------
 irdl.dialect @nixpath attributes {nix.summary = "Paths: pure path manipulation", nix.scope = "io", nix.continent = "nixpath"} {
-  irdl.operation @base_name_of attributes {nix.key = "baseNameOf", nix.fx = "pure"} {
+  irdl.operation @base_name_of attributes {nix.key = "baseNameOf", nix.fx = "pure", nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @dir_of attributes {nix.key = "dirOf", nix.fx = "pure"} {
+  irdl.operation @dir_of attributes {nix.key = "dirOf", nix.fx = "pure", nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v)
     irdl.results(r: %v)
@@ -427,17 +429,17 @@ irdl.dialect @nixfs attributes {nix.summary = "World reads: files and environmen
     irdl.operands(a0: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @path_exists attributes {nix.key = "__pathExists", nix.fx = "fs"} {
+  irdl.operation @path_exists attributes {nix.key = "__pathExists", nix.fx = "fs", nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @read_dir attributes {nix.key = "__readDir", nix.fx = "fs", nix.fresh} {
+  irdl.operation @read_dir attributes {nix.key = "__readDir", nix.fx = "fs", nix.fresh, nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @read_file attributes {nix.key = "__readFile", nix.fx = "fs"} {
+  irdl.operation @read_file attributes {nix.key = "__readFile", nix.fx = "fs", nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v)
     irdl.results(r: %v)
@@ -508,7 +510,7 @@ irdl.dialect @nixhash attributes {nix.summary = "Hashing", nix.scope = "io", nix
     irdl.operands(a0: %v, a1: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @hash_string attributes {nix.key = "__hashString", nix.fx = "pure", nix.fold} {
+  irdl.operation @hash_string attributes {nix.key = "__hashString", nix.fx = "pure", nix.fold, nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v, a1: %v)
     irdl.results(r: %v)
@@ -517,7 +519,7 @@ irdl.dialect @nixhash attributes {nix.summary = "Hashing", nix.scope = "io", nix
 
 // ---- scope meta ------------------------------------------------------------
 irdl.dialect @nixjson attributes {nix.summary = "JSON", nix.scope = "meta", nix.continent = "nixfmt"} {
-  irdl.operation @from_json attributes {nix.key = "__fromJSON", nix.fx = "pure", nix.fresh} {
+  irdl.operation @from_json attributes {nix.key = "__fromJSON", nix.fx = "pure", nix.fresh, nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v)
     irdl.results(r: %v)
@@ -565,12 +567,12 @@ irdl.dialect @nixctl attributes {nix.summary = "Evaluation order and recovery", 
     irdl.operands(a0: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @deep_seq attributes {nix.key = "__deepSeq", nix.fx = "pure"} {
+  irdl.operation @deep_seq attributes {nix.key = "__deepSeq", nix.fx = "pure", nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v, a1: %v)
     irdl.results(r: %v)
   }
-  irdl.operation @seq attributes {nix.key = "__seq", nix.fx = "pure"} {
+  irdl.operation @seq attributes {nix.key = "__seq", nix.fx = "pure", nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v, a1: %v)
     irdl.results(r: %v)
@@ -619,7 +621,7 @@ irdl.dialect @nixtrace attributes {nix.summary = "Tracing", nix.scope = "ctl", n
 }
 
 irdl.dialect @nixload attributes {nix.summary = "Loading other Nix files", nix.scope = "ctl", nix.continent = "nixctl"} {
-  irdl.operation @import attributes {nix.key = "import", nix.fx = "import"} {
+  irdl.operation @import attributes {nix.key = "import", nix.fx = "import", nix.first = 0 : i64} {
     %v = irdl.base "!nix.value"
     irdl.operands(a0: %v)
     irdl.results(r: %v)
