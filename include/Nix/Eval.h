@@ -522,9 +522,26 @@ struct EvalState {
   Value *newStringWindow(llvm::StringRef r) { Value *v = allocValue(); mkStringWindow(*v, r); return v; }
 
   /// Builder for attribute sets.
+  /// A set being built: its rows go where the set will live.  Given the most rows it can get (`room`), the builder writes them into an
+  /// arena block of that size, and finish() sorts them there: no heap and no copy.  Without one, up to twelve rows stay in the builder and
+  /// are copied once into a block of their size; more go to a MutableSeries and are copied at finish.
   struct BindingsBuilder {
-    BindingsBuilder(EvalState &st) : st(st) {}
-    void insertIndexed(Symbol s, Value *v, PosIdx pos) { attrs.push_back({s, pos, v}); }
+    explicit BindingsBuilder(EvalState &st, size_t room = 0) : st(st) {
+      if (room > kInline) {
+        block = st.allocBindings(room);
+        rows = block->attrs;
+        cap = uint32_t(room);
+      }
+    }
+    BindingsBuilder(const BindingsBuilder &) = delete; // `rows` may point into the builder itself
+    BindingsBuilder &operator=(const BindingsBuilder &) = delete;
+    void insertIndexed(Symbol s, Value *v, PosIdx pos) {
+      if (n < cap) [[likely]] {
+        rows[n++] = {s, pos, v};
+        return;
+      }
+      overflow({s, pos, v});
+    }
     void insert(Symbol s, Value *v, PosPtr pos = nullptr) { insertIndexed(s, v, st.positionIndex(pos)); }
     void insert(llvm::StringRef name, Value *v, PosPtr pos = nullptr) { insert(st.symbols.create(name), v, pos); }
     Value &alloc(llvm::StringRef name, PosPtr pos = nullptr) {
@@ -537,10 +554,18 @@ struct EvalState {
       insert(s, v, pos);
       return *v;
     }
-    Bindings *finish(); // sorts; later inserts of the same name win? (no: first)
-    size_t size() const { return attrs.size(); }
+    Bindings *finish(); // sorts in name order; of rows with one name, the first inserted stays
+    size_t size() const { return n; }
+    static constexpr uint32_t kInline = 12;
     EvalState &st;
-    llvm::SmallVector<Attr, 12> attrs; // accumulated here, then drained into the arena by finish()
+    Attr inl[kInline];
+    Attr *rows = inl;       // where the next row goes while there is room: `inl`, or the arena block `room` asked for
+    uint32_t n = 0, cap = kInline;
+    Bindings *block = nullptr;
+    composite::MutableSeries<Attr> more; // the rows, once more came than there was room for
+
+  private:
+    void overflow(Attr a);
   };
 
   // -- Forcing -------------------------------------------------------------

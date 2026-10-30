@@ -286,12 +286,15 @@ static std::string fileTypeOf(const std::string &path) {
 
 /// The type of a directory entry: the file system already told `readdir` (d_type), so no stat;
 /// DT_UNKNOWN (some file systems) falls back to lstat, as upstream does.
-static std::string dirEntryType(const std::string &dir, const dirent &e) {
+static const char *dirEntryType(const std::string &dir, const dirent &e) {
   switch (e.d_type) {
   case DT_REG: return "regular";
   case DT_DIR: return "directory";
   case DT_LNK: return "symlink";
-  case DT_UNKNOWN: return fileTypeOf(dir + "/" + e.d_name);
+  case DT_UNKNOWN: {
+    std::string t = fileTypeOf(dir + "/" + e.d_name);
+    return t == "regular" ? "regular" : t == "directory" ? "directory" : t == "symlink" ? "symlink" : t.empty() ? "" : "unknown";
+  }
   default: return "unknown";
   }
 }
@@ -615,14 +618,17 @@ void registerStoreBuiltins(EvalState &state) {
     nixprefetch::note('D', real.c_str());
     DIR *d = opendir(real.c_str());
     if (!d) throw EvalError("cannot read directory '" + p + "': " + strerror(errno), pos);
-    EvalState::BindingsBuilder bb(st);
+    // The entries first, then the set at their count, written where it lives; a type is a window on its literal, not a copy.
+    struct Entry { Symbol name; const char *type; };
+    composite::MutableSeries<Entry> entries;
     while (auto *e = readdir(d)) {
-      std::string n = e->d_name;
+      std::string_view n = e->d_name;
       if (n == "." || n == "..") continue;
-      Value &t = bb.alloc(n);
-      st.mkString(t, dirEntryType(real, *e));
+      entries.append({st.symbols.create(n), dirEntryType(real, *e)});
     }
     closedir(d);
+    EvalState::BindingsBuilder bb(st, entries.size());
+    for (const Entry &e : entries) st.mkStringWindow(bb.alloc(e.name), e.type);
     st.mkAttrs(v, bb.finish());
   });
   S.addPrimOp("__readFileType", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {

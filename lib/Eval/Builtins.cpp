@@ -795,7 +795,7 @@ void registerBuiltins(EvalState &state) {
   });
   S.addPrimOp("__listToAttrs", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[0], pos, "while evaluating the argument passed to builtins.listToAttrs");
-    EvalState::BindingsBuilder bb(st);
+    EvalState::BindingsBuilder bb(st, args[0]->listSize()); // a row an element at most
     for (Value &e : args[0]->values()) {
       st.forceAttrs(e, pos, "while evaluating an element of the list passed to builtins.listToAttrs");
       const Attr *n = e.attrs->get(st.s.name);
@@ -845,14 +845,13 @@ void registerBuiltins(EvalState &state) {
     if (args[0]->type != VType::Lambda) throw EvalError("'functionArgs' requires a function", pos);
     auto lam = cast<nd::LambdaOp>(args[0]->thunk.node->def);
     if (!lam.getFormals()) { st.mkAttrs(v, st.allocBindings(0)); return; }
-    EvalState::BindingsBuilder bb(st);
+    EvalState::BindingsBuilder bb(st, lam.getFormals()->size()); // a row a formal
     auto defs = *lam.getFormalDefaults();
     // Positions of the formals come from the nix.formal ops in the body.
     auto locs = lam.getFormalLocs();
     for (size_t i = 0; i < lam.getFormals()->size(); i++) {
-      std::string n = cast<StringAttr>((*lam.getFormals())[i]).getValue().str();
       PosPtr p = locs && i < locs->size() ? nd::posOfWord(uint64_t((*locs)[i])) : nullptr;
-      bb.insert(n, defs[i] ? &st.vTrue : &st.vFalse, p);
+      bb.insert(st.symbolOf(cast<StringAttr>((*lam.getFormals())[i])), defs[i] ? &st.vTrue : &st.vFalse, p); // by the name's address
     }
     st.mkAttrs(v, bb.finish());
   });
@@ -883,7 +882,8 @@ void registerBuiltins(EvalState &state) {
     for (Value &e : args[1]->values())
       for (auto &a : *e.attrs) all.append({a.name, a.value});
     cp::sortRows(all.data(), all.size(), [](const NV &x, const NV &y) { return x.name < y.name; });
-    EvalState::BindingsBuilder bb(st);
+    // One row a name: the sorted rows tell how many, so the set is written where it lives.
+    EvalState::BindingsBuilder bb(st, cp::uniqueCount(all.data(), all.size(), [](const NV &x) { return x.name; }));
     for (uint32_t i = 0, n = all.size(); i < n;) {
       uint32_t j = i;
       while (j < n && all[j].name == all[i].name) j++;
@@ -1080,7 +1080,7 @@ void registerBuiltins(EvalState &state) {
       kv.append({st.symbolOfString(st.forceStringNoCtx(r, pos, "while evaluating the return value of the grouping function passed to builtins.groupBy")), e});
     }
     cp::sortRows(kv.data(), kv.size(), [](const KV &x, const KV &y) { return x.key < y.key; });
-    EvalState::BindingsBuilder bb(st);
+    EvalState::BindingsBuilder bb(st, cp::uniqueCount(kv.data(), kv.size(), [](const KV &x) { return x.key; }));
     for (uint32_t i = 0, n = kv.size(); i < n;) {
       uint32_t j = i;
       while (j < n && kv[j].key == kv[i].key) j++;

@@ -127,13 +127,32 @@ Bindings *EvalState::allocBindings(size_t n) {
 }
 
 static size_t sortRowsFirstWins(Attr *rows, size_t n);
+void EvalState::BindingsBuilder::overflow(Attr a) {
+  if (cap) { // the first row past the room: the rows so far move to the series, and every later row goes there
+    more.reserve(size_t(n) * 2 + 1);
+    more.appendAll(rows, n);
+    cap = 0;
+  }
+  more.append(a);
+  n++;
+}
+
 Bindings *EvalState::BindingsBuilder::finish() {
-  if (st.statsEnabled) { ++st.nBuilders; st.nBuilderRows += attrs.size(); if (attrs.size() > 12) { ++st.nBuildersBig; st.nBuilderBigRows += attrs.size(); } }
+  if (st.statsEnabled) {
+    ++st.nBuilders;
+    st.nBuilderRows += n;
+    if (n > kInline && !(block && cap)) { ++st.nBuildersBig; st.nBuilderBigRows += n; }
+  }
   // A set of size 0 is the one constant: nothing is written to it after it is built, so every empty set is the same cell.
-  if (attrs.empty()) { if (st.statsEnabled) ++st.nEmptyShared; return st.vEmptyAttrs.attrs; }
-  Bindings *b = st.allocBindings(attrs.size());
-  std::copy(attrs.begin(), attrs.end(), b->attrs);
-  b->size_ = sortRowsFirstWins(b->attrs, attrs.size());
+  if (n == 0) { if (st.statsEnabled) ++st.nEmptyShared; return st.vEmptyAttrs.attrs; }
+  if (block && cap) { // written where it lives
+    block->size_ = uint32_t(sortRowsFirstWins(block->attrs, n));
+    return block;
+  }
+  Bindings *b = st.allocBindings(n);
+  const Attr *src = cap ? rows : more.data();
+  for (uint32_t i = 0; i < n; i++) b->attrs[i] = src[i];
+  b->size_ = uint32_t(sortRowsFirstWins(b->attrs, n));
   return b;
 }
 
@@ -510,7 +529,7 @@ void EvalState::printStats() {
     for (unsigned i = 0; i < 5; ++i) llvm::errs() << llvm::format("  %s %.1f%%", nm[i], 100.0 * nSimReuseDist[i] / nSimHit);
     llvm::errs() << "\n";
   }
-  if (nBuilders) llvm::errs() << llvm::format("== attribute-set builders: %llu, %.1f rows each on average; %llu (%.2f%%) outgrow the 12 inline rows and use malloc, holding %.1f%% of all rows built (%.1f MB of rows through a std heap vector and then copied)\n",
+  if (nBuilders) llvm::errs() << llvm::format("== attribute-set builders: %llu, %.1f rows each on average; %llu (%.2f%%) outgrow the 12 inline rows with no room given, holding %.1f%% of all rows built (%.1f MB of rows through a heap series and then copied)\n",
                                               (unsigned long long)nBuilders, double(nBuilderRows) / nBuilders, (unsigned long long)nBuildersBig, 100.0 * nBuildersBig / nBuilders,
                                               100.0 * nBuilderBigRows / nBuilderRows, nBuilderBigRows * sizeof(Attr) / 1048576.0);
   llvm::errs() << "calls run on a stack frame (strict bodies over their one argument): " << nStackFrames << "\n";
@@ -1844,7 +1863,7 @@ void EvalState::autoCallFunction(const std::map<std::string, Value *> &autoArgs,
     out = fun;
     return;
   }
-  BindingsBuilder bb(*this);
+  BindingsBuilder bb(*this, lam.getFormals()->size()); // a row a formal at most
   auto defs = *lam.getFormalDefaults();
   for (size_t i = 0; i < lam.getFormals()->size(); i++) {
     std::string name = cast<StringAttr>((*lam.getFormals())[i]).getValue().str();
@@ -1951,7 +1970,7 @@ void EvalState::evalAttrsDynamic(Node *node, Frame *env, Value &out) {
   Node **dynNames = node->operands + node->nDyn, **dynValues = dynNames + nDynNames;
   auto positions = op.getPositions();
   PosIdx posBase = positionBase(op);
-  BindingsBuilder bb(*this);
+  BindingsBuilder bb(*this, names.size() + nDynNames); // the static names and the dynamic ones (one that is null adds none)
   for (size_t i = 0; i < names.size(); i++) {
     PosIdx p = i < positions.size() ? posBase + i : 0;
     bb.insertIndexed(symbolOf(names[i]), lookup(env, values[i]), p);

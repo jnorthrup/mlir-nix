@@ -60,6 +60,13 @@ template <class Row, class Less> void sortRows(const Row *src, Row *dst, size_t 
 template <class Row, class Less> void sortRows(Row *rows, size_t n, Less less) { sortRows(static_cast<const Row *>(rows), rows, n, less); }
 
 /// Rows sorted by key, the first of each run of equal keys kept: the rows left, packed at the front.
+/// How many distinct keys n rows sorted by key hold: the size uniqueFirst would leave, without moving a row.
+template <class Row, class Key> constexpr size_t uniqueCount(const Row *rows, size_t n, Key key) {
+  size_t m = 0;
+  for (size_t i = 0; i < n; i++) m += i == 0 || !(key(rows[i - 1]) == key(rows[i]));
+  return m;
+}
+
 template <class Row, class Key> constexpr size_t uniqueFirst(Row *rows, size_t n, Key key) {
   size_t m = 0;
   for (size_t i = 0; i < n; i++) {
