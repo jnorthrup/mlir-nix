@@ -3,11 +3,11 @@
 #include "Composite/Mutable.h"
 #include "Composite/Patricia.h"
 #include "Composite/Rows.h"
+#include "Nix/Os.h"
 #include "Nix/Prefetch.h"
 #include "Nix/Store.h"
 
 #include <algorithm>
-#include <atomic>
 #include <cerrno>
 #include <cmath>
 #include <cstdio>
@@ -17,7 +17,6 @@
 #include <sstream>
 #include <sys/stat.h>
 #include <sys/wait.h>
-#include <thread>
 #include <unistd.h>
 
 extern char **environ;
@@ -345,7 +344,7 @@ namespace {
 /// A tree a recorded run hashed, hashed again by the helper.  The helper writes it while Hashing; once Done it is only read.
 struct Prehash {
   enum : uint8_t { Queued, Hashing, Done, Claimed }; // Claimed: asked for before the helper began it, and hashed by the asker
-  std::atomic<uint8_t> state{Queued};
+  composite::Atomic<uint8_t> state{Queued};
   bool filtered = false;
   std::string root;
   composite::Patricia<char> kept; // a filtered tree: the entries the recorded run's filter kept, keyed by bytes of its own (`names`)
@@ -382,6 +381,10 @@ std::string_view typeName(char t) {
   }
 }
 
+/// A tree being hashed is waited for here (the evaluator asks for one now and then): the helper signals after each tree it finishes.
+nixsys::Lock prehashLock;
+nixsys::Signal prehashDone;
+
 /// The helper's answer for the tree at `path`: waited for while it is being made, null when there is none or it failed.  One the helper has
 /// not begun is claimed instead, and hashed by the caller.
 Prehash *takePrehash(const std::string &path, bool filtered) {
@@ -389,8 +392,11 @@ Prehash *takePrehash(const std::string &path, bool filtered) {
   if (!pp) return nullptr;
   Prehash *p = *pp;
   uint8_t s = Prehash::Queued;
-  if (p->state.compare_exchange_strong(s, Prehash::Claimed) || s == Prehash::Claimed) return ++prehashClaimed, nullptr;
-  while ((s = p->state.load(std::memory_order_acquire)) == Prehash::Hashing) p->state.wait(Prehash::Hashing);
+  if (p->state.compare_exchange(s, Prehash::Claimed) || s == Prehash::Claimed) return ++prehashClaimed, nullptr;
+  if (s == Prehash::Hashing) {
+    nixsys::Held g(prehashLock);
+    prehashDone.waitFor(prehashLock, [p] { return p->state.load(__ATOMIC_ACQUIRE) != Prehash::Hashing; });
+  }
   return p->ok ? p : nullptr;
 }
 } // namespace
@@ -420,10 +426,10 @@ void startPrehash() {
     byRoot.set(p->root.data(), uint32_t(p->root.size()), p, [p] { return p->root.c_str(); });
     order.append(p);
   }
-  std::thread([order = std::move(order)]() mutable {
+  nixsys::Thread::start([order = std::move(order)]() mutable {
     for (Prehash *p : order) {
       uint8_t s = Prehash::Queued;
-      if (!p->state.compare_exchange_strong(s, Prehash::Hashing)) continue; // claimed: the evaluator got there first
+      if (!p->state.compare_exchange(s, Prehash::Hashing)) continue; // claimed: the evaluator got there first
       try {
         HashSink hs(HashAlgo::SHA256);
         auto update = [&](std::string_view d) { hs.update(d); }; // the callables a Sink and a PathFilter lend: named, so they outlive the walk
@@ -445,8 +451,9 @@ void startPrehash() {
       } catch (...) {
         p->ok = false;
       }
-      p->state.store(Prehash::Done, std::memory_order_release);
-      p->state.notify_all();
+      p->state.store(Prehash::Done, __ATOMIC_RELEASE);
+      { nixsys::Held g(prehashLock); } // a waiter that saw Hashing under the lock is asleep before the signal, so it is woken
+      prehashDone.notifyAll();
     }
   }).detach();
 }

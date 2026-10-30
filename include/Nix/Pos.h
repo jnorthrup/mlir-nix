@@ -20,10 +20,9 @@
 
 #include <cstdint>
 #include "Composite/Mutable.h"
-#include <deque>
-#include <mutex>
+#include "Composite/Table.h"
+#include "Nix/Os.h"
 #include <string>
-#include <unordered_map>
 
 namespace nixfe {
 
@@ -56,18 +55,22 @@ struct FileTable {
     return t;
   }
   uint32_t add(const std::string &name) {
-    std::lock_guard<std::mutex> g(m);
-    auto [it, fresh] = ids.try_emplace(name, uint32_t(names.size() + 1));
-    if (fresh) names.append(name);
-    return it->second;
+    nixsys::Held g(m);
+    uint32_t &id = ids.at(name.data(), uint32_t(name.size()), [&] { return bytes.copy(name.data(), uint32_t(name.size())); });
+    if (!id) {
+      names.append(name);
+      id = names.size();
+    }
+    return id;
   }
   std::string name(uint32_t id) const {
-    std::lock_guard<std::mutex> g(m);
+    nixsys::Held g(m);
     return id >= 1 && id <= names.size() ? names[id - 1] : std::string();
   }
 
-  mutable std::mutex m;
-  std::unordered_map<std::string, uint32_t> ids;
+  mutable nixsys::Lock m;
+  composite::TextTable<uint32_t> ids; // a name's number (0: none yet), the names' bytes in `bytes`
+  composite::Bump bytes;
   composite::MutableSeries<std::string> names; // read by value under the lock: nothing holds a name by address
 };
 

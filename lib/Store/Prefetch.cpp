@@ -2,10 +2,9 @@
 
 #include "Composite/Mutable.h"
 #include "Composite/Patricia.h"
+#include "Nix/Os.h"
 #include "Nix/Prefetch.h"
 
-#include <atomic>
-#include <chrono>
 #include <climits>
 #include <cstdio>
 #include <cstdlib>
@@ -13,9 +12,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <fstream>
-#include <memory>
 #include <string>
-#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -92,17 +89,17 @@ struct Entry {
 
 /// Directory listings cannot go through the ring (no getdents opcode): a few threads do them.
 void warmDirectories(const composite::MutableSeries<std::string> &dirs, unsigned threads) {
-  std::atomic<size_t> next{0};
-  composite::MutableSeries<std::thread> ts;
-  for (unsigned t = 0; t < threads; t++)
-    ts.emplace([&] {
-      for (size_t i; (i = next.fetch_add(1)) < dirs.size();)
-        if (DIR *d = opendir(dirs[i].c_str())) {
-          while (readdir(d)) {}
-          closedir(d);
-        }
-    });
-  for (std::thread &t : ts) t.join();
+  composite::Atomic<size_t> next{0};
+  composite::MutableSeries<nixsys::Thread> ts;
+  auto list = [&] { // the next directory not taken, until none is left
+    for (size_t i; (i = next.fetch_add(1)) < dirs.size();)
+      if (DIR *d = opendir(dirs[i].c_str())) {
+        while (readdir(d)) {}
+        closedir(d);
+      }
+  };
+  for (unsigned t = 0; t < threads; t++) ts.append(nixsys::Thread::start(list));
+  for (nixsys::Thread &t : ts) t.join();
 }
 
 #ifdef MLNIX_HAVE_URING
@@ -179,17 +176,17 @@ void warmFiles(const composite::MutableSeries<Entry> &es) {
 #endif
 
 void replay(composite::MutableSeries<Entry> es) {
-  auto t0 = std::chrono::steady_clock::now();
+  uint64_t t0 = nixsys::monotonicNs();
   composite::MutableSeries<std::string> dirs;
   for (const Entry &e : es)
     if (e.kind == 'D') dirs.append(e.path);
-  std::thread dirThread([dirs = std::move(dirs)] { warmDirectories(dirs, 4); });
+  nixsys::Thread dirThread = nixsys::Thread::start([dirs = composite::mv(dirs)] { warmDirectories(dirs, 4); });
 #ifdef MLNIX_HAVE_URING
   warmFiles(es);
 #endif
   dirThread.join();
   if (getenv("MLNIX_PREFETCH_DEBUG"))
-    fprintf(stderr, "prefetch: %zu entries in %.3f s\n", size_t(es.size()), std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+    fprintf(stderr, "prefetch: %zu entries in %.3f s\n", size_t(es.size()), (nixsys::monotonicNs() - t0) / 1e9);
 }
 
 } // namespace
@@ -273,7 +270,7 @@ void init(int argc, char **argv) {
     // replay-wait: the evaluation starts when the whole list has been replayed (the best a prefetch can do)
     bool wait = spec.rfind("replay-wait:", 0) == 0;
     if (!es.empty()) {
-      std::thread t(replay, std::move(es));
+      nixsys::Thread t = nixsys::Thread::start([es = composite::mv(es)]() mutable { replay(composite::mv(es)); });
       if (wait) t.join();
       else t.detach();
     }

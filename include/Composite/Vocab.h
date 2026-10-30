@@ -99,6 +99,24 @@ private:
 /// A T made with new, owned: what std::make_unique made.
 template <class T, class... A> Own<T> own(A &&...a) { return Own<T>(new T(fw<A>(a)...)); }
 
+/// A word read and written by more than one thread: the compiler's __atomic builtins on it (what std::atomic was), sequentially consistent
+/// unless an order is given.  Waiting for a change is not here: that is the system's (Nix/Os.h, a lock and a signal).
+template <class T> struct Atomic {
+  static_assert(plainData<T> && sizeof(T) <= 8, "a word");
+  constexpr Atomic() = default;
+  constexpr Atomic(T v) : v(v) {}
+  Atomic(const Atomic &) = delete;
+  Atomic &operator=(const Atomic &) = delete;
+  T load(int order = __ATOMIC_SEQ_CST) const { return __atomic_load_n(&v, order); }
+  void store(T x, int order = __ATOMIC_SEQ_CST) { __atomic_store_n(&v, x, order); }
+  T fetch_add(T d, int order = __ATOMIC_SEQ_CST) { return __atomic_fetch_add(&v, d, order); }
+  /// x for the old value, if the value is still `expected`; otherwise false, and `expected` is what the value is.
+  bool compare_exchange(T &expected, T x) { return __atomic_compare_exchange_n(&v, &expected, x, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); }
+
+private:
+  T v{};
+};
+
 } // namespace composite
 
 #endif // COMPOSITE_VOCAB_H

@@ -19,14 +19,10 @@
 
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/ErrorHandling.h"
-#include <algorithm>
-#include <condition_variable>
+#include "Nix/Os.h"
 #include <cstdint>
 #include <cstdlib>
-#include <deque>
-#include <mutex>
 #include <sys/mman.h>
-#include <thread>
 #include <unistd.h>
 
 namespace nixev {
@@ -45,25 +41,38 @@ struct Prefaulter {
     static Prefaulter p;
     return p;
   }
+  struct Range {
+    char *p;
+    size_t n;
+  };
   void request(char *p, size_t n) {
     if (disabled) return;
     {
-      std::lock_guard<std::mutex> g(m);
+      nixsys::Held g(m);
       queue.append({p, n});
     }
-    cv.notify_one();
+    cv.notifyOne();
   }
-  void run(std::stop_token st) {
+  void run() {
     for (;;) {
-      std::pair<char *, size_t> job;
+      Range job;
       {
-        std::unique_lock<std::mutex> g(m);
-        if (!cv.wait(g, st, [this] { return head < queue.size(); })) return; // closed, and empty
+        nixsys::Held g(m);
+        cv.waitFor(m, [this] { return closed || head < queue.size(); });
+        if (head == queue.size()) return; // closed, and empty
         job = queue.drain(head++);
         if (head == queue.size()) { queue.clear(); head = 0; } // drained: start over
       }
-      touch(job.first, job.second);
+      touch(job.p, job.n);
     }
+  }
+  ~Prefaulter() { // the stop request: the queue is closed, the helper empties it and is joined
+    {
+      nixsys::Held g(m);
+      closed = true;
+    }
+    cv.notifyAll();
+    worker.join();
   }
   static void touch(char *p, size_t n) {
 #if defined(__linux__) && defined(MADV_POPULATE_WRITE)
@@ -74,11 +83,12 @@ struct Prefaulter {
       __atomic_fetch_add(reinterpret_cast<uint8_t *>(p + off), uint8_t(0), __ATOMIC_RELAXED);
   }
   const bool disabled = getenv("MLNIX_NO_PREFAULT") != nullptr;
-  std::mutex m;
-  std::condition_variable_any cv;
-  composite::MutableSeries<std::pair<char *, size_t>> queue; // appended; the helper drains from `head`, a job by value
+  nixsys::Lock m;
+  nixsys::Signal cv;
+  composite::MutableSeries<Range> queue; // appended; the helper drains from `head`, a job by value
   uint32_t head = 0;
-  std::jthread worker = disabled ? std::jthread() : std::jthread([this](std::stop_token st) { run(st); }); // last: built last, stopped first
+  bool closed = false;
+  nixsys::Thread worker = disabled ? nixsys::Thread() : nixsys::Thread::start([this] { run(); }); // last: built last, stopped first
 };
 
 } // namespace arena_detail
@@ -92,7 +102,7 @@ struct PrefaultSlabs {
     const size_t page = arena_detail::pageSize();
     size = (size + page - 1) & ~(page - 1);
     if (static_cast<size_t>(end - cur) < size) {
-      size_t chunk = std::max(kChunk, size);
+      size_t chunk = composite::max(kChunk, size);
 #ifdef __linux__
       // Transparent huge pages back a 2 MiB aligned range with 2 MiB pages: 512 times fewer faults, which the helper
       // takes for the evaluator anyway, but also one TLB entry for 2 MiB of values.  Most kernels ship THP as "madvise".
@@ -115,7 +125,7 @@ struct PrefaultSlabs {
     // The evaluator will fill this slab; make the next one resident meanwhile.  Not for the first: a run that never
     // needs a second slab (`eval -E 1`) should not pay for one.
     if (carved++ > 0) {
-      size_t ahead = std::min<size_t>(kSlab, static_cast<size_t>(end - cur));
+      size_t ahead = composite::min<size_t>(kSlab, static_cast<size_t>(end - cur));
       if (ahead >= page) arena_detail::Prefaulter::get().request(cur, ahead & ~(page - 1));
     }
     return slab;

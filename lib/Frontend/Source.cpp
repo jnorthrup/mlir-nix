@@ -2,8 +2,8 @@
 
 #include "Nix/Source.h"
 #include <fcntl.h>
-#include <mutex>
 #include "Composite/Mutable.h"
+#include "Nix/Os.h"
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -12,10 +12,10 @@ namespace nixfe {
 
 /// A Source is never freed (a Name, and so the IR, may be a slice of it), nor an Origin: both are listed here, so a leak checker sees
 /// them reachable, and the list is never walked.
-static std::mutex kept;
+static nixsys::Lock kept;
 static composite::MutableSeries<const void *> *keptAll = new composite::MutableSeries<const void *>();
 template <class T> static T *retain(T *s) {
-  std::lock_guard<std::mutex> g(kept);
+  nixsys::Held g(kept);
   keptAll->append(s);
   return s;
 }

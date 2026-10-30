@@ -34,22 +34,19 @@
 
 namespace mlir { class PassManager; }
 
-#include <atomic>
-#include <condition_variable>
 #include <deque>
 #include <functional>
 #include <map>
 #include <memory>
-#include <mutex>
 #include <set>
 #include <string>
-#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 #include "Nix/StdBind.h"
 #include "Nix/Arena.h"
+#include "Nix/Os.h"
 
 namespace nixev {
 namespace cp = ::composite;
@@ -805,7 +802,7 @@ struct EvalState {
   /// MLNIX_DEFER: one pool of deferred lambdas per lowered file.  The `body_index` of a nix.lambda is a
   /// nixfe::BodyIndex (`file j row`) into these.
   composite::MutableSeries<composite::Own<nixfe::FilePool>> pools; // indexed by FilePool::file; a slot is empty while its file is only prelowered
-  std::atomic<uint32_t> nextPoolId{0};
+  composite::Atomic<uint32_t> nextPoolId{0}; // the helpers number their files' pools too
   void installPool(composite::Own<nixfe::FilePool> p);
   unsigned exprCounter = 0;
 
@@ -823,8 +820,8 @@ struct EvalState {
     composite::Own<Indexer> index; // the file's body indexed by the helper: adoption installs its regions and captures
   };
   struct PrelowerState {
-    std::mutex m;
-    std::condition_variable cv;
+    nixsys::Lock m;
+    nixsys::Signal cv; // a path queued (a helper waits for one), a file lowered (the evaluator waits for it), or the stop
     composite::Patricia<Prelowered *> byPath; // the file's lowering, by path (the paths' bytes in pathBytes)
     composite::Bump pathBytes;
     composite::MutableSeries<composite::Own<Prelowered>> lowered; // every Prelowered, owned here until the state goes
@@ -832,7 +829,7 @@ struct EvalState {
     uint32_t head = 0;
     composite::TextTable<char> baseNames; // a set: the base environment's names when the helpers started (they read it, nothing writes it)
     nixfe::ParseOptions po;
-    composite::MutableSeries<std::thread> workers;
+    composite::MutableSeries<nixsys::Thread> workers;
     bool stop = false;
     uint64_t adopted = 0, waited = 0, missed = 0;
   };

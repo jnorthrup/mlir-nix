@@ -28,11 +28,9 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
-#include <chrono>
 #include <cstring>
 #include <cstdlib>
 #include <filesystem>
-#include <mutex>
 
 namespace nixev {
 namespace nd = mlir::nix;
@@ -255,17 +253,12 @@ struct ScalarJIT::Impl {
 
   bool compile(Entry &entry, const Plan *plan, unsigned result = 0) {
     using namespace mlir;
-    auto started = std::chrono::steady_clock::now();
-    auto recordTime = llvm::make_scope_exit([&] {
-      compileNs += std::chrono::duration_cast<std::chrono::nanoseconds>(
-          std::chrono::steady_clock::now() - started).count();
-    });
+    uint64_t started = nixsys::monotonicNs();
+    auto recordTime = llvm::make_scope_exit([&] { compileNs += nixsys::monotonicNs() - started; });
     const unsigned serial = attempts++;
-    static std::once_flag native;
-    static bool nativeFailed = false;
-    std::call_once(native, [] {
-      nativeFailed = llvm::InitializeNativeTarget() || llvm::InitializeNativeTargetAsmPrinter();
-    });
+    static const bool nativeFailed = [] { // a local static's initializer runs once, whichever thread comes first
+      return llvm::InitializeNativeTarget() || llvm::InitializeNativeTargetAsmPrinter();
+    }();
     if (nativeFailed) return false;
     if (!ctx) {
       ctx = composite::own<MLIRContext>();
@@ -342,7 +335,7 @@ struct ScalarJIT::Impl {
       if (!ec) entry.lazyPlan->print(os);
     }
     dump(".typed.mlir");
-    auto tPh0 = std::chrono::steady_clock::now();
+    uint64_t tPh0 = nixsys::monotonicNs();
     PassManager pm(ctx.get());
     // Typed-level cleanup: shared graph nodes dedupe here, before LLVM sees them (opt-in MLNIX_JIT_CLEAN=1: measured no gain on small kernels).
     if (const char *clean = getenv("MLNIX_JIT_CLEAN"); clean && std::string_view(clean) == "1") {
@@ -375,9 +368,9 @@ struct ScalarJIT::Impl {
     options.transformer = entry.transformer;
     options.enableGDBNotificationListener = false;
     options.enablePerfNotificationListener = false;
-    auto tPh1 = std::chrono::steady_clock::now();
+    uint64_t tPh1 = nixsys::monotonicNs();
     auto engine = ExecutionEngine::create(*module, options);
-    if (getenv("MLNIX_JIT_PHASE")) { auto us=[](auto a,auto b){return std::chrono::duration_cast<std::chrono::microseconds>(b-a).count();}; auto tPh2=std::chrono::steady_clock::now(); llvm::errs()<<"phase lower_us="<<us(tPh0,tPh1)<<" engine_us="<<us(tPh1,tPh2)<<" pre_us="<<us(started,tPh0)<<"\n"; }
+    if (getenv("MLNIX_JIT_PHASE")) { auto us=[](uint64_t a,uint64_t b){return (b-a)/1000;}; uint64_t tPh2=nixsys::monotonicNs(); llvm::errs()<<"phase lower_us="<<us(tPh0,tPh1)<<" engine_us="<<us(tPh1,tPh2)<<" pre_us="<<us(started,tPh0)<<"\n"; }
     if (!engine) { llvm::consumeError(engine.takeError()); return false; }
     auto address = (*engine)->lookup("scalar");
     if (!address) { llvm::consumeError(address.takeError()); return false; }

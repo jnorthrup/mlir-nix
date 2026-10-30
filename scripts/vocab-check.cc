@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -134,6 +135,18 @@ int main() {
   }
   require(alive == 0, "every owner deletes its object when it goes");
 
+  // Atomic: four threads add to one word, a compare-exchange takes it only from the value it names.
+  {
+    Atomic<uint64_t> sum{0};
+    std::thread ts[4];
+    for (auto &t : ts) t = std::thread([&] { for (int i = 0; i < 250000; i++) sum.fetch_add(1); });
+    for (auto &t : ts) t.join();
+    require(sum.load() == 1000000, "fetch_add from four threads loses nothing");
+    uint64_t want = 5;
+    require(!sum.compare_exchange(want, 9) && want == 1000000, "a compare-exchange from the wrong value fails and says the value");
+    require(sum.compare_exchange(want, 9) && sum.load() == 9, "and from the right one takes");
+  }
+
   // TextTable and Bump against unordered_map<string>: names of every length, values replaced, misses.
   Bump bump;
   TextTable<uint32_t> tt;
@@ -151,5 +164,5 @@ int main() {
     require(!tt.find(k.data(), uint32_t(k.size())), "bytes never stored miss");
   }
   require(tt.find("", 0) == nullptr && *tt.set("", 0, 9, [&] { return bump.copy("", 0); }) == 9 && *tt.find("", 0) == 9, "the empty string is a key");
-  std::printf("vocabulary: Fn, Maybe, Text (100000 numbers), Spill (2000 rounds of moves), WordTable, TextTable (%u names) PASS; Own\n", tt.size());
+  std::printf("vocabulary: Fn, Maybe, Text (100000 numbers), Spill (2000 rounds of moves), WordTable, TextTable (%u names) PASS; Own, Atomic\n", tt.size());
 }

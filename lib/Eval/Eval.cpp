@@ -795,8 +795,8 @@ void EvalState::printStats() {
 
 EvalState::~EvalState() {
   if (pre) {
-    { std::lock_guard<std::mutex> g(pre->m); pre->stop = true; }
-    pre->cv.notify_all();
+    { nixsys::Held g(pre->m); pre->stop = true; }
+    pre->cv.notifyAll();
     for (auto &w : pre->workers) w.join();
   }
   if (statsEnabled) printStats();
@@ -2862,7 +2862,7 @@ void EvalState::startPrelower() {
   }
   unsigned n = 1;
   if (const char *t = getenv("MLNIX_PRELOWER_THREADS")) n = unsigned(cp::max(1ul, cp::min(8ul, strtoul(t, nullptr, 10))));
-  for (unsigned i = 0; i < n; i++) pre->workers.emplace([this] { prelowerLoop(); });
+  for (unsigned i = 0; i < n; i++) pre->workers.append(nixsys::Thread::start([this] { prelowerLoop(); }));
 }
 
 void EvalState::prelowerLoop() {
@@ -2870,8 +2870,8 @@ void EvalState::prelowerLoop() {
     std::string path;
     Prelowered *pl;
     {
-      std::unique_lock<std::mutex> lk(pre->m);
-      pre->cv.wait(lk, [&] { return pre->stop || pre->head < pre->queue.size(); });
+      nixsys::Held lk(pre->m);
+      pre->cv.waitFor(pre->m, [&] { return pre->stop || pre->head < pre->queue.size(); });
       if (pre->stop) return;
       path = pre->queue.drain(pre->head++);
       if (pre->byPath.find(path.data(), uint32_t(path.size()))) continue; // the evaluator took it first, or a duplicate
@@ -2921,8 +2921,8 @@ void EvalState::prelowerLoop() {
     } catch (...) {
       pl->ok = false;
     }
-    { std::lock_guard<std::mutex> g(pre->m); pl->done = true; }
-    pre->cv.notify_all();
+    { nixsys::Held g(pre->m); pl->done = true; }
+    pre->cv.notifyAll();
   }
 }
 
@@ -2938,7 +2938,7 @@ nd::ExprOp EvalState::takePrelowered(const std::string &resolved) {
   if (!pre) return {};
   Prelowered *pl;
   {
-    std::unique_lock<std::mutex> lk(pre->m);
+    nixsys::Held lk(pre->m);
     Prelowered **found = pre->byPath.find(resolved.data(), uint32_t(resolved.size()));
     if (!found) {
       // not started: take it off the queue so the helper does not lower it again, and lower it here
@@ -2947,7 +2947,7 @@ nd::ExprOp EvalState::takePrelowered(const std::string &resolved) {
       return {};
     }
     pl = *found;
-    if (!pl->done) { ++pre->waited; pre->cv.wait(lk, [&] { return pl->done; }); }
+    if (!pl->done) { ++pre->waited; pre->cv.waitFor(pre->m, [&] { return pl->done; }); }
   }
   if (!pl->ok) return {};
   ++pre->adopted;

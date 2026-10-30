@@ -16,7 +16,6 @@
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/TypeSwitch.h"
-#include <mutex>
 
 using namespace mlir;
 using namespace mlir::nix;
@@ -556,8 +555,7 @@ struct NixDcePass : public PassWrapper<NixDcePass, OperationPass<>> {
 } // namespace
 
 void mlir::nix::registerNixPasses() {
-  static std::once_flag once;
-  std::call_once(once, [] {
+  static const bool registered = [] { // a local static's initializer runs once, whichever thread comes first
     PassRegistration<NixPrimsPass>();
     PassRegistration<NixFoldPass>();
     PassRegistration<NixDcePass>();
@@ -568,7 +566,9 @@ void mlir::nix::registerNixPasses() {
                                [](OpPassManager &pm) {
                                  pm.addPass(std::make_unique<NixPrimsPass>());
                                  pm.addPass(std::make_unique<NixFoldPass>());
-                                 pm.addPass(std::make_unique<NixDcePass>());
+                                 pm.addPass(std::make_unique<NixDcePass>()); // addPass takes MLIR's unique_ptr
                                });
-  });
+    return true;
+  }();
+  (void)registered;
 }

@@ -15,6 +15,7 @@
 
 #include "Composite/Mutable.h"
 #include "Composite/Rows.h"
+#include "Nix/Os.h"
 #include "Nix/Store.h"
 #include "llvm/ADT/ArrayRef.h" // xxh3_64bits' ArrayRef overload lives here from LLVM 23, in xxhash.h before
 #include "llvm/Support/xxhash.h"
@@ -29,10 +30,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/wait.h>
-#include <condition_variable>
 #include <exception>
-#include <mutex>
-#include <thread>
 #include <unistd.h>
 
 namespace nixstore {
@@ -44,7 +42,7 @@ Store::Store(StoreSettings s) : settings(std::move(s)) {
                             ? std::string(home ? home : "/tmp") + "/.local/state/mlnix"
                             : settings.realRoot + "/nix/var/mlnix";
   }
-  if (!settings.cores) settings.cores = std::max(1u, std::thread::hardware_concurrency());
+  if (!settings.cores) settings.cores = nixsys::processors();
   log = [](const std::string &m) { std::cerr << m << "\n"; };
   try {
     createDirs(toReal(settings.storeDir));
@@ -389,8 +387,8 @@ const Derivation &Store::readDerivation(const std::string &drvPath) {
 struct Store::LaterHashes {
   struct Answer { bool done = false, taken = false; Hash hash; std::exception_ptr error; };
   struct Job { Answer *answer; const Derivation *drv; DrvInputs inputs; };
-  std::mutex m;
-  std::condition_variable cv; // a job queued (the hasher waits for one) or an answer made (a dependent waits for it)
+  nixsys::Lock m;
+  nixsys::Signal cv; // a job queued (the hasher waits for one) or an answer made (a dependent waits for it)
   composite::MutableSeries<Job> queue;
   uint32_t head = 0, pending = 0; // pending: queued or being hashed (a store torn down waits for none, as the jobs read its cache)
   /// By path, the derivation record's own bytes (they never move): queued, then done, then taken by the dependent that asks first.  The
@@ -401,8 +399,8 @@ struct Store::LaterHashes {
 
 Store::~Store() {
   if (later) {
-    std::unique_lock<std::mutex> lk(later->m);
-    later->cv.wait(lk, [&] { return later->pending == 0; });
+    nixsys::Held lk(later->m);
+    later->cv.waitFor(later->m, [&] { return later->pending == 0; });
   }
   drvs.prefix("", 0, [](const composite::Patricia<DrvRecord *>::Row &r) { delete r.v; }); // no job of the hasher reads one now
 }
@@ -411,12 +409,12 @@ void Store::hashLater(const std::string &drvPath, DrvInputs &&inputs) {
   if (DrvRecord *rec = drvAt(drvPath); rec && rec->hasModulo) return;
   if (!later) {
     later = new LaterHashes();
-    std::thread([L = later] {
+    nixsys::Thread::start([L = later] {
       for (;;) {
         LaterHashes::Job job;
         {
-          std::unique_lock<std::mutex> lk(L->m);
-          L->cv.wait(lk, [&] { return L->head < L->queue.size(); });
+          nixsys::Held lk(L->m);
+          L->cv.waitFor(L->m, [&] { return L->head < L->queue.size(); });
           job = std::move(L->queue[L->head++]);
           if (L->head == L->queue.size()) { L->queue.clear(); L->head = 0; }
         }
@@ -428,26 +426,26 @@ void Store::hashLater(const std::string &drvPath, DrvInputs &&inputs) {
           error = std::current_exception();
         }
         {
-          std::lock_guard<std::mutex> lk(L->m);
+          nixsys::Held lk(L->m);
           job.answer->hash = h;
           job.answer->error = error;
           job.answer->done = true;
           --L->pending;
         }
-        L->cv.notify_all();
+        L->cv.notifyAll();
       }
     }).detach();
   }
   DrvRecord *rec = drvAt(drvPath); // written just before
   {
-    std::lock_guard<std::mutex> lk(later->m);
+    nixsys::Held lk(later->m);
     if (later->answers.find(drvPath.data(), uint32_t(drvPath.size()))) return; // queued already
     auto *a = new LaterHashes::Answer();
     later->answers.set(rec->path.data(), uint32_t(rec->path.size()), a, [rec] { return rec->path.c_str(); });
     later->queue.append({a, &rec->drv, std::move(inputs)});
     ++later->pending;
   }
-  later->cv.notify_all();
+  later->cv.notifyAll();
 }
 
 SortedMap<Hash> Store::hashDerivationModulo(const Derivation &drv, bool maskOutputs, DrvInputs *inputsOut) {
@@ -497,11 +495,11 @@ bool Store::takeLater(const std::string &drvPath, SortedMap<Hash> &out) {
   if (!later) return false;
   std::exception_ptr error;
   {
-    std::unique_lock<std::mutex> lk(later->m);
+    nixsys::Held lk(later->m);
     LaterHashes::Answer **found = later->answers.find(drvPath.data(), uint32_t(drvPath.size()));
     if (!found || (*found)->taken) return false;
     LaterHashes::Answer *a = *found;
-    later->cv.wait(lk, [&] { return a->done; });
+    later->cv.waitFor(later->m, [&] { return a->done; });
     if (a->error) error = a->error;
     else {
       out = SortedMap<Hash>();
