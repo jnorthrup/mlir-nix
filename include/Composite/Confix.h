@@ -305,7 +305,17 @@ template <class Out> void utf8(Out &out, uint32_t cp) {
   }
 }
 
-/// The text of the String row from..to (its quotes), the escapes decoded, `put` into out.  For a span `scan` accepted.
+/// n bytes at p into out: in one piece when out takes pieces (`append(p, n)`), else a byte at a time (`put`).
+template <class Out> void putRun(Out &out, const char *p, uint32_t n) {
+  if constexpr (requires { out.append(p, n); }) {
+    out.append(p, n);
+  } else {
+    for (uint32_t i = 0; i < n; i++) out.put(p[i]);
+  }
+}
+
+/// The text of the String row from..to (its quotes), the escapes decoded, put into out: the bytes between escapes as runs (putRun).  For a
+/// span `scan` accepted.
 template <class Out> void decode(const char *s, uint32_t from, uint32_t to, Out &out) {
   auto hex4 = [&](uint32_t at) {
     uint32_t v = 0;
@@ -313,11 +323,14 @@ template <class Out> void decode(const char *s, uint32_t from, uint32_t to, Out 
     return v;
   };
   for (uint32_t p = from + 1; p < to;) {
-    char c = s[p++];
-    if (c != '\\') {
-      out.put(c);
+    if (s[p] != '\\') {
+      uint32_t run = p + 1;
+      while (run < to && s[run] != '\\') run++;
+      putRun(out, s + p, run - p);
+      p = run;
       continue;
     }
+    p++;
     switch (char e = s[p++]) {
     case 'b': out.put('\b'); break;
     case 'f': out.put('\f'); break;

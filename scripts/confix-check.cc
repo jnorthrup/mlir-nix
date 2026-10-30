@@ -238,7 +238,8 @@ static string oldRead(const string &text) {
 // The new reader: scan, then the values from the index
 //===----------------------------------------------------------------------===//
 
-struct Sink { string s; void put(char c) { s += c; } };
+struct Sink { string s; void put(char c) { s += c; } };                                         // a byte at a time: putRun puts
+struct RunSink { string s; void put(char c) { s += c; } void append(const char *p, size_t n) { s.append(p, n); } }; // in pieces: putRun appends
 static string dump(const char *s, const cf::Index &ix, uint32_t r) {
   uint32_t from = ix.open(r), to = ix.close(r);
   switch (ix.tag(r)) {
@@ -246,7 +247,7 @@ static string dump(const char *s, const cf::Index &ix, uint32_t r) {
   case cf::Tag::Boolean: return s[from] == 't' ? "true" : "false";
   case cf::Tag::Long: return "i" + std::to_string((long long)cf::readLong(s, from, to));
   case cf::Tag::Double: return number(std::strtod(string(s + from, to - from + 1).c_str(), nullptr));
-  case cf::Tag::String: { Sink k; cf::decode(s, from, to, k); return quote(k.s); }
+  case cf::Tag::String: { RunSink k; cf::decode(s, from, to, k); return quote(k.s); }
   case cf::Tag::Array: {
     string out = "[";
     auto kids = ix.kidsOf(r);
