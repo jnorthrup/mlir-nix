@@ -147,11 +147,16 @@ of the reader it replaced, so every error message is the same. `Formats.cpp` los
   `put` at 15%), and it now puts each run between escapes in one piece. The memory goes the other way. Peak RSS of the three documents: Mac
   284 MB against 196, 152 against 139, 113 against 91; Kali 288 against 206, 152 against 154, 138 against 124. The index and a `Value *` for each
   element (about 29 bytes) are held until the value is made, where the recursive reader held only the value. A text of 4 GiB or more is
-  refused (the offsets are 32 bits, as `Text`'s are). No workload parses JSON of that size, or at all: no frame of the parser appears in a
-  profile of nixpkgs-73 on Kali. The workloads' A/B on Kali (the build before against this one, 11 interleaved runs, both orders): the demand
-  schedule is within 2.5% in every comparison (six); the plain schedule gave -9% to +7% on nixpkgs-73 over five runs, in both orders, and -1.4% to
-  +6.5% on nixos-toplevel, which is not a reading. The control that sizes that noise (the same binary in both slots) was queued when the host
-  went out of reach.
+  refused (the offsets are 32 bits, as `Text`'s are). The workloads parse little: nixpkgs-73 makes 7 `fromJSON` calls on 72,810 bytes in all (the
+  largest 36,172), nixos-toplevel 3 on 25,506, ffmpeg 2 on 24,299 (counted in a build that logs each input, the answers checked against the
+  expected hashes). Those 72,810 bytes take 0.25 ms to parse with the old reader and 0.17 ms with this one (3,000 rounds in one process,
+  minimum of 9), of an evaluation of 0.9 s on the Mac (about 2.6 s on Kali), and a sampling profile of nixpkgs-73 on Kali shows no frame of the parser. The workload's
+  A/B on the Mac, nixpkgs-73, 15 runs each, a copy of each binary in both slots, both orders: the same binary against itself gave -1.4% and
+  +0.4%, the build before against this one -1.3% to +0.9% on the two schedules, and half the difference between the two orders, the part that
+  belongs to the build and not to the slot, is -0.6% to 0.0% (negative: this build is faster). On Kali (the build before against this one, 11
+  interleaved runs, both orders) the demand schedule is within 2.5% in every comparison (six); the plain schedule gave -9% to +7% on nixpkgs-73
+  over five runs, in both orders, and -1.4% to +6.5% on nixos-toplevel, which is not a reading. The control that sizes that noise (the same
+  binary in both slots) was queued when the host went out of reach.
 
 ## Measured and left alone
 
