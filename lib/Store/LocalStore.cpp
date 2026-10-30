@@ -185,7 +185,7 @@ static void copyRecursive(const std::string &from, const std::string &to, const 
     closedir(d);
     for (auto &n : names) {
       std::string c = from + "/" + n;
-      if (filter && !filter(c)) continue;
+      if (filter && !filter(c, {})) continue;
       copyRecursive(c, to + "/" + n, filter, false);
     }
   } else if (S_ISLNK(st.st_mode)) {

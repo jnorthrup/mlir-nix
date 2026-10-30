@@ -2748,6 +2748,7 @@ void EvalState::startPrelower() {
   const char *list = getenv("MLNIX_PRELOWER_LIST");
   bool replayed = getenv("MLNIX_PRELOWER") && !nixprefetch::replayFiles.empty(); // MLNIX_PREFETCH=auto|replay:FILE supplies the list
   if (pre || !settings.deferBodies || (!list && !replayed)) return;
+  if (replayed) nixstore::startPrehash(); // the source trees the recorded run hashed, hashed again off this thread
   pre = std::make_unique<PrelowerState>();
   for (auto &e : baseEnv) pre->baseNames.insert(e.getKey().str());
   pre->po = parseOptions();

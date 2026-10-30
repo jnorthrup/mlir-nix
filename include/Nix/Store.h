@@ -88,7 +88,9 @@ extern const char nix32Chars[33];
 // NAR
 //===----------------------------------------------------------------------===//
 
-using PathFilter = std::function<bool(const std::string &path)>;
+/// Whether an entry of a tree is kept: called with the entry's path and, when the caller knows it, its type as builtins.path's filter is
+/// told it ("regular", "directory", "symlink", "unknown"); empty when it does not.
+using PathFilter = std::function<bool(const std::string &path, std::string_view type)>;
 using Sink = std::function<void(std::string_view)>;
 
 /// Serialise `path` as a Nix ARchive.  Throws Error on I/O failure.
@@ -100,6 +102,11 @@ void restorePath(const std::string &path, std::string_view nar);
 std::pair<Hash, uint64_t> hashPath(const std::string &path,
                                    const PathFilter &filter = nullptr,
                                    HashAlgo algo = HashAlgo::SHA256);
+/// Source trees hashed ahead.  The NAR hashes a recorded run made (nixprefetch::replayHashes) are made again by a helper thread at start-up,
+/// reading the files as they are then, and hashPath takes a tree's answer instead of walking, reading and hashing it on the evaluator's
+/// thread: a filtered tree's when the filter, asked about the entries the helper saw in the order a walk asks, keeps what the recorded
+/// run's kept.  MLNIX_PRELOWER starts it, on prelowering's terms: a file is read once, early in the run.
+void startPrehash();
 
 //===----------------------------------------------------------------------===//
 // Store paths

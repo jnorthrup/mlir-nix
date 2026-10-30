@@ -305,11 +305,11 @@ static void addPath(EvalState &st, PosPtr pos, std::string name, const std::stri
   if (!nixstore::pathExists(real)) throw EvalError("path '" + path + "' does not exist", pos);
   nixstore::PathFilter filter;
   if (filterFun) {
-    filter = [&](const std::string &p) {
+    filter = [&](const std::string &p, std::string_view type) {
       // Map physical path back to the logical one.
       std::string logical = path + p.substr(real.size());
       Value *arg1 = st.newString(logical);
-      Value *arg2 = st.newString(fileTypeOf(p));
+      Value *arg2 = st.newString(type.empty() ? fileTypeOf(p) : std::string(type)); // a prehashed tree's walk knows the type
       Value *fargs[2] = {arg1, arg2};
       Value r;
       st.callFunction(*filterFun, 2, fargs, r, pos);

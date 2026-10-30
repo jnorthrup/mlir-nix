@@ -28,6 +28,7 @@ namespace nixprefetch {
 bool recording = false;
 composite::MutableSeries<std::string> replayFiles;
 std::unordered_map<std::string, composite::MutableSeries<uint32_t>> replayMints;
+composite::MutableSeries<ReplayHash> replayHashes;
 
 namespace {
 
@@ -177,6 +178,18 @@ void noteMintSlow(const char *path, uint32_t row) {
   if (trace->seen.insert(line).second) trace->order.append(std::move(line));
 }
 
+bool noteRootSlow(char kind, const char *path) {
+  std::string line;
+  line.push_back(kind);
+  line.push_back(' ');
+  line += absolute(path);
+  if (!trace->seen.insert(line).second) return false;
+  trace->order.append(std::move(line));
+  return true;
+}
+
+void noteKeptSlow(const char *path) { trace->order.append("g " + absolute(path)); }
+
 /// auto: the list for this invocation (working directory + arguments) under the state directory.
 std::string autoSpec(int argc, char **argv) {
   uint64_t h = 1469598103934665603ull; // FNV-1a
@@ -215,6 +228,10 @@ void init(int argc, char **argv) {
       if (l.size() > 2 && l[1] == ' ' && l[0] == 'M') { // a minted body: for the prelowering helpers, nothing to read ahead
         size_t sp = l.rfind(' ');
         if (sp > 2) replayMints[l.substr(2, sp - 2)].append(uint32_t(strtoul(l.c_str() + sp + 1, nullptr, 10)));
+      } else if (l.size() > 2 && l[1] == ' ' && (l[0] == 'H' || l[0] == 'G')) { // a hashed tree: for the prehashing helper
+        replayHashes.append({l.substr(2), l[0] == 'G', {}});
+      } else if (l.size() > 2 && l[1] == ' ' && l[0] == 'g') {
+        if (!replayHashes.empty() && replayHashes.back().filtered) replayHashes.back().kept.append(l.substr(2));
       } else if (l.size() > 2 && l[1] == ' ') {
         es.append({l[0], l.substr(2)});
         if (l[0] == 'F' && l.size() > 6 && l.compare(l.size() - 4, 4, ".nix") == 0) replayFiles.append(l.substr(2));

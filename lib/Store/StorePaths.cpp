@@ -1,11 +1,13 @@
 //===- StorePaths.cpp - NAR, store paths, ATerm derivations, utilities ----===//
 
 #include "Composite/Mutable.h"
+#include "Composite/Patricia.h"
 #include "Composite/Rows.h"
 #include "Nix/Prefetch.h"
 #include "Nix/Store.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cmath>
 #include <cstdio>
@@ -15,6 +17,7 @@
 #include <sstream>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <thread>
 #include <unistd.h>
 
 extern char **environ;
@@ -242,6 +245,7 @@ namespace {
 struct NarWriter {
   const Sink &sink;
   const PathFilter &filter;
+  bool noteKept = false; // a recorded run's first walk of a filtered tree: each entry the filter keeps goes into the list
   void u64(uint64_t n) {
     char b[8];
     for (int i = 0; i < 8; i++) b[i] = char((n >> (8 * i)) & 0xff);
@@ -305,7 +309,8 @@ struct NarWriter {
       for (const std::string *np : order) {
         const std::string &n = *np;
         std::string child = path + "/" + n;
-        if (filter && !filter(child)) continue;
+        if (filter && !filter(child, {})) continue;
+        if (noteKept) nixprefetch::noteKept(child.c_str());
         str("entry");
         str("(");
         str("name");
@@ -336,9 +341,147 @@ void dumpPath(const std::string &path, const Sink &sink, const PathFilter &filte
   w.dump(path);
 }
 
+namespace {
+/// A tree a recorded run hashed, hashed again by the helper.  The helper writes it while Hashing; once Done it is only read.
+struct Prehash {
+  enum : uint8_t { Queued, Hashing, Done, Claimed }; // Claimed: asked for before the helper began it, and hashed by the asker
+  std::atomic<uint8_t> state{Queued};
+  bool filtered = false;
+  std::string root;
+  composite::Patricia<char> kept; // a filtered tree: the entries the recorded run's filter kept, keyed by bytes of its own (`names`)
+  bool ok = false;
+  Hash hash;
+  uint64_t size = 0;
+  struct Seen {
+    uint32_t off, len; // the entry's path, in `text`
+    char type;         // 'r', 'd', 's', 'u', or 0 when lstat failed
+    bool kept;
+  };
+  composite::MutableSeries<char> text;
+  composite::MutableSeries<Seen> seen; // a filtered tree: every entry the walk asked about, in its order, which is a walk's
+  std::string_view path(const Seen &s) const { return {text.data() + s.off, s.len}; }
+};
+/// The trees by root, filtered or not; built before the helper starts and only read after, so the tries need no lock.
+composite::Patricia<Prehash *> *prehashes = nullptr; // [2]
+/// How the trees were answered (MLNIX_PREFETCH_DEBUG prints it at exit): the helper's hash, a filter that answered otherwise, hashed by the
+/// evaluator because the helper had not begun it.
+uint32_t prehashTaken, prehashRefiltered, prehashClaimed;
+
+char typeOf(const std::string &path) {
+  struct stat st;
+  if (lstat(path.c_str(), &st) != 0) return 0;
+  return S_ISREG(st.st_mode) ? 'r' : S_ISDIR(st.st_mode) ? 'd' : S_ISLNK(st.st_mode) ? 's' : 'u';
+}
+std::string_view typeName(char t) {
+  switch (t) {
+  case 'r': return "regular";
+  case 'd': return "directory";
+  case 's': return "symlink";
+  case 'u': return "unknown";
+  default: return {}; // the filter finds it itself
+  }
+}
+
+/// The helper's answer for the tree at `path`: waited for while it is being made, null when there is none or it failed.  One the helper has
+/// not begun is claimed instead, and hashed by the caller.
+Prehash *takePrehash(const std::string &path, bool filtered) {
+  Prehash **pp = prehashes[filtered].find(path.data(), uint32_t(path.size()));
+  if (!pp) return nullptr;
+  Prehash *p = *pp;
+  uint8_t s = Prehash::Queued;
+  if (p->state.compare_exchange_strong(s, Prehash::Claimed) || s == Prehash::Claimed) return ++prehashClaimed, nullptr;
+  while ((s = p->state.load(std::memory_order_acquire)) == Prehash::Hashing) p->state.wait(Prehash::Hashing);
+  return p->ok ? p : nullptr;
+}
+} // namespace
+
+void startPrehash() {
+  if (prehashes || nixprefetch::replayHashes.empty()) return;
+  prehashes = new composite::Patricia<Prehash *>[2];
+  if (getenv("MLNIX_PREFETCH_DEBUG"))
+    atexit([] { fprintf(stderr, "prehash: %u trees taken, %u filtered otherwise, %u hashed here first\n", prehashTaken, prehashRefiltered, prehashClaimed); });
+  composite::MutableSeries<Prehash *> order;
+  for (const nixprefetch::ReplayHash &r : nixprefetch::replayHashes) {
+    auto &byRoot = prehashes[r.filtered];
+    if (byRoot.find(r.root.data(), uint32_t(r.root.size()))) continue; // a root is recorded once (noteRoot)
+    // A tree and its kept names are the helper's own, never freed: the helper may still be hashing when the process ends, after the
+    // replay list is gone.  The names go in one buffer, made once at its size, so a key never moves.
+    auto *p = new Prehash();
+    p->filtered = r.filtered;
+    p->root = r.root;
+    size_t bytes = 0;
+    for (const std::string &k : r.kept) bytes += k.size();
+    char *names = static_cast<char *>(::operator new(bytes ? bytes : 1)), *at = names;
+    for (const std::string &k : r.kept) {
+      memcpy(at, k.data(), k.size());
+      p->kept.set(at, uint32_t(k.size()), 1, [at] { return at; });
+      at += k.size();
+    }
+    byRoot.set(p->root.data(), uint32_t(p->root.size()), p, [p] { return p->root.c_str(); });
+    order.append(p);
+  }
+  std::thread([order = std::move(order)]() mutable {
+    for (Prehash *p : order) {
+      uint8_t s = Prehash::Queued;
+      if (!p->state.compare_exchange_strong(s, Prehash::Hashing)) continue; // claimed: the evaluator got there first
+      try {
+        HashSink hs(HashAlgo::SHA256);
+        Sink sink = [&](std::string_view d) { hs.update(d); };
+        PathFilter keep = [p](const std::string &c, std::string_view) {
+          bool k = p->kept.find(c.data(), uint32_t(c.size())) != nullptr;
+          uint32_t off = p->text.size();
+          p->text.appendAll(c.data(), uint32_t(c.size()));
+          p->seen.append({off, uint32_t(c.size()), typeOf(c), k});
+          return k;
+        };
+        PathFilter none;
+        NarWriter w{sink, p->filtered ? keep : none};
+        w.str("nix-archive-1");
+        w.dump(p->root);
+        p->size = hs.bytes();
+        p->hash = hs.finish();
+        p->ok = true;
+      } catch (...) {
+        p->ok = false;
+      }
+      p->state.store(Prehash::Done, std::memory_order_release);
+      p->state.notify_all();
+    }
+  }).detach();
+}
+
 std::pair<Hash, uint64_t> hashPath(const std::string &path, const PathFilter &filter, HashAlgo algo) {
+  composite::Patricia<char> given; // a prehashed tree whose filter answered otherwise: the answers it gave (1 kept, 2 not), then the filter
+  PathFilter answered;
+  if (prehashes && algo == HashAlgo::SHA256)
+    if (Prehash *p = takePrehash(path, bool(filter))) {
+      if (!filter) return ++prehashTaken, std::pair<Hash, uint64_t>{p->hash, p->size};
+      uint32_t k = 0;
+      bool d = false;
+      for (; k < p->seen.size(); k++) {
+        const Prehash::Seen &s = p->seen[k];
+        if ((d = filter(std::string(p->path(s)), typeName(s.type))) != s.kept) break;
+      }
+      if (k == p->seen.size()) return ++prehashTaken, std::pair<Hash, uint64_t>{p->hash, p->size};
+      ++prehashRefiltered;
+      // Entry k is answered otherwise: the tree is walked here.  The entries asked about so far come first in the walk too, and keep
+      // their answers, so the filter is asked about each entry once.
+      for (uint32_t i = 0; i <= k; i++) {
+        std::string_view e = p->path(p->seen[i]);
+        given.set(e.data(), uint32_t(e.size()), (i < k ? p->seen[i].kept : d) ? 1 : 2, [&] { return e.data(); }); // `text` is done growing
+      }
+      answered = [&given, &filter](const std::string &c, std::string_view t) {
+        char *a = given.find(c.data(), uint32_t(c.size()));
+        return a ? *a == 1 : filter(c, t);
+      };
+    }
   HashSink hs(algo);
-  dumpPath(path, [&](std::string_view d) { hs.update(d); }, filter);
+  Sink sink = [&](std::string_view d) { hs.update(d); };
+  const PathFilter &f = answered ? answered : filter;
+  NarWriter w{sink, f};
+  w.noteKept = algo == HashAlgo::SHA256 && nixprefetch::noteRoot(filter ? 'G' : 'H', path.c_str()) && filter;
+  w.str("nix-archive-1");
+  w.dump(path);
   uint64_t n = hs.bytes();
   return {hs.finish(), n};
 }

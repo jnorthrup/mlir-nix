@@ -46,6 +46,22 @@ inline void noteMint(const char *path, uint32_t row) {
   if (recording) noteMintSlow(path, row);
 }
 
+/// The NAR hashes a replayed list says were made (`H path`; `G root` for a filtered tree, then `g path` for each entry its filter kept):
+/// MLNIX_PRELOWER makes them again at start-up, off the evaluator's thread (nixstore::startPrehash).
+struct ReplayHash {
+  std::string root;
+  bool filtered;
+  composite::MutableSeries<std::string> kept;
+};
+extern composite::MutableSeries<ReplayHash> replayHashes;
+bool noteRootSlow(char kind, const char *path);
+void noteKeptSlow(const char *path);
+/// Remember that the evaluation hashes the tree at `path` (`H`, or `G` with a filter): true the first time, when the walk that follows
+/// should name the entries its filter keeps (noteKept).  A tree hashed again is not recorded again.
+inline bool noteRoot(char kind, const char *path) { return recording && noteRootSlow(kind, path); }
+/// An entry the filter of the tree last noted kept (`g`): not made unique, as it belongs to the root before it.
+inline void noteKept(const char *path) { noteKeptSlow(path); }
+
 } // namespace nixprefetch
 
 #endif
