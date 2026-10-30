@@ -153,7 +153,7 @@ void EvalState::printValueAsJSON(JsonOut &out, Value &v, bool strict, NixStringC
     out.put(']');
     break;
   case VType::Float: out.put(nixstore::jsonFloat(v.fpoint)); break;
-  case VType::Thunk: case VType::App: case VType::Failed: case VType::Blackhole:
+  case VType::Thunk: case VType::App: case VType::AttrApp: case VType::Failed: case VType::Blackhole:
     out.put("null");
     break;
   default:

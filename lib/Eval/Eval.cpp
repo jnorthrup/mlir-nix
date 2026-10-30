@@ -476,6 +476,9 @@ void EvalState::printStats() {
     auto v = ranked(immediateByOp, [](auto &e) { return e.getValue(); });
     llvm::errs() << "   by operation:";
     for (size_t i = 0; i < v.size() && i < 8; ++i) llvm::errs() << llvm::format(" %s %.1f%%", v[i]->getKey().str().c_str(), 100.0 * v[i]->getValue() / nImmediate);
+    llvm::errs() << "\n   by the op whose operand it was made for:";
+    auto c = ranked(immediateByConsumer, [](auto &e) { return e.getValue(); });
+    for (size_t i = 0; i < c.size() && i < 10; ++i) llvm::errs() << llvm::format(" %s %.1f%%", c[i]->getKey().str().c_str(), 100.0 * c[i]->getValue() / nImmediate);
     llvm::errs() << "\n";
   }
   if (nProjThunks + nHardThunks) llvm::errs() << llvm::format("== thunks made over a frame: %llu, of which %llu (%.1f%%) are projections of the body's argument or a captured value (the rest %llu need the frame)\n",
@@ -557,7 +560,7 @@ void EvalState::printStats() {
   // These writes include stack temporaries and repeated mutations of a cell. They
   // describe evaluator work, not a live-heap census or a per-facet allocation count.
   {
-    static const char *nm[kAllocated] = {"thunk", "app", "failed", "blackhole", "int", "float", "bool", "null", "string", "path",
+    static const char *nm[kAllocated] = {"thunk", "app", "attrapp", "failed", "blackhole", "int", "float", "bool", "null", "string", "path",
                                          "attrs", "list", "lambda", "primop", "primopapp"};
     llvm::errs() << "== instrumented value-tag writes (including stack temporaries; not live heap rows)\n";
     for (unsigned i = 0; i < kAllocated; i++)
@@ -838,7 +841,7 @@ const char *EvalState::showType(const Value &v) {
   case VType::PrimOp: return "a built-in function";
   case VType::PrimOpApp: return "a partially applied built-in function";
   case VType::Float: return "a float";
-  case VType::Thunk: case VType::App: case VType::Failed: return "a thunk";
+  case VType::Thunk: case VType::App: case VType::AttrApp: case VType::Failed: return "a thunk";
   case VType::Blackhole: return "a thunk";
   }
   return "?";
@@ -1191,7 +1194,7 @@ void EvalState::statCell(Frame *f, Node *s, Value *nv, bool eager) {
   if (nv->type == VType::Lambda) markPinned(f);
   else if (isProjection(op)) ++nProjThunks;          // in the simulated world this thunk holds (base cell, path), not the frame
   else {
-    ++nHardThunks; markCaptured(f); lastThunk = nv;
+    ++nHardThunks; markCaptured(f); lastThunk = nv; lastThunkFor = statCur;
     auto &e = thunksByOp[op->getName().getStringRef()];
     ++e.first;
     unsigned inside = 0;                                // operands defined in this very body: cells the thunk would have to create first
@@ -1316,15 +1319,29 @@ struct DepthGuard {
 
 void EvalState::epochTouch(const Value &v) {
   uint32_t cur = epochEvals.size() - 1;
-  if (v.type == VType::Thunk || v.type == VType::App) { forcedBy[&v] = cur; return; } // about to be forced here
+  if (v.type == VType::Thunk || v.type == VType::App || v.type == VType::AttrApp) { forcedBy[&v] = cur; return; } // about to be forced here
   auto it = forcedBy.find(&v);
   if (it != forcedBy.end() && it->second != cur) epochEdges.insert(uint64_t(it->second) << 32 | cur);
+}
+
+void EvalState::evalOpCounted(Node *n, Frame *env, Value &out) {
+  statEval(n, env);
+  struct Restore {
+    Node *&cur, *saved;
+    ~Restore() { cur = saved; }
+  } restore{statCur, statCur};
+  statCur = n;
+  n->eval(*this, n, env, out);
 }
 
 void EvalState::forceCell(Value &v, PosPtr pos) {
   if (recordEdges && !epochEvals.empty()) [[unlikely]] epochTouch(v);
   if (statsEnabled && lastThunk) [[unlikely]] {
-    if (&v == lastThunk && v.type == VType::Thunk) { ++nImmediate; ++immediateByOp[v.thunk.node->def->getName().getStringRef()]; }
+    if (&v == lastThunk && v.type == VType::Thunk) {
+      ++nImmediate;
+      ++immediateByOp[v.thunk.node->def->getName().getStringRef()];
+      ++immediateByConsumer[lastThunkFor ? lastThunkFor->def->getName().getStringRef() : "(none)"];
+    }
     lastThunk = nullptr;
   }
   if (v.type == VType::Thunk) {
@@ -1352,6 +1369,20 @@ void EvalState::forceCell(Value &v, PosPtr pos) {
       v.type = VType::App; if (statsEnabled) ++nVT[unsigned(VType::App)];
       v.app.left = l;
       v.app.right = r;
+      throw;
+    }
+  } else if (v.type == VType::AttrApp) {
+    Value *f = v.app.left, *x = v.app.right;
+    Symbol name = Symbol(v.aux);
+    v.type = VType::Blackhole; if (statsEnabled) ++nVT[unsigned(VType::Blackhole)];
+    try {
+      Value *args[2] = {newStringWindow(symbols[name]), x}; // the name's own bytes, in the symbol table
+      callFunction(*f, 2, args, v, pos);
+    } catch (...) {
+      v.type = VType::AttrApp; if (statsEnabled) ++nVT[unsigned(VType::AttrApp)];
+      v.aux = name;
+      v.app.left = f;
+      v.app.right = x;
       throw;
     }
   } else if (v.type == VType::Failed) {
@@ -2552,7 +2583,7 @@ void EvalState::printValue(std::ostream &str, Value &v, std::set<const void *> *
       str << "]";
     }
     break;
-  case VType::Thunk: case VType::App: case VType::Failed: str << "<CODE>"; break;
+  case VType::Thunk: case VType::App: case VType::AttrApp: case VType::Failed: str << "<CODE>"; break;
   case VType::Blackhole: str << "«potential infinite recursion»"; break;
   case VType::Lambda: str << "<LAMBDA>"; break;
   case VType::PrimOp: str << "<PRIMOP>"; break;
@@ -2674,7 +2705,7 @@ struct TracePrinter {
       out << "«partially applied primop " << (p->type == VType::PrimOp ? p->primOp->name : "?") << "»";
       break;
     }
-    case VType::Thunk: case VType::App: case VType::Failed: out << "«thunk»"; break;
+    case VType::Thunk: case VType::App: case VType::AttrApp: case VType::Failed: out << "«thunk»"; break;
     case VType::Blackhole: out << "«potential infinite recursion»"; break;
     }
   }

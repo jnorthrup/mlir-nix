@@ -193,8 +193,11 @@ struct JsonOut {
 /// Failed: a thunk whose evaluation threw an evaluation error.  Forcing it again throws a fresh copy of that error as it stands then (the
 /// first throw may still be gathering traces on its way out), not the evaluation again: Nix 2.34's memoised errors.  The tags up to
 /// Blackhole are the cells that are not values yet (isThunk; the JITs test `tag <= Blackhole`).
+/// AttrApp: `f name value` as mapAttrs and zipAttrsWith make it for each attribute, one cell holding f (app.left), the value (app.right) and
+/// the name's symbol (aux).  The name's string and the application of f to it are made when the cell is forced, not for every attribute
+/// (three cells an attribute were made before, most of them never read).
 enum class VType : uint8_t {
-  Thunk, App, Failed, Blackhole, Int, Float, Bool, Null, String, Path, Attrs, List,
+  Thunk, App, AttrApp, Failed, Blackhole, Int, Float, Bool, Null, String, Path, Attrs, List,
   Lambda, PrimOp, PrimOpApp
 };
 
@@ -517,6 +520,16 @@ struct EvalState {
   void mkAttrs(Value &v, Bindings *b) { if (statsEnabled) ++nVT[unsigned(VType::Attrs)];  v.type = VType::Attrs; v.attrs = b; }
   void mkApp(Value &v, Value *f, Value *x) { if (statsEnabled) ++nVT[unsigned(VType::App)];  v.type = VType::App; v.app.left = f; v.app.right = x; }
   Value *mkAppValue(Value *f, Value *x) { Value *v = allocValue(); mkApp(*v, f, x); return v; }
+  /// `f name x`, applied when forced (VType::AttrApp).
+  Value *mkAttrAppValue(Value *f, Symbol name, Value *x) {
+    Value *v = allocValue();
+    if (statsEnabled) ++nVT[unsigned(VType::AttrApp)];
+    v->type = VType::AttrApp;
+    v->aux = name;
+    v->app.left = f;
+    v->app.right = x;
+    return v;
+  }
   Value *newString(std::string_view s, const NixStringContext &ctx = {}) { Value *v = allocValue(); mkString(*v, s, ctx); return v; }
   /// A string on bytes that stay where they are (a name in the symbol table, a piece of an arena string): a window, nothing copied.
   Value *newStringWindow(llvm::StringRef r) { Value *v = allocValue(); mkStringWindow(*v, r); return v; }
@@ -741,10 +754,13 @@ struct EvalState {
   }
   [[noreturn]] static void unindexed();
   void evalOp(Node *n, Frame *env, Value &out) {
-    if (statsEnabled) [[unlikely]] statEval(n, env);
+    if (statsEnabled) [[unlikely]] return evalOpCounted(n, env, out);
     n->eval(*this, n, env, out);
   }
   void statEval(Node *n, Frame *env);
+  /// MLNIX_STATS: evalOp with the census, and the node being evaluated kept in statCur while it runs (the consumer a lookup makes a cell for).
+  void evalOpCounted(Node *n, Frame *env, Value &out);
+  Node *statCur = nullptr, *lastThunkFor = nullptr;
   RegionInfo *regionInfo(mlir::Region *r);
   /// A frame of `ri`'s body: its slots empty.  The ordinary case (no census, no recycling) is a bump of the arena, here; the rest out of line.
   Frame *newFrame(RegionInfo *ri, Frame *up) {
@@ -956,6 +972,7 @@ struct EvalState {
   uint64_t nBuilders = 0, nBuilderRows = 0, nBuildersBig = 0, nBuilderBigRows = 0; // MLNIX_STATS: attribute-set builders, and those past the 12 inline rows (a malloc)
   llvm::StringMap<std::pair<uint64_t, uint64_t>> thunksByOp; // MLNIX_STATS: frame-needing thunks by operation: count, packed operand counts
   uint64_t nProjThunks = 0, nHardThunks = 0, nImmediate = 0, nImmediateLater = 0; // MLNIX_STATS: frame-needing thunks forced as the very next thing
+  llvm::StringMap<uint64_t> immediateByConsumer; // MLNIX_STATS: the same, by the op whose operand the thunk was made for
   const Value *lastThunk = nullptr;
   llvm::StringMap<uint64_t> immediateByOp; // MLNIX_STATS: thunks made over a frame, projections and the rest
   uint64_t nSelectorCalls = 0; // MLNIX_STATS: saturated calls of a recognized selector, made with no frame and no closure

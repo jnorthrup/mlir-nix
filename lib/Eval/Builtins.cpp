@@ -859,11 +859,7 @@ void registerBuiltins(EvalState &state) {
     st.forceAttrs(*args[1], pos, "while evaluating the second argument passed to builtins.mapAttrs");
     Bindings *b = st.allocBindings(args[1]->attrs->size());
     size_t n = 0;
-    for (auto &a : *args[1]->attrs) {
-      Value *name = st.newStringWindow(st.symbols[a.name]); // the name's own bytes, in the symbol table
-      Value *f1 = st.mkAppValue(args[0], name);
-      b->attrs[n++] = {a.name, a.pos, st.mkAppValue(f1, a.value)};
-    }
+    for (auto &a : *args[1]->attrs) b->attrs[n++] = {a.name, a.pos, st.mkAttrAppValue(args[0], a.name, a.value)}; // `f name value`, one cell
     b->size_ = n;
     st.mkAttrs(v, b);
   });
@@ -887,10 +883,9 @@ void registerBuiltins(EvalState &state) {
     for (uint32_t i = 0, n = all.size(); i < n;) {
       uint32_t j = i;
       while (j < n && all[j].name == all[i].name) j++;
-      Value *name = st.newStringWindow(st.symbols[all[i].name]);
       Value *list = st.allocValue();
       st.mkList(*list, cp::series(all.data() + i, j - i) |cp::α| [](const NV &x) { return x.value; });
-      bb.insert(all[i].name, st.mkAppValue(st.mkAppValue(args[0], name), list));
+      bb.insert(all[i].name, st.mkAttrAppValue(args[0], all[i].name, list)); // `f name values`, one cell
       i = j;
     }
     st.mkAttrs(v, bb.finish());
