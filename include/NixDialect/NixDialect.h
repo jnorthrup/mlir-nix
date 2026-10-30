@@ -17,8 +17,6 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/ADT/StringMap.h"
-#include <functional>
-#include <memory>
 
 // The evaluator library is a client of the dialects, never a dependency: the
 // interfaces below only mention its types.
@@ -71,7 +69,7 @@ class NixModes : public OpTrait::TraitBase<ConcreteType, NixModes> {};
 #include "Nix/Pos.h"
 
 #include <optional>
-#include <string>
+#include <string_view>
 
 namespace mlir::nix {
 /// Source positions.  An op that can fail carries its position in its `pos` property (a nixfe::PackedPos
@@ -97,7 +95,7 @@ inline const void *posOfValue(Value v) {
 inline const void *posOfWord(uint64_t word) { return reinterpret_cast<const void *>(word); }
 
 struct SrcPos {
-  std::string file;
+  std::string_view file;   // a window on text that outlives it: the file table's (never freed) or the context's
   unsigned line = 0, col = 0;
 };
 /// File, line and column of a PosPtr; nullopt when it holds none.

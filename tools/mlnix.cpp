@@ -11,6 +11,7 @@
 #include "Nix/Prefetch.h"
 #include "Nix/Eval.h"
 #include "Nix/MLIRGen.h"
+#include "Nix/Numbers.h"
 
 #include "mlir/IR/AsmState.h"
 #include "mlir/IR/Verifier.h"
@@ -18,9 +19,6 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <cstring>
-#include <iostream>
-#include <map>
-#include <sstream>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -33,12 +31,22 @@ extern bool tomlTimestamps;
 
 namespace {
 
-[[noreturn]] void usage(const std::string &msg) {
-  std::cerr << "error: " << msg << "\nTry 'mlnix --help' for more information.\n";
+/// A line to standard error.
+void lineToStderr(std::string_view line) { nixsys::lineToStderr(line.data(), line.size()); }
+/// A line to standard output.
+void lineToStdout(std::string_view line) { nixsys::lineToStdout(line.data(), line.size()); }
+
+/// What the standard library's stoul was: the facet's reading of the digits, and the two exceptions it threw (nothing read; out of range).
+unsigned long toUnsigned(std::string_view v) { return nixsys::stoValue("stoul", nixsys::readUnsigned(v)); }
+
+[[noreturn]] void usage(std::string_view msg) {
+  composite::Text t;
+  t.put("error: ").put(msg).put("\nTry 'mlnix --help' for more information.\n");
+  nixsys::toStderr(t.data(), t.size());
   exit(1);
 }
 
-std::string defaultSystem() {
+composite::Text defaultSystem() {
 #if defined(__APPLE__)
 #if defined(__aarch64__)
   return "aarch64-darwin";
@@ -54,19 +62,18 @@ std::string defaultSystem() {
 #endif
 }
 
-std::string absPath(const std::string &p) {
+composite::Text absPath(std::string_view p) {
   if (!p.empty() && p[0] == '/') return nixfe::canonPath(p);
   char buf[PATH_MAX];
-  std::string cwd = getcwd(buf, sizeof buf) ? buf : "/";
-  return nixfe::canonPath(cwd + "/" + p);
+  return nixfe::canonPath(composite::cat(getcwd(buf, sizeof buf) ? buf : "/", '/', p));
 }
 
-composite::MutableSeries<SearchPathElem> parseNixPath(const std::string &s) {
+composite::MutableSeries<SearchPathElem> parseNixPath(std::string_view s) {
   composite::MutableSeries<SearchPathElem> res;
   size_t i = 0;
   while (i < s.size()) {
     size_t j = i;
-    std::string elem;
+    composite::Text elem;
     while (j < s.size()) {
       if (s[j] == ':') {
         if (s.compare(j, 3, "://") == 0) { elem += "://"; j += 3; continue; }
@@ -77,9 +84,9 @@ composite::MutableSeries<SearchPathElem> parseNixPath(const std::string &s) {
     if (!elem.empty()) {
       SearchPathElem e;
       auto eq = elem.find('=');
-      if (eq != std::string::npos) { e.prefix = elem.substr(0, eq); e.path = elem.substr(eq + 1); }
-      else e.path = elem;
-      res.append(e);
+      if (eq != composite::npos) { e.prefix = composite::Text(elem.substr(0, eq)); e.path = composite::Text(elem.substr(eq + 1)); }
+      else e.path = composite::mv(elem);
+      res.append(composite::mv(e));
     }
     i = j + 1;
   }
@@ -87,15 +94,15 @@ composite::MutableSeries<SearchPathElem> parseNixPath(const std::string &s) {
 }
 
 struct Options {
-  composite::MutableSeries<std::string> files;
-  composite::MutableSeries<std::string> attrPaths;
-  composite::MutableSeries<std::pair<std::string, std::string>> argExprs, argStrs;
-  composite::MutableSeries<std::string> includes;
+  composite::MutableSeries<composite::Text> files;
+  composite::MutableSeries<composite::Text> attrPaths;
+  composite::MutableSeries<composite::Join<composite::Text, composite::Text>> argExprs, argStrs;
+  composite::MutableSeries<composite::Text> includes;
   bool fromArgs = false, readStdin = false, evalOnly = false, parseOnly = false, strict = false;
   bool json = false, xml = false, raw = false, location = true, findFile = false;
   bool readWrite = false, readOnly = false, dryRun = false, noOutLink = false, showTrace = false;
   bool emitMLIR = false, noOpt = false;
-  std::string outLink = "result", addRoot;
+  composite::Text outLink = "result", addRoot;
   EvalSettings eval;
   nixstore::StoreSettings store;
   bool storeDirSet = false, storeRootSet = false;
@@ -103,24 +110,24 @@ struct Options {
 
 /// Parse options shared by all evaluating commands. Returns false if `arg`
 /// was not recognised.
-bool parseCommon(Options &o, const std::string &arg, int &i, int argc, char **argv) {
-  auto next = [&]() -> std::string {
-    if (i + 1 >= argc) usage("flag '" + arg + "' requires an argument");
+bool parseCommon(Options &o, std::string_view arg, int &i, int argc, char **argv) {
+  auto next = [&]() -> std::string_view {
+    if (i + 1 >= argc) usage(composite::cat("flag '", arg, "' requires an argument"));
     return argv[++i];
   };
   if (arg == "-I" || arg == "--include") {
-    std::string v = next();
-    o.includes.append(v);
+    std::string_view v = next();
+    o.includes.append(composite::Text(v));
   } else if (arg.rfind("-I", 0) == 0 && arg.size() > 2) {
-    o.includes.append(arg.substr(2));
+    o.includes.append(composite::Text(arg.substr(2)));
   } else if (arg == "--arg") {
-    std::string n = next(), v = next();
-    o.argExprs.append({n, v});
+    composite::Text n(next()), v(next());
+    o.argExprs.append({composite::mv(n), composite::mv(v)});
   } else if (arg == "--argstr") {
-    std::string n = next(), v = next();
-    o.argStrs.append({n, v});
+    composite::Text n(next()), v(next());
+    o.argStrs.append({composite::mv(n), composite::mv(v)});
   } else if (arg == "-A" || arg == "--attr") {
-    o.attrPaths.append(next());
+    o.attrPaths.append(composite::Text(next()));
   } else if (arg == "-E" || arg == "--expr") {
     o.fromArgs = true;
   } else if (arg == "--show-trace") {
@@ -136,35 +143,34 @@ bool parseCommon(Options &o, const std::string &arg, int &i, int argc, char **ar
   } else if (arg == "--restrict-eval") {
     o.eval.restrictEval = true;
   } else if (arg == "--extra-experimental-features" || arg == "--experimental-features") {
-    std::string f = next();
-    std::istringstream ss(f);
-    std::string w;
-    while (ss >> w) {
+    std::string_view f = next();
+    composite::eachWord(f.data(), uint32_t(f.size()), [&](const char *p, uint32_t n) {
+      std::string_view w(p, n);
       if (w == "pipe-operators") o.eval.pipeOperators = true;
       if (w == "parse-toml-timestamps") nixev::tomlTimestamps = true;
-    }
+    });
   } else if (arg == "--option") {
-    std::string n = next(), v = next();
-    if (n == "max-call-depth") o.eval.maxCallDepth = std::stoul(v);
-    else if ((n == "extra-experimental-features" || n == "experimental-features") && v.find("pipe-operators") != std::string::npos)
+    std::string_view n = next(), v = next();
+    if (n == "max-call-depth") o.eval.maxCallDepth = toUnsigned(v);
+    else if ((n == "extra-experimental-features" || n == "experimental-features") && v.find("pipe-operators") != std::string_view::npos)
       o.eval.pipeOperators = true;
-    else if (n == "system") o.eval.currentSystem = v;
+    else if (n == "system") o.eval.currentSystem = composite::Text(v);
     else if (n == "pure-eval") o.eval.pureEval = v == "true";
   } else if (arg == "--lint-absolute-path-literals" || arg == "--lint-short-path-literals" || arg == "--lint-url-literals") {
-    std::string v = next();
+    std::string_view v = next();
     nixfe::Lint l = v == "warn" ? nixfe::Lint::Warn : v == "fatal" ? nixfe::Lint::Fatal : nixfe::Lint::Ignore;
     if (v != "warn" && v != "fatal" && v != "ignore")
-      usage("option '" + arg.substr(2) + "' has invalid value '" + v + "' (expected 'ignore', 'warn', or 'fatal')");
+      usage(composite::cat("option '", arg.substr(2), "' has invalid value '", v, "' (expected 'ignore', 'warn', or 'fatal')"));
     if (arg == "--lint-absolute-path-literals") o.eval.lintAbsolutePaths = l;
     else if (arg == "--lint-short-path-literals") o.eval.lintShortPaths = l;
     else o.eval.lintUrls = l;
   } else if (arg == "--system") {
-    o.eval.currentSystem = next();
+    o.eval.currentSystem = composite::Text(next());
   } else if (arg == "--store-dir") {
     o.store.storeDir = absPath(next());
     o.storeDirSet = true;
   } else if (arg == "--store") {
-    std::string s = next();
+    std::string_view s = next();
     if (s == "dummy://") o.readOnly = true;
     else if (s.rfind("local?root=", 0) == 0) { o.store.realRoot = absPath(s.substr(11)); o.storeRootSet = true; }
     else if (s != "auto" && s != "local" && s != "daemon") { o.store.realRoot = absPath(s); o.storeRootSet = true; }
@@ -175,8 +181,8 @@ bool parseCommon(Options &o, const std::string &arg, int &i, int argc, char **ar
   } else if (arg == "-K" || arg == "--keep-failed") {
     o.store.keepFailed = true;
   } else if (arg == "-j" || arg == "--max-jobs" || arg == "--cores") {
-    std::string v = next();
-    if (arg == "--cores") o.store.cores = std::stoul(v);
+    std::string_view v = next();
+    if (arg == "--cores") o.store.cores = toUnsigned(v);
   } else if (arg == "--no-opt") {
     o.noOpt = true;
   } else if (arg == "-v" || arg == "--verbose" || arg == "-Q" || arg == "--no-build-output" || arg == "--quiet" ||
@@ -190,50 +196,50 @@ bool parseCommon(Options &o, const std::string &arg, int &i, int argc, char **ar
 void finishOptions(Options &o) {
   if (o.eval.currentSystem.empty()) {
     const char *sys = getenv("NIX_SYSTEM");
-    o.eval.currentSystem = sys ? sys : defaultSystem();
+    o.eval.currentSystem = sys ? composite::Text(sys) : defaultSystem();
   }
   // NIX_PATH and -I.
-  for (const std::string &inc : o.includes) {
+  for (const composite::Text &inc : o.includes) {
     auto v = parseNixPath(inc);
-    for (auto &e : v) o.eval.nixPath.append(e);
+    for (auto &e : v) o.eval.nixPath.append(composite::mv(e));
   }
   if (const char *np = getenv("NIX_PATH")) {
     auto v = parseNixPath(np);
-    for (auto &e : v) o.eval.nixPath.append(e);
+    for (auto &e : v) o.eval.nixPath.append(composite::mv(e));
   }
   for (auto &e : o.eval.nixPath)
-    if (e.path.find("://") == std::string::npos) e.path = absPath(e.path);
+    if (e.path.find("://") == composite::npos) e.path = absPath(e.path);
   if (o.noOpt) o.eval.optimize = false;
   // Store configuration.
   if (!o.storeDirSet) {
     if (const char *sd = getenv("NIX_STORE_DIR")) o.store.storeDir = sd;
     else if (const char *sd2 = getenv("NIX_STORE")) o.store.storeDir = sd2;
   }
-  if (const char *r = getenv("NIX_REMOTE"); r && std::string(r) == "dummy://") o.readOnly = true;
+  if (const char *r = getenv("NIX_REMOTE"); r && std::string_view(r) == "dummy://") o.readOnly = true;
   if (!o.storeRootSet) {
     if (const char *r = getenv("MLNIX_STORE_ROOT")) o.store.realRoot = r;
     else {
       // Use the store directory directly if we can write to it; otherwise
       // fall back to a chroot-style store under the user's data directory.
-      std::string sd = o.store.storeDir;
+      const composite::Text &sd = o.store.storeDir;
       bool usable = access(sd.c_str(), W_OK) == 0 ||
                     (access(sd.c_str(), F_OK) != 0 && access(nixstore::dirOf(sd).c_str(), W_OK) == 0);
       if (!usable) {
         const char *home = getenv("HOME");
-        o.store.realRoot = std::string(home ? home : "/tmp") + "/.local/share/mlnix/root";
+        o.store.realRoot = composite::cat(home ? home : "/tmp", "/.local/share/mlnix/root");
       }
     }
   }
   if (const char *sd = getenv("MLNIX_STATE_DIR")) o.store.stateDir = sd;
   o.store.readOnly = o.readOnly;
-  o.store.system = o.eval.currentSystem;
+  o.store.system = o.eval.currentSystem.clone();
 }
 
 AutoArgs buildAutoArgs(EvalState &st, const Options &o) {
   AutoArgs res; // a name given twice stands for its last value
   char buf[PATH_MAX];
-  std::string cwd = getcwd(buf, sizeof buf) ? buf : "/";
-  auto set = [&](const std::string &n, Value *v) { res.set(n.data(), uint32_t(n.size()), v, [&] { return st.copyString(n); }); };
+  composite::Text cwd(getcwd(buf, sizeof buf) ? buf : "/");
+  auto set = [&](std::string_view n, Value *v) { res.set(n.data(), uint32_t(n.size()), v, [&] { return st.copyString(n); }); };
   for (auto &[n, e] : o.argExprs) set(n, st.evalString(e, cwd, "«string»"));
   for (auto &[n, s] : o.argStrs) {
     Value *v = st.allocValue();
@@ -244,41 +250,42 @@ AutoArgs buildAutoArgs(EvalState &st, const Options &o) {
 }
 
 /// findAlongAttrPath
-Value *findAlongAttrPath(EvalState &st, const std::string &path, const AutoArgs &autoArgs,
+Value *findAlongAttrPath(EvalState &st, std::string_view path, const AutoArgs &autoArgs,
                          Value &root) {
-  composite::MutableSeries<std::string> comps;
+  composite::MutableSeries<composite::Text> comps;
   {
-    std::string cur;
+    composite::Text cur;
     bool quoted = false;
     for (char c : path) {
       if (c == '"') { quoted = !quoted; continue; }
-      if (c == '.' && !quoted) { comps.append(cur); cur.clear(); continue; }
+      if (c == '.' && !quoted) { comps.append(composite::mv(cur)); cur.clear(); continue; }
       cur += c;
     }
-    if (quoted) throw EvalError("missing closing quote in selection path '" + path + "'");
-    if (!path.empty()) comps.append(cur);
+    if (quoted) throw EvalError(composite::cat("missing closing quote in selection path '", path, "'"));
+    if (!path.empty()) comps.append(composite::mv(cur));
   }
   Value *v = &root;
   for (auto &c : comps) {
-    if (c.empty()) throw EvalError("empty attribute name in selection path '" + path + "'");
+    if (c.empty()) throw EvalError(composite::cat("empty attribute name in selection path '", path, "'"));
     Value *vNew = st.allocValue();
     st.autoCallFunction(autoArgs, *v, *vNew);
     v = vNew;
     st.forceValue(*v);
-    bool isIndex = !c.empty() && std::all_of(c.begin(), c.end(), [](char ch) { return isdigit((unsigned char)ch); });
+    composite::text::Reading index = nixsys::readUnsigned(c); // a list index is digits all through: no space, no sign
+    bool isIndex = !c.empty() && composite::isAsciiDigit(c[0]) && index.consumed == c.size();
     if (!isIndex) {
       if (v->type != VType::Attrs)
-        throw TypeError("the expression selected by the selection path '" + path + "' should be a set but is " +
-                        EvalState::showType(*v));
+        throw TypeError(composite::cat("the expression selected by the selection path '", path, "' should be a set but is ",
+                                       EvalState::showType(*v)));
       const Attr *a = v->attrs->get(st.symbols.create(c));
-      if (!a) throw EvalError("attribute '" + c + "' in selection path '" + path + "' not found");
+      if (!a) throw EvalError(composite::cat("attribute '", c, "' in selection path '", path, "' not found"));
       v = a->value;
     } else {
       if (v->type != VType::List)
-        throw TypeError("the expression selected by the selection path '" + path + "' should be a list but is " +
-                        EvalState::showType(*v));
-      size_t idx = std::stoul(c);
-      if (idx >= v->listSize()) throw EvalError("list index " + c + " in selection path '" + path + "' is out of range");
+        throw TypeError(composite::cat("the expression selected by the selection path '", path, "' should be a list but is ",
+                                       EvalState::showType(*v)));
+      size_t idx = nixsys::stoValue("stoul", index);
+      if (idx >= v->listSize()) throw EvalError(composite::cat("list index ", c, " in selection path '", path, "' is out of range"));
       v = v->list.elems[idx];
     }
   }
@@ -286,28 +293,28 @@ Value *findAlongAttrPath(EvalState &st, const std::string &path, const AutoArgs 
 }
 
 struct DrvInfo {
-  std::string drvPath, outputName, attrPath;
-  std::map<std::string, std::string> outputs;
+  composite::Text drvPath, outputName, attrPath;
+  nixstore::SortedMap<composite::Text> outputs;
 };
 
-bool getDerivation(EvalState &st, Value &v, const std::string &attrPath, composite::MutableSeries<DrvInfo> &drvs,
+bool getDerivation(EvalState &st, Value &v, std::string_view attrPath, composite::MutableSeries<DrvInfo> &drvs,
                    std::set<const void *> &done) {
   st.forceValue(v);
   if (!st.isDerivation(v)) return true;
   if (!done.insert(v.attrs).second) return false;
   DrvInfo d;
-  d.attrPath = attrPath;
+  d.attrPath = composite::Text(attrPath);
   const Attr *dp = v.attrs->get(st.s.drvPath);
   if (!dp) throw EvalError("derivation does not contain a 'drvPath' attribute");
   NixStringContext ctx;
   d.drvPath = st.coerceToString(*dp->value, ctx, false, false);
   d.outputName = "out";
-  if (const Attr *on = v.attrs->get(st.s.outputName)) d.outputName = std::string(st.forceStringNoCtx(*on->value));
-  drvs.append(d);
+  if (const Attr *on = v.attrs->get(st.s.outputName)) d.outputName = composite::Text(st.forceStringNoCtx(*on->value));
+  drvs.append(composite::mv(d));
   return false;
 }
 
-void getDerivations(EvalState &st, Value &vIn, const std::string &prefix, const AutoArgs &autoArgs,
+void getDerivations(EvalState &st, Value &vIn, std::string_view prefix, const AutoArgs &autoArgs,
                     composite::MutableSeries<DrvInfo> &drvs, std::set<const void *> &done) {
   Value v;
   st.autoCallFunction(autoArgs, vIn, v);
@@ -315,7 +322,7 @@ void getDerivations(EvalState &st, Value &vIn, const std::string &prefix, const 
   if (v.type == VType::Attrs) {
     if (!done.insert(v.attrs).second) return;
     for (const Attr *a : v.attrs->lexicographicOrder(st.symbols)) {
-      std::string p2 = prefix.empty() ? st.symbols[a->name].str() : prefix + "." + st.symbols[a->name].str();
+      composite::Text p2 = prefix.empty() ? composite::Text(st.symbols[a->name]) : composite::cat(prefix, '.', st.symbols[a->name]);
       st.beginEpoch();
       if (getDerivation(st, *a->value, p2, drvs, done)) {
         if (a->value->type == VType::Attrs) {
@@ -326,7 +333,7 @@ void getDerivations(EvalState &st, Value &vIn, const std::string &prefix, const 
     }
   } else if (v.type == VType::List) {
     for (size_t i = 0; i < v.listSize(); i++) {
-      std::string p2 = prefix.empty() ? std::to_string(i) : prefix + "." + std::to_string(i);
+      composite::Text p2 = prefix.empty() ? composite::str(i) : composite::cat(prefix, '.', i);
       if (getDerivation(st, *v.list.elems[i], p2, drvs, done))
         getDerivations(st, *v.list.elems[i], p2, autoArgs, drvs, done);
     }
@@ -335,19 +342,19 @@ void getDerivations(EvalState &st, Value &vIn, const std::string &prefix, const 
   }
 }
 
-std::string readStdin() {
-  std::stringstream ss;
-  ss << std::cin.rdbuf();
-  return ss.str();
+composite::Text readStdin() {
+  composite::Text text;
+  nixsys::readInto(STDIN_FILENO, text);
+  return text;
 }
 
-std::string cwdPath() {
+composite::Text cwdPath() {
   char buf[PATH_MAX];
-  return getcwd(buf, sizeof buf) ? buf : "/";
+  return composite::Text(getcwd(buf, sizeof buf) ? buf : "/");
 }
 
 /// Locate the file argument (handles <lookup> and directories).
-std::string lookupFileArg(EvalState &st, const std::string &s) {
+composite::Text lookupFileArg(EvalState &st, std::string_view s) {
   if (s.size() > 2 && s.front() == '<' && s.back() == '>') {
     Value *np = st.baseEnvValue("__nixPath");
     return st.findFile(*np, s.substr(1, s.size() - 2), nullptr);
@@ -381,16 +388,13 @@ int runEvalCommand(Options &o, bool build) {
   try {
     return runEvalCommandIn(o, build, st, store);
   } catch (nixfe::ParseError &e) {
-    std::cout.flush();
-    std::cerr << formatParseError(e) << std::endl;
+    lineToStderr(formatParseError(e));
     return 1;
   } catch (EvalError &e) {
-    std::cout.flush();
-    std::cerr << formatError(&st, e) << std::endl;
+    lineToStderr(formatError(&st, e));
     return 1;
   } catch (nixstore::Error &e) {
-    std::cout.flush();
-    std::cerr << "error: " << e.what() << std::endl;
+    lineToStderr(composite::cat("error: ", e.what()));
     return 1;
   }
 }
@@ -400,20 +404,22 @@ int runEvalCommandIn(Options &o, bool build, EvalState &st, nixstore::Store *sto
   if (o.attrPaths.empty()) o.attrPaths.append("");
 
 
-  auto handleParsed = [&](const std::string &text, const std::string &baseDir, const std::string &name,
-                          const std::string &path) -> Value * {
+  auto handleParsed = [&](composite::Text text, std::string_view baseDir, std::string_view name,
+                          std::string_view path) -> Value * {
     nixfe::Origin *origin = nixfe::newOrigin();
-    origin->name = name;
-    origin->path = path;
-    origin->baseDir = baseDir;
-    origin->text = nixfe::Source::fromString(text);
+    origin->name = composite::Text(name);
+    origin->path = composite::Text(path);
+    origin->baseDir = composite::Text(baseDir);
+    origin->text = nixfe::Source::fromString(composite::mv(text));
     st.origins.append(origin);
     if (o.parseOnly) {
       st.lowerToMLIR(origin); // static checks (undefined variables), like bindVars
       nixfe::ParseOptions po = st.parseOptions();
       po.lintAbsolutePaths = po.lintShortPaths = po.lintUrls = nixfe::Lint::Ignore; // warned once, above
-      nixfe::showSource(std::cout, origin, po);
-      std::cout << "\n";
+      composite::Text shown;
+      nixfe::showSource(shown, origin, po);
+      shown.put('\n');
+      nixsys::toStdout(shown.data(), shown.size());
       return nullptr;
     }
     // The IR is printed whole: a deferred body would print as an empty shell, which is not the program.
@@ -434,25 +440,25 @@ int runEvalCommandIn(Options &o, bool build, EvalState &st, nixstore::Store *sto
   if (o.readStdin) {
     roots.append([&]() { return handleParsed(readStdin(), cwdPath(), "«stdin»", ""); });
   } else if (o.fromArgs) {
-    for (auto &f : o.files) roots.append([&, f]() { return handleParsed(f, cwdPath(), "«string»", ""); });
+    for (auto &f : o.files) roots.append([&, f = std::string_view(f)]() { return handleParsed(composite::Text(f), cwdPath(), "«string»", ""); });
   } else {
     if (o.files.empty()) o.files.append("./default.nix");
     for (auto &f : o.files)
-      roots.append([&, f]() -> Value * {
-        std::string p = lookupFileArg(st, f);
+      roots.append([&, f = std::string_view(f)]() -> Value * {
+        composite::Text p = lookupFileArg(st, f);
         if (o.findFile) {
-          std::cout << p << "\n";
+          lineToStdout(p);
           return nullptr;
         }
-        std::string resolved = st.resolveExprPath(st.realisePath(p, nullptr));
+        composite::Text resolved = st.resolveExprPath(st.realisePath(p, nullptr));
         if (resolved.size() > 5 && resolved.substr(resolved.size() - 5) == ".mlir") return st.evalMLIRFile(resolved, "");
-        std::string text = nixstore::readFile(resolved);
-        return handleParsed(text, nixstore::dirOf(resolved), resolved, resolved);
+        composite::Text text = nixstore::readFile(resolved);
+        return handleParsed(composite::mv(text), nixstore::dirOf(resolved), resolved, resolved);
       });
   }
 
   int rootNr = 0;
-  composite::MutableSeries<std::string> buildOutputs;
+  composite::MutableSeries<composite::Text> buildOutputs;
   for (auto &r : roots) {
     Value *root = r();
     if (!root) continue;
@@ -465,19 +471,34 @@ int runEvalCommandIn(Options &o, bool build, EvalState &st, nixstore::Store *sto
         if (autoArgs.empty()) vRes = v;
         else st.autoCallFunction(autoArgs, v, vRes);
         if (o.raw) {
-          std::cout << st.coerceToString(vRes, ctx, false, true);
+          composite::Text raw = st.coerceToString(vRes, ctx, false, true);
+          nixsys::toStdout(raw.data(), raw.size());
         } else if (o.xml) {
-          st.printValueAsXML(std::cout, vRes, o.strict, o.location, ctx);
+          composite::Text xml;
+          try {
+            st.printValueAsXML(xml, vRes, o.strict, o.location, ctx);
+          } catch (...) {
+            nixsys::toStdout(xml.data(), xml.size()); // the part a stream had taken before the error stays on standard output
+            throw;
+          }
+          nixsys::toStdout(xml.data(), xml.size());
         } else if (o.json) {
           JsonOut js;
           st.printValueAsJSON(js, vRes, o.strict, ctx, true);
-          std::cout.write(js.view().data(), std::streamsize(js.view().size()));
-          std::cout << std::endl;
+          nixsys::lineToStdout(js.view().data(), js.view().size());
+          fflush(stdout);
         } else {
           if (o.strict) st.forceValueDeep(vRes);
-          std::set<const void *> seen;
-          st.printValue(std::cout, vRes, &seen);
-          std::cout << std::endl;
+          composite::WordTable<char> seen; // the sets and lists met, by address
+          composite::Text shown;
+          try {
+            st.printValue(shown, vRes, &seen);
+          } catch (...) {
+            nixsys::toStdout(shown.data(), shown.size()); // as above
+            throw;
+          }
+          nixsys::lineToStdout(shown.data(), shown.size());
+          fflush(stdout);
         }
       } else {
         composite::MutableSeries<DrvInfo> drvs;
@@ -485,41 +506,42 @@ int runEvalCommandIn(Options &o, bool build, EvalState &st, nixstore::Store *sto
         getDerivations(st, v, "", autoArgs, drvs, done);
         for (auto &d : drvs) {
           if (!build) {
-            std::string out = d.drvPath;
+            composite::Text out = d.drvPath.clone();
             if (!o.addRoot.empty()) {
-              std::string rootName = absPath(o.addRoot);
-              if (++rootNr > 1) rootName += "-" + std::to_string(rootNr);
+              composite::Text rootName = absPath(o.addRoot);
+              if (++rootNr > 1) rootName.put('-').putInt(rootNr);
               store->addPermRoot(d.drvPath, rootName);
-              out = rootName;
+              out = composite::mv(rootName);
             }
-            std::cout << out << (d.outputName != "out" ? "!" + d.outputName : "") << "\n";
+            if (d.outputName != "out") out.put('!').put(d.outputName);
+            lineToStdout(out);
           } else {
             if (o.dryRun) {
-              std::cerr << "these derivations will be built:\n  " << d.drvPath << "\n";
+              lineToStderr(composite::cat("these derivations will be built:\n  ", d.drvPath));
               continue;
             }
             auto outs = store->buildDerivation(d.drvPath);
-            std::string outPath = outs.at(d.outputName);
+            composite::Text outPath = outs.at(d.outputName).clone();
             if (!o.noOutLink) {
-              std::string link = o.outLink;
-              if (++rootNr > 1) link += "-" + std::to_string(rootNr);
-              if (d.outputName != "out") link += "-" + d.outputName;
+              composite::Text link = o.outLink.clone();
+              if (++rootNr > 1) link.put('-').putInt(rootNr);
+              if (d.outputName != "out") link.put('-').put(d.outputName);
               store->addPermRoot(outPath, absPath(link));
             }
-            buildOutputs.append(outPath);
+            buildOutputs.append(composite::mv(outPath));
           }
         }
       }
     }
   }
-  for (auto &p : buildOutputs) std::cout << p << "\n";
+  for (auto &p : buildOutputs) lineToStdout(p);
   return 0;
 }
 
 int cmdInstantiate(int argc, char **argv, int start, bool build) {
   Options o;
   for (int i = start; i < argc; i++) {
-    std::string a = argv[i];
+    std::string_view a = argv[i];
     if (parseCommon(o, a, i, argc, argv)) continue;
     if (a == "--eval" || a == "--eval-only") o.evalOnly = true;
     else if (a == "--parse" || a == "--parse-only") { o.parseOnly = true; o.evalOnly = true; }
@@ -536,8 +558,8 @@ int cmdInstantiate(int argc, char **argv, int start, bool build) {
     else if (a == "-o" || a == "--out-link") { if (++i >= argc) usage("--out-link requires an argument"); o.outLink = argv[i]; }
     else if (a == "--no-out-link") o.noOutLink = true;
     else if (a == "-") o.readStdin = true;
-    else if (a.size() > 1 && a[0] == '-' && !o.fromArgs) usage("unrecognised flag '" + a + "'");
-    else o.files.append(a);
+    else if (a.size() > 1 && a[0] == '-' && !o.fromArgs) usage(composite::cat("unrecognised flag '", a, "'"));
+    else o.files.append(composite::Text(a));
   }
   if (o.parseOnly && o.files.empty() && !o.fromArgs) o.readStdin = true;
   return runEvalCommand(o, build);
@@ -545,12 +567,12 @@ int cmdInstantiate(int argc, char **argv, int start, bool build) {
 
 int cmdStore(int argc, char **argv, int start) {
   Options o;
-  std::string op;
-  composite::MutableSeries<std::string> args;
+  std::string_view op;
+  composite::MutableSeries<composite::Text> args;
   bool queryRefs = false, queryReqs = false, queryReferrers = false, queryDeriver = false, queryOutputs = false,
        queryHash = false, querySize = false, includeOutputs = false, printInvalid = false;
   for (int i = start; i < argc; i++) {
-    std::string a = argv[i];
+    std::string_view a = argv[i];
     if (parseCommon(o, a, i, argc, argv)) continue;
     if (a == "--add" || a == "--add-fixed" || a == "--realise" || a == "-r" || a == "--query" || a == "-q" ||
         a == "--dump" || a == "--gc" || a == "--delete" || a == "--verify-path" || a == "--print-env" ||
@@ -566,53 +588,51 @@ int cmdStore(int argc, char **argv, int start) {
     else if (a == "--include-outputs") includeOutputs = true;
     else if (a == "--print-dead" || a == "--print-live") printInvalid = true;
     else if (a == "--recursive") {}
-    else args.append(a);
+    else args.append(composite::Text(a));
   }
   finishOptions(o);
   nixstore::Store store(o.store);
-  auto toStore = [&](const std::string &p) {
-    std::string ap = p;
+  auto toStore = [&](std::string_view p) {
+    composite::Text ap(p);
     if (!nixstore::isInStore(store.storeDir(), ap)) {
       ap = absPath(p);
       // Follow result symlinks into the (possibly chroot) store.
       char buf[PATH_MAX];
       ssize_t n = readlink(ap.c_str(), buf, sizeof buf - 1);
       if (n > 0) {
-        ap = std::string(buf, n);
-        if (!o.store.realRoot.empty() && ap.rfind(o.store.realRoot, 0) == 0) ap = ap.substr(o.store.realRoot.size());
+        ap = composite::Text(buf, size_t(n));
+        if (!o.store.realRoot.empty() && ap.rfind(o.store.realRoot, 0) == 0) ap = composite::Text(ap.substr(o.store.realRoot.size()));
       }
     }
     return nixstore::toStorePath(store.storeDir(), ap);
   };
   try {
     if (op == "--add") {
-      for (auto &a : args) std::cout << store.addToStore(nixstore::baseNameOf(absPath(a)), absPath(a)) << "\n";
+      for (auto &a : args) lineToStdout(store.addToStore(nixstore::baseNameOf(absPath(a)), absPath(a)));
     } else if (op == "--add-fixed") {
       if (args.empty()) usage("--add-fixed requires an algorithm");
       auto algo = nixstore::parseHashAlgo(args[0]);
-      if (!algo) usage("unknown hash algorithm '" + args[0] + "'");
+      if (!algo) usage(composite::cat("unknown hash algorithm '", args[0], "'"));
       for (size_t i = 1; i < args.size(); i++)
-        std::cout << store.addToStore(nixstore::baseNameOf(absPath(args[i])), absPath(args[i]),
-                                      nixstore::FileIngestionMethod::Flat, *algo)
-                  << "\n";
+        lineToStdout(store.addToStore(nixstore::baseNameOf(absPath(args[i])), absPath(args[i]), nixstore::FileIngestionMethod::Flat, *algo));
     } else if (op == "--realise") {
       for (auto &a : args) {
-        std::string p = toStore(a);
+        composite::Text p = toStore(a);
         if (p.size() > 4 && p.substr(p.size() - 4) == ".drv") {
-          for (auto &[n, out] : store.buildDerivation(p)) std::cout << out << "\n";
+          for (auto &[n, out] : store.buildDerivation(p)) lineToStdout(out);
         } else {
           store.ensurePath(p);
-          std::cout << p << "\n";
+          lineToStdout(p);
         }
       }
     } else if (op == "--query") {
-      std::set<std::string> out;
-      composite::MutableSeries<std::string> ordered;
+      nixstore::SortedSet out;
+      composite::MutableSeries<composite::Text> ordered;
       for (auto &a : args) {
-        std::string p = toStore(a);
+        composite::Text p = toStore(a);
         if (queryRefs) {
           auto info = store.queryPathInfo(p);
-          if (!info) throw nixstore::Error("path '" + p + "' is not valid");
+          if (!info) throw nixstore::Error(composite::cat("path '", p, "' is not valid"));
           for (auto &r : info->references) out.insert(r);
         } else if (queryReqs) {
           auto c = store.computeFSClosure(nixstore::SortedSet::of(p), includeOutputs);
@@ -622,84 +642,88 @@ int cmdStore(int argc, char **argv, int start) {
           out.insert(r.begin(), r.end());
         } else if (queryDeriver) {
           auto info = store.queryPathInfo(p);
-          ordered.append(info && !info->deriver.empty() ? info->deriver : "unknown-deriver");
+          ordered.append(info && !info->deriver.empty() ? info->deriver.clone() : composite::Text("unknown-deriver"));
         } else if (queryOutputs) {
-          auto d = store.readDerivation(p);
-          for (auto &[n, o2] : d.outputs) ordered.append(o2.path);
+          const auto &d = store.readDerivation(p);
+          for (auto &[n, o2] : d.outputs) ordered.append(o2.path.clone());
         } else if (queryHash || querySize) {
           auto info = store.queryPathInfo(p);
-          if (!info) throw nixstore::Error("path '" + p + "' is not valid");
+          if (!info) throw nixstore::Error(composite::cat("path '", p, "' is not valid"));
           ordered.append(queryHash ? info->narHash.to_string(nixstore::HashFormat::Nix32, true)
-                                      : std::to_string(info->narSize));
+                                      : composite::str(info->narSize));
         } else {
-          ordered.append(p);
+          ordered.append(composite::mv(p));
         }
       }
-      for (auto &p : out) std::cout << p << "\n";
-      for (auto &p : ordered) std::cout << p << "\n";
+      for (auto &p : out) lineToStdout(p);
+      for (auto &p : ordered) lineToStdout(p);
     } else if (op == "--dump") {
       for (auto &a : args)
-        nixstore::dumpPath(absPath(a), [](std::string_view d) { std::cout.write(d.data(), d.size()); });
+        nixstore::dumpPath(absPath(a), [](std::string_view d) { nixsys::toStdout(d.data(), d.size()); });
     } else if (op == "--restore") {
       if (args.size() != 1) usage("--restore requires a path");
       nixstore::restorePath(absPath(args[0]), readStdin());
     } else if (op == "--gc") {
-      composite::MutableSeries<std::string> deleted;
+      composite::MutableSeries<composite::Text> deleted;
       store.collectGarbage(printInvalid, deleted);
-      for (auto &d : deleted) std::cout << (printInvalid ? "" : "deleting '") << d << (printInvalid ? "" : "'") << "\n";
-      std::cerr << deleted.size() << " store paths deleted\n";
+      for (auto &d : deleted) {
+        if (printInvalid) lineToStdout(d);
+        else lineToStdout(composite::cat("deleting '", d, "'"));
+      }
+      composite::Text count;
+      count.putUnsigned(deleted.size()).put(" store paths deleted");
+      nixsys::lineToStderr(count.data(), count.size());
     } else if (op == "--delete") {
       for (auto &a : args) {
-        std::string p = toStore(a);
-        if (!store.deletePath(p)) throw nixstore::Error("cannot delete path '" + p + "' since it is still alive");
+        composite::Text p = toStore(a);
+        if (!store.deletePath(p)) throw nixstore::Error(composite::cat("cannot delete path '", p, "' since it is still alive"));
       }
     } else if (op == "--verify-path" || op == "--verify") {
       int bad = 0;
-      composite::MutableSeries<std::string> paths = args.empty() ? store.allValidPaths() : composite::MutableSeries<std::string>{};
+      composite::MutableSeries<composite::Text> paths = args.empty() ? store.allValidPaths() : composite::MutableSeries<composite::Text>{};
       for (auto &a : args) paths.append(toStore(a));
       for (auto &p : paths) {
         auto info = store.queryPathInfo(p);
-        if (!info) { std::cerr << "path '" << p << "' is not valid\n"; bad++; continue; }
+        if (!info) { lineToStderr(composite::cat("path '", p, "' is not valid")); bad++; continue; }
         auto [h, n] = nixstore::hashPath(store.toReal(p));
         if (!(h == info->narHash)) {
-          std::cerr << "path '" << p << "' was modified! expected hash '"
-                    << info->narHash.to_string(nixstore::HashFormat::Nix32, true) << "', got '"
-                    << h.to_string(nixstore::HashFormat::Nix32, true) << "'\n";
+          lineToStderr(composite::cat("path '", p, "' was modified! expected hash '", info->narHash.to_string(nixstore::HashFormat::Nix32, true),
+                   "', got '", h.to_string(nixstore::HashFormat::Nix32, true), "'"));
           bad++;
         }
       }
       return bad ? 1 : 0;
     } else if (op == "--print-env") {
       for (auto &a : args) {
-        auto d = store.readDerivation(toStore(a));
-        for (auto &[k, v] : d.env) std::cout << "export " << k << "; " << k << "='" << v << "'\n";
-        std::cout << "export _args; _args='";
-        for (auto &x : d.args) std::cout << x << " ";
-        std::cout << "'\n";
+        const auto &d = store.readDerivation(toStore(a));
+        for (auto &[k, v] : d.env) lineToStdout(composite::cat("export ", k, "; ", k, "='", v, "'"));
+        composite::Text args("export _args; _args='");
+        for (auto &x : d.args) args.put(x).put(' ');
+        lineToStdout(args + "'");
       }
     } else {
       usage("no operation specified");
     }
   } catch (nixstore::Error &e) {
-    std::cerr << "error: " << e.what() << "\n";
+    lineToStderr(composite::cat("error: ", e.what()));
     return 1;
   }
   return 0;
 }
 
 int cmdHash(int argc, char **argv, int start) {
-  std::string mode;
+  std::string_view mode;
   nixstore::HashAlgo algo = nixstore::HashAlgo::SHA256;
   nixstore::HashFormat fmt = nixstore::HashFormat::Base16;
   bool flat = false, sri = false;
-  composite::MutableSeries<std::string> args;
+  composite::MutableSeries<composite::Text> args;
   bool algoGiven = false;
   for (int i = start; i < argc; i++) {
-    std::string a = argv[i];
+    std::string_view a = argv[i];
     if (a == "--type") {
       if (++i >= argc) usage("--type requires an argument");
       auto t = nixstore::parseHashAlgo(argv[i]);
-      if (!t) usage(std::string("unknown hash algorithm '") + argv[i] + "'");
+      if (!t) usage(composite::cat("unknown hash algorithm '", argv[i], "'"));
       algo = *t;
       algoGiven = true;
     } else if (a == "--flat") flat = true;
@@ -711,27 +735,26 @@ int cmdHash(int argc, char **argv, int start) {
     else if (a == "--to-base32" || a == "--to-nix32" || a == "--to-base16" || a == "--to-base64" || a == "--to-sri")
       mode = a;
     else if (a == "path" || a == "file") mode = a;
-    else args.append(a);
+    else args.append(composite::Text(a));
   }
   try {
     for (auto &a : args) {
       if (mode.rfind("--to-", 0) == 0) {
-        if (!algoGiven && a.find(':') == std::string::npos && a.find('-') == std::string::npos)
-          throw nixstore::Error("hash '" + a + "' does not include a type, nor is the type otherwise known from context");
+        if (!algoGiven && a.find(':') == composite::npos && a.find('-') == composite::npos)
+          throw nixstore::Error(composite::cat("hash '", a, "' does not include a type, nor is the type otherwise known from context"));
         auto h = nixstore::parseHash(a, algo);
         nixstore::HashFormat f = mode == "--to-base16" ? nixstore::HashFormat::Base16
                                  : mode == "--to-base64" ? nixstore::HashFormat::Base64
                                  : mode == "--to-sri" ? nixstore::HashFormat::SRI : nixstore::HashFormat::Nix32;
-        std::cout << h.to_string(f, f == nixstore::HashFormat::SRI) << "\n";
+        lineToStdout(h.to_string(f, f == nixstore::HashFormat::SRI));
         continue;
       }
       nixstore::Hash h = (flat || mode == "file") ? nixstore::hashFile(algo, absPath(a))
                                                   : nixstore::hashPath(absPath(a), nullptr, algo).a;
-      if (sri) std::cout << h.to_string(nixstore::HashFormat::SRI, true) << "\n";
-      else std::cout << h.to_string(fmt, false) << "\n";
+      lineToStdout(sri ? h.to_string(nixstore::HashFormat::SRI, true) : h.to_string(fmt, false));
     }
   } catch (nixstore::Error &e) {
-    std::cerr << "error: " << e.what() << "\n";
+    lineToStderr(composite::cat("error: ", e.what()));
     return 1;
   }
   return 0;
@@ -739,29 +762,30 @@ int cmdHash(int argc, char **argv, int start) {
 
 int cmdDerivationShow(int argc, char **argv, int start) {
   Options o;
-  composite::MutableSeries<std::string> args;
+  composite::MutableSeries<composite::Text> args;
   for (int i = start; i < argc; i++) {
-    std::string a = argv[i];
+    std::string_view a = argv[i];
     if (parseCommon(o, a, i, argc, argv)) continue;
-    args.append(a);
+    args.append(composite::Text(a));
   }
   finishOptions(o);
   nixstore::Store store(o.store);
-  std::cout << "{";
+  nixsys::toStdout("{"); // a derivation at a time, as it was: one that cannot be read leaves the ones before it on standard output
   bool first = true;
   for (auto &a : args) {
-    std::string p = nixstore::isInStore(store.storeDir(), a) ? a : absPath(a);
-    auto d = store.readDerivation(p);
-    std::string j = nixstore::derivationToJSON(store.storeDir(), p, d);
-    std::cout << (first ? "" : ",") << j.substr(1, j.size() - 2);
+    composite::Text p = nixstore::isInStore(store.storeDir(), a) ? a.clone() : absPath(a);
+    const auto &d = store.readDerivation(p);
+    composite::Text j = nixstore::derivationToJSON(store.storeDir(), p, d);
+    nixsys::toStdout(first ? "" : ",");
+    nixsys::toStdout(j.data() + 1, uint32_t(j.size() - 2));
     first = false;
   }
-  std::cout << "}\n";
+  nixsys::toStdout("}\n");
   return 0;
 }
 
 void printHelp() {
-  std::cout << R"(mlnix - a Nix implementation built on an MLIR dialect
+  static const char help[] = R"(mlnix - a Nix implementation built on an MLIR dialect
 
 Usage:
   mlnix instantiate [options] [FILE | -E EXPR]...   (like nix-instantiate)
@@ -784,10 +808,11 @@ Common options:
 When invoked as nix-instantiate, nix-build, nix-store or nix-hash, mlnix
 behaves like the corresponding Nix command.
 )";
+  nixsys::toStdout(help, sizeof help - 1);
 }
 
 int realMain(int argc, char **argv) {
-  std::string prog = nixstore::baseNameOf(argv[0]);
+  composite::Text prog = nixstore::baseNameOf(argv[0]);
   if (prog == "nix-instantiate") return cmdInstantiate(argc, argv, 1, false);
   if (prog == "nix-build") return cmdInstantiate(argc, argv, 1, true);
   if (prog == "nix-store") return cmdStore(argc, argv, 1);
@@ -796,13 +821,14 @@ int realMain(int argc, char **argv) {
     printHelp();
     return 1;
   }
-  std::string cmd = argv[1];
+  std::string_view cmd = argv[1];
   if (cmd == "--help" || cmd == "-h" || cmd == "help") {
     printHelp();
     return 0;
   }
   if (cmd == "--version") {
-    std::cout << "mlnix (Nix-compatible) 2.35.4\n";
+    static const char version[] = "mlnix (Nix-compatible) 2.35.4\n";
+    nixsys::toStdout(version, sizeof version - 1);
     return 0;
   }
   if (cmd == "instantiate") return cmdInstantiate(argc, argv, 2, false);
@@ -810,7 +836,7 @@ int realMain(int argc, char **argv) {
   if (cmd == "eval" || cmd == "parse" || cmd == "emit-mlir" || cmd == "run-mlir") {
     composite::MutableSeries<char *> args;
     for (int ai = 0; ai < argc; ai++) args.append(argv[ai]);
-    composite::MutableSeries<std::string> extra;
+    composite::MutableSeries<composite::Text> extra;
     if (cmd == "eval") extra = {"--eval", "--strict"};
     if (cmd == "parse") extra = {"--parse"};
     if (cmd == "emit-mlir") extra = {"--emit-mlir"};
@@ -837,16 +863,18 @@ int realMain(int argc, char **argv) {
     composite::sortRows(v.data(), v.size(), [](const Entry *a, const Entry *b) {
       return composite::lessChars(composite::series(a->p, a->n), composite::series(b->p, b->n));
     });
-    for (const Entry *e : v) std::cout << std::string_view(e->p, e->n) << " " << e->v->primOp->arity << "\n";
+    composite::Text rows;
+    for (const Entry *e : v) rows.put(e->p, e->n).put(' ').putInt(e->v->primOp->arity).put('\n');
+    nixsys::toStdout(rows.data(), rows.size());
     return 0;
   }
   if (cmd == "store") return cmdStore(argc, argv, 2);
   if (cmd == "hash") return cmdHash(argc, argv, 2);
   if (cmd == "derivation") {
-    if (argc < 3 || std::string(argv[2]) != "show") usage("expected 'mlnix derivation show DRV...'");
+    if (argc < 3 || std::string_view(argv[2]) != "show") usage("expected 'mlnix derivation show DRV...'");
     return cmdDerivationShow(argc, argv, 3);
   }
-  usage("unknown command '" + cmd + "'");
+  usage(composite::cat("unknown command '", cmd, "'"));
 }
 
 } // namespace
@@ -879,28 +907,24 @@ int main(int argc, char **argv) {
   useHugePages(argv);
 #endif
   nixprefetch::init(argc, argv); // MLNIX_PREFETCH=record:FILE | replay:FILE | auto
-  std::ios::sync_with_stdio(true);
   int rc = 1;
   try {
     rc = runWithLargeStack([&]() -> int {
       try {
         return realMain(argc, argv);
       } catch (nixfe::ParseError &e) {
-        std::cout.flush();
-        std::cerr << formatParseError(e) << std::endl;
+        lineToStderr(formatParseError(e));
         return 1;
       } catch (EvalError &e) {
-        std::cout.flush();
-        std::cerr << formatError(nullptr, e) << std::endl;
+        lineToStderr(formatError(nullptr, e));
         return 1;
       } catch (nixstore::Error &e) {
-        std::cout.flush();
-        std::cerr << "error: " << e.what() << std::endl;
+        lineToStderr(composite::cat("error: ", e.what()));
         return 1;
       }
     });
   } catch (std::exception &e) {
-    std::cerr << "error: " << e.what() << std::endl;
+    lineToStderr(composite::cat("error: ", e.what()));
     return 1;
   }
   return rc;

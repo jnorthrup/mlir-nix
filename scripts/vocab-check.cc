@@ -1,6 +1,6 @@
-// The pure zone's vocabulary against the standard library it replaces: Fn (std::function), Maybe (std::optional), Own (std::unique_ptr), Text (ostringstream,
-// std::to_string), the Spill body (llvm::SmallVector, checked against std::vector) and WordTable (DenseMap, checked against
-// std::unordered_map).
+// The pure zone's vocabulary against the standard library it replaces: Fn (std::function), Maybe (std::optional), Own (std::unique_ptr), Text (std::string,
+// ostringstream, std::to_string), eachWord and eachLine (a stream's >> and getline), the Spill body (llvm::SmallVector, checked against std::vector), WordTable
+// (DenseMap, checked against std::unordered_map) and TextSet (std::unordered_set<std::string>).
 //   clang++ -std=c++20 -O1 -g -fsanitize=address,undefined -I include scripts/vocab-check.cc -o /tmp/vocab-check && /tmp/vocab-check
 #include "Composite/Table.h"
 #include "Composite/Text.h"
@@ -8,9 +8,12 @@
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
+#include <sstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 using namespace composite;
@@ -51,6 +54,109 @@ int main() {
   Text u;
   u.put("ab").put(Text("cd", 2)).put('e');
   require(u.size() == 5 && std::string(u.cstr()) == "abcde" && u.size() == 5, "Text appends runs, and cstr() adds an uncounted NUL");
+
+  // Text against std::string: random writes of every kind of piece (C string, run, window, view, char, number, another Text, a part of itself),
+  // truncation, erase, insert and resize; after each, every search, comparison and conversion on the result.  The NUL always follows the last byte.
+  {
+    auto eq = [](const Text &t, const std::string &r) { return t.size() == r.size() && std::string_view(t) == r && t.c_str()[t.size()] == 0; };
+    auto piece = [](int maxLen) {
+      std::string p(rng() % (maxLen + 1), 'a');
+      for (char &c : p) c = "ab/c. \t-x"[rng() % 9];
+      return p;
+    };
+    Text t;
+    std::string r;
+    for (int op = 0; op < 60000; op++) {
+      std::string a = piece(6);
+      switch (rng() % 21) {
+      case 0: t.put(a.c_str()); r += a.c_str(); break;
+      case 1: t.put(a.data(), a.size()); r += a; break;
+      case 2: t.put(std::string_view(a)); r += a; break;
+      case 3: t.put(chars(a.data(), uint32_t(a.size()))); r += a; break;
+      case 4: { char c = "xyz/"[rng() % 4]; t += c; r += c; break; }
+      case 5: t += a.c_str(); r += a.c_str(); break;
+      case 6: { Text o(a.data(), a.size()); t += o; r += a; break; }
+      case 7: { int64_t v = int64_t(rng()) >> (rng() % 60); t.putInt(v); r += std::to_string((long long)v); break; }
+      case 8: if (r.size() > 20) { t.clear(); r.clear(); } break;
+      case 9: { size_t n = r.empty() ? 0 : rng() % (r.size() + 1); t.truncate(n); r.resize(n); break; }
+      case 10: if (!r.empty()) { t.pop_back(); r.pop_back(); } break;
+      case 11: { size_t at = r.empty() ? 0 : rng() % (r.size() + 1), n = rng() % 5; t.erase(at, n); r.erase(at, n); break; }
+      case 12: { size_t at = r.empty() ? 0 : rng() % (r.size() + 1); t.insert(at, a.c_str()); r.insert(at, a); break; }
+      case 13: { size_t n = rng() % 40; t.resize(n, 'q'); r.resize(n, 'q'); break; }
+      case 14: { Text c = t.clone(); require(eq(c, r), "clone copies the bytes"); t.put(c); r += std::string(r); break; }
+      case 15: if (!r.empty()) { t.put(t); r += std::string(r); } break; // a write of itself, through the window
+      case 16: { Text x = a + t; require(eq(x, a + r), "piece + Text"); break; }
+      case 17: { Text x = Text(t.clone()) + "/" + a + '!'; require(eq(x, r + "/" + a + '!'), "Text + pieces, one run"); break; }
+      case 18: { Text u = cat("n=", 42, ' ', a, -7L, uint64_t(18446744073709551615ull)); require(eq(u, "n=42 " + a + "-718446744073709551615"), "cat writes pieces and decimal numbers"); break; }
+      case 19: require(str(12345).size() == 5 && str(-9) == "-9" && str(INT64_MIN) == std::to_string(INT64_MIN), "str is std::to_string"); break;
+      default: t.swap(t); break;
+      }
+      require(eq(t, r), "Text and std::string hold the same bytes");
+      std::string n = piece(3);
+      char c = "ab/c. \t-x"[rng() % 9];
+      size_t from = rng() % (r.size() + 2);
+      if (rng() % 5 == 0) from = std::string::npos;
+      require(t.find(c, from) == r.find(c, from) && t.find(n.c_str(), from) == r.find(n, from) && t.find(std::string_view(n), from) == r.find(n, from), "find");
+      require(t.rfind(c, from) == r.rfind(c, from) && t.rfind(n.c_str(), from) == r.rfind(n, from), "rfind");
+      require(t.find_first_of(n.c_str(), from) == r.find_first_of(n, from) && t.find_last_of(n.c_str(), from) == r.find_last_of(n, from), "find_first_of, find_last_of");
+      require(t.find_first_not_of(n.c_str(), from) == r.find_first_not_of(n, from) && t.find_last_not_of(n.c_str(), from) == r.find_last_not_of(n, from), "find_first_not_of, find_last_not_of");
+      require(t.starts_with(n.c_str()) == r.starts_with(n) && t.ends_with(n.c_str()) == r.ends_with(n) && t.starts_with(c) == r.starts_with(c) && t.ends_with(c) == r.ends_with(c), "starts_with, ends_with");
+      require(t.contains(n.c_str()) == (r.find(n) != std::string::npos), "contains");
+      size_t sp = r.empty() ? 0 : rng() % (r.size() + 1), sn = rng() % 8;
+      Chars w = t.substr(sp, sn);
+      require(std::string_view(w) == r.substr(sp, sn), "substr is a window on the same bytes");
+      std::string other = piece(5);
+      Text o(other.data(), other.size());
+      require((t == other.c_str()) == (r == other) && (t < other.c_str()) == (r < other) && (t > other.c_str()) == (r > other), "== < > against a C string");
+      require((t <= other.c_str()) == (r <= other) && (t >= other.c_str()) == (r >= other) && (t != other.c_str()) == (r != other), "<= >= != against a C string");
+      require((t == o) == (r == other) && (t < o) == (r < other) && (t == std::string_view(other)) == (r == other), "== < against a Text and a view");
+      require(compare(t.chars(), o.chars()) == (r < other ? -1 : r > other ? 1 : 0), "compare");
+      std::string_view sv = t;
+      Chars win = t;
+      require(sv == r && win.size() == r.size(), "a Text converts to a view and to a window");
+      require(startsWith(win, o.chars()) == r.starts_with(other) && endsWith(win, o.chars()) == r.ends_with(other), "startsWith, endsWith");
+      require(find(win, o.chars(), from) == r.find(other, from) && rfind(win, o.chars(), from) == r.rfind(other, from), "find, rfind on a window");
+    }
+    // a Text that has not held a byte: reads give the NUL, and erase, truncate, clear, insert and a write of nothing leave it empty and usable
+    {
+      Text e;
+      require(e[0] == 0 && e.size() == 0 && e.c_str()[0] == 0, "an unwritten Text reads as empty with a NUL at [0]");
+      Text f;
+      f.erase(0, 5).truncate(0);
+      f.clear();
+      f.put("", size_t(0));
+      require(f.size() == 0 && f.c_str()[0] == 0 && f == "", "erase, truncate, clear and an empty put on an unwritten Text do nothing");
+      Text g;
+      g.insert(0, "ab");
+      require(g == "ab" && g.c_str()[2] == 0, "insert into an unwritten Text");
+    }
+    // a series of Texts grows by moving them; Maybe<Text> holds one; nothing is copied, nothing lost
+    MutableSeries<Text> many;
+    for (int i = 0; i < 3000; i++) many.append(cat("row ", i, std::string(rng() % 40, 'z')));
+    bool all = many.size() == 3000;
+    for (int i = 0; i < 3000 && all; i++) all = std::string_view(many[uint32_t(i)]).starts_with("row " + std::to_string(i));
+    require(all, "MutableSeries<Text> moves its cells when it grows");
+    Maybe<Text> mt(Text("held")), nt;
+    require(mt && !nt && *mt == "held" && mt->size() == 4, "Maybe<Text> holds a Text");
+  }
+
+  // eachWord against a stream's >>, eachLine against getline: every mix of separators, the empty string and a lone separator included.
+  for (int round = 0; round < 20000; round++) {
+    static const char alphabet[] = "ab \t\n\v\f\r";
+    std::string text(rng() % 24, ' ');
+    for (char &c : text) c = alphabet[rng() % (sizeof alphabet - 1)];
+    std::vector<std::string> want, got;
+    std::istringstream words(text);
+    for (std::string x; words >> x;) want.push_back(x);
+    eachWord(text.data(), uint32_t(text.size()), [&](const char *p, uint32_t n) { got.emplace_back(p, n); });
+    require(got == want, "eachWord splits where a stream's >> does");
+    want.clear();
+    got.clear();
+    std::istringstream lines(text);
+    for (std::string x; std::getline(lines, x);) want.push_back(x);
+    eachLine(text.data(), uint32_t(text.size()), [&](const char *p, uint32_t n) { got.emplace_back(p, n); });
+    require(got == want, "eachLine splits where getline does");
+  }
 
   // Spill: inline, then the heap; moves of an inline and of a spilled series; non-plain cells.
   for (int round = 0; round < 2000; round++) {
@@ -147,12 +253,13 @@ int main() {
     require(sum.compare_exchange(want, 9) && sum.load() == 9, "and from the right one takes");
   }
 
-  // TextTable and Bump against unordered_map<string>: names of every length, values replaced, misses.
+  // TextTable and Bump against unordered_map<string>: names of every length (one in 300 up to 200,000 bytes, so a block of its own and a
+  // few dozen MB, not seven GB), values replaced, misses.
   Bump bump;
   TextTable<uint32_t> tt;
   std::unordered_map<std::string, uint32_t> tr;
   for (int i = 0; i < 100000; i++) {
-    std::string k = "name" + std::to_string(rng() % 30000) + std::string(rng() % 3 ? 0 : rng() % 200000, 'q');
+    std::string k = "name" + std::to_string(rng() % 30000) + std::string(rng() % 300 ? 0 : rng() % 200000, 'q');
     uint32_t v = uint32_t(rng());
     tt.set(k.data(), uint32_t(k.size()), v, [&] { return bump.copy(k.data(), uint32_t(k.size())); });
     tr[k] = v;
@@ -164,5 +271,24 @@ int main() {
     require(!tt.find(k.data(), uint32_t(k.size())), "bytes never stored miss");
   }
   require(tt.find("", 0) == nullptr && *tt.set("", 0, 9, [&] { return bump.copy("", 0); }) == 9 && *tt.find("", 0) == 9, "the empty string is a key");
-  std::printf("vocabulary: Fn, Maybe, Text (100000 numbers), Spill (2000 rounds of moves), WordTable, TextTable (%u names) PASS; Own, Atomic\n", tt.size());
+  // TextSet against unordered_set<string>: the first of equal strings is the new one, the members come back in the order they came.
+  TextSet ts;
+  std::unordered_set<std::string> sr;
+  std::vector<std::string> arrived;
+  for (int i = 0; i < 100000; i++) {
+    std::string k = "member" + std::to_string(rng() % 40000) + std::string(rng() % 5 ? 0 : rng() % 3000, 'z');
+    bool fresh = sr.insert(k).second;
+    require(ts.insert(k.data(), uint32_t(k.size())) == fresh, "insert says whether the bytes were new");
+    if (fresh) arrived.push_back(k);
+    require(ts.contains(k.data(), uint32_t(k.size())), "a member is found");
+  }
+  require(ts.size() == sr.size() && ts.size() == arrived.size(), "one member a byte string");
+  uint32_t at = 0;
+  for (const auto &r : ts) require(std::string(r.p, r.n) == arrived[at++], "members come back in the order they came");
+  for (int i = 0; i < 50000; i++) {
+    std::string k = "stranger" + std::to_string(rng());
+    require(!ts.contains(k.data(), uint32_t(k.size())), "bytes never inserted are not members");
+  }
+  require(!ts.contains("", 0) && ts.insert("", 0) && ts.contains("", 0) && !ts.insert("", 0), "the empty string is a member");
+  std::printf("vocabulary: Fn, Maybe, Text (100000 numbers; 60000 random operations against std::string), eachWord and eachLine (20000 strings), Spill (2000 rounds of moves), WordTable, TextTable (%u names), TextSet (%u members) PASS; Own, Atomic\n", tt.size(), ts.size());
 }

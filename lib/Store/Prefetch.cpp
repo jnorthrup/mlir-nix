@@ -2,6 +2,8 @@
 
 #include "Composite/Mutable.h"
 #include "Composite/Patricia.h"
+#include "Composite/Text.h"
+#include "Nix/Numbers.h"
 #include "Nix/Os.h"
 #include "Nix/Prefetch.h"
 
@@ -11,10 +13,7 @@
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
-#include <fstream>
-#include <string>
 #include <unistd.h>
-#include <vector>
 
 #ifdef MLNIX_HAVE_URING
 #include <liburing.h>
@@ -23,7 +22,7 @@
 namespace nixprefetch {
 
 bool recording = false;
-composite::MutableSeries<std::string> replayFiles;
+composite::MutableSeries<composite::Text> replayFiles;
 namespace {
 /// A key's bytes, copied once where they never move: the keys of the tries below live as long as the process.
 const char *keep(std::string_view s) {
@@ -50,30 +49,30 @@ namespace {
 //===----------------------------------------------------------------------===//
 
 struct Trace {
-  composite::MutableSeries<std::string> order;
+  composite::MutableSeries<composite::Text> order;
   composite::Patricia<char> seen; // the lines kept so far, each once (their bytes copied where they never move)
-  std::string file;
+  composite::Text file;
 };
 Trace *trace = nullptr; // never destroyed: it is written from an atexit handler
 
 /// True the first time the trace meets this line, which is then kept in `seen`.
-bool firstTime(const std::string &line) {
+bool firstTime(std::string_view line) {
   if (trace->seen.find(line.data(), uint32_t(line.size()))) return false;
   trace->seen.set(line.data(), uint32_t(line.size()), 1, [&] { return keep(line); });
   return true;
 }
 
-std::string absolute(const char *p) {
+composite::Text absolute(const char *p) {
   if (p[0] == '/') return p;
   char cwd[PATH_MAX];
   if (!getcwd(cwd, sizeof cwd)) return p;
-  return std::string(cwd) + "/" + p;
+  return composite::cat(cwd, "/", p);
 }
 
 void save() {
   if (!trace) return;
   if (FILE *f = fopen(trace->file.c_str(), "w")) {
-    for (const std::string &l : trace->order) fprintf(f, "%s\n", l.c_str());
+    for (const composite::Text &l : trace->order) fprintf(f, "%s\n", l.c_str());
     fclose(f);
   }
 }
@@ -84,11 +83,11 @@ void save() {
 
 struct Entry {
   char kind;
-  std::string path;
+  composite::Text path;
 };
 
 /// Directory listings cannot go through the ring (no getdents opcode): a few threads do them.
-void warmDirectories(const composite::MutableSeries<std::string> &dirs, unsigned threads) {
+void warmDirectories(const composite::MutableSeries<composite::Text> &dirs, unsigned threads) {
   composite::Atomic<size_t> next{0};
   composite::MutableSeries<nixsys::Thread> ts;
   auto list = [&] { // the next directory not taken, until none is left
@@ -177,9 +176,9 @@ void warmFiles(const composite::MutableSeries<Entry> &es) {
 
 void replay(composite::MutableSeries<Entry> es) {
   uint64_t t0 = nixsys::monotonicNs();
-  composite::MutableSeries<std::string> dirs;
+  composite::MutableSeries<composite::Text> dirs;
   for (const Entry &e : es)
-    if (e.kind == 'D') dirs.append(e.path);
+    if (e.kind == 'D') dirs.append(e.path.clone());
   nixsys::Thread dirThread = nixsys::Thread::start([dirs = composite::mv(dirs)] { warmDirectories(dirs, 4); });
 #ifdef MLNIX_HAVE_URING
   warmFiles(es);
@@ -192,32 +191,32 @@ void replay(composite::MutableSeries<Entry> es) {
 } // namespace
 
 void noteSlow(char kind, const char *path) {
-  std::string line;
+  composite::Text line;
   line.push_back(kind);
   line.push_back(' ');
   line += absolute(path);
-  if (firstTime(line)) trace->order.append(std::move(line));
+  if (firstTime(line)) trace->order.append(composite::mv(line));
 }
 
 void noteMintSlow(const char *path, uint32_t row) {
-  std::string line = "M " + absolute(path) + " " + std::to_string(row);
-  if (firstTime(line)) trace->order.append(std::move(line));
+  composite::Text line = composite::cat("M ", absolute(path), " ", row);
+  if (firstTime(line)) trace->order.append(composite::mv(line));
 }
 
 bool noteRootSlow(char kind, const char *path) {
-  std::string line;
+  composite::Text line;
   line.push_back(kind);
   line.push_back(' ');
   line += absolute(path);
   if (!firstTime(line)) return false;
-  trace->order.append(std::move(line));
+  trace->order.append(composite::mv(line));
   return true;
 }
 
-void noteKeptSlow(const char *path) { trace->order.append("g " + absolute(path)); }
+void noteKeptSlow(const char *path) { trace->order.append(composite::cat("g ", absolute(path))); }
 
 /// auto: the list for this invocation (working directory + arguments) under the state directory.
-std::string autoSpec(int argc, char **argv) {
+composite::Text autoSpec(int argc, char **argv) {
   uint64_t h = 1469598103934665603ull; // FNV-1a
   auto mix = [&](const char *s) {
     for (; *s; s++) h = (h ^ uint8_t(*s)) * 1099511628211ull;
@@ -227,46 +226,49 @@ std::string autoSpec(int argc, char **argv) {
   if (getcwd(cwd, sizeof cwd)) mix(cwd);
   for (int i = 1; i < argc; i++) mix(argv[i]);
   const char *state = getenv("MLNIX_STATE_DIR"), *home = getenv("HOME");
-  std::string dir = state ? std::string(state) : std::string(home ? home : "/tmp") + "/.cache/mlnix";
+  composite::Text dir = state ? composite::Text(state) : composite::cat(home ? home : "/tmp", "/.cache/mlnix");
   dir += "/prefetch";
-  std::string cmd = "mkdir -p '" + dir + "'";
+  composite::Text cmd = composite::cat("mkdir -p '", dir, "'");
   if (system(cmd.c_str()) != 0) return "";
   char name[32];
   snprintf(name, sizeof name, "/%016llx.list", (unsigned long long)h);
-  std::string file = dir + name;
-  return (access(file.c_str(), R_OK) == 0 ? "replay:" : "record:") + file;
+  composite::Text file = composite::cat(dir, name);
+  return composite::cat(access(file.c_str(), R_OK) == 0 ? "replay:" : "record:", file);
 }
 
 void init(int argc, char **argv) {
   const char *env = getenv("MLNIX_PREFETCH");
   if (!env) return;
-  std::string spec = env;
+  composite::Text spec(env);
   if (spec == "auto") spec = autoSpec(argc, argv);
   if (spec.rfind("record:", 0) == 0) {
     trace = new Trace();
-    trace->file = spec.substr(7);
+    trace->file = composite::Text(spec.substr(7));
     recording = true;
     atexit(save);
   } else if (spec.rfind("replay:", 0) == 0 || spec.rfind("replay-wait:", 0) == 0) {
     composite::MutableSeries<Entry> es;
-    std::ifstream in(spec.substr(spec.find(':') + 1));
-    for (std::string l; std::getline(in, l);)
+    composite::Text text; // no list: nothing to replay
+    nixsys::readInto(spec.c_str() + spec.find(':') + 1, text);
+    composite::eachLine(text.data(), text.size(), [&](const char *p, uint32_t n) {
+      composite::Text l(p, n);
       if (l.size() > 2 && l[1] == ' ' && l[0] == 'M') { // a minted body: for the prelowering helpers, nothing to read ahead
         size_t sp = l.rfind(' ');
         if (sp > 2) {
           std::string_view path = std::string_view(l).substr(2, sp - 2);
           uint32_t *i = mintsByPath.find(path.data(), uint32_t(path.size()));
           if (!i) i = mintsByPath.set(path.data(), uint32_t(path.size()), mintRows.append({}), [&] { return keep(path); });
-          mintRows[*i].append(uint32_t(strtoul(l.c_str() + sp + 1, nullptr, 10)));
+          mintRows[*i].append(uint32_t(nixsys::readUnsigned(std::string_view(l).substr(sp + 1)).value));
         }
       } else if (l.size() > 2 && l[1] == ' ' && (l[0] == 'H' || l[0] == 'G')) { // a hashed tree: for the prehashing helper
-        replayHashes.append({l.substr(2), l[0] == 'G', {}});
+        replayHashes.append({composite::Text(l.substr(2)), l[0] == 'G', {}});
       } else if (l.size() > 2 && l[1] == ' ' && l[0] == 'g') {
-        if (!replayHashes.empty() && replayHashes.back().filtered) replayHashes.back().kept.append(l.substr(2));
+        if (!replayHashes.empty() && replayHashes.back().filtered) replayHashes.back().kept.append(composite::Text(l.substr(2)));
       } else if (l.size() > 2 && l[1] == ' ') {
-        es.append({l[0], l.substr(2)});
-        if (l[0] == 'F' && l.size() > 6 && l.compare(l.size() - 4, 4, ".nix") == 0) replayFiles.append(l.substr(2));
+        es.append({l[0], composite::Text(l.substr(2))});
+        if (l[0] == 'F' && l.size() > 6 && l.ends_with(".nix")) replayFiles.append(composite::Text(l.substr(2)));
       }
+    });
     // replay-wait: the evaluation starts when the whole list has been replayed (the best a prefetch can do)
     bool wait = spec.rfind("replay-wait:", 0) == 0;
     if (!es.empty()) {

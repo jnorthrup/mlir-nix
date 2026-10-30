@@ -130,7 +130,7 @@ void printPrim(Operation *op, OpAsmPrinter &p, StringRef defaultDialect) {
   // Unlike an ODS op, a dynamic op's print function must print its own name
   // (OpState::printOpName is protected; this is its whole body).
   StringRef name = op->getName().getStringRef();
-  if (name.starts_with((defaultDialect + ".").str()) && name.count('.') == 1)
+  if (name.starts_with(defaultDialect) && name.drop_front(defaultDialect.size()).starts_with('.') && name.count('.') == 1)
     name = name.drop_front(defaultDialect.size() + 1);
   p << name << "(";
   p.printOperands(op->getOperands());
@@ -177,7 +177,7 @@ LogicalResult mlir::nix::loadPrimDialects(MLIRContext *ctx, NixDialect &core) {
   if (const char *path = getenv("MLNIX_PRIMS_IRDL")) {
     auto buf = llvm::MemoryBuffer::getFile(path);
     if (!buf) {
-      emitError(UnknownLoc::get(ctx)) << "cannot read MLNIX_PRIMS_IRDL=" << path << ": " << buf.getError().message();
+      emitError(UnknownLoc::get(ctx)) << "cannot read MLNIX_PRIMS_IRDL=" << path << ": " << composite::Text(buf.getError().message()).c_str();
       return failure();
     }
     override = composite::Own<llvm::MemoryBuffer>(buf->release()); // LLVM hands it over as a unique_ptr
@@ -193,12 +193,14 @@ LogicalResult mlir::nix::loadPrimDialects(MLIRContext *ctx, NixDialect &core) {
   for (auto dialectOp : module->getOps<irdl::DialectOp>()) {
     auto scope = dialectOp->getAttrOfType<StringAttr>("nix.scope");
     auto continent = dialectOp->getAttrOfType<StringAttr>("nix.continent");
-    core.continents[dialectOp.getSymName()] = {scope ? scope.getValue().str() : "", continent ? continent.getValue().str() : ""};
+    auto &info = core.continents[dialectOp.getSymName()]; // two views on the declaration's attributes
+    info.scope = scope ? scope.getValue() : StringRef();
+    info.continent = continent ? continent.getValue() : StringRef();
     for (auto opOp : dialectOp.getOps<irdl::OperationOp>()) {
-      std::string full = (dialectOp.getSymName() + "." + opOp.getSymName()).str();
+      composite::Text full = composite::cat(dialectOp.getSymName(), '.', opOp.getSymName());
       OperationName name(full, ctx);
       if (!name.isRegistered())
-        return opOp.emitError("IRDL did not register '") << full << "'";
+        return opOp.emitError("IRDL did not register '") << llvm::StringRef(full) << "'";
 
       auto key = opOp->getAttrOfType<StringAttr>("nix.key");
       auto fxAttr = opOp->getAttrOfType<StringAttr>("nix.fx");
@@ -231,7 +233,7 @@ LogicalResult mlir::nix::loadPrimDialects(MLIRContext *ctx, NixDialect &core) {
       def->setPrintFn(printPrim);
       if (foldable)
         def->setGetCanonicalizationPatternsFn(
-            [full](RewritePatternSet &patterns, MLIRContext *c) { patterns.add<FoldPrim>(full, c); });
+            [full = composite::mv(full)](RewritePatternSet &patterns, MLIRContext *c) { patterns.add<FoldPrim>(llvm::StringRef(full), c); });
       name.attachInterface<PrimEffects>();
     }
   }

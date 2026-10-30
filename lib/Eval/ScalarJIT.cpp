@@ -1,8 +1,10 @@
 //===- ScalarJIT.cpp - Nix sea of nodes -> typed MLIR -> LLVM -> native -------===//
 #include "Composite/Mutable.h"
+#include "Composite/Text.h"
 #include "Nix/ScalarJIT.h"
 #include "Nix/Eval.h"
 #include "Nix/LazyJIT.h"
+#include "Nix/Numbers.h"
 
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
 #include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
@@ -21,13 +23,13 @@
 #include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "llvm/IR/Module.h"
+#include "llvm/ADT/FunctionExtras.h"
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/TargetSelect.h"
 
 #include <algorithm>
 #include <array>
-#include <charconv>
 #include <cstring>
 #include <cstdlib>
 #include <filesystem>
@@ -165,9 +167,8 @@ struct Plan {
 unsigned threshold() {
   unsigned n = 1024;
   if (const char *s = getenv("MLNIX_JIT_THRESHOLD")) {
-    unsigned parsed;
-    auto result = std::from_chars(s, s + strlen(s), parsed);
-    if (result.ec == std::errc() && *result.ptr == '\0' && parsed >= 1 && parsed <= 1000000) n = parsed;
+    composite::text::Reading r = nixsys::readUnsigned(s); // all of it digits (no space, no sign), and 1 to 1000000
+    if (composite::isAsciiDigit(*s) && s[r.consumed] == '\0' && !r.overflow && r.value >= 1 && r.value <= 1000000) n = unsigned(r.value);
   }
   return n;
 }
@@ -189,9 +190,9 @@ struct ScalarJIT::Impl {
     uint64_t curriedCalls = 0, curriedCompletions = 0, curriedDeopts = 0;
     uint64_t projectionRequests = 0, projectionForces = 0, saturatedInlineCalls = 0, valueCompletions = 0,
              listCompletions = 0, stringComparisons = 0;
-    std::string curriedLocation;
+    composite::Text curriedLocation;
     // ExecutionEngine accepts a function_ref; keep its callable alive until after the engine is destroyed.
-    std::function<llvm::Error(llvm::Module *)> transformer;
+    llvm::unique_function<llvm::Error(llvm::Module *)> transformer; // it owns a Text (the dump prefix), which no std::function can hold
     composite::Own<mlir::ExecutionEngine> engine;
     void releaseLazyCode() {
       engine = nullptr;
@@ -213,7 +214,7 @@ struct ScalarJIT::Impl {
   Entry sharedPointer; // one generated selector, reused across argument/capture/conditional leaf shapes
   struct Profile {
     uint64_t calls = 0, ready = 0, integers = 0;
-    std::string shape, location;
+    composite::Text shape, location;
     uint64_t booleanCompletions = 0, booleanDemands = 0, booleanDeopts = 0, inlineCalls = 0;
     uint64_t projectionRequests = 0, projectionForces = 0, saturatedInlineCalls = 0, valueCompletions = 0,
              listCompletions = 0, stringComparisons = 0;
@@ -317,21 +318,21 @@ struct ScalarJIT::Impl {
     }
     if (failed(verify(*module))) return false;
 
-    std::string prefix;
+    composite::Text prefix;
     if (const char *dir = getenv("MLNIX_JIT_DUMP")) {
       std::error_code ec;
       std::filesystem::create_directories(dir, ec);
-      if (!ec) prefix = std::string(dir) + "/scalar-" + std::to_string(serial);
+      if (!ec) prefix = composite::cat(dir, "/scalar-", serial);
     }
     auto dump = [&](llvm::StringRef suffix) {
       if (prefix.empty()) return;
       std::error_code ec;
-      llvm::raw_fd_ostream os(prefix + suffix.str(), ec);
+      llvm::raw_fd_ostream os(composite::cat(prefix, suffix), ec);
       if (!ec) { module->print(os); os << '\n'; }
     };
     if (entry.lazyPlan && !prefix.empty()) {
       std::error_code ec;
-      llvm::raw_fd_ostream os(prefix + ".plan.txt", ec);
+      llvm::raw_fd_ostream os(composite::cat(prefix, ".plan.txt"), ec);
       if (!ec) entry.lazyPlan->print(os);
     }
     dump(".typed.mlir");
@@ -351,13 +352,13 @@ struct ScalarJIT::Impl {
     if (failed(pm.run(*module))) return false;
     dump(".llvm.mlir");
     unsigned optLevel = 0; // measured: engine 0.45 ms at 0 vs 1.85 ms at 2, same steady-state speed (host forcing dominates)
-    if (const char *o = getenv("MLNIX_JIT_OPT")) optLevel = std::min(3, atoi(o));
+    if (const char *o = getenv("MLNIX_JIT_OPT")) optLevel = std::min(3, int(nixsys::readSigned(o).value));
     auto optimize = makeOptimizingTransformer(optLevel, 0, nullptr);
-    entry.transformer = [optimize = std::move(optimize), prefix](llvm::Module *m) -> llvm::Error {
+    entry.transformer = [optimize = std::move(optimize), prefix = prefix.clone()](llvm::Module *m) -> llvm::Error {
       if (auto error = optimize(m)) return error;
       if (!prefix.empty()) {
         std::error_code ec;
-        llvm::raw_fd_ostream os(prefix + ".ll", ec);
+        llvm::raw_fd_ostream os(composite::cat(prefix, ".ll"), ec);
         if (!ec) m->print(os, nullptr);
       }
       return llvm::Error::success();
@@ -463,7 +464,7 @@ struct ScalarJIT::Impl {
         if (p.attempts >= kMaxCompiles) { refuse(); return; }
         if (!p.compile(e, nullptr)) {
           if (getenv("MLNIX_JIT_DEBUG"))
-            llvm::errs() << "jit: lazy graph compilation failed at " << st.showPos(nd::posOfOp(lambda)) << '\n';
+            llvm::errs() << "jit: lazy graph compilation failed at " << llvm::StringRef(st.showPos(nd::posOfOp(lambda))) << '\n';
           e.rejected = true; ++p.compileFailures;
           return; // preserve the oracle answer, without repeating its effects
         }
@@ -659,22 +660,22 @@ void ScalarJIT::evaluate(EvalState &st, mlir::Operation *lambda, mlir::Value res
     if (it == p.profiles.end() && p.profiles.size() < 4096) {
       auto lam = mlir::cast<nd::LambdaOp>(lambda);
       auto shape = [&](mlir::Value v) {
-        if (v == lam.getBody().front().getArgument(0)) return std::string("argument");
+        if (v == lam.getBody().front().getArgument(0)) return composite::Text("argument");
         auto *op = v.getDefiningOp();
-        if (!op || op->getParentRegion() != &lam.getBody()) return std::string("capture");
-        return op->getName().getStringRef().str();
+        if (!op || op->getParentRegion() != &lam.getBody()) return composite::Text("capture");
+        return composite::Text(op->getName().getStringRef());
       };
-      std::string desc = shape(result);
+      composite::Text desc = shape(result);
       if (auto *op = result.getDefiningOp()) {
         if (auto select = mlir::dyn_cast<nd::SelectOp>(op)) {
-          desc += "(" + shape(select.getBase()) + ":";
-          for (const auto &name : select.getPath()) desc += name.toString() + ".";
+          desc.put('(').put(shape(select.getBase())).put(':');
+          for (const auto &name : select.getPath()) desc.put(name.str()).put('.');
           desc += ")";
         } else if (auto branch = mlir::dyn_cast<nd::IfOp>(op)) {
-          desc += "(" + shape(branch.getCond()) + "," + shape(branch.getThenValue()) + "," + shape(branch.getElseValue()) + ")";
+          desc.put('(').put(shape(branch.getCond())).put(',').put(shape(branch.getThenValue())).put(',').put(shape(branch.getElseValue())).put(')');
         }
       }
-      it = p.profiles.try_emplace(lambda, Impl::Profile{0, 0, 0, std::move(desc), st.showPos(nd::posOfOp(lambda))}).first;
+      it = p.profiles.try_emplace(lambda, Impl::Profile{0, 0, 0, composite::mv(desc), st.showPos(nd::posOfOp(lambda))}).first;
     }
     if (it != p.profiles.end()) {
       ++it->second.calls;
@@ -865,7 +866,7 @@ void ScalarJIT::printStats() const {
     for (size_t i = 0; i < std::min<size_t>(ranked.size(), 60); ++i) {
       const auto &r = *ranked[i];
       llvm::errs() << "jit-shape: calls=" << r.calls << " ready=" << r.ready << " integers=" << r.integers
-                   << " root=" << r.shape << " boolean_completions=" << r.booleanCompletions
+                   << " root=" << llvm::StringRef(r.shape) << " boolean_completions=" << r.booleanCompletions
                    << " boolean_demands=" << r.booleanDemands << " boolean_deopts=" << r.booleanDeopts
                    << " boolean_inline_calls=" << r.inlineCalls
                    << " projection_requests=" << r.projectionRequests << " projection_forces=" << r.projectionForces
@@ -873,7 +874,7 @@ void ScalarJIT::printStats() const {
                    << " value_completions=" << r.valueCompletions
                    << " list_completions=" << r.listCompletions
                    << " string_comparisons=" << r.stringComparisons
-                   << " at=" << r.location << '\n';
+                   << " at=" << llvm::StringRef(r.location) << '\n';
     }
     composite::MutableSeries<const Impl::Entry *> saturated;
     for (const auto &entry : p.curriedEntries) saturated.append(entry.get());
@@ -890,7 +891,7 @@ void ScalarJIT::printStats() const {
                    << " value_completions=" << entry.valueCompletions
                    << " list_completions=" << entry.listCompletions
                    << " string_comparisons=" << entry.stringComparisons
-                   << " at=" << entry.curriedLocation << '\n';
+                   << " at=" << llvm::StringRef(entry.curriedLocation) << '\n';
     }
     // A low-call kernel can still account for many fallbacks. Reuse the bounded
     // recorded rows to expose that cost without adding hot-path bookkeeping.
@@ -908,7 +909,7 @@ void ScalarJIT::printStats() const {
       const auto &r = *ranked[i];
       llvm::errs() << "jit-deopt-shape: calls=" << r.calls << " completions=" << r.booleanCompletions
                    << " demands=" << r.booleanDemands << " deopts=" << r.booleanDeopts
-                   << " root=" << r.shape << " at=" << r.location << '\n';
+                   << " root=" << llvm::StringRef(r.shape) << " at=" << llvm::StringRef(r.location) << '\n';
     }
     composite::sortRows(saturated.data(), saturated.size(), [](const auto *a, const auto *b) {
       if (a->curriedDeopts != b->curriedDeopts) return a->curriedDeopts > b->curriedDeopts;
@@ -918,7 +919,7 @@ void ScalarJIT::printStats() const {
       const auto &e = *saturated[i];
       llvm::errs() << "jit-deopt-curried: arity=" << e.curriedArity << " calls=" << e.curriedCalls
                    << " completions=" << e.curriedCompletions << " deopts=" << e.curriedDeopts
-                   << " at=" << e.curriedLocation << '\n';
+                   << " at=" << llvm::StringRef(e.curriedLocation) << '\n';
     }
   }
 }

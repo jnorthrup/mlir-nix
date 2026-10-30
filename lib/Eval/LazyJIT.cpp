@@ -1,5 +1,6 @@
 //===- LazyJIT.cpp - Lazy value graph -> resumable MLIR control flow ---------===//
 #include "Nix/LazyJIT.h"
+#include "Composite/Text.h"
 #include "Nix/Eval.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -15,7 +16,6 @@
 #include <cstddef>
 #include <cstdlib>
 #include <map>
-#include <string>
 #include <string_view>
 #include <tuple>
 
@@ -53,7 +53,7 @@ struct StringOperand {
 };
 struct StringLiteral {
   mlir::Value value;
-  std::string bytes; // immutable after plan construction; activeRuns pins its storage
+  composite::Text bytes; // immutable after plan construction; activeRuns pins its storage
 };
 struct PlanNode {
   Kind kind = Kind::Deopt;
@@ -306,7 +306,7 @@ struct LazyJITPlan::Impl {
     }
     unsigned index = literals.size();
     literalBytes += bytes.size();
-    literals.push_back({value, bytes.str()});
+    literals.push_back({value, composite::Text(bytes)});
     return {kNoArgument, index};
   }
   Value *observed(unsigned index) const {

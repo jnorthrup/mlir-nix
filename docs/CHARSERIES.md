@@ -40,6 +40,23 @@ No loop is written in the header (every walk is a `fold` or `firstWhere`) and no
   with `strtoll` and `strtoull` on 400,000 random strings in five bases. `<cctype>`, `atoll` and `snprintf` are gone from `Formats.cpp`:
   26 libc number and character calls became 1, `strtod`, which stays for floats (a correctly rounded decimal-to-double conversion is
   not hand-rolled here, and `std::from_chars` differs on `+`, `inf` and overflow).
+- **Every other integer the evaluator reads** goes through the same facets, by `Nix/Numbers.h` (`nixsys::readUnsigned` and `readSigned`,
+  on any bytes or a C string, no NUL needed): the parser's integer lexeme (read where it lies; only a float lexeme is still copied to the
+  stack, for `strtod`), the options (`--option max-call-depth`, `--cores`), the list index of a selection path, the components of
+  `compareVersions`, `narSize` in the store's info files, `fetchGit`'s revision count and time, the count after a minted body in a
+  replayed prefetch list, the exponent in `jsonFloat`, and the environment (`MLNIX_STATS_TOP`, `MLNIX_STATS_SHAPES`,
+  `MLNIX_PRELOWER_THREADS`, `MLNIX_JIT_THRESHOLD`, `MLNIX_JIT_OPT`). `strtoul`, `strtoull`, `strtoll`, `atoi`, `atoll` and
+  `std::from_chars` are gone from `lib/`, `include/` and `tools/`. `stoul`, `stoull` and `stoll` are `stoValue` of a reading: its value,
+  or `std::invalid_argument` (nothing read) and `std::out_of_range` (too large) with the words of the library the program is built with
+  (libc++: `stoul: out of range`; libstdc++: `stoul`). What libc still reads: floats (`strtod`) and, in the Linux-only memory report at
+  exit, `sscanf` of `/proc/self/status`. `scripts/numbers-check.cc` holds the helpers, and each place's old logic, against the library
+  (31 million comparisons under ASan and UBSan, exception types and `what()` included); the command line gives the same bytes as HEAD in
+  173 cases. The lexeme itself is faster: 6.0 ns against 13.0 for the stack copy and `strtoull`, on the corpus's mix of lengths (Mac,
+  clang `-O3`); the parser corpus, 9 interleaved runs each way, is within 1.4% of the build before, which is the noise of the run. On Linux (glibc, libstdc++) the same holds: `numbers-check` agrees with the library in 31 million
+  comparisons (g++-16 under ASan and UBSan, clang++-22 optimized), which is also where the bare `stoul` of libstdc++'s exceptions is
+  checked against the real library; the command line (173 cases), the evaluator (430 runs), the language suite on both schedules, the
+  parser corpus and the three workloads give HEAD's bytes; and the A/B of the tree before the integer facets against the tree after
+  them (22 rounds, both orders) has paired medians of -1.8% to +0.7%.
 
 All of it is invisible: language 487/487 on both schedules, both workloads byte-identical to the build before, 36 JSON and TOML number
 cases and 22 substring and `concatStringsSep` cases identical to it (contexts, paths, coercion, overflow, errors, UTF-8).

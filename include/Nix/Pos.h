@@ -22,7 +22,7 @@
 #include "Composite/Mutable.h"
 #include "Composite/Table.h"
 #include "Nix/Os.h"
-#include <string>
+#include <string_view>
 
 namespace nixfe {
 
@@ -54,24 +54,26 @@ struct FileTable {
     static FileTable t;
     return t;
   }
-  uint32_t add(const std::string &name) {
+  uint32_t add(std::string_view name) {
     nixsys::Held g(m);
-    uint32_t &id = ids.at(name.data(), uint32_t(name.size()), [&] { return bytes.copy(name.data(), uint32_t(name.size())); });
+    const char *kept = nullptr;
+    uint32_t &id = ids.at(name.data(), uint32_t(name.size()), [&] { return kept = bytes.copy(name.data(), uint32_t(name.size())); });
     if (!id) {
-      names.append(name);
+      names.append(composite::chars(kept, uint32_t(name.size())));
       id = names.size();
     }
     return id;
   }
-  std::string name(uint32_t id) const {
+  /// The name, a window on bytes that are never freed or moved (empty for a number that names no file).
+  std::string_view name(uint32_t id) const {
     nixsys::Held g(m);
-    return id >= 1 && id <= names.size() ? names[id - 1] : std::string();
+    return id >= 1 && id <= names.size() ? std::string_view(names[id - 1]) : std::string_view();
   }
 
   mutable nixsys::Lock m;
   composite::TextTable<uint32_t> ids; // a name's number (0: none yet), the names' bytes in `bytes`
   composite::Bump bytes;
-  composite::MutableSeries<std::string> names; // read by value under the lock: nothing holds a name by address
+  composite::MutableSeries<composite::Chars> names; // windows on `bytes`, in number order
 };
 
 } // namespace nixfe

@@ -34,16 +34,6 @@
 
 namespace mlir { class PassManager; }
 
-#include <deque>
-#include <functional>
-#include <map>
-#include <memory>
-#include <set>
-#include <string>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
-
 #include "Nix/StdBind.h"
 #include "Nix/Arena.h"
 #include "Nix/Os.h"
@@ -253,7 +243,7 @@ static_assert(sizeof(Value) == 24, "a Value is a tag, a count and two words");
 /// makes one per constant, the constant a template parameter (K in Builtins.cpp), not a capture: there is no closure to call through.
 using PrimFn = void (*)(EvalState &, Value **args, Value &out, PosPtr pos);
 struct PrimOp {
-  std::string name;
+  composite::Text name;
   unsigned arity;
   PrimFn fn;
   void call(EvalState &st, Value **args, Value &out, PosPtr pos) const { fn(st, args, out, pos); }
@@ -279,7 +269,7 @@ struct RegionInfo {
   void *curriedEntry = nullptr;
   uint64_t calls = 0; // MLNIX_STATS: frames made for this region
   uint8_t stackable = 2; // MLNIX_STATS: 1 when no op of the body can make a thunk or closure over the frame, so it could live on the C++ stack; 2 unclassified
-  std::string shape = {}; // MLNIX_STATS_SHAPES: the name-free canonical form of this lambda and the lambdas it returns (EvalState::shapeOf)
+  composite::Text shape = {}; // MLNIX_STATS_SHAPES: the name-free canonical form of this lambda and the lambdas it returns (EvalState::shapeOf)
   PosPtr selPos = nullptr; // where the recognized selector's `if` is: the position a non-Boolean condition is reported at
   uint8_t selShape = 0; // 0 unclassified, 1 none, 2 `c: x: if c then [x] else []`, 3 `c: x: if c then x else {}` (EvalState::selectorShape)
   uint8_t chainOuter = 2; // MLNIX_STATS: 1 when the body's result is itself a lambda (a curried chain's outer half), 2 unclassified
@@ -368,20 +358,22 @@ static_assert(sizeof(Node) == 64, "a node is one cache line");
 
 struct Trace {
   PosPtr pos;
-  std::string msg;
+  composite::Text msg;
 };
 
 struct EvalError : std::exception {
-  std::string msg;
+  composite::Text msg;
   PosPtr pos = nullptr;
   composite::MutableSeries<Trace> traces;
-  EvalError(std::string m, PosPtr p = nullptr) : msg(std::move(m)), pos(p) {}
+  EvalError(composite::Text m, PosPtr p = nullptr) : msg(std::move(m)), pos(p) {}
+  /// A message that is a view of bytes: copied.
+  template <class V> requires(composite::ByteView<V> && !composite::same<V, composite::Text>) EvalError(const V &m, PosPtr p = nullptr) : msg(m), pos(p) {}
   const char *what() const noexcept override { return msg.c_str(); }
-  EvalError &addTrace(PosPtr p, std::string m) & {
+  EvalError &addTrace(PosPtr p, composite::Text m) & {
     traces.append({p, std::move(m)});
     return *this;
   }
-  EvalError &&addTrace(PosPtr p, std::string m) && { // `throw EvalError(...).addTrace(...)`: the temporary is moved into the exception
+  EvalError &&addTrace(PosPtr p, composite::Text m) && { // `throw EvalError(...).addTrace(...)`: the temporary is moved into the exception
     traces.append({p, std::move(m)});
     return std::move(*this);
   }
@@ -398,12 +390,12 @@ struct StackOverflowError : EvalError { using EvalError::EvalError; };
 //===----------------------------------------------------------------------===//
 
 struct SearchPathElem {
-  std::string prefix, path;
+  composite::Text prefix, path;
 };
 
 struct EvalSettings {
   composite::MutableSeries<SearchPathElem> nixPath;
-  std::string currentSystem;
+  composite::Text currentSystem;
   bool pureEval = false;
   bool restrictEval = false;
   bool traceVerbose = false;
@@ -417,7 +409,7 @@ struct EvalSettings {
   /// cse, canonicalize, sccp, ...).  MLNIX_PIPELINE overrides it.  `nix-fold` and
   /// `nix-dce` cost more than they save on real workloads (measured), so only
   /// devirtualization is on by default.
-  std::string pipeline = "nix-prims";
+  composite::Text pipeline = "nix-prims";
   /// Sea-of-nodes schedule (MLNIX_DEFER): mint no lambda body at lowering
   /// time; the op carries a pool row and the body is generated on first call.
   bool deferBodies = false;
@@ -619,20 +611,20 @@ struct EvalState {
   void autoCallFunction(const AutoArgs &autoArgs, Value &fun, Value &out);
 
   // -- Coercions -------------------------------------------------------------
-  std::string coerceToString(Value &v, NixStringContext &ctx, bool coerceMore, bool copyToStore,
+  composite::Text coerceToString(Value &v, NixStringContext &ctx, bool coerceMore, bool copyToStore,
                              PosPtr pos = nullptr, std::string_view errorCtx = "",
                              bool canonicalizePath = true);
   // The same coercion as a window: a string, and a set's __toString result or outPath, is its own bytes (nothing copied); anything else is made
   // in `scratch`, which the window views.
   // With `own`, a string (and a set's __toString result or outPath) hands its own context back through it instead of copying it into ctx.
   composite::Chars coerceToWindow(Value &v, NixStringContext &ctx, bool coerceMore, bool copyToStore, PosPtr pos,
-                                       std::string_view errorCtx, std::string &scratch, bool canonicalizePath = true,
+                                       std::string_view errorCtx, composite::Text &scratch, bool canonicalizePath = true,
                                        const StringContext **own = nullptr);
-  std::string coerceToPath(Value &v, NixStringContext &ctx, PosPtr pos, std::string_view errorCtx = "");
-  std::string coerceToStorePath(Value &v, NixStringContext &ctx, PosPtr pos, std::string_view errorCtx = "");
-  std::string copyPathToStore(NixStringContext &ctx, const std::string &path);
+  composite::Text coerceToPath(Value &v, NixStringContext &ctx, PosPtr pos, std::string_view errorCtx = "");
+  composite::Text coerceToStorePath(Value &v, NixStringContext &ctx, PosPtr pos, std::string_view errorCtx = "");
+  composite::Text copyPathToStore(NixStringContext &ctx, std::string_view path);
   bool isDerivation(Value &v);
-  composite::Maybe<std::string> tryAttrsToString(Value &v, NixStringContext &ctx, bool coerceMore, bool copyToStore);
+  composite::Maybe<composite::Text> tryAttrsToString(Value &v, NixStringContext &ctx, bool coerceMore, bool copyToStore);
 
   // -- Comparison ------------------------------------------------------------
   bool eqValues(Value &a, Value &b, PosPtr pos);
@@ -644,45 +636,46 @@ struct EvalState {
 
   // -- Errors -----------------------------------------------------------------
   [[noreturn]] void throwTypeError(const char *expected, Value &v, PosPtr pos, std::string_view ctx = "");
-  [[noreturn]] void throwError(const std::string &msg, PosPtr pos = nullptr);
-  void warn(const std::string &msg);
-  std::string showPos(PosPtr pos) const;
+  [[noreturn]] void throwError(std::string_view msg, PosPtr pos = nullptr);
+  void warn(std::string_view msg);
+  composite::Text showPos(PosPtr pos) const;
 
   // -- Printing ---------------------------------------------------------------
-  void printValue(std::ostream &os, Value &v, std::set<const void *> *seen, size_t depth = 0);
-  std::string printValueForTrace(Value &v);
+  void printValue(composite::Text &out, Value &v, composite::WordTable<char> *seen, size_t depth = 0); // seen: a set by address
+  composite::Text printValueForTrace(Value &v);
   void printValueAsJSON(JsonOut &out, Value &v, bool strict, NixStringContext &ctx,
                         bool copyToStore = true, PosPtr pos = nullptr);
-  void printValueAsXML(std::ostream &os, Value &v, bool strict, bool location, NixStringContext &ctx);
+  void printValueAsXML(composite::Text &out, Value &v, bool strict, bool location, NixStringContext &ctx);
 
   // -- Parsing / evaluation entry points ---------------------------------------
   /// Parse+lower+evaluate a file (cached).  Result is a lazy value.
-  Value *evalFile(const std::string &path);
+  Value *evalFile(std::string_view path);
   /// Parse+lower a string; returns the expression value (lazy).
-  Value *evalString(const std::string &text, const std::string &baseDir,
-                    const std::string &originName = "«string»");
+  Value *evalString(std::string_view text, std::string_view baseDir,
+                    std::string_view originName = "«string»");
   /// Parse only.
   nixfe::ParseOptions parseOptions();
   /// Parse a source into the module (kept alive by the state, as its origin is).
-  mlir::nix::ExprOp lowerToMLIR(nixfe::Origin *origin, const composite::MutableSeries<std::string> *scopeNames = nullptr);
+  mlir::nix::ExprOp lowerToMLIR(nixfe::Origin *origin, const composite::MutableSeries<composite::Text> *scopeNames = nullptr);
   Value *evalExprOp(mlir::nix::ExprOp op);
   /// Load all nix.expr ops of an MLIR module (from mlnix compile) and
   /// evaluate the one named `sym` (or the first).
-  Value *evalMLIRFile(const std::string &path, const std::string &sym);
+  Value *evalMLIRFile(std::string_view path, std::string_view sym);
 
-  std::string resolveExprPath(std::string path);
-  std::string findFile(Value &searchPath, std::string_view name, PosPtr pos);
-  std::string realisePath(const std::string &path, PosPtr pos);
+  composite::Text resolveExprPath(std::string_view path);
+  composite::Text findFile(Value &searchPath, std::string_view name, PosPtr pos);
+  composite::Text realisePath(std::string_view path, PosPtr pos);
   /// Ensure the store paths in `ctx` are realised (import-from-derivation).
   void realiseContext(const NixStringContext &ctx, PosPtr pos);
 
   // -- Builtins -----------------------------------------------------------------
   /// The arguments of a primop call are gathered in a fixed array of this many cells (checked once, when a primop is registered).
   static constexpr unsigned kMaxPrimArity = 8;
-  void addPrimOp(const std::string &name, unsigned arity, PrimFn fn);
+  /// A primop under its base-environment key.  Its arity is the one NixPrims.irdl.mlir declares for the key; a primop not declared there is fatal.
+  void addPrimOp(std::string_view name, PrimFn fn);
   /// For a primop that captures (a registering loop's parameter).
-  void addConstant(const std::string &name, Value *v);
-  void registerPrimOp(const std::string &name, PrimOp *p);
+  void addConstant(std::string_view name, Value *v);
+  void registerPrimOp(std::string_view name, PrimOp *p);
   void createBaseEnv();
 
   // Interpreter internals (public for builtins).
@@ -825,7 +818,7 @@ struct EvalState {
     composite::Patricia<Prelowered *> byPath; // the file's lowering, by path (the paths' bytes in pathBytes)
     composite::Bump pathBytes;
     composite::MutableSeries<composite::Own<Prelowered>> lowered; // every Prelowered, owned here until the state goes
-    composite::MutableSeries<std::string> queue; // paths, appended; the helpers drain them from `head` (a cell leaves, an empty one stays)
+    composite::MutableSeries<composite::Text> queue; // paths, appended; the helpers drain them from `head` (a cell leaves, an empty one stays)
     uint32_t head = 0;
     composite::TextTable<char> baseNames; // a set: the base environment's names when the helpers started (they read it, nothing writes it)
     nixfe::ParseOptions po;
@@ -836,9 +829,9 @@ struct EvalState {
   composite::Own<PrelowerState> pre;
   void startPrelower();
   void prelowerLoop();
-  mlir::nix::ExprOp takePrelowered(const std::string &resolved);
-  Prelowered *newPrelowered(const std::string &path);
-  void (*printTrace)(const std::string &) = nullptr; // builtins.trace's line
+  mlir::nix::ExprOp takePrelowered(std::string_view resolved);
+  Prelowered *newPrelowered(std::string_view path);
+  void (*printTrace)(std::string_view) = nullptr; // builtins.trace's line
 
   // The record of each SSA value, by the value's address: the evaluator reads the records an op's record points at and never asks; the JITs,
   // the primop model and the cold paths ask here, through a direct-mapped cache in front of the hash map.  A value's address indexed again
@@ -887,7 +880,7 @@ struct EvalState {
   uint64_t nVT[kAllocated + 1] = {}; // MLNIX_STATS: instrumented tag writes, including stack values and repeated retyping;
                          // [14] alone counts allocated Value rows, not tag writes
   uint64_t nFrames = 0, nFrameBytes = 0, nFrameSlots = 0; // requested frame storage, excluding arena overhead
-  composite::MutableSeries<std::pair<std::string, size_t>> evaluatedFiles; // MLNIX_STATS_IMPORTS: files evalFile'd, with how many path literals had been lowered by then
+  composite::MutableSeries<composite::Join<composite::Text, size_t>> evaluatedFiles; // MLNIX_STATS_IMPORTS: files evalFile'd, with how many path literals had been lowered by then
   composite::MutableSeries<uint64_t> epochEvals; // MLNIX_STATS: evalOp calls per epoch (one epoch a derivation attribute the driver visits)
   void beginEpoch() { if (statsEnabled) epochEvals.append(0); }
   composite::WordTable<uint32_t> forcedBy; // MLNIX_STATS_EDGES: the epoch that first forced a cell, by the cell's address
@@ -1000,7 +993,7 @@ struct EvalState {
   uint64_t nSelectorCalls = 0; // MLNIX_STATS: saturated calls of a recognized selector, made with no frame and no closure
   bool selectorsOn = true;     // MLNIX_NOSELECTORS turns the recognition off
   unsigned selectorShape(mlir::nix::LambdaOp outerLam, RegionInfo *outer);
-  std::string shapeOf(RegionInfo *ri, unsigned depth = 0); // MLNIX_STATS_SHAPES
+  composite::Text shapeOf(RegionInfo *ri, unsigned depth = 0); // MLNIX_STATS_SHAPES
   uint64_t nStackCells = 0; // MLNIX_STATS: curried-call intermediates held by value instead of in a heap cell
   uint64_t nEmptyShared = 0; // MLNIX_STATS: empty attribute sets that were the shared constant instead of a fresh 16-byte cell
   uint64_t nSlotsTouched = 0; // MLNIX_STATS: frame slots that were ever read (a cell made on first touch), of nFrameSlots allocated
@@ -1018,8 +1011,8 @@ struct EvalState {
 };
 
 /// Render an error the way Nix does ("error: ..." with source excerpt).
-std::string formatError(EvalState *state, const EvalError &e);
-std::string formatParseError(const nixfe::ParseError &e, const char *kind = "error");
+composite::Text formatError(EvalState *state, const EvalError &e);
+composite::Text formatParseError(const nixfe::ParseError &e, const char *kind = "error");
 
 /// Register all builtins (Builtins.cpp).
 void registerBuiltins(EvalState &state);

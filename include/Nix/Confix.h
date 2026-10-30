@@ -24,10 +24,7 @@
 #include "Composite/TrikeShedEnums.h.inc"
 
 #include "llvm/ADT/DenseMap.h"
-
-#include <algorithm>
 #include <string_view>
-#include <vector>
 
 namespace nixfe::confix {
 

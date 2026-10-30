@@ -16,9 +16,9 @@
 #define NIX_PREFETCH_H
 
 #include "Composite/Mutable.h"
+#include "Composite/Text.h"
 
 #include <cstdint>
-#include <string>
 #include <string_view>
 
 namespace nixprefetch {
@@ -31,7 +31,7 @@ void init(int argc = 0, char **argv = nullptr);
 
 extern bool recording;
 /// The files (`.nix`, kind F) a replayed list names, in order: what the evaluator will ask evalFile for (MLNIX_PRELOWER lowers them ahead).
-extern composite::MutableSeries<std::string> replayFiles;
+extern composite::MutableSeries<composite::Text> replayFiles;
 void noteSlow(char kind, const char *path);
 /// Remember that the evaluation is touching `path` (kinds above).  One branch when not recording.
 inline void note(char kind, const char *path) {
@@ -49,9 +49,9 @@ inline void noteMint(const char *path, uint32_t row) {
 /// The NAR hashes a replayed list says were made (`H path`; `G root` for a filtered tree, then `g path` for each entry its filter kept):
 /// MLNIX_PRELOWER makes them again at start-up, off the evaluator's thread (nixstore::startPrehash).
 struct ReplayHash {
-  std::string root;
+  composite::Text root;
   bool filtered;
-  composite::MutableSeries<std::string> kept;
+  composite::MutableSeries<composite::Text> kept;
 };
 extern composite::MutableSeries<ReplayHash> replayHashes;
 bool noteRootSlow(char kind, const char *path);

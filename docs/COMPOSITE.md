@@ -64,6 +64,49 @@ copy, the assignment and the destruction of a `Derivation` 1.5%; then `evalConca
 `Hash::to_string` 0.3%. (`std::function` is 1.5% at most: `NarWriter::dump` 1.2%, `callPrimOp` 0.3%; the 39% under
 `runWithLargeStack` is the whole evaluation.)
 
+## std::string is gone (2026-10-30)
+
+The census above is a record of what was: `lib/`, `include/` and `tools/` now name no `std::string`, `std::to_string`, `std::sto*`,
+string stream, `<string>`, `<sstream>`, `<iostream>` or `<fstream>` (comments say what `Text` replaced; the checks under `scripts/` keep the
+standard library as their oracle). Owning text is `composite::Text` (`Composite/Text.h`), a `MutableSeries<char>` that keeps a NUL after
+its last byte; reading is a window (`Chars`, `std::string_view`, `llvm::StringRef`), to which a `Text` converts for nothing.
+
+What the type does differently, on purpose:
+
+- **Move-only.** A copy is `clone()`; an accidental copy is a compile error, so the places that copied a `std::string` by value were each
+  decided (a `const auto &` for `readDerivation`, a `mv` into `Source::fromString`, a window for what only reads).
+- **A write of a piece is a run.** `put`, `+=`, `cat("dir/", name, '/', 12)`: one capacity check a run, integers in decimal, no `operator+`
+  chain of temporaries. `str(n)` is `std::to_string`. Floating point is not in it: the evaluator's own float code writes those.
+- **No small-string buffer.** A `std::string` kept up to 15 (libstdc++) or 22 (libc++) bytes inline; a `Text` allocates from its first
+  byte (capacity 32). A window on a `Text` row therefore survives the series growing, because a move steals the buffer (the parser's
+  `texts` rows in Show mode rely on it). Where a short string was made per token, the `Text` is a reused member (the lexer's
+  indented-string piece). The cost is in the allocation count, not the clock: nixpkgs-73 on the deferred schedule makes 2,894,323
+  allocation calls, against 2,306,565 before and 2,172,744 just before this change (a derivation's attribute names and values are
+  short strings kept as owned `Text`, 550,000 calls in `derivationStrict` against 212,000); on the Kali host the 22-round A/B (both
+  orders) of the six workload modes is 1.0016 for the tree with `Text` (geometric mean of the ratios of medians; paired medians -0.6% to
+  +0.5%) and 1.0104 for the final tree, with the integer facets (paired medians -0.8% to +1.0%), RSS and CPU equal. Between those two
+  trees alone it is 1.0072, from one cell (nixpkgs-73, plain: +5.1% in the median, +0.2% paired, +0.1% in the minimum): host noise. On the Mac
+  (libc++, 22 bytes inline before), 15 interleaved runs: nixos-toplevel +0.3% plain and +0.1% deferred, nixpkgs-73 +2.6% and +1.7%;
+  start-up is unchanged (+0.01 ms of 9.7). An inline buffer in `Text` would take most of that back, at the price of that window guarantee.
+- **It stops where `std::string` threw.** `substr`, `truncate` and `pop_back` past the end, and a text of 4 GiB, call `TODO`.
+- **Where the standard library's maps held strings,** `nixstore::SortedMap` and `SortedSet` (sorted by bytes, as `std::map<std::string>`
+  was) or `TextTable` / `TextSet` (by hash); a `fromJSON` object is collected in parse order and sorted once, as an insert into a
+  sorted array is O(n).
+
+Checked against the build before it: the language suite (487 cases, both schedules) prints the same stdout, stderr and status for every
+case; 40,196 files parse to the same 104,184,338 bytes (in 1.27 s instead of 1.82); the three workloads print the same answers plain,
+recorded and replayed with prelowering, and record the same prefetch lists byte for byte; 430 evaluator runs of 86 string-heavy
+expressions in five output modes are identical on both hosts; the evaluator under AddressSanitizer (Mac, and Linux with the io_uring
+and helper threads) reports no memory error, and the pure-zone checks are clean under ASan + UBSan and TSan. LeakSanitizer reports what
+the evaluator drops at exit, from the same roots as `HEAD`: in a recorded nixos-toplevel run both builds have 38 direct leak records at
+two sites (the primops `addPrimOp` makes, the name arena) and everything else hangs off them; a replay adds the prefetch replay's kept
+entries and the prehash trees. The converted tree leaks 78 allocations to `HEAD`'s 44 (19,864 bytes to 19,344): the 34 added are the
+primops' name texts, 37 `Text` buffers where `std::string` kept the short names inline.
+One `HEAD` bug came out of it: `structuredAttrsFiles` read past the end of a `\u` escape cut short by the end of the input (fixed in
+the earlier slice). Left alone, because the bytes must not change: the same function casts a JSON number to `int` without a range check.
+What the streams did that a buffer must keep doing: `--xml`, the default print and `derivation show` write what they have produced
+before an error stops them, so those paths print the buffer from a `catch` before rethrowing.
+
 ## Measured and left alone
 
 - **A segment attribute for `nix.str`.** The toplevel evaluation creates 223,587 string literals,

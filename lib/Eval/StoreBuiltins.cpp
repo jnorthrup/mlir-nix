@@ -3,28 +3,32 @@
 #include "Composite/Mutable.h"
 #include "Nix/Prefetch.h"
 #include "Nix/Eval.h"
-
-#include <algorithm>
+#include "Nix/Numbers.h"
 #include <cstring>
 #include <dirent.h>
-#include <iostream>
-#include <sstream>
 #include <sys/stat.h>
 #include <unistd.h>
 
 namespace nixev {
 
 using A = Value **;
-static std::string str(std::string_view s) { return std::string(s); }
 
-static bool isDrvPath(const std::string &p) { return p.size() > 4 && p.substr(p.size() - 4) == ".drv"; }
+/// A program's arguments, each piece of any kind (a literal, a view, a Text that is only lent) copied into a Text of its own: runProgram takes
+/// a series of Texts, and a braced list cannot copy a Text out.
+template <class... P> static composite::MutableSeries<composite::Text> progArgs(const P &...words) {
+  composite::MutableSeries<composite::Text> a;
+  (a.append(composite::cat(words)), ...);
+  return a;
+}
 
-static void addOutputsToResult(EvalState &st, EvalState::BindingsBuilder &bb, const std::string &drvPath,
+static bool isDrvPath(std::string_view p) { return p.size() > 4 && p.substr(p.size() - 4) == ".drv"; }
+
+static void addOutputsToResult(EvalState &st, EvalState::BindingsBuilder &bb, std::string_view drvPath,
                                const nixstore::Derivation &drv) {
   for (auto &[name, o] : drv.outputs) {
-    std::string p = o.kind == nixstore::DerivationOutput::CAFixed && o.path.empty()
-                        ? o.fixedPath(st.store->storeDir(), drv.name, name) : o.path;
-    st.mkString(bb.alloc(name), p, NixStringContext{st.copyString("!" + name + "!" + drvPath)});
+    composite::Text p = o.kind == nixstore::DerivationOutput::CAFixed && o.path.empty()
+                            ? o.fixedPath(st.store->storeDir(), drv.name, name) : o.path.clone();
+    st.mkString(bb.alloc(name), p, NixStringContext{st.copyString(composite::cat("!", name, "!", drvPath))});
   }
 }
 
@@ -35,9 +39,9 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
   if (!nameAttr)
     throw EvalError("attribute 'name' missing", pos)
         .addTrace(pos, "in the attrset passed as argument to builtins.derivationStrict");
-  std::string drvName;
+  composite::Text drvName;
   try {
-    drvName = str(st.forceStringNoCtx(*nameAttr->value, pos, "while evaluating the `name` attribute passed to builtins.derivationStrict"));
+    drvName = composite::Text(st.forceStringNoCtx(*nameAttr->value, pos, "while evaluating the `name` attribute passed to builtins.derivationStrict"));
   } catch (EvalError &e) {
     e.addTrace(st.positionOf(*nameAttr), "while evaluating the derivation attribute 'name'");
     throw;
@@ -46,7 +50,7 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
     try {
       nixstore::checkName(drvName);
     } catch (nixstore::Error &e) {
-      throw EvalError("invalid derivation name: " + std::string(e.what()) + ". Please pass a different 'name'.", pos);
+      throw EvalError(composite::cat("invalid derivation name: ", e.what(), ". Please pass a different 'name'."), pos);
     }
 
     bool structured = false;
@@ -57,18 +61,18 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
       ignoreNulls = st.forceBool(*a->value, pos, "while evaluating the `__ignoreNulls` attribute passed to builtins.derivationStrict");
 
     nixstore::Derivation drv;
-    drv.name = drvName;
+    drv.name = drvName.clone();
     nixstore::DrvInputs moduloInputs; // the input derivations as the output paths' hash saw them, for the derivation's modulo hash
     NixStringContext context;                         // what coercions make: paths copied to the store, and the rarer attributes
     composite::MutableSeries<const StringContext *> owns; // each string attribute's own context, interned: its elements are not copied
-    std::string coerced;
+    composite::Text coerced;
     bool contentAddressed = false, isImpure = false;
-    composite::Maybe<std::string> outputHash;
+    composite::Maybe<composite::Text> outputHash;
     composite::Maybe<nixstore::HashAlgo> outputHashAlgo;
     composite::Maybe<nixstore::FileIngestionMethod> ingestionMethod;
     nixstore::SortedSet outputs; // the output names: rows kept sorted, in the order the derivation lists them
     outputs.insert("out");
-    std::string jsonObj = "{";
+    composite::Text jsonObj("{");
     bool jsonFirst = true;
 
     auto handleHashMode = [&](std::string_view s) {
@@ -78,12 +82,12 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
         throw EvalError("experimental Nix feature 'dynamic-derivations' is disabled; add '--extra-experimental-features dynamic-derivations' to enable it", pos);
       else if (s == "git")
         throw EvalError("experimental Nix feature 'git-hashing' is disabled; add '--extra-experimental-features git-hashing' to enable it", pos);
-      else throw EvalError("invalid value '" + str(s) + "' for 'outputHashMode' attribute", pos);
+      else throw EvalError(composite::cat("invalid value '", s, "' for 'outputHashMode' attribute"), pos);
     };
     auto handleOutputs = [&](const auto &ss) {
       outputs = nixstore::SortedSet();
       for (auto &j : ss) {
-        if (outputs.count(j)) throw EvalError("duplicate derivation output '" + j + "'", pos);
+        if (outputs.count(j)) throw EvalError(composite::cat("duplicate derivation output '", j, "'"), pos);
         if (j == "drvPath") throw EvalError("invalid derivation output name 'drvPath'", pos);
         outputs.insert(j);
       }
@@ -92,13 +96,13 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
     auto parseAlgo = [&](std::string_view s) -> composite::Maybe<nixstore::HashAlgo> {
       if (s.empty()) return nullptr;
       auto a = nixstore::parseHashAlgo(s);
-      if (!a) throw EvalError("unknown hash algorithm '" + str(s) + "', expect 'blake3', 'md5', 'sha1', 'sha256', or 'sha512'", pos);
+      if (!a) throw EvalError(composite::cat("unknown hash algorithm '", s, "', expect 'blake3', 'md5', 'sha1', 'sha256', or 'sha512'"), pos);
       return a;
     };
 
     for (const Attr *i : attrs->lexicographicOrder(st.symbols)) {
       if (i->name == st.s.ignoreNulls) continue;
-      std::string key = str(st.symbols[i->name]);
+      composite::Text key(st.symbols[i->name]);
       try {
         if (ignoreNulls) {
           st.forceValue(*i->value, pos);
@@ -128,15 +132,15 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
           st.printValueAsJSON(js, *i->value, true, context, true, pos);
           jsonObj += js.view();
           jsonFirst = false;
-          if (i->name == st.s.builder) drv.builder = str(st.forceString(*i->value, context, pos));
-          else if (i->name == st.s.system) drv.platform = str(st.forceStringNoCtx(*i->value, pos));
-          else if (i->name == st.s.outputHash) outputHash = str(st.forceStringNoCtx(*i->value, pos));
+          if (i->name == st.s.builder) drv.builder = composite::Text(st.forceString(*i->value, context, pos));
+          else if (i->name == st.s.system) drv.platform = composite::Text(st.forceStringNoCtx(*i->value, pos));
+          else if (i->name == st.s.outputHash) outputHash = composite::Text(st.forceStringNoCtx(*i->value, pos));
           else if (i->name == st.s.outputHashAlgo) outputHashAlgo = parseAlgo(st.forceStringNoCtx(*i->value, pos));
           else if (i->name == st.s.outputHashMode) handleHashMode(st.forceStringNoCtx(*i->value, pos));
           else if (i->name == st.s.outputs) {
             st.forceList(*i->value, pos, "");
-            auto strs = i->value->values() |cp::α| [&](Value &e) { return str(st.forceStringNoCtx(e, pos)); };
-            composite::MutableSeries<std::string> ss;
+            auto strs = i->value->values() |cp::α| [&](Value &e) { return composite::Text(st.forceStringNoCtx(e, pos)); };
+            composite::MutableSeries<composite::Text> ss;
             for (uint32_t k = 0, n = strs.size(); k < n; k++) ss.append(strs[k]);
             handleOutputs(ss);
           }
@@ -144,31 +148,24 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
                                          "disallowedRequisites", "maxSize", "maxClosureSize"};
           for (auto *l : legacy)
             if (key == l)
-              st.warn("In a derivation named '" + drvName + "', 'structuredAttrs' disables the effect of the derivation attribute '" +
-                      key + "'; use 'outputChecks.<output>." + key + "' instead");
+              st.warn(composite::cat("In a derivation named '", drvName, "', 'structuredAttrs' disables the effect of the derivation attribute '",
+                                     key, "'; use 'outputChecks.<output>.", key, "' instead"));
         } else {
           const StringContext *own = nullptr;
-          std::string s(composite::view(st.coerceToWindow(*i->value, context, true, true, pos, "", coerced, true, &own)));
+          composite::Text s(composite::view(st.coerceToWindow(*i->value, context, true, true, pos, "", coerced, true, &own)));
           if (own) owns.append(own);
           if (i->name == st.s.json) {
-            st.warn("In derivation '" + drvName + "': setting structured attributes via '__json' is deprecated, and may be disallowed in future versions of Nix. Set '__structuredAttrs = true' instead.");
-            drv.structuredAttrs = s;
+            st.warn(composite::cat("In derivation '", drvName, "': setting structured attributes via '__json' is deprecated, and may be disallowed in future versions of Nix. Set '__structuredAttrs = true' instead."));
+            drv.structuredAttrs = composite::mv(s);
           } else {
-            if (i->name == st.s.builder) drv.builder = s;
-            else if (i->name == st.s.system) drv.platform = s;
-            else if (i->name == st.s.outputHash) outputHash = s;
+            if (i->name == st.s.builder) drv.builder = s.clone();
+            else if (i->name == st.s.system) drv.platform = s.clone();
+            else if (i->name == st.s.outputHash) outputHash = s.clone();
             else if (i->name == st.s.outputHashAlgo) outputHashAlgo = parseAlgo(s);
             else if (i->name == st.s.outputHashMode) handleHashMode(s);
             else if (i->name == st.s.outputs) {
-              composite::MutableSeries<std::string> ss;
-              // The names are the words of the string, split at whitespace as a stream's >> splits them.
-              auto space = [](char c) { return c == ' ' || (c >= '\t' && c <= '\r'); };
-              for (size_t k = 0, n = s.size(); k < n;) {
-                while (k < n && space(s[k])) k++;
-                size_t b = k;
-                while (k < n && !space(s[k])) k++;
-                if (k > b) ss.append(s.substr(b, k - b));
-              }
+              composite::MutableSeries<composite::Text> ss; // the names are the words of the string
+              composite::eachWord(s.data(), uint32_t(s.size()), [&](const char *p, uint32_t n) { ss.append(composite::Text(p, n)); });
               handleOutputs(ss);
             }
             // Last, once nothing above can throw: the attributes come in name order, the map's own, so the key and the value move in at the
@@ -177,7 +174,7 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
           }
         }
       } catch (EvalError &e) {
-        e.addTrace(st.positionOf(*i), "while evaluating attribute '" + key + "' of derivation '" + drvName + "'");
+        e.addTrace(st.positionOf(*i), composite::cat("while evaluating attribute '", key, "' of derivation '", drvName, "'"));
         throw;
       }
     }
@@ -194,7 +191,7 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
     for (size_t ei = 0; ei < nElems; ei++) {
       std::string_view c = elems[uint32_t(ei)];
       if (c[0] == '=') {
-        std::string d(c.substr(1));
+        std::string_view d(c.substr(1));
         auto refs = st.store->computeFSClosure(nixstore::SortedSet::of(d));
         for (auto &j : refs) {
           drv.inputSrcs.insert(j);
@@ -219,7 +216,7 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
     if (outputHash) {
       if (outputs.size() != 1 || *outputs.begin() != "out")
         throw EvalError("multiple outputs are not supported in fixed-output derivations", pos);
-      std::string warning;
+      composite::Text warning;
       nixstore::Hash h;
       try {
         h = nixstore::parseHashAllowEmpty(*outputHash, outputHashAlgo, &warning);
@@ -237,7 +234,7 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
       } catch (nixstore::Error &e) {
         throw EvalError(e.what(), pos);
       }
-      drv.env["out"] = o.path;
+      drv.env["out"] = o.path.clone();
       drv.outputs["out"] = o;
     } else {
       (void)contentAddressed;
@@ -250,10 +247,10 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
 
     // A derivation made before with this content has its paths already, and neither hash below is made again: 37% of a NixOS
     // evaluation's derivations and 44% of nixpkgs-73's are made again by another call with equal attributes.
-    std::string drvPath;
+    composite::Text drvPath;
     uint64_t fingerprint;
-    if (const std::string *same = st.store->sameDerivation(drv, fingerprint)) {
-      drvPath = *same;
+    if (const composite::Text *same = st.store->sameDerivation(drv, fingerprint)) {
+      drvPath = same->clone();
     } else {
       try {
         if (!outputHash) st.store->fillInOutputPaths(drv, &moduloInputs);
@@ -265,19 +262,19 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
       }
     }
     EvalState::BindingsBuilder bb(st);
-    st.mkString(bb.alloc(st.s.drvPath), drvPath, NixStringContext{st.copyString("=" + drvPath)});
+    st.mkString(bb.alloc(st.s.drvPath), drvPath, NixStringContext{st.copyString(composite::cat("=", drvPath))});
     addOutputsToResult(st, bb, drvPath, st.store->readDerivation(drvPath)); // the derivation as the store keeps it, not a copy
     st.mkAttrs(v, bb.finish());
   } catch (EvalError &e) {
-    e.addTrace(nullptr, "while evaluating derivation '" + drvName + "'\n  whose name attribute is located at " +
-                            st.showPos(st.positionOf(*nameAttr)));
+    e.addTrace(nullptr, composite::cat("while evaluating derivation '", drvName, "'\n  whose name attribute is located at ",
+                                       st.showPos(st.positionOf(*nameAttr))));
     throw;
   }
 }
 
-static std::string fileTypeOf(const std::string &path) {
+static std::string_view fileTypeOf(std::string_view path) {
   struct stat st;
-  if (lstat(path.c_str(), &st) != 0) return "";
+  if (lstat(nixsys::CStr(path), &st) != 0) return "";
   if (S_ISREG(st.st_mode)) return "regular";
   if (S_ISDIR(st.st_mode)) return "directory";
   if (S_ISLNK(st.st_mode)) return "symlink";
@@ -286,13 +283,13 @@ static std::string fileTypeOf(const std::string &path) {
 
 /// The type of a directory entry: the file system already told `readdir` (d_type), so no stat;
 /// DT_UNKNOWN (some file systems) falls back to lstat, as upstream does.
-static const char *dirEntryType(const std::string &dir, const dirent &e) {
+static const char *dirEntryType(std::string_view dir, const dirent &e) {
   switch (e.d_type) {
   case DT_REG: return "regular";
   case DT_DIR: return "directory";
   case DT_LNK: return "symlink";
   case DT_UNKNOWN: {
-    std::string t = fileTypeOf(dir + "/" + e.d_name);
+    std::string_view t = fileTypeOf(composite::cat(dir, '/', e.d_name));
     return t == "regular" ? "regular" : t == "directory" ? "directory" : t == "symlink" ? "symlink" : t.empty() ? "" : "unknown";
   }
   default: return "unknown";
@@ -300,18 +297,18 @@ static const char *dirEntryType(const std::string &dir, const dirent &e) {
 }
 
 /// Shared implementation of builtins.path and builtins.filterSource.
-static void addPath(EvalState &st, PosPtr pos, std::string name, const std::string &path, Value *filterFun,
+static void addPath(EvalState &st, PosPtr pos, std::string_view name, std::string_view path, Value *filterFun,
                     nixstore::FileIngestionMethod method, composite::Maybe<nixstore::Hash> expected, Value &v,
                     const NixStringContext &ctx) {
   st.realiseContext(ctx, pos);
-  std::string real = st.realisePath(path, pos);
-  if (!nixstore::pathExists(real)) throw EvalError("path '" + path + "' does not exist", pos);
+  composite::Text real = st.realisePath(path, pos);
+  if (!nixstore::pathExists(real)) throw EvalError(composite::cat("path '", path, "' does not exist"), pos);
   // The Nix filter, as the store's walk asks it: named here, so the PathFilter that lends it to the walk refers to a live callable.
-  auto askFilter = [&](const std::string &p, std::string_view type) {
+  auto askFilter = [&](std::string_view p, std::string_view type) {
     // Map physical path back to the logical one.
-    std::string logical = path + p.substr(real.size());
+    composite::Text logical = composite::cat(path, p.substr(real.size()));
     Value *arg1 = st.newString(logical);
-    Value *arg2 = st.newString(type.empty() ? fileTypeOf(p) : std::string(type)); // a prehashed tree's walk knows the type
+    Value *arg2 = st.newString(type.empty() ? fileTypeOf(p) : type); // a prehashed tree's walk knows the type
     Value *fargs[2] = {arg1, arg2};
     Value r;
     st.callFunction(*filterFun, 2, fargs, r, pos);
@@ -322,13 +319,13 @@ static void addPath(EvalState &st, PosPtr pos, std::string name, const std::stri
   try {
     nixstore::checkName(name);
   } catch (nixstore::Error &e) {
-    throw EvalError(std::string("invalid store path name: ") + e.what(), pos);
+    throw EvalError(composite::cat("invalid store path name: ", e.what()), pos);
   }
-  std::string dst;
+  composite::Text dst;
   try {
     if (expected && !filterFun) {
-      std::string exp = nixstore::makeFixedOutputPath(st.store->storeDir(), name, method, *expected);
-      if (st.store->isValidPath(exp)) dst = exp;
+      composite::Text exp = nixstore::makeFixedOutputPath(st.store->storeDir(), name, method, *expected);
+      if (st.store->isValidPath(exp)) dst = composite::mv(exp);
     }
     if (dst.empty())
       dst = st.store->addToStore(name, real, method,
@@ -339,41 +336,41 @@ static void addPath(EvalState &st, PosPtr pos, std::string name, const std::stri
   st.mkStoreString(v, dst);
 }
 
-static std::string downloadToTemp(const std::string &url, PosPtr pos) {
+static composite::Text downloadToTemp(std::string_view url, PosPtr pos) {
   char tmpl[] = "/tmp/mlnix-dl-XXXXXX";
   int fd = mkstemp(tmpl);
   if (fd < 0) throw EvalError("cannot create temporary file", pos);
   close(fd);
-  std::string out;
+  composite::Text out;
   int rc;
   if (url.rfind("file://", 0) == 0) {
-    rc = nixstore::runProgram("cp", {url.substr(7), tmpl}, &out);
+    rc = nixstore::runProgram("cp", progArgs(url.substr(7), tmpl), &out);
   } else {
-    rc = nixstore::runProgram("curl", {"-fsSL", "--retry", "3", "-o", tmpl, url}, &out);
+    rc = nixstore::runProgram("curl", progArgs("-fsSL", "--retry", "3", "-o", tmpl, url), &out);
   }
   if (rc != 0) {
     unlink(tmpl);
-    throw EvalError("unable to download '" + url + "': HTTP error (curl exit code " + std::to_string(rc) + ")", pos);
+    throw EvalError(composite::cat("unable to download '", url, "': HTTP error (curl exit code ", rc, ")"), pos);
   }
-  return tmpl;
+  return composite::Text(tmpl);
 }
 
-static std::string urlBaseName(const std::string &url) {
-  std::string u = url;
+static composite::Text urlBaseName(std::string_view url) {
+  std::string_view u = url;
   auto q = u.find_first_of("?#");
-  if (q != std::string::npos) u = u.substr(0, q);
+  if (q != std::string_view::npos) u = u.substr(0, q);
   auto s = u.rfind('/');
-  return s == std::string::npos ? u : u.substr(s + 1);
+  return composite::Text(s == std::string_view::npos ? u : u.substr(s + 1));
 }
 
 static void fetchImpl(EvalState &st, A args, Value &v, PosPtr pos, bool unpack, const char *who) {
-  std::string url, name;
+  composite::Text url, name;
   composite::Maybe<nixstore::Hash> expected;
   st.forceValue(*args[0], pos);
   if (args[0]->type == VType::Attrs) {
     for (auto &a : *args[0]->attrs) {
       auto n = st.symbols[a.name];
-      if (n == "url") url = str(st.forceStringNoCtx(*a.value, pos));
+      if (n == "url") url = composite::Text(st.forceStringNoCtx(*a.value, pos));
       else if (n == "sha256") {
         auto h = st.forceStringNoCtx(*a.value, pos);
         try {
@@ -388,48 +385,48 @@ static void fetchImpl(EvalState &st, A args, Value &v, PosPtr pos, bool unpack, 
         } catch (nixstore::Error &e) {
           throw EvalError(e.what(), pos);
         }
-      } else if (n == "name") name = str(st.forceStringNoCtx(*a.value, pos));
-      else throw EvalError("unsupported argument '" + n.str() + "' to '" + who + "'", pos);
+      } else if (n == "name") name = composite::Text(st.forceStringNoCtx(*a.value, pos));
+      else throw EvalError(composite::cat("unsupported argument '", n, "' to '", who, "'"), pos);
     }
     if (url.empty()) throw EvalError("'url' argument required", pos);
   } else {
-    url = str(st.forceStringNoCtx(*args[0], pos));
+    url = composite::Text(st.forceStringNoCtx(*args[0], pos));
   }
   if (name.empty()) name = unpack ? "source" : urlBaseName(url);
   if (st.settings.pureEval && !expected)
-    throw EvalError("in pure evaluation mode, '" + std::string(who) + "' requires a 'sha256' argument", pos);
+    throw EvalError(composite::cat("in pure evaluation mode, '", who, "' requires a 'sha256' argument"), pos);
   auto method = unpack ? nixstore::FileIngestionMethod::NixArchive : nixstore::FileIngestionMethod::Flat;
   if (expected) {
-    std::string exp = nixstore::makeFixedOutputPath(st.store->storeDir(), name, method, *expected);
+    composite::Text exp = nixstore::makeFixedOutputPath(st.store->storeDir(), name, method, *expected);
     if (st.store->isValidPath(exp)) {
       st.mkStoreString(v, exp);
       return;
     }
   }
-  std::string file = downloadToTemp(url, pos);
-  std::string dst;
+  composite::Text file = downloadToTemp(url, pos);
+  composite::Text dst;
   try {
     if (unpack) {
       char dtmpl[] = "/tmp/mlnix-unpack-XXXXXX";
       if (!mkdtemp(dtmpl)) throw EvalError("cannot create temporary directory", pos);
-      std::string out;
-      int rc = nixstore::runProgram("tar", {"xf", file, "-C", dtmpl}, &out);
+      composite::Text out;
+      int rc = nixstore::runProgram("tar", progArgs("xf", file, "-C", dtmpl), &out);
       unlink(file.c_str());
       if (rc != 0) {
         nixstore::deletePathRecursive(dtmpl);
-        throw EvalError("failed to unpack '" + url + "'", pos);
+        throw EvalError(composite::cat("failed to unpack '", url, "'"), pos);
       }
       // Use the single top-level directory if there is one.
-      composite::MutableSeries<std::string> entries;
+      composite::MutableSeries<composite::Text> entries;
       if (DIR *d = opendir(dtmpl)) {
         while (auto *e = readdir(d)) {
-          std::string n = e->d_name;
-          if (n != "." && n != "..") entries.append(n);
+          std::string_view n = e->d_name;
+          if (n != "." && n != "..") entries.append(composite::Text(n));
         }
         closedir(d);
       }
-      std::string root = dtmpl;
-      if (entries.size() == 1 && fileTypeOf(root + "/" + entries[0]) == "directory") root += "/" + entries[0];
+      composite::Text root(dtmpl);
+      if (entries.size() == 1 && fileTypeOf(composite::cat(root, '/', entries[0])) == "directory") root.put('/').put(entries[0]);
       dst = st.store->addToStore(name, root, method, nixstore::HashAlgo::SHA256, nullptr, {}, expected);
       nixstore::deletePathRecursive(dtmpl);
     } else {
@@ -444,7 +441,7 @@ static void fetchImpl(EvalState &st, A args, Value &v, PosPtr pos, bool unpack, 
 }
 
 static void fetchGit(EvalState &st, A args, Value &v, PosPtr pos) {
-  std::string url, ref, rev, name = "source";
+  composite::Text url, ref, rev, name("source");
   bool submodules = false, shallow = false, allRefs = false;
   st.forceValue(*args[0], pos);
   if (args[0]->type == VType::Attrs) {
@@ -453,14 +450,14 @@ static void fetchGit(EvalState &st, A args, Value &v, PosPtr pos) {
       if (n == "url") {
         NixStringContext ctx;
         url = st.coerceToString(*a.value, ctx, false, false, pos);
-      } else if (n == "ref") ref = str(st.forceStringNoCtx(*a.value, pos));
-      else if (n == "rev") rev = str(st.forceStringNoCtx(*a.value, pos));
-      else if (n == "name") name = str(st.forceStringNoCtx(*a.value, pos));
+      } else if (n == "ref") ref = composite::Text(st.forceStringNoCtx(*a.value, pos));
+      else if (n == "rev") rev = composite::Text(st.forceStringNoCtx(*a.value, pos));
+      else if (n == "name") name = composite::Text(st.forceStringNoCtx(*a.value, pos));
       else if (n == "submodules") submodules = st.forceBool(*a.value, pos);
       else if (n == "shallow") shallow = st.forceBool(*a.value, pos);
       else if (n == "allRefs") allRefs = st.forceBool(*a.value, pos);
       else if (n == "narHash" || n == "lastModified" || n == "revCount" || n == "exportIgnore") {
-      } else throw EvalError("unsupported argument '" + n.str() + "' to 'fetchGit'", pos);
+      } else throw EvalError(composite::cat("unsupported argument '", n, "' to 'fetchGit'"), pos);
     }
   } else {
     NixStringContext ctx;
@@ -471,34 +468,34 @@ static void fetchGit(EvalState &st, A args, Value &v, PosPtr pos) {
     throw EvalError("in pure evaluation mode, 'fetchGit' requires a Git revision", pos);
   char tmpl[] = "/tmp/mlnix-git-XXXXXX";
   if (!mkdtemp(tmpl)) throw EvalError("cannot create temporary directory", pos);
-  std::string dir = std::string(tmpl) + "/checkout";
-  std::string out;
-  composite::MutableSeries<std::string> cloneArgs = {"clone", "--quiet"};
+  composite::Text dir = composite::cat(tmpl, "/checkout");
+  composite::Text out;
+  composite::MutableSeries<composite::Text> cloneArgs = {"clone", "--quiet"};
   if (shallow && rev.empty()) cloneArgs.append("--depth=1");
   if (!ref.empty() && rev.empty()) {
     cloneArgs.append("--branch");
-    cloneArgs.append(ref.rfind("refs/heads/", 0) == 0 ? ref.substr(11) : ref);
+    cloneArgs.append(ref.rfind("refs/heads/", 0) == 0 ? composite::Text(ref.substr(11)) : ref.clone());
   }
-  cloneArgs.append(url);
-  cloneArgs.append(dir);
+  cloneArgs.append(url.clone());
+  cloneArgs.append(dir.clone());
   if (nixstore::runProgram("git", cloneArgs, &out) != 0) {
     nixstore::deletePathRecursive(tmpl);
-    throw EvalError("failed to clone '" + url + "'", pos);
+    throw EvalError(composite::cat("failed to clone '", url, "'"), pos);
   }
-  if (!rev.empty() && nixstore::runProgram("git", {"-C", dir, "checkout", "--quiet", rev}, &out) != 0) {
+  if (!rev.empty() && nixstore::runProgram("git", progArgs("-C", dir, "checkout", "--quiet", rev), &out) != 0) {
     nixstore::deletePathRecursive(tmpl);
-    throw EvalError("cannot find Git revision '" + rev + "' in '" + url + "'", pos);
+    throw EvalError(composite::cat("cannot find Git revision '", rev, "' in '", url, "'"), pos);
   }
-  if (submodules) nixstore::runProgram("git", {"-C", dir, "submodule", "update", "--init", "--recursive", "--quiet"}, &out);
-  std::string headRev;
-  nixstore::runProgram("git", {"-C", dir, "rev-parse", "HEAD"}, &headRev);
+  if (submodules) nixstore::runProgram("git", progArgs("-C", dir, "submodule", "update", "--init", "--recursive", "--quiet"), &out);
+  composite::Text headRev;
+  nixstore::runProgram("git", progArgs("-C", dir, "rev-parse", "HEAD"), &headRev);
   while (!headRev.empty() && isspace((unsigned char)headRev.back())) headRev.pop_back();
-  std::string countS, timeS;
-  nixstore::runProgram("git", {"-C", dir, "rev-list", "--count", "HEAD"}, &countS);
-  nixstore::runProgram("git", {"-C", dir, "log", "-1", "--format=%ct", "HEAD"}, &timeS);
+  composite::Text countS, timeS;
+  nixstore::runProgram("git", progArgs("-C", dir, "rev-list", "--count", "HEAD"), &countS);
+  nixstore::runProgram("git", progArgs("-C", dir, "log", "-1", "--format=%ct", "HEAD"), &timeS);
   // Export the tree without .git.
-  nixstore::deletePathRecursive(dir + "/.git");
-  std::string dst;
+  nixstore::deletePathRecursive(composite::cat(dir, "/.git"));
+  composite::Text dst;
   try {
     dst = st.store->addToStore(name, dir);
   } catch (nixstore::Error &e) {
@@ -511,8 +508,8 @@ static void fetchGit(EvalState &st, A args, Value &v, PosPtr pos) {
   st.mkStoreString(bb.alloc(st.s.outPath), dst);
   st.mkString(bb.alloc(st.s.rev), headRev);
   st.mkString(bb.alloc(st.s.shortRev), headRev.substr(0, 7));
-  int64_t lm = atoll(timeS.c_str());
-  st.mkInt(bb.alloc(st.s.revCount), atoll(countS.c_str()));
+  int64_t lm = (int64_t)nixsys::readSigned(timeS).value;
+  st.mkInt(bb.alloc(st.s.revCount), (int64_t)nixsys::readSigned(countS).value);
   st.mkInt(bb.alloc(st.s.lastModified), lm);
   char buf[32];
   time_t t = lm;
@@ -527,24 +524,24 @@ static void fetchGit(EvalState &st, A args, Value &v, PosPtr pos) {
 
 void registerStoreBuiltins(EvalState &state) {
   auto &S = state;
-  S.addPrimOp("derivationStrict", 1, derivationStrict);
-  S.addPrimOp("placeholder", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
+  S.addPrimOp("derivationStrict", derivationStrict);
+  S.addPrimOp("placeholder", [](EvalState &st, A args, Value &v, PosPtr pos) {
     auto o = st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.placeholder");
     st.mkString(v, nixstore::hashPlaceholder(o));
   });
-  S.addPrimOp("__toFile", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
-    auto name = str(st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.toFile"));
+  S.addPrimOp("__toFile", [](EvalState &st, A args, Value &v, PosPtr pos) {
+    auto name = st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.toFile");
     NixStringContext ctx;
-    auto contents = str(st.forceString(*args[1], ctx, pos, "while evaluating the second argument passed to builtins.toFile"));
+    auto contents = st.forceString(*args[1], ctx, pos, "while evaluating the second argument passed to builtins.toFile");
     nixstore::SortedSet refs;
     for (auto &c : ctx) {
       if (c[0] == '=' || c[0] == '!')
-        throw EvalError("files created by builtins.toFile may not reference derivations, but " + name +
-                            " references " + c,
+        throw EvalError(composite::cat("files created by builtins.toFile may not reference derivations, but ", name,
+                                       " references ", c),
                         pos);
       refs.insert(c);
     }
-    std::string p;
+    composite::Text p;
     try {
       p = st.store->addTextToStore(name, contents, refs);
     } catch (nixstore::Error &e) {
@@ -552,23 +549,23 @@ void registerStoreBuiltins(EvalState &state) {
     }
     st.mkStoreString(v, p);
   });
-  S.addPrimOp("__storePath", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
+  S.addPrimOp("__storePath", [](EvalState &st, A args, Value &v, PosPtr pos) {
     if (st.settings.pureEval) throw EvalError("'builtins.storePath' is not allowed in pure evaluation mode", pos);
     NixStringContext ctx;
-    std::string p = st.coerceToPath(*args[0], ctx, pos, "while evaluating the first argument passed to builtins.storePath");
+    composite::Text p = st.coerceToPath(*args[0], ctx, pos, "while evaluating the first argument passed to builtins.storePath");
     if (!nixstore::isInStore(st.store->storeDir(), p))
-      throw EvalError("path '" + p + "' is not in the Nix store", pos);
-    std::string sp = nixstore::toStorePath(st.store->storeDir(), p);
+      throw EvalError(composite::cat("path '", p, "' is not in the Nix store"), pos);
+    composite::Text sp = nixstore::toStorePath(st.store->storeDir(), p);
     if (!st.store->isValidPath(sp)) st.store->ensurePath(sp);
     ctx.insert(st.copyString(sp));
     st.mkString(v, p, ctx);
   });
-  S.addPrimOp("__toPath", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
+  S.addPrimOp("__toPath", [](EvalState &st, A args, Value &v, PosPtr pos) {
     NixStringContext ctx;
-    std::string p = st.coerceToPath(*args[0], ctx, pos, "while evaluating the first argument passed to builtins.toPath");
+    composite::Text p = st.coerceToPath(*args[0], ctx, pos, "while evaluating the first argument passed to builtins.toPath");
     st.mkString(v, nixfe::canonPath(p), ctx);
   });
-  S.addPrimOp("__pathExists", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
+  S.addPrimOp("__pathExists", [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceValue(*args[0], pos);
     NixStringContext ctx;
     bool mustBeDir = false;
@@ -576,48 +573,48 @@ void registerStoreBuiltins(EvalState &state) {
       auto sv = args[0]->sv();
       mustBeDir = (sv.size() >= 1 && sv.back() == '/') || (sv.size() >= 2 && sv.substr(sv.size() - 2) == "/.");
     }
-    std::string p = st.coerceToPath(*args[0], ctx, pos, "while realising the context of a path");
+    composite::Text p = st.coerceToPath(*args[0], ctx, pos, "while realising the context of a path");
     try {
       st.realiseContext(ctx, pos);
     } catch (EvalError &) {
       st.mkBool(v, false);
       return;
     }
-    std::string real = st.realisePath(nixfe::canonPath(p), pos);
+    composite::Text real = st.realisePath(nixfe::canonPath(p), pos);
     struct stat sb;
     nixprefetch::note('S', real.c_str());
     bool ok = mustBeDir ? (stat(real.c_str(), &sb) == 0 && S_ISDIR(sb.st_mode)) : (stat(real.c_str(), &sb) == 0 || nixstore::pathExists(real));
     st.mkBool(v, ok);
   });
-  S.addPrimOp("__readFile", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
+  S.addPrimOp("__readFile", [](EvalState &st, A args, Value &v, PosPtr pos) {
     NixStringContext ctx;
-    std::string p = st.coerceToPath(*args[0], ctx, pos, "while evaluating the first argument passed to builtins.readFile");
+    composite::Text p = st.coerceToPath(*args[0], ctx, pos, "while evaluating the first argument passed to builtins.readFile");
     st.realiseContext(ctx, pos);
-    std::string real = st.realisePath(p, pos);
-    std::string s;
+    composite::Text real = st.realisePath(p, pos);
+    composite::Text s;
     try {
       s = nixstore::readFile(real);
     } catch (nixstore::Error &e) {
       throw EvalError(e.what(), pos);
     }
-    if (s.find('\0') != std::string::npos)
-      throw EvalError("the contents of the file '" + p + "' cannot be represented as a Nix string", pos);
+    if (s.find('\0') != composite::npos)
+      throw EvalError(composite::cat("the contents of the file '", p, "' cannot be represented as a Nix string"), pos);
     NixStringContext refs;
     if (nixstore::isInStore(st.store->storeDir(), p)) {
-      std::string sp = nixstore::toStorePath(st.store->storeDir(), p);
+      composite::Text sp = nixstore::toStorePath(st.store->storeDir(), p);
       if (auto info = st.store->queryPathInfo(sp))
         for (auto &r : info->references) refs.insert(st.copyString(r));
     }
     st.mkString(v, s, refs);
   });
-  S.addPrimOp("__readDir", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
+  S.addPrimOp("__readDir", [](EvalState &st, A args, Value &v, PosPtr pos) {
     NixStringContext ctx;
-    std::string p = st.coerceToPath(*args[0], ctx, pos, "while evaluating the first argument passed to builtins.readDir");
+    composite::Text p = st.coerceToPath(*args[0], ctx, pos, "while evaluating the first argument passed to builtins.readDir");
     st.realiseContext(ctx, pos);
-    std::string real = st.realisePath(p, pos);
+    composite::Text real = st.realisePath(p, pos);
     nixprefetch::note('D', real.c_str());
     DIR *d = opendir(real.c_str());
-    if (!d) throw EvalError("cannot read directory '" + p + "': " + strerror(errno), pos);
+    if (!d) throw EvalError(composite::cat("cannot read directory '", p, "': ", strerror(errno)), pos);
     // The entries first, then the set at their count, written where it lives; a type is a window on its literal, not a copy.
     struct Entry { Symbol name; const char *type; };
     composite::MutableSeries<Entry> entries;
@@ -631,20 +628,20 @@ void registerStoreBuiltins(EvalState &state) {
     for (const Entry &e : entries) st.mkStringWindow(bb.alloc(e.name), e.type);
     st.mkAttrs(v, bb.finish());
   });
-  S.addPrimOp("__readFileType", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
+  S.addPrimOp("__readFileType", [](EvalState &st, A args, Value &v, PosPtr pos) {
     NixStringContext ctx;
-    std::string p = st.coerceToPath(*args[0], ctx, pos, "while evaluating the first argument passed to builtins.readFileType");
+    composite::Text p = st.coerceToPath(*args[0], ctx, pos, "while evaluating the first argument passed to builtins.readFileType");
     st.realiseContext(ctx, pos);
-    std::string t = fileTypeOf(st.realisePath(p, pos));
-    if (t.empty()) throw EvalError("getting status of '" + p + "': No such file or directory", pos);
+    std::string_view t = fileTypeOf(st.realisePath(p, pos));
+    if (t.empty()) throw EvalError(composite::cat("getting status of '", p, "': No such file or directory"), pos);
     st.mkString(v, t);
   });
-  S.addPrimOp("__hashFile", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
+  S.addPrimOp("__hashFile", [](EvalState &st, A args, Value &v, PosPtr pos) {
     auto algoS = st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.hashFile");
     auto algo = nixstore::parseHashAlgo(algoS);
-    if (!algo) throw EvalError("unknown hash algorithm '" + str(algoS) + "', expect 'blake3', 'md5', 'sha1', 'sha256', or 'sha512'", pos);
+    if (!algo) throw EvalError(composite::cat("unknown hash algorithm '", algoS, "', expect 'blake3', 'md5', 'sha1', 'sha256', or 'sha512'"), pos);
     NixStringContext ctx;
-    std::string p = st.coerceToPath(*args[1], ctx, pos, "while evaluating the second argument passed to builtins.hashFile");
+    composite::Text p = st.coerceToPath(*args[1], ctx, pos, "while evaluating the second argument passed to builtins.hashFile");
     st.realiseContext(ctx, pos);
     try {
       st.mkString(v, nixstore::hashFile(*algo, st.realisePath(p, pos)).to_string(nixstore::HashFormat::Base16, false));
@@ -652,15 +649,15 @@ void registerStoreBuiltins(EvalState &state) {
       throw EvalError(e.what(), pos);
     }
   });
-  S.addPrimOp("__hashString", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
+  S.addPrimOp("__hashString", [](EvalState &st, A args, Value &v, PosPtr pos) {
     auto algoS = st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.hashString");
     auto algo = nixstore::parseHashAlgo(algoS);
-    if (!algo) throw EvalError("unknown hash algorithm '" + str(algoS) + "', expect 'blake3', 'md5', 'sha1', 'sha256', or 'sha512'", pos);
+    if (!algo) throw EvalError(composite::cat("unknown hash algorithm '", algoS, "', expect 'blake3', 'md5', 'sha1', 'sha256', or 'sha512'"), pos);
     NixStringContext ctx;
     auto s = st.forceString(*args[1], ctx, pos, "while evaluating the second argument passed to builtins.hashString");
     st.mkString(v, nixstore::hashString(*algo, s).to_string(nixstore::HashFormat::Base16, false));
   });
-  S.addPrimOp("__convertHash", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
+  S.addPrimOp("__convertHash", [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceAttrs(*args[0], pos, "while evaluating the first argument passed to builtins.convertHash");
     const Attr *h = args[0]->attrs->get(st.symbols.create("hash"));
     if (!h) throw EvalError("attribute 'hash' missing", pos);
@@ -669,7 +666,7 @@ void registerStoreBuiltins(EvalState &state) {
     if (const Attr *a = args[0]->attrs->get(st.symbols.create("hashAlgo"))) {
       auto as = st.forceStringNoCtx(*a->value, pos, "while evaluating the attribute 'hashAlgo'");
       algo = nixstore::parseHashAlgo(as);
-      if (!algo) throw EvalError("unknown hash algorithm '" + str(as) + "', expect 'blake3', 'md5', 'sha1', 'sha256', or 'sha512'", pos);
+      if (!algo) throw EvalError(composite::cat("unknown hash algorithm '", as, "', expect 'blake3', 'md5', 'sha1', 'sha256', or 'sha512'"), pos);
     }
     const Attr *f = args[0]->attrs->get(st.symbols.create("toHashFormat"));
     if (!f) throw EvalError("attribute 'toHashFormat' missing", pos);
@@ -679,7 +676,7 @@ void registerStoreBuiltins(EvalState &state) {
     else if (fs == "nix32" || fs == "base32") fmt = nixstore::HashFormat::Nix32;
     else if (fs == "base64") fmt = nixstore::HashFormat::Base64;
     else if (fs == "sri") fmt = nixstore::HashFormat::SRI;
-    else throw EvalError("unknown hash format '" + str(fs) + "', expect 'base16', 'base32', 'base64', or 'sri'", pos);
+    else throw EvalError(composite::cat("unknown hash format '", fs, "', expect 'base16', 'base32', 'base64', or 'sri'"), pos);
     try {
       nixstore::Hash hash = nixstore::parseHash(hs, algo);
       st.mkString(v, hash.to_string(fmt, fmt == nixstore::HashFormat::SRI));
@@ -687,9 +684,9 @@ void registerStoreBuiltins(EvalState &state) {
       throw EvalError(e.what(), pos);
     }
   });
-  S.addPrimOp("__path", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
+  S.addPrimOp("__path", [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceAttrs(*args[0], pos, "while evaluating the argument passed to 'builtins.path'");
-    std::string path, name;
+    composite::Text path, name;
     Value *filter = nullptr;
     auto method = nixstore::FileIngestionMethod::NixArchive;
     composite::Maybe<nixstore::Hash> expected;
@@ -697,7 +694,7 @@ void registerStoreBuiltins(EvalState &state) {
     for (auto &a : *args[0]->attrs) {
       auto n = st.symbols[a.name];
       if (n == "path") path = st.coerceToPath(*a.value, ctx, pos, "while evaluating the 'path' attribute passed to 'builtins.path'");
-      else if (n == "name") name = str(st.forceStringNoCtx(*a.value, pos));
+      else if (n == "name") name = composite::Text(st.forceStringNoCtx(*a.value, pos));
       else if (n == "filter") { st.forceFunction(*a.value, pos); filter = a.value; }
       else if (n == "recursive") method = st.forceBool(*a.value, pos) ? nixstore::FileIngestionMethod::NixArchive : nixstore::FileIngestionMethod::Flat;
       else if (n == "sha256") {
@@ -706,23 +703,23 @@ void registerStoreBuiltins(EvalState &state) {
         } catch (nixstore::Error &e) {
           throw EvalError(e.what(), pos);
         }
-      } else throw EvalError("unsupported argument '" + n.str() + "' to 'builtins.path'", pos);
+      } else throw EvalError(composite::cat("unsupported argument '", n, "' to 'builtins.path'"), pos);
     }
     if (path.empty()) throw EvalError("missing required 'path' attribute in the first argument to 'builtins.path'", pos);
     if (name.empty()) name = nixstore::baseNameOf(path);
     addPath(st, pos, name, path, filter, method, expected, v, ctx);
   });
-  S.addPrimOp("__filterSource", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
+  S.addPrimOp("__filterSource", [](EvalState &st, A args, Value &v, PosPtr pos) {
     NixStringContext ctx;
-    std::string path = st.coerceToPath(*args[1], ctx, pos, "while evaluating the second argument (the path to filter) passed to 'builtins.filterSource'");
+    composite::Text path = st.coerceToPath(*args[1], ctx, pos, "while evaluating the second argument (the path to filter) passed to 'builtins.filterSource'");
     st.forceFunction(*args[0], pos);
     addPath(st, pos, nixstore::baseNameOf(path), path, args[0], nixstore::FileIngestionMethod::NixArchive,
             nullptr, v, ctx);
   });
-  S.addPrimOp("__fetchurl", 1, [](EvalState &st, A args, Value &v, PosPtr pos) { fetchImpl(st, args, v, pos, false, "fetchurl"); });
-  S.addPrimOp("fetchTarball", 1, [](EvalState &st, A args, Value &v, PosPtr pos) { fetchImpl(st, args, v, pos, true, "fetchTarball"); });
-  S.addPrimOp("fetchGit", 1, fetchGit);
-  S.addPrimOp("fetchMercurial", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
+  S.addPrimOp("__fetchurl", [](EvalState &st, A args, Value &v, PosPtr pos) { fetchImpl(st, args, v, pos, false, "fetchurl"); });
+  S.addPrimOp("fetchTarball", [](EvalState &st, A args, Value &v, PosPtr pos) { fetchImpl(st, args, v, pos, true, "fetchTarball"); });
+  S.addPrimOp("fetchGit", fetchGit);
+  S.addPrimOp("fetchMercurial", [](EvalState &st, A args, Value &v, PosPtr pos) {
     throw EvalError("fetchMercurial is not supported by mlnix", pos);
   });
 }

@@ -11,7 +11,6 @@
 #include "Nix/LexRules.h"
 
 #include <cstring>
-#include <vector>
 
 namespace nixfe::confix {
 

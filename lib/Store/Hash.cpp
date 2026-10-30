@@ -1,5 +1,6 @@
 //===- Hash.cpp - Hashes and encodings (bit-compatible with Nix) ----------===//
 
+#include "Nix/Os.h"
 #include "Nix/Prefetch.h"
 #include "Nix/Store.h"
 
@@ -35,7 +36,7 @@ size_t hashSize(HashAlgo a) {
   return 0;
 }
 
-std::string algoName(HashAlgo a) {
+std::string_view algoName(HashAlgo a) {
   switch (a) {
   case HashAlgo::MD5: return "md5";
   case HashAlgo::SHA1: return "sha1";
@@ -230,15 +231,16 @@ Hash hashString(HashAlgo a, std::string_view s) {
   return sink.finish();
 }
 
-Hash hashFile(HashAlgo a, const std::string &path) {
+Hash hashFile(HashAlgo a, std::string_view path) {
   HashSink sink(a);
-  nixprefetch::note('F', path.c_str());
-  int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
-  if (fd < 0) throw Error("opening file '" + path + "': " + strerror(errno));
+  nixsys::CStr file(path);
+  nixprefetch::note('F', file);
+  int fd = open(file, O_RDONLY | O_CLOEXEC);
+  if (fd < 0) throw Error(composite::cat("opening file '", path, "': ", strerror(errno)));
   char buf[65536];
   while (true) {
     ssize_t n = read(fd, buf, sizeof buf);
-    if (n < 0) { close(fd); throw Error("reading file '" + path + "'"); }
+    if (n < 0) { close(fd); throw Error(composite::cat("reading file '", path, "'")); }
     if (n == 0) break;
     sink.update(std::string_view(buf, n));
   }
@@ -246,23 +248,22 @@ Hash hashFile(HashAlgo a, const std::string &path) {
   return sink.finish();
 }
 
-void appendBase16(std::string &out, const uint8_t *d, size_t n) {
+void appendBase16(composite::Text &out, const uint8_t *d, size_t n) {
   static const char hex[] = "0123456789abcdef";
-  size_t at = out.size();
-  out.resize(at + n * 2);
+  out.reserve(out.size() + n * 2);
   for (size_t i = 0; i < n; i++) {
-    out[at + 2 * i] = hex[d[i] >> 4];
-    out[at + 2 * i + 1] = hex[d[i] & 0xf];
+    out.put(hex[d[i] >> 4]);
+    out.put(hex[d[i] & 0xf]);
   }
 }
 
-std::string base16Encode(const uint8_t *d, size_t n) {
-  std::string s;
+composite::Text base16Encode(const uint8_t *d, size_t n) {
+  composite::Text s;
   appendBase16(s, d, n);
   return s;
 }
 
-void appendNix32(std::string &out, const uint8_t *d, size_t n) {
+void appendNix32(composite::Text &out, const uint8_t *d, size_t n) {
   size_t len = (n * 8 - 1) / 5 + 1, at = out.size();
   out.resize(at + len);
   for (int i = (int)len - 1; i >= 0; i--) {
@@ -273,14 +274,15 @@ void appendNix32(std::string &out, const uint8_t *d, size_t n) {
   }
 }
 
-std::string nix32Encode(const uint8_t *d, size_t n) {
-  std::string s;
+composite::Text nix32Encode(const uint8_t *d, size_t n) {
+  composite::Text s;
   appendNix32(s, d, n);
   return s;
 }
 
-composite::Maybe<std::string> nix32Decode(std::string_view s, size_t size) {
-  std::string out(size, '\0');
+composite::Maybe<composite::Text> nix32Decode(std::string_view s, size_t size) {
+  composite::Text out;
+  out.resize(size);
   for (size_t n = 0; n < s.size(); n++) {
     char c = s[s.size() - n - 1];
     const char *p = strchr(nix32Chars, c);
@@ -297,8 +299,8 @@ composite::Maybe<std::string> nix32Decode(std::string_view s, size_t size) {
 
 static const char b64chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-std::string base64Encode(std::string_view s) {
-  std::string res;
+composite::Text base64Encode(std::string_view s) {
+  composite::Text res;
   int data = 0, nbits = 0;
   for (unsigned char c : s) {
     data = data << 8 | c;
@@ -313,11 +315,11 @@ std::string base64Encode(std::string_view s) {
   return res;
 }
 
-composite::Maybe<std::string> base64Decode(std::string_view s) {
+composite::Maybe<composite::Text> base64Decode(std::string_view s) {
   int decode[256];
   for (int i = 0; i < 256; i++) decode[i] = -1;
   for (int i = 0; i < 64; i++) decode[(unsigned char)b64chars[i]] = i;
-  std::string res;
+  composite::Text res;
   unsigned d = 0, bits = 0;
   for (char c : s) {
     if (c == '=') break;
@@ -334,8 +336,8 @@ composite::Maybe<std::string> base64Decode(std::string_view s) {
   return res;
 }
 
-std::string Hash::to_string(HashFormat f, bool includeAlgo) const {
-  std::string s;
+composite::Text Hash::to_string(HashFormat f, bool includeAlgo) const {
+  composite::Text s;
   if (f == HashFormat::SRI || includeAlgo) {
     s += algoName(algo);
     s += f == HashFormat::SRI ? '-' : ':';
@@ -364,7 +366,7 @@ static Hash parseRest(std::string_view rest, HashAlgo algo, bool isSRI, std::str
   h.algo = algo;
   size_t sz = h.size();
   auto bad = [&]() -> Error {
-    return Error("hash '" + std::string(orig) + "' has wrong length for hash algorithm '" + algoName(algo) + "'");
+    return Error(composite::cat("hash '", orig, "' has wrong length for hash algorithm '", algoName(algo), "'"));
   };
   if (!isSRI && rest.size() == sz * 2) {
     for (size_t i = 0; i < sz; i++) {
@@ -372,7 +374,7 @@ static Hash parseRest(std::string_view rest, HashAlgo algo, bool isSRI, std::str
         if (c >= '0' && c <= '9') return c - '0';
         if (c >= 'a' && c <= 'f') return c - 'a' + 10;
         if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-        throw Error("invalid base-16 hash '" + std::string(orig) + "'");
+        throw Error(composite::cat("invalid base-16 hash '", orig, "'"));
       };
       h.bytes[i] = uint8_t(hexv(rest[2 * i]) << 4 | hexv(rest[2 * i + 1]));
     }
@@ -380,14 +382,14 @@ static Hash parseRest(std::string_view rest, HashAlgo algo, bool isSRI, std::str
   }
   if (!isSRI && rest.size() == (sz * 8 - 1) / 5 + 1) {
     auto d = nix32Decode(rest, sz);
-    if (!d) throw Error("invalid nix32 hash '" + std::string(orig) + "'");
+    if (!d) throw Error(composite::cat("invalid nix32 hash '", orig, "'"));
     memcpy(h.bytes, d->data(), sz);
     return h;
   }
   if (isSRI || rest.size() == ((4 * sz / 3) + 3) / 4 * 4) {
     auto d = base64Decode(rest);
     if (!d || d->size() != sz) {
-      if (isSRI) throw Error("invalid SRI hash '" + std::string(orig) + "'");
+      if (isSRI) throw Error(composite::cat("invalid SRI hash '", orig, "'"));
       throw bad();
     }
     memcpy(h.bytes, d->data(), sz);
@@ -403,7 +405,7 @@ Hash parseHash(std::string_view s, composite::Maybe<HashAlgo> algo) {
   composite::Maybe<HashAlgo> parsed;
   if (colon != std::string_view::npos) {
     parsed = parseHashAlgo(s.substr(0, colon));
-    if (!parsed) throw Error("unknown hash algorithm '" + std::string(s.substr(0, colon)) + "', expect 'blake3', 'md5', 'sha1', 'sha256', or 'sha512'");
+    if (!parsed) throw Error(composite::cat("unknown hash algorithm '", s.substr(0, colon), "', expect 'blake3', 'md5', 'sha1', 'sha256', or 'sha512'"));
     s = s.substr(colon + 1);
   } else {
     auto dash = s.find('-');
@@ -416,18 +418,18 @@ Hash parseHash(std::string_view s, composite::Maybe<HashAlgo> algo) {
     }
   }
   if (parsed && algo && *parsed != *algo)
-    throw Error("hash '" + std::string(orig) + "' should have type '" + algoName(*algo) + "'");
+    throw Error(composite::cat("hash '", orig, "' should have type '", algoName(*algo), "'"));
   if (!parsed && !algo)
-    throw Error("hash '" + std::string(orig) + "' does not include a type, nor is the type otherwise known from context");
+    throw Error(composite::cat("hash '", orig, "' does not include a type, nor is the type otherwise known from context"));
   return parseRest(s, parsed ? *parsed : *algo, isSRI, orig);
 }
 
-Hash parseHashAllowEmpty(std::string_view s, composite::Maybe<HashAlgo> algo, std::string *warning) {
+Hash parseHashAllowEmpty(std::string_view s, composite::Maybe<HashAlgo> algo, composite::Text *warning) {
   if (s.empty()) {
     if (!algo) throw Error("empty hash requires explicit hash algorithm");
     Hash h;
     h.algo = *algo;
-    if (warning) *warning = "found empty hash, assuming '" + h.to_string(HashFormat::SRI, true) + "'";
+    if (warning) *warning = composite::cat("found empty hash, assuming '", h.to_string(HashFormat::SRI, true), "'");
     return h;
   }
   return parseHash(s, algo);

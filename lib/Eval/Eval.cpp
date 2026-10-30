@@ -4,8 +4,8 @@
 #include "Composite/Folds.h"
 #include "Composite/Mutable.h"
 #include "Nix/Prefetch.h"
-#include <fstream>
 #include "Nix/Eval.h"
+#include "Nix/Numbers.h"
 #include "Nix/Os.h"
 #include "Nix/ScalarJIT.h"
 #include "mlir/Pass/PassManager.h"
@@ -18,6 +18,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/Parser/Parser.h"
 #include "mlir/Pass/PassManager.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/SourceMgr.h"
 
@@ -25,9 +26,7 @@
 #include <cmath>
 #include <cstring>
 #include <exception>
-#include <iostream>
 #include <pthread.h>
-#include <sstream>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -35,6 +34,9 @@ using namespace mlir;
 namespace nd = mlir::nix;
 
 namespace nixev {
+
+/// Bytes (a Text, a string_view) as the StringRef a raw_ostream takes: a Text itself is ambiguous between the stream's overloads.
+static llvm::StringRef asRef(std::string_view s) { return llvm::StringRef(s.data(), s.size()); }
 
 //===----------------------------------------------------------------------===//
 // Bindings
@@ -274,7 +276,7 @@ EvalState::EvalState(EvalSettings st, nixstore::Store *store) : settings(std::mo
   statsEnabled = getenv("MLNIX_STATS") != nullptr;
   recordEdges = statsEnabled && getenv("MLNIX_STATS_EDGES");
   instrumented = statsEnabled || recordEdges;
-  if (getenv("MLNIX_STATS_IMPORTS")) nixfe::pathLiterals = new nixfe::PathLiterals();
+  if (getenv("MLNIX_STATS_IMPORTS")) nixfe::pathLiterals = new cp::TextSet();
   Bindings::countGets = statsEnabled;
   scalarJIT = ScalarJIT::create();
   settings.mapSources = !getenv("MLNIX_NOMMAP"); // ablation switch: read and copy every file, as before
@@ -320,7 +322,7 @@ EvalState::EvalState(EvalSettings st, nixstore::Store *store) : settings(std::mo
   mkNull(vNull);
   mkAttrs(vEmptyAttrs, allocBindings(0));
   mkList(vEmptyList, 0);
-  printTrace = [](const std::string &m) { std::cerr << m << std::endl; };
+  printTrace = [](std::string_view m) { nixsys::lineToStderr(m.data(), m.size()); };
   createBaseEnv();
 }
 
@@ -366,17 +368,17 @@ void EvalState::printStats() {
     for (auto &kv : regionInfos) if (kv.v->calls) top.append(kv.v);
     cp::sortRows(top.data(), top.size(), [](RegionInfo *a, RegionInfo *b) { return a->calls > b->calls; });
     size_t keep = 40;
-    if (const char *t = getenv("MLNIX_STATS_TOP")) keep = cp::max<size_t>(1, strtoul(t, nullptr, 10));
+    if (const char *t = getenv("MLNIX_STATS_TOP")) keep = cp::max<size_t>(1, nixsys::readUnsigned(t).value);
     llvm::errs() << "== the " << keep << " lambdas that make the most frames (calls, slots, where):\n";
     uint64_t cum = 0;
     for (size_t i = 0; i < top.size() && i < keep; ++i) {
       cum += top[i]->calls;
       llvm::errs() << llvm::format("   %9llu %2u slots  cum %5.1f%%  ", (unsigned long long)top[i]->calls, top[i]->numSlots, 100.0 * cum / nFrames)
-                   << showPos(nd::posOfOp(top[i]->region->getParentOp())) << "\n";
+                   << asRef(showPos(nd::posOfOp(top[i]->region->getParentOp()))) << "\n";
     }
   }
   if (nFrames && getenv("MLNIX_STATS_SHAPES")) {
-    struct Group { uint64_t frames = 0, lambdas = 0; std::string example, shape; };
+    struct Group { uint64_t frames = 0, lambdas = 0; cp::Text example, shape; };
     cp::MutableSeries<Group> groups;
     cp::TextTable<uint32_t> byShape; // a shape's group
     // The lambdas first: shapeOf reaches the bodies of the lambdas inside them, and one not indexed yet is indexed (minted, even) then,
@@ -385,8 +387,8 @@ void EvalState::printStats() {
     for (auto &kv : regionInfos)
       if (kv.v->calls && kv.v->region->getParentOp() && isa<nd::LambdaOp>(kv.v->region->getParentOp())) called.append(kv.v);
     for (RegionInfo *ri : called) {
-      std::string sh = shapeOf(ri);
-      if (sh.size() > 400) sh = "(large)";
+      cp::Text sh = shapeOf(ri);
+      if (sh.size() > 400) sh = cp::Text("(large)");
       uint32_t *found = byShape.find(sh.data(), uint32_t(sh.size()));
       if (!found) {
         found = byShape.set(sh.data(), uint32_t(sh.size()), groups.size(), [&] { return keyText.copy(sh.data(), uint32_t(sh.size())); });
@@ -394,18 +396,18 @@ void EvalState::printStats() {
       }
       Group &g = groups[*found];
       if (g.example.empty()) g.example = showPos(nd::posOfOp(ri->region->getParentOp()));
-      g.frames += ri->calls; ++g.lambdas; g.shape = sh;
+      g.frames += ri->calls; ++g.lambdas; g.shape = sh.clone();
     }
     auto gs = ranked(groups, [](auto &g) { return g.frames; });
     size_t keep = 30;
-    if (const char *t = getenv("MLNIX_STATS_SHAPES")) keep = cp::max<size_t>(1, strtoul(t, nullptr, 10));
+    if (const char *t = getenv("MLNIX_STATS_SHAPES")) keep = cp::max<size_t>(1, nixsys::readUnsigned(t).value);
     llvm::errs() << "== lambda shapes by the frames they make (" << gs.size() << " shapes, " << nFrames << " frames):\n";
     uint64_t cum = 0;
     for (size_t i = 0; i < gs.size() && i < keep; ++i) {
       const Group &g = *gs[i];
       cum += g.frames;
       llvm::errs() << llvm::format("   %9llu frames in %5llu lambdas  cum %5.1f%%  ", (unsigned long long)g.frames, (unsigned long long)g.lambdas, 100.0 * cum / nFrames)
-                   << g.shape << "   e.g. " << g.example << "\n";
+                   << asRef(g.shape) << "   e.g. " << asRef(g.example) << "\n";
     }
   }
   if (nFrames) llvm::errs() << llvm::format("== frames that cannot leak (strict ops only, nothing built over the frame): %llu = %.1f%% of frames, %.1f MB of %.1f MB of frame storage\n",
@@ -609,14 +611,16 @@ void EvalState::printStats() {
   if (pre) llvm::errs() << "== prelowering: " << pre->adopted << " files adopted (" << pre->waited << " of them waited for), " << pre->missed << " lowered by the evaluator\n";
   if (nixfe::pathLiterals) { // how predictable is the next file: a file is predicted if a literal naming it (or its directory) was lowered before it was evaluated
     size_t pred = 0, nix = 0;
-    nixfe::PathLiterals hit; // the literals that named an evaluated file: its path, its directory, the directory with a slash
+    cp::TextSet hit; // the literals that named an evaluated file: its path, its directory, the directory with a slash
+    auto in = [](const cp::TextSet &set, std::string_view s) { return set.contains(s.data(), uint32_t(s.size())); };
+    auto add = [](cp::TextSet &set, std::string_view s) { set.insert(s.data(), uint32_t(s.size())); };
     for (auto &ef : evaluatedFiles) {
-      std::string dir = nixstore::dirOf(ef.first);
-      bool p = nixfe::pathLiterals->count(ef.first) || nixfe::pathLiterals->count(dir) || nixfe::pathLiterals->count(dir + "/");
-      pred += p; if (p) { hit.insert(ef.first); hit.insert(dir); hit.insert(dir + "/"); }
+      cp::Text dir = nixstore::dirOf(ef.a);
+      bool p = in(*nixfe::pathLiterals, ef.a) || in(*nixfe::pathLiterals, dir) || in(*nixfe::pathLiterals, dir + "/");
+      pred += p; if (p) { add(hit, ef.a); add(hit, dir); add(hit, dir + "/"); }
     }
-    for (auto &l : nixfe::pathLiterals->set) nix += l.n > 4 && memcmp(l.p + l.n - 4, ".nix", 4) == 0;
-    size_t litHit = 0; for (auto &l : nixfe::pathLiterals->set) litHit += hit.count(std::string_view(l.p, l.n));
+    for (auto &l : *nixfe::pathLiterals) nix += l.n > 4 && memcmp(l.p + l.n - 4, ".nix", 4) == 0;
+    size_t litHit = 0; for (auto &l : *nixfe::pathLiterals) litHit += hit.contains(l.p, l.n);
     llvm::errs() << "== import prediction: " << evaluatedFiles.size() << " files evaluated, " << pred << " named by a path literal lowered earlier (recall "
                  << llvm::format("%.1f", evaluatedFiles.empty() ? 0.0 : 100.0 * pred / evaluatedFiles.size()) << "%); " << nixfe::pathLiterals->size() << " distinct path literals ("
                  << nix << " end in .nix), " << litHit << " of them led to an evaluated file (precision "
@@ -811,13 +815,16 @@ Value *EvalState::baseEnvValue(llvm::StringRef name) {
   return v ? *v : nullptr;
 }
 
-static std::string primOpName(const std::string &name) { return name.rfind("__", 0) == 0 ? name.substr(2) : name; }
+static cp::Text primOpName(std::string_view name) { return cp::Text(name.starts_with("__") ? name.substr(2) : name); }
 
-void EvalState::addPrimOp(const std::string &name, unsigned arity, PrimFn fn) {
-  registerPrimOp(name, new PrimOp{primOpName(name), arity, fn});
+void EvalState::addPrimOp(std::string_view name, PrimFn fn) {
+  const auto &declared = ctx.getLoadedDialect<nd::NixDialect>()->prims;
+  auto it = declared.find(name);
+  if (it == declared.end()) llvm::report_fatal_error(cp::cat("the primop '", name, "' is registered but not declared in NixPrims.irdl.mlir").c_str());
+  registerPrimOp(name, new PrimOp{primOpName(name), it->second.arity, fn});
 }
 
-void EvalState::registerPrimOp(const std::string &name, PrimOp *p) {
+void EvalState::registerPrimOp(std::string_view name, PrimOp *p) {
   if (p->arity > kMaxPrimArity) llvm::report_fatal_error("a primop with more arguments than EvalState::kMaxPrimArity");
   Value *v = allocValue();
   if (p->arity == 0) {
@@ -830,7 +837,7 @@ void EvalState::registerPrimOp(const std::string &name, PrimOp *p) {
   addConstant(name, v);
 }
 
-void EvalState::addConstant(const std::string &name, Value *v) {
+void EvalState::addConstant(std::string_view name, Value *v) {
   uint32_t n = uint32_t(name.size());
   baseEnv.set(name.data(), n, v, [&] { return baseEnvNames.copy(name.data(), n); });
 }
@@ -839,16 +846,17 @@ void EvalState::addConstant(const std::string &name, Value *v) {
 // Positions & errors
 //===----------------------------------------------------------------------===//
 
-std::string EvalState::showPos(PosPtr pos) const {
+cp::Text EvalState::showPos(PosPtr pos) const {
   auto f = nd::decodePos(pos);
   if (!f) return "«none»:0";
-  return f->file + ":" + std::to_string(f->line) + ":" + std::to_string(f->col);
+  return cp::cat(f->file, ':', f->line, ':', f->col);
 }
 
-void EvalState::throwError(const std::string &msg, PosPtr pos) { throw EvalError(msg, pos); }
+void EvalState::throwError(std::string_view msg, PosPtr pos) { throw EvalError(msg, pos); }
 
-void EvalState::warn(const std::string &msg) {
-  std::cerr << "warning: " << msg << std::endl;
+void EvalState::warn(std::string_view msg) {
+  cp::Text line = cp::cat("warning: ", msg);
+  nixsys::lineToStderr(line.data(), line.size());
   if (settings.abortOnWarn) throw EvalError(msg);
 }
 
@@ -887,10 +895,8 @@ const char *EvalState::typeOf(const Value &v) {
 }
 
 void EvalState::throwTypeError(const char *expected, Value &v, PosPtr pos, std::string_view ctx) {
-  TypeError e(std::string("expected ") + expected + " but found " + showType(v) + ": " +
-                  printValueForTrace(v),
-              pos);
-  if (!ctx.empty()) e.addTrace(pos, std::string(ctx));
+  TypeError e(cp::cat("expected ", expected, " but found ", showType(v), ": ", printValueForTrace(v)), pos);
+  if (!ctx.empty()) e.addTrace(pos, cp::Text(ctx));
   throw e;
 }
 
@@ -1074,9 +1080,9 @@ unsigned EvalState::srcClassOf(RegionInfo *ri) {
   if (ri->srcClass) return ri->srcClass;
   unsigned c = 4;
   if (auto f = nd::decodePos(nd::posOfOp(ri->region->getParentOp()))) {
-    const std::string &p = f->file;
-    c = p.find("nixpkgs/lib/") != std::string::npos ? 1 : p.find("nixos/modules/") != std::string::npos ? 2
-        : p.find("nixpkgs/pkgs/") != std::string::npos ? 3 : 4;
+    std::string_view p = f->file;
+    c = p.find("nixpkgs/lib/") != std::string_view::npos ? 1 : p.find("nixos/modules/") != std::string_view::npos ? 2
+        : p.find("nixpkgs/pkgs/") != std::string_view::npos ? 3 : 4;
   }
   return ri->srcClass = uint8_t(c);
 }
@@ -1116,12 +1122,13 @@ bool EvalState::classifyStackFrame(RegionInfo *ri) {
 static const char *downgradeSet() { static const char *e = getenv("MLNIX_STATS_DOWNGRADE"); return e; }
 static bool isProjection(mlir::Operation *op) {
   if (const char *d = downgradeSet()) {            // the experiment: these families would hold their operand cells, not the frame
-    std::string name = op->getName().getStringRef().str();
-    if (std::string(d) == "all") return true;
+    llvm::StringRef opName = op->getName().getStringRef();
+    std::string_view name(opName.data(), opName.size());
+    if (std::string_view(d) == "all") return true;
     for (const char *p = d; *p;) {
       const char *q = strchr(p, ',');
-      std::string tok = q ? std::string(p, q) : std::string(p);
-      if (name.find(tok) != std::string::npos) return true;
+      std::string_view tok = q ? std::string_view(p, size_t(q - p)) : std::string_view(p);
+      if (name.find(tok) != std::string_view::npos) return true;
       if (!q) break;
       p = q + 1;
     }
@@ -1236,7 +1243,7 @@ Value *EvalState::makeFixed(Node *s) {
   if (s->how == Node::Builtin) { // the base environment is complete before anything is evaluated
     auto b = cast<nd::BuiltinOp>(op);
     Value *bv = baseEnvValue(b.getName().str());
-    if (!bv) throw EvalError("undefined variable '" + b.getName().toString() + "'", nd::posOfOp(op));
+    if (!bv) throw EvalError(cp::cat("undefined variable '", b.getName().str(), "'"), nd::posOfOp(op));
     return s->fixed = bv;
   }
   Value *cv = allocValue();
@@ -1427,8 +1434,8 @@ void EvalState::fail(Value &v) {
 }
 
 template <class E> [[noreturn]] static void throwCopy(const E &e) {
-  E c(e.msg, e.pos);
-  for (const Trace &t : e.traces) c.traces.append(t);
+  E c(e.msg.clone(), e.pos);
+  for (const Trace &t : e.traces) c.traces.append(Trace{t.pos, t.msg.clone()});
   throw c;
 }
 
@@ -1457,7 +1464,7 @@ void EvalState::forceValueDeep(Value &v) {
         try {
           self(self, *a.value);
         } catch (EvalError &e) {
-          e.addTrace(positionOf(a), "while evaluating the attribute '" + symbols[a.name].str() + "'");
+          e.addTrace(positionOf(a), cp::cat("while evaluating the attribute '", symbols[a.name], "'"));
           throw;
         }
       }
@@ -1518,11 +1525,10 @@ std::string_view EvalState::forceString(Value &v, NixStringContext &ctx, PosPtr 
 std::string_view EvalState::forceStringNoCtx(Value &v, PosPtr pos, std::string_view c) {
   auto s = forceString(v, pos, c);
   if (v.str.ctx) {
-    std::string first = v.str.ctx->elems[0];
-    std::string what = first[0] == '=' ? first.substr(1) : first[0] == '!' ? first.substr(first.find('!', 1) + 1) : first;
-    throw EvalError("the string '" + std::string(s) + "' is not allowed to refer to a store path (such as '" +
-                        nixstore::baseNameOf(what) + "')",
-                    pos);
+    std::string_view first = v.str.ctx->elems[0];
+    char head = first.empty() ? '\0' : first[0]; // first[0] of a standard string was the NUL of an empty one
+    std::string_view what = head == '=' ? first.substr(1) : head == '!' ? first.substr(first.find('!', 1) + 1) : first;
+    throw EvalError(cp::cat("the string '", s, "' is not allowed to refer to a store path (such as '", nixstore::baseNameOf(what), "')"), pos);
   }
   return s;
 }
@@ -1539,9 +1545,9 @@ static cp::Own<mlir::PassManager> makeOptimizer(mlir::MLIRContext &,
                                                         const EvalSettings &);
 
 /// The pass pipeline as text: MLNIX_PIPELINE over the setting.
-static std::string pipelineText(const EvalSettings &settings) {
+static cp::Text pipelineText(const EvalSettings &settings) {
   const char *e = getenv("MLNIX_PIPELINE");
-  return e ? e : settings.pipeline;
+  return e ? cp::Text(e) : settings.pipeline.clone();
 }
 
 RegionInfo *EvalState::mintLambda(nixfe::FilePool &p, uint32_t row) {
@@ -1586,32 +1592,32 @@ void EvalState::callLambda(Value &fun, Value *arg, Value &out, PosPtr pos) {
 // Error paths: the messages are built here, in functions of their own, and the compiler decides what to inline.
 //===----------------------------------------------------------------------===//
 
-static std::string lambdaDesc(nd::LambdaOp lam) {
-  if (auto n = lam.getName()) return "function '" + n->str() + "'";
+static cp::Text lambdaDesc(nd::LambdaOp lam) {
+  if (auto n = lam.getName()) return cp::cat("function '", *n, "'");
   return "function 'anonymous lambda'";
 }
 [[noreturn]] static void throwMissingArg(nd::LambdaOp lam, llvm::StringRef formal, PosPtr pos) {
-  throw EvalError(lambdaDesc(lam) + " called without required argument '" + formal.str() + "'", pos).addTrace(nd::posOfOp(lam), "from call site");
+  throw EvalError(cp::cat(lambdaDesc(lam), " called without required argument '", formal, "'"), pos).addTrace(nd::posOfOp(lam), "from call site");
 }
 [[noreturn]] static void throwUnexpectedArg(nd::LambdaOp lam, llvm::StringRef name, PosPtr pos) {
-  throw EvalError(lambdaDesc(lam) + " called with unexpected argument '" + name.str() + "'", pos).addTrace(nd::posOfOp(lam), "from call site");
+  throw EvalError(cp::cat(lambdaDesc(lam), " called with unexpected argument '", name, "'"), pos).addTrace(nd::posOfOp(lam), "from call site");
 }
-[[noreturn]] static void throwUndefinedVariable(const nixfe::Name &n, PosPtr pos) { throw EvalError("undefined variable '" + n.toString() + "'", pos); }
-[[noreturn]] static void throwMissingFormal(const nixfe::Name &n, PosPtr pos) { throw EvalError("missing formal argument '" + n.toString() + "'", pos); }
+[[noreturn]] static void throwUndefinedVariable(const nixfe::Name &n, PosPtr pos) { throw EvalError(cp::cat("undefined variable '", n.str(), "'"), pos); }
+[[noreturn]] static void throwMissingFormal(const nixfe::Name &n, PosPtr pos) { throw EvalError(cp::cat("missing formal argument '", n.str(), "'"), pos); }
 [[noreturn]] static void throwCannotEvaluate(mlir::Operation *o, PosPtr pos) {
-  throw EvalError("internal error: cannot evaluate operation '" + o->getName().getStringRef().str() + "'", pos);
+  throw EvalError(cp::cat("internal error: cannot evaluate operation '", o->getName().getStringRef(), "'"), pos);
 }
 [[noreturn]] static void throwAssertFailed(nd::AssertOp a, PosPtr pos) {
-  std::string txt = a.getText() ? a.getText()->str() : "?";
-  throw AssertionError("assertion '" + txt + "' failed", pos);
+  auto txt = a.getText();
+  throw AssertionError(cp::cat("assertion '", txt ? *txt : llvm::StringRef("?"), "' failed"), pos);
 }
 [[noreturn]] static void throwIntOverflow(int64_t n, int64_t m, PosPtr pos) {
-  throw EvalError("integer overflow in adding " + std::to_string(n) + " + " + std::to_string(m), pos);
+  throw EvalError(cp::cat("integer overflow in adding ", n, " + ", m), pos);
 }
 [[noreturn]] static void throwCannotAdd(const char *type, const char *to, PosPtr pos) {
-  throw EvalError(std::string("cannot add ") + type + " to " + to, pos);
+  throw EvalError(cp::cat("cannot add ", type, " to ", to), pos);
 }
-[[noreturn]] static void throwAttrMissing(llvm::StringRef name, PosPtr pos) { throw EvalError("attribute '" + name.str() + "' missing", pos); }
+[[noreturn]] static void throwAttrMissing(llvm::StringRef name, PosPtr pos) { throw EvalError(cp::cat("attribute '", name, "' missing"), pos); }
 
 void EvalState::callLambdaIn(Value &fun, RegionInfo *ri, Value *arg, Value &out, PosPtr pos) {
   auto lam = cast<nd::LambdaOp>(fun.thunk.node->def);
@@ -1619,7 +1625,7 @@ void EvalState::callLambdaIn(Value &fun, RegionInfo *ri, Value *arg, Value &out,
     try {
       forceAttrs(*arg, pos, "while evaluating the value passed for the lambda argument");
     } catch (EvalError &e) {
-      e.addTrace(nd::posOfOp(lam), "while calling " + lambdaDesc(lam));
+      e.addTrace(nd::posOfOp(lam), cp::cat("while calling ", lambdaDesc(lam)));
       throw;
     }
     if (ri->formalsOf != lam.getOperation()) {
@@ -1754,39 +1760,44 @@ unsigned EvalState::selectorShape(nd::LambdaOp outerLam, RegionInfo *outer) {
 /// The shape of a lambda: its ops in order with the names, positions and file taken out, so two lambdas that compute the same thing
 /// the same way have the same string.  Operands are `aN` (the Nth argument of this body), `rN` (the Nth op of this body), `cK` (a
 /// value captured from outside, by distance K), and a returned lambda's body is written inline.  Constants keep their value.
-std::string EvalState::shapeOf(RegionInfo *ri, unsigned depth) {
-  if (depth == 0 && !ri->shape.empty()) return ri->shape;
-  std::string out;
+cp::Text EvalState::shapeOf(RegionInfo *ri, unsigned depth) {
+  if (depth == 0 && !ri->shape.empty()) return ri->shape.clone();
+  cp::Text out;
   cp::WordTable<uint32_t> ids; // a value's name, by its address: 2i for the argument aI, 2n + 1 for rN, the result of the Nth op
   mlir::Block &blk = ri->region->front();
   auto key = [](mlir::Value v) { return uint64_t(uintptr_t(v.getAsOpaquePointer())); };
   for (unsigned i = 0; i < blk.getNumArguments(); ++i) ids.at(key(blk.getArgument(i))) = 2 * i;
   unsigned n = 0;
-  auto ref = [&](mlir::Value v) {
+  auto putRef = [&](mlir::Value v) { // aN, rN or c; a ' after the first two inside a returned lambda
     const uint32_t *id = ids.find(key(v));
-    return id ? (*id & 1 ? "r" : "a") + std::to_string(*id >> 1) + (depth ? "'" : "") : std::string("c");
+    if (!id) {
+      out.put('c');
+      return;
+    }
+    out.put(*id & 1 ? 'r' : 'a').putUnsigned(*id >> 1);
+    if (depth) out.put('\'');
   };
   for (mlir::Operation &op : blk) {
     uint32_t id = 2 * n++ + 1;
-    out += op.getName().getStringRef().str();
-    if (auto iv = dyn_cast<nd::IntOp>(op)) out += "=" + std::to_string(iv.getValue());
-    else if (auto bv = dyn_cast<nd::BoolOp>(op)) out += bv.getValue() ? "=true" : "=false";
-    else if (auto sv = dyn_cast<nd::StringOp>(op)) { out += "=\""; out += sv.getValue().str().substr(0, 12); out += "\""; }
-    out += "(";
+    out.put(op.getName().getStringRef());
+    if (auto iv = dyn_cast<nd::IntOp>(op)) out.put('=').putUnsigned(iv.getValue()); // getValue() is a uint64_t: written unsigned, as to_string wrote it
+    else if (auto bv = dyn_cast<nd::BoolOp>(op)) out.put(bv.getValue() ? "=true" : "=false");
+    else if (auto sv = dyn_cast<nd::StringOp>(op)) { out.put("=\""); out.put(sv.getValue().str().substr(0, 12)); out.put('"'); }
+    out.put('(');
     if (auto lam = dyn_cast<nd::LambdaOp>(op)) {
       if (depth < 4) {
         mlir::IntegerAttr deferred = lam.getBodyIndexAttr();
         RegionInfo *inner = deferred ? bodyOf(nixfe::BodyIndex(uint64_t(deferred.getInt()))) : regionInfo(&lam.getBody());
-        out += (lam.getFormals() ? "formals" : "arg") + std::string(": ") + shapeOf(inner, depth + 1);
+        out.put(lam.getFormals() ? "formals" : "arg").put(": ").put(shapeOf(inner, depth + 1));
       }
     } else {
       bool first = true;
-      for (mlir::Value v : op.getOperands()) { out += (first ? "" : ",") + ref(v); first = false; }
+      for (mlir::Value v : op.getOperands()) { out.put(first ? "" : ","); putRef(v); first = false; }
     }
-    out += ") ";
+    out.put(") ");
     for (mlir::Value r : op.getResults()) ids.at(key(r)) = id;
   }
-  if (depth == 0) ri->shape = out;
+  if (depth == 0) ri->shape = out.clone();
   return out;
 }
 
@@ -1812,7 +1823,7 @@ bool EvalState::jitChain(nd::LambdaOp lambda, RegionInfo *ri, Value &cur, size_t
 }
 
 void EvalState::notAFunction(Value &cur, PosPtr pos) {
-  throw EvalError(std::string("attempt to call something which is not a function but ") + showType(cur) + ": " + printValueForTrace(cur), pos);
+  throw EvalError(cp::cat("attempt to call something which is not a function but ", showType(cur), ": ", printValueForTrace(cur)), pos);
 }
 
 void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out, PosPtr pos, bool allowCurried) {
@@ -1936,8 +1947,8 @@ void EvalState::autoCallFunction(const AutoArgs &autoArgs, Value &fun, Value &ou
     llvm::StringRef name = cast<StringAttr>((*lam.getFormals())[i]).getValue();
     if (Value *const *found = autoArgs.find(name.data(), uint32_t(name.size()))) bb.insert(name, *found);
     else if (!defs[i])
-      throw EvalError("cannot evaluate a function that has an argument without a value ('" + name.str() +
-                          "')\nNix attempted to evaluate a function as a top level expression; in this case it must have its arguments supplied either by default values, or passed explicitly with '--arg' or '--argstr'. See https://nix.dev/manual/nix/stable/language/syntax.html#functions.",
+      throw EvalError(cp::cat("cannot evaluate a function that has an argument without a value ('", name,
+                              "')\nNix attempted to evaluate a function as a top level expression; in this case it must have its arguments supplied either by default values, or passed explicitly with '--arg' or '--argstr'. See https://nix.dev/manual/nix/stable/language/syntax.html#functions."),
                       nd::posOfOp(lam));
   }
   if (lam.getEllipsis())
@@ -2051,7 +2062,7 @@ void EvalState::evalAttrsDynamic(Node *node, Frame *env, Value &out) {
     auto name = forceStringNoCtx(*nv, p, "while evaluating the name of a dynamic attribute");
     Symbol sym = symbolOfString(name);
     if (PosPtr *defined = seen.find(uint64_t(sym) + 1))
-      throw EvalError("dynamic attribute '" + std::string(name) + "' already defined at " + showPos(*defined ? *defined : nd::posOfOp(op)), p);
+      throw EvalError(cp::cat("dynamic attribute '", name, "' already defined at ", showPos(*defined ? *defined : nd::posOfOp(op))), p);
     seen.insert(uint64_t(sym) + 1, p);
     bb.insert(sym, lookup(env, dynValues[j]), p);
   }
@@ -2070,7 +2081,7 @@ void EvalState::evalConcatStrings(Node *node, Frame *env, Value &out) {
   size_t np = parts.size(), nv = 0;
   composite::Chars stackViews[16];
   composite::Chars *views = np <= 16 ? stackViews : static_cast<composite::Chars *>(alloc.Allocate(np * sizeof(composite::Chars), alignof(composite::Chars)));
-  std::string scratch;
+  cp::Text scratch;
   PieceContexts own; // the string pieces' own contexts: shared as the result's when there is one, merged only when there are several
   size_t total = 0;
   int64_t n = 0;
@@ -2112,7 +2123,7 @@ void EvalState::evalConcatStrings(Node *node, Frame *env, Value &out) {
   if (firstType == VType::Path) {
     if (own.any(context))
       throw EvalError("a string that refers to a store path cannot be appended to a path", pos);
-    std::string str;
+    cp::Text str;
     str.reserve(total);
     for (size_t k = 0; k < nv; k++) str += composite::view(views[k]);
     return mkPath(out, nixfe::canonPath(str));
@@ -2382,7 +2393,7 @@ bool EvalState::isDerivation(Value &v) {
   return t->value->type == VType::String && t->value->sv() == "derivation";
 }
 
-cp::Maybe<std::string> EvalState::tryAttrsToString(Value &v, NixStringContext &ctx, bool coerceMore, bool copyToStore) {
+cp::Maybe<cp::Text> EvalState::tryAttrsToString(Value &v, NixStringContext &ctx, bool coerceMore, bool copyToStore) {
   const Attr *f = v.attrs->get(s.toString);
   if (!f) return {};
   Value *r = allocValue();
@@ -2392,7 +2403,7 @@ cp::Maybe<std::string> EvalState::tryAttrsToString(Value &v, NixStringContext &c
 }
 
 composite::Chars EvalState::coerceToWindow(Value &v, NixStringContext &ctx, bool coerceMore, bool copyToStore,
-                                                 PosPtr pos, std::string_view errorCtx, std::string &scratch,
+                                                 PosPtr pos, std::string_view errorCtx, cp::Text &scratch,
                                                  bool canonicalizePath, const StringContext **own) {
   forceValue(v, pos);
   if (v.type == VType::String) {
@@ -2415,24 +2426,23 @@ composite::Chars EvalState::coerceToWindow(Value &v, NixStringContext &ctx, bool
   return composite::chars(std::string_view(scratch));
 }
 
-std::string EvalState::coerceToString(Value &v, NixStringContext &ctx, bool coerceMore, bool copyToStore,
-                                      PosPtr pos, std::string_view errorCtx, bool canonicalizePath) {
+cp::Text EvalState::coerceToString(Value &v, NixStringContext &ctx, bool coerceMore, bool copyToStore,
+                                   PosPtr pos, std::string_view errorCtx, bool canonicalizePath) {
   forceValue(v, pos);
   switch (v.type) {
   case VType::String:
     copyContext(v, ctx);
-    return std::string(v.sv());
+    return cp::Text(v.sv());
   case VType::Path: {
-    std::string p(v.pathView());
-    if (copyToStore) return copyPathToStore(ctx, p);
-    return p;
+    if (copyToStore) return copyPathToStore(ctx, v.pathView());
+    return cp::Text(v.pathView());
   }
   case VType::Attrs: {
-    if (auto s2 = tryAttrsToString(v, ctx, coerceMore, copyToStore)) return *s2;
+    if (auto s2 = tryAttrsToString(v, ctx, coerceMore, copyToStore)) return cp::mv(*s2);
     const Attr *o = v.attrs->get(s.outPath);
     if (!o) {
-      TypeError e(std::string("cannot coerce ") + showType(v) + " to a string: " + printValueForTrace(v), pos);
-      if (!errorCtx.empty()) e.addTrace(pos, std::string(errorCtx));
+      TypeError e(cp::cat("cannot coerce ", showType(v), " to a string: ", printValueForTrace(v)), pos);
+      if (!errorCtx.empty()) e.addTrace(pos, cp::Text(errorCtx));
       throw e;
     }
     return coerceToString(*o->value, ctx, coerceMore, copyToStore, pos,
@@ -2443,11 +2453,11 @@ std::string EvalState::coerceToString(Value &v, NixStringContext &ctx, bool coer
   }
   if (coerceMore) {
     if (v.type == VType::Bool) return v.boolean ? "1" : "";
-    if (v.type == VType::Int) return std::to_string(v.integer);
-    if (v.type == VType::Float) return std::to_string(v.fpoint);
+    if (v.type == VType::Int) return cp::str(v.integer);
+    if (v.type == VType::Float) return nixfe::fixedFloat(v.fpoint);
     if (v.type == VType::Null) return "";
     if (v.type == VType::List) {
-      std::string result;
+      cp::Text result;
       for (size_t n = 0; n < v.listSize(); n++) {
         Value *e = v.list.elems[n];
         try {
@@ -2461,22 +2471,22 @@ std::string EvalState::coerceToString(Value &v, NixStringContext &ctx, bool coer
       return result;
     }
   }
-  TypeError e(std::string("cannot coerce ") + showType(v) + " to a string: " + printValueForTrace(v), pos);
-  if (!errorCtx.empty()) e.addTrace(pos, std::string(errorCtx));
+  TypeError e(cp::cat("cannot coerce ", showType(v), " to a string: ", printValueForTrace(v)), pos);
+  if (!errorCtx.empty()) e.addTrace(pos, cp::Text(errorCtx));
   throw e;
 }
 
-std::string EvalState::copyPathToStore(NixStringContext &ctx, const std::string &path) {
-  std::string base = nixstore::baseNameOf(path);
-  if (base.size() >= 4 && base.substr(base.size() - 4) == ".drv")
+cp::Text EvalState::copyPathToStore(NixStringContext &ctx, std::string_view path) {
+  cp::Text base = nixstore::baseNameOf(path);
+  if (base.ends_with(".drv"))
     throw EvalError("file names are not allowed to end in '.drv'");
   const char *dst;
   if (const char **hit = srcToStore.find(path.data(), uint32_t(path.size()))) {
     dst = *hit;
   } else {
-    std::string real = path;
+    cp::Text real(path);
     if (nixstore::isInStore(store->storeDir(), path)) real = store->toReal(path);
-    if (!nixstore::pathExists(real)) throw EvalError("path '" + path + "' does not exist");
+    if (!nixstore::pathExists(real)) throw EvalError(cp::cat("path '", path, "' does not exist"));
     try {
       dst = copyString(store->addToStore(base, real));
     } catch (nixstore::Error &e) {
@@ -2488,23 +2498,23 @@ std::string EvalState::copyPathToStore(NixStringContext &ctx, const std::string 
   return dst;
 }
 
-std::string EvalState::coerceToPath(Value &v, NixStringContext &ctx, PosPtr pos, std::string_view errorCtx) {
+cp::Text EvalState::coerceToPath(Value &v, NixStringContext &ctx, PosPtr pos, std::string_view errorCtx) {
   forceValue(v, pos);
-  if (v.type == VType::Path) return std::string(v.pathView());
-  std::string p = coerceToString(v, ctx, false, false, pos, errorCtx);
+  if (v.type == VType::Path) return cp::Text(v.pathView());
+  cp::Text p = coerceToString(v, ctx, false, false, pos, errorCtx);
   if (p.empty() || p[0] != '/') {
-    EvalError e("string '" + p + "' doesn't represent an absolute path", pos);
-    if (!errorCtx.empty()) e.addTrace(pos, std::string(errorCtx));
+    EvalError e(cp::cat("string '", p, "' doesn't represent an absolute path"), pos);
+    if (!errorCtx.empty()) e.addTrace(pos, cp::Text(errorCtx));
     throw e;
   }
   return p;
 }
 
-std::string EvalState::coerceToStorePath(Value &v, NixStringContext &ctx, PosPtr pos, std::string_view errorCtx) {
-  std::string p = coerceToString(v, ctx, false, false, pos, errorCtx);
+cp::Text EvalState::coerceToStorePath(Value &v, NixStringContext &ctx, PosPtr pos, std::string_view errorCtx) {
+  cp::Text p = coerceToString(v, ctx, false, false, pos, errorCtx);
   if (nixstore::isInStore(store->storeDir(), p)) return nixstore::toStorePath(store->storeDir(), p);
-  EvalError e("path '" + p + "' is not in the Nix store", pos);
-  if (!errorCtx.empty()) e.addTrace(pos, std::string(errorCtx));
+  EvalError e(cp::cat("path '", p, "' is not in the Nix store"), pos);
+  if (!errorCtx.empty()) e.addTrace(pos, cp::Text(errorCtx));
   throw e;
 }
 
@@ -2553,7 +2563,7 @@ bool EvalState::eqValues(Value &v1, Value &v2, PosPtr pos) {
   case VType::Lambda: case VType::PrimOp: case VType::PrimOpApp:
     return false;
   default:
-    throw EvalError(std::string("cannot compare ") + showType(v1) + " with " + showType(v2), pos);
+    throw EvalError(cp::cat("cannot compare ", showType(v1), " with ", showType(v2)), pos);
   }
 }
 
@@ -2563,7 +2573,7 @@ bool EvalState::lessThan(Value &v1, Value &v2, PosPtr pos) {
   if (v1.type == VType::Float && v2.type == VType::Int) return v1.fpoint < (double)v2.integer;
   if (v1.type == VType::Int && v2.type == VType::Float) return (double)v1.integer < v2.fpoint;
   if (v1.type != v2.type)
-    throw EvalError(std::string("cannot compare ") + showType(v1) + " with " + showType(v2), pos);
+    throw EvalError(cp::cat("cannot compare ", showType(v1), " with ", showType(v2)), pos);
   switch (v1.type) {
   case VType::Int: return v1.integer < v2.integer;
   case VType::Float: return v1.fpoint < v2.fpoint;
@@ -2577,9 +2587,7 @@ bool EvalState::lessThan(Value &v1, Value &v2, PosPtr pos) {
         return lessThan(*v1.list.elems[i], *v2.list.elems[i], pos);
     }
   default:
-    throw EvalError(std::string("cannot compare ") + showType(v1) + " with " + showType(v2) +
-                        "; values of that type are incomparable",
-                    pos);
+    throw EvalError(cp::cat("cannot compare ", showType(v1), " with ", showType(v2), "; values of that type are incomparable"), pos);
   }
 }
 
@@ -2587,85 +2595,83 @@ bool EvalState::lessThan(Value &v1, Value &v2, PosPtr pos) {
 // Printing
 //===----------------------------------------------------------------------===//
 
-static std::string fmtFloat(double d) {
-  std::ostringstream os;
-  os << d;
-  return os.str();
-}
+/// A cell or set met before, by its address (a set: the WordTable's values say nothing).
+static bool firstTime(cp::WordTable<char> &seen, const void *p) { return seen.insert(uint64_t(uintptr_t(p)), 1); }
 
-void EvalState::printValue(std::ostream &str, Value &v, std::set<const void *> *seen, size_t depth) {
+void EvalState::printValue(cp::Text &out, Value &v, cp::WordTable<char> *seen, size_t depth) {
   if (depth > settings.maxCallDepth) throw StackOverflowError("stack overflow");
   switch (v.type) {
-  case VType::Int: str << v.integer; break;
-  case VType::Bool: str << (v.boolean ? "true" : "false"); break;
-  case VType::String: nixfe::printLiteralString(str, v.sv()); break;
-  case VType::Path: str << v.pathView(); break;
-  case VType::Null: str << "null"; break;
+  case VType::Int: out.putInt(v.integer); break;
+  case VType::Bool: out.put(v.boolean ? "true" : "false"); break;
+  case VType::String: nixfe::printLiteralString(out, v.sv()); break;
+  case VType::Path: out.put(cp::chars(v.pathView())); break;
+  case VType::Null: out.put("null"); break;
   case VType::Attrs:
-    if (seen && !v.attrs->empty() && !seen->insert(v.attrs).second) str << "«repeated»";
+    if (seen && !v.attrs->empty() && !firstTime(*seen, v.attrs)) out.put("«repeated»");
     else {
-      str << "{ ";
+      out.put("{ ");
       for (auto *a : v.attrs->lexicographicOrder(symbols)) {
-        nixfe::printIdentifier(str, symbols[a->name]);
-        str << " = ";
-        printValue(str, *a->value, seen, depth + 1);
-        str << "; ";
+        nixfe::printIdentifier(out, symbols[a->name]);
+        out.put(" = ");
+        printValue(out, *a->value, seen, depth + 1);
+        out.put("; ");
       }
-      str << "}";
+      out.put('}');
     }
     break;
   case VType::List:
-    if (seen && v.listSize() && !seen->insert(&v).second) str << "«repeated»";
+    if (seen && v.listSize() && !firstTime(*seen, &v)) out.put("«repeated»");
     else {
-      str << "[ ";
+      out.put("[ ");
       for (size_t i = 0; i < v.listSize(); i++) {
-        printValue(str, *v.list.elems[i], seen, depth + 1);
-        str << " ";
+        printValue(out, *v.list.elems[i], seen, depth + 1);
+        out.put(' ');
       }
-      str << "]";
+      out.put(']');
     }
     break;
-  case VType::Thunk: case VType::App: case VType::AttrApp: case VType::Failed: str << "<CODE>"; break;
-  case VType::Blackhole: str << "«potential infinite recursion»"; break;
-  case VType::Lambda: str << "<LAMBDA>"; break;
-  case VType::PrimOp: str << "<PRIMOP>"; break;
-  case VType::PrimOpApp: str << "<PRIMOP-APP>"; break;
-  case VType::Float: str << fmtFloat(v.fpoint); break;
+  case VType::Thunk: case VType::App: case VType::AttrApp: case VType::Failed: out.put("<CODE>"); break;
+  case VType::Blackhole: out.put("«potential infinite recursion»"); break;
+  case VType::Lambda: out.put("<LAMBDA>"); break;
+  case VType::PrimOp: out.put("<PRIMOP>"); break;
+  case VType::PrimOpApp: out.put("<PRIMOP-APP>"); break;
+  case VType::Float: nixfe::printFloat(out, v.fpoint); break;
   }
 }
 
 namespace {
 struct TracePrinter {
   EvalState &st;
-  std::ostream &out;
+  cp::Text &out;
   bool force;
   size_t maxDepth = 10, maxAttrs = 10, maxList = 10, maxStr = 1024;
   size_t attrsPrinted = 0, listPrinted = 0;
-  std::set<const void *> seen;
+  cp::WordTable<char> seen;
 
-  void elided(size_t n, const char *one, const char *many) {
-    out << "«" << n << " " << (n == 1 ? one : many) << " elided»";
-  }
+  void put(std::string_view s) { out.put(cp::chars(s)); }
+  void elided(size_t n, const char *one, const char *many) { out.put("«").putUnsigned(n).put(' ').put(n == 1 ? one : many).put(" elided»"); }
   void print(Value &v, size_t depth) {
     if (force) {
       try {
         st.forceValue(v);
       } catch (EvalError &e) {
-        out << "«error: " << e.msg << "»";
+        out.put("«error: ");
+        put(e.msg);
+        out.put("»");
         return;
       }
     }
     switch (v.type) {
-    case VType::Int: out << v.integer; break;
-    case VType::Float: out << fmtFloat(v.fpoint); break;
-    case VType::Bool: out << (v.boolean ? "true" : "false"); break;
-    case VType::Null: out << "null"; break;
-    case VType::Path: out << v.pathView(); break;
+    case VType::Int: out.putInt(v.integer); break;
+    case VType::Float: nixfe::printFloat(out, v.fpoint); break;
+    case VType::Bool: out.put(v.boolean ? "true" : "false"); break;
+    case VType::Null: out.put("null"); break;
+    case VType::Path: put(v.pathView()); break;
     case VType::String: {
       auto s = v.sv();
       if (s.size() > maxStr) {
         nixfe::printLiteralString(out, s.substr(0, maxStr));
-        out << " ";
+        out.put(' ');
         elided(s.size() - maxStr, "byte", "bytes");
       } else {
         nixfe::printLiteralString(out, s);
@@ -2673,21 +2679,24 @@ struct TracePrinter {
       break;
     }
     case VType::Attrs: {
-      if (!seen.insert(v.attrs).second) { out << "«repeated»"; break; }
+      if (!firstTime(seen, v.attrs)) { out.put("«repeated»"); break; }
       if (force && st.isDerivation(v)) {
-        out << "«derivation";
+        out.put("«derivation");
         if (const Attr *d = v.attrs->get(st.s.drvPath)) {
           try {
             st.forceValue(*d->value);
-            if (d->value->type == VType::String) out << " " << d->value->sv();
+            if (d->value->type == VType::String) {
+              out.put(' ');
+              put(d->value->sv());
+            }
           } catch (EvalError &) {
           }
         }
-        out << "»";
+        out.put("»");
         break;
       }
-      if (depth >= maxDepth) { out << "{ ... }"; break; }
-      out << "{";
+      if (depth >= maxDepth) { out.put("{ ... }"); break; }
+      out.put('{');
       composite::MutableSeries<const Attr *> sorted;
       for (auto &a : *v.attrs) sorted.append(&a);
       cp::sortRows(sorted.data(), sorted.size(), [&](const Attr *a, const Attr *b) {
@@ -2698,30 +2707,30 @@ struct TracePrinter {
       });
       size_t cur = 0;
       for (auto *a : sorted) {
-        out << " ";
+        out.put(' ');
         if (attrsPrinted >= maxAttrs) {
           elided(sorted.size() - cur, "attribute", "attributes");
           break;
         }
         auto n = st.symbols[a->name];
-        if (nixfe::isValidIdentifier(n)) out << n.str();
+        if (nixfe::isValidIdentifier(n)) put(n);
         else nixfe::printLiteralString(out, n);
-        out << " = ";
+        out.put(" = ");
         print(*a->value, depth + 1);
-        out << ";";
+        out.put(';');
         attrsPrinted++;
         cur++;
       }
-      out << " }";
+      out.put(" }");
       break;
     }
     case VType::List: {
-      if (v.listSize() && !seen.insert(&v).second) { out << "«repeated»"; break; }
-      if (depth >= maxDepth) { out << "[ ... ]"; break; }
-      out << "[";
+      if (v.listSize() && !firstTime(seen, &v)) { out.put("«repeated»"); break; }
+      if (depth >= maxDepth) { out.put("[ ... ]"); break; }
+      out.put('[');
       size_t cur = 0;
       for (size_t i = 0; i < v.listSize(); i++) {
-        out << " ";
+        out.put(' ');
         if (listPrinted >= maxList) {
           elided(v.listSize() - cur, "item", "items");
           break;
@@ -2730,35 +2739,43 @@ struct TracePrinter {
         listPrinted++;
         cur++;
       }
-      out << " ]";
+      out.put(" ]");
       break;
     }
     case VType::Lambda: {
       auto lam = cast<nd::LambdaOp>(v.thunk.node->def);
-      out << "«lambda";
-      if (auto n = lam.getName()) out << " " << n->str();
-      out << " @ " << st.showPos(nd::posOfOp(lam)) << "»";
+      out.put("«lambda");
+      if (auto n = lam.getName()) {
+        out.put(' ');
+        put(*n);
+      }
+      out.put(" @ ");
+      put(st.showPos(nd::posOfOp(lam)));
+      out.put("»");
       break;
     }
-    case VType::PrimOp: out << "«primop " << v.primOp->name << "»"; break;
+    case VType::PrimOp: out.put("«primop "); put(v.primOp->name); out.put("»"); break;
     case VType::PrimOpApp: {
       Value *p = &v;
       while (p->type == VType::PrimOpApp) p = p->app.left;
-      out << "«partially applied primop " << (p->type == VType::PrimOp ? p->primOp->name : "?") << "»";
+      out.put("«partially applied primop ");
+      if (p->type == VType::PrimOp) put(p->primOp->name);
+      else out.put('?');
+      out.put("»");
       break;
     }
-    case VType::Thunk: case VType::App: case VType::AttrApp: case VType::Failed: out << "«thunk»"; break;
-    case VType::Blackhole: out << "«potential infinite recursion»"; break;
+    case VType::Thunk: case VType::App: case VType::AttrApp: case VType::Failed: out.put("«thunk»"); break;
+    case VType::Blackhole: out.put("«potential infinite recursion»"); break;
     }
   }
 };
 } // namespace
 
-std::string EvalState::printValueForTrace(Value &v) {
-  std::ostringstream os;
-  TracePrinter p{*this, os, false};
+cp::Text EvalState::printValueForTrace(Value &v) {
+  cp::Text t;
+  TracePrinter p{*this, t, false};
   p.print(v, 0);
-  return os.str();
+  return t;
 }
 
 //===----------------------------------------------------------------------===//
@@ -2773,7 +2790,10 @@ nixfe::ParseOptions EvalState::parseOptions() {
   po.lintAbsolutePaths = settings.lintAbsolutePaths;
   po.lintShortPaths = settings.lintShortPaths;
   po.lintUrls = settings.lintUrls;
-  po.onWarning = [](const nixfe::ParseError &e) { std::cerr << formatParseError(e, "warning") << std::endl; };
+  po.onWarning = [](const nixfe::ParseError &e) {
+    cp::Text line = formatParseError(e, "warning");
+    nixsys::lineToStderr(line.data(), line.size());
+  };
   return po;
 }
 
@@ -2786,17 +2806,17 @@ static cp::Own<mlir::PassManager> makeOptimizer(mlir::MLIRContext &ctx, const Ev
     return true;
   }();
   (void)registered;
-  std::string text = pipelineText(settings);
+  cp::Text text = pipelineText(settings);
   auto pm = cp::own<mlir::PassManager>(&ctx); // anchored on any op
   pm->enableVerifier(false);
-  std::string err;
-  llvm::raw_string_ostream os(err);
+  llvm::SmallString<256> err;
+  llvm::raw_svector_ostream os(err);
   if (mlir::failed(mlir::parsePassPipeline(text, *pm, os)))
-    throw EvalError("invalid pass pipeline '" + text + "': " + err);
+    throw EvalError(cp::cat("invalid pass pipeline '", text, "': ", err));
   return pm;
 }
 
-nd::ExprOp EvalState::lowerToMLIR(nixfe::Origin *origin, const composite::MutableSeries<std::string> *scopeNames) {
+nd::ExprOp EvalState::lowerToMLIR(nixfe::Origin *origin, const composite::MutableSeries<composite::Text> *scopeNames) {
   nixfe::ParseOptions po = parseOptions();
   nixfe::GenOptions go;
   go.isBaseName = baseNameOf;
@@ -2806,7 +2826,7 @@ nd::ExprOp EvalState::lowerToMLIR(nixfe::Origin *origin, const composite::Mutabl
     // demand schedule devirtualizes it directly, which is the whole default pipeline.  Any other
     // pipeline would be skipped silently on every minted body, so refuse it.
     if (settings.optimize && pipelineText(settings) != "nix-prims")
-      throw EvalError("MLNIX_DEFER runs only the default pipeline 'nix-prims', not '" + pipelineText(settings) + "'");
+      throw EvalError(cp::cat("MLNIX_DEFER runs only the default pipeline 'nix-prims', not '", pipelineText(settings), "'"));
     auto pool = cp::own<nixfe::FilePool>(nextPoolId.fetch_add(1), origin, po);
     go.deferBodies = true;
     go.pool = pool.get();
@@ -2814,9 +2834,9 @@ nd::ExprOp EvalState::lowerToMLIR(nixfe::Origin *origin, const composite::Mutabl
   }
   if (scopeNames) {
     go.scoped = true;
-    for (const std::string &nm : *scopeNames) go.scopeNames.append(nm);
+    for (const cp::Text &nm : *scopeNames) go.scopeNames.append(nm.clone());
   }
-  std::string sym = "expr" + std::to_string(exprCounter++);
+  cp::Text sym = cp::cat("expr", exprCounter++);
   uint64_t t0 = statsEnabled ? nixsys::monotonicNs() : 0;
   nd::ExprOp op = nixfe::genExpr(*module, origin, po, sym, go);
   // The expression is IsolatedFromAbove and not yet referenced by any frame,
@@ -2849,25 +2869,27 @@ void EvalState::startPrelower() {
   pre->po.lintAbsolutePaths = pre->po.lintShortPaths = pre->po.lintUrls = nixfe::Lint::Ignore;
   pre->po.onWarning = nullptr;
   if (list) {
-    std::ifstream in(list); // one path a line, or a prefetch list (`F path`)
-    for (std::string line; std::getline(in, line);) {
+    cp::Text text; // one path a line, or a prefetch list (`F path`); no list, nothing to prelower
+    nixsys::readInto(list, text);
+    cp::eachLine(text.data(), text.size(), [&](const char *p, uint32_t n) {
+      std::string_view line(p, n);
       if (line.size() > 2 && line[1] == ' ') {
-        if (line[0] == 'F' && line.compare(line.size() - 4, 4, ".nix") == 0) pre->queue.append(line.substr(2));
+        if (line[0] == 'F' && line.size() >= 6 && line.ends_with(".nix")) pre->queue.append(cp::Text(line.substr(2)));
       } else if (!line.empty()) {
-        pre->queue.append(line);
+        pre->queue.append(cp::Text(line));
       }
-    }
+    });
   } else {
-    for (const std::string &f : nixprefetch::replayFiles) pre->queue.append(f);
+    for (const cp::Text &f : nixprefetch::replayFiles) pre->queue.append(f.clone());
   }
   unsigned n = 1;
-  if (const char *t = getenv("MLNIX_PRELOWER_THREADS")) n = unsigned(cp::max(1ul, cp::min(8ul, strtoul(t, nullptr, 10))));
+  if (const char *t = getenv("MLNIX_PRELOWER_THREADS")) n = unsigned(cp::max<uint64_t>(1, cp::min<uint64_t>(8, nixsys::readUnsigned(t).value)));
   for (unsigned i = 0; i < n; i++) pre->workers.append(nixsys::Thread::start([this] { prelowerLoop(); }));
 }
 
 void EvalState::prelowerLoop() {
   for (;;) {
-    std::string path;
+    cp::Text path;
     Prelowered *pl;
     {
       nixsys::Held lk(pre->m);
@@ -2879,8 +2901,8 @@ void EvalState::prelowerLoop() {
     }
     try {
       nixfe::Origin *origin = nixfe::newOrigin();
-      origin->name = path;
-      origin->path = path;
+      origin->name = path.clone();
+      origin->path = path.clone();
       origin->baseDir = nixstore::dirOf(path);
       origin->text = nixfe::Source::mapFile(path);
       if (origin->text) {
@@ -2927,14 +2949,14 @@ void EvalState::prelowerLoop() {
 }
 
 /// A new lowering of `path`, owned by the prelowering state and found by the path (called under pre->m).
-EvalState::Prelowered *EvalState::newPrelowered(const std::string &path) {
+EvalState::Prelowered *EvalState::newPrelowered(std::string_view path) {
   Prelowered *pl = pre->lowered[pre->lowered.append(cp::own<Prelowered>())].get();
   pre->byPath.set(path.data(), uint32_t(path.size()), pl, [&] { return pre->pathBytes.copy(path.data(), uint32_t(path.size())); });
   return pl;
 }
 
 /// The finished lowering of `resolved`, adopted into the evaluator's module (and optimized there: the prim folder is the evaluator's), or a null op.
-nd::ExprOp EvalState::takePrelowered(const std::string &resolved) {
+nd::ExprOp EvalState::takePrelowered(std::string_view resolved) {
   if (!pre) return {};
   Prelowered *pl;
   {
@@ -2955,7 +2977,7 @@ nd::ExprOp EvalState::takePrelowered(const std::string &resolved) {
   origins.append(pl->origin);
   nd::ExprOp op = pl->op;
   op->remove();
-  op.setSymName("expr" + std::to_string(exprCounter++));
+  op.setSymName(cp::cat("expr", exprCounter++));
   module->push_back(op);
   pl->mod = nullptr;
   if (settings.optimize && !pl->optimized) {
@@ -3050,8 +3072,8 @@ derivation (
 )
 )NIX";
 
-static std::string readSource(const std::string &path) {
-  if (path == "/__corepkgs__/fetchurl.nix") return corepkgsFetchurl;
+static cp::Text readSource(std::string_view path) {
+  if (path == "/__corepkgs__/fetchurl.nix") return cp::Text(corepkgsFetchurl);
   try {
     return nixstore::readFile(path);
   } catch (nixstore::Error &e) {
@@ -3059,19 +3081,20 @@ static std::string readSource(const std::string &path) {
   }
 }
 
-std::string EvalState::resolveExprPath(std::string path) {
-  if (path.rfind("/__corepkgs__/", 0) == 0) return path;
+cp::Text EvalState::resolveExprPath(std::string_view pathIn) {
+  cp::Text path(pathIn);
+  if (path.starts_with("/__corepkgs__/")) return path;
   // Follow symlinks (to the final target), then use default.nix for dirs.
   for (int i = 0; i < 1024; i++) {
     struct stat st;
     nixprefetch::note('L', path.c_str());
-    if (lstat(path.c_str(), &st) != 0) throw EvalError("path '" + path + "' does not exist");
+    if (lstat(path.c_str(), &st) != 0) throw EvalError(cp::cat("path '", path, "' does not exist"));
     if (!S_ISLNK(st.st_mode)) break;
     char buf[PATH_MAX + 1];
     ssize_t n = readlink(path.c_str(), buf, PATH_MAX);
     if (n < 0) break;
-    std::string tgt(buf, n);
-    if (tgt[0] != '/') tgt = nixstore::dirOf(path) + "/" + tgt;
+    cp::Text tgt(buf, size_t(n));
+    if (tgt.empty() || tgt[0] != '/') tgt = cp::cat(nixstore::dirOf(path), '/', tgt); // (tgt[0] of an empty standard string was its NUL)
     path = nixfe::canonPath(tgt);
   }
   struct stat st;
@@ -3080,15 +3103,15 @@ std::string EvalState::resolveExprPath(std::string path) {
   return path;
 }
 
-Value *EvalState::evalFile(const std::string &pathIn) {
-  std::string path = pathIn;
+Value *EvalState::evalFile(std::string_view pathIn) {
+  cp::Text path(pathIn);
   if (Value **hit = fileEvalCache.find(path.data(), uint32_t(path.size()))) return *hit;
-  std::string real = realisePath(path, nullptr);
-  std::string resolved = resolveExprPath(real);
+  cp::Text real = realisePath(path, nullptr);
+  cp::Text resolved = resolveExprPath(real);
   // Map back from the physical location when using a chroot store.
-  std::string logical = resolved;
-  if (!store->config().realRoot.empty() && resolved.rfind(store->config().realRoot, 0) == 0)
-    logical = resolved.substr(store->config().realRoot.size());
+  cp::Text logical = resolved.clone();
+  if (!store->config().realRoot.empty() && resolved.starts_with(store->config().realRoot))
+    logical = cp::Text(resolved.substr(store->config().realRoot.size()));
   if (Value **hit = fileEvalCache.find(logical.data(), uint32_t(logical.size()))) {
     Value *same = *hit; // read before the set, which may move the rows
     fileEvalCache.set(path.data(), uint32_t(path.size()), same, [&] { return copyString(path); });
@@ -3096,15 +3119,15 @@ Value *EvalState::evalFile(const std::string &pathIn) {
   }
 
   Value *result;
-  if (resolved.size() > 5 && resolved.substr(resolved.size() - 5) == ".mlir") {
+  if (resolved.size() > 5 && resolved.ends_with(".mlir")) {
     result = evalMLIRFile(resolved, "");
   } else {
     nixfe::Origin *origin = nixfe::newOrigin();
-    origin->name = logical;
-    origin->path = logical;
+    origin->name = logical.clone();
+    origin->path = logical.clone();
     origin->baseDir = nixstore::dirOf(logical);
     nixprefetch::note('F', resolved.c_str());
-    if (nixfe::pathLiterals) evaluatedFiles.append({logical, nixfe::pathLiterals->size()});
+    if (nixfe::pathLiterals) evaluatedFiles.append({logical.clone(), nixfe::pathLiterals->size()});
     origin->text = settings.mapSources ? nixfe::Source::mapFile(resolved) : nullptr;
     if (!origin->text) origin->text = nixfe::Source::fromString(readSource(resolved));
     nd::ExprOp adopted;
@@ -3124,39 +3147,39 @@ Value *EvalState::evalFile(const std::string &pathIn) {
   return result;
 }
 
-Value *EvalState::evalString(const std::string &text, const std::string &baseDir, const std::string &originName) {
+Value *EvalState::evalString(std::string_view text, std::string_view baseDir, std::string_view originName) {
   nixfe::Origin *origin = nixfe::newOrigin();
-  origin->name = originName;
-  origin->baseDir = baseDir;
-  origin->text = nixfe::Source::fromString(text);
+  origin->name.assign(originName);
+  origin->baseDir.assign(baseDir);
+  origin->text = nixfe::Source::fromString(cp::Text(text));
   origins.append(origin);
   return evalExprOp(lowerToMLIR(origin));
 }
 
-Value *EvalState::evalMLIRFile(const std::string &path, const std::string &sym) {
+Value *EvalState::evalMLIRFile(std::string_view path, std::string_view sym) {
   llvm::SourceMgr sm;
-  OwningOpRef<ModuleOp> m = parseSourceFile<ModuleOp>(path, sm, ParserConfig(&ctx));
-  if (!m) throw EvalError("failed to parse MLIR file '" + path + "'");
+  OwningOpRef<ModuleOp> m = parseSourceFile<ModuleOp>(llvm::StringRef(path), sm, ParserConfig(&ctx));
+  if (!m) throw EvalError(cp::cat("failed to parse MLIR file '", path, "'"));
   nd::ExprOp found;
   // Move all ops into our module (renaming symbols to avoid clashes).
   auto exprs = llvm::to_vector(m->getOps<nd::ExprOp>());
   for (auto e : exprs) {
-    bool match = sym.empty() ? !found : e.getSymName() == sym;
+    bool match = sym.empty() ? !found : e.getSymName() == llvm::StringRef(sym);
     e->remove();
-    e.setSymName("mlir" + std::to_string(exprCounter++));
+    e.setSymName(cp::cat("mlir", exprCounter++));
     module->getBody()->push_back(e);
     if (match && !found) found = e;
   }
-  if (!found) throw EvalError("no nix.expr found in '" + path + "'");
+  if (!found) throw EvalError(cp::cat("no nix.expr found in '", path, "'"));
   return evalExprOp(found);
 }
 
-std::string EvalState::realisePath(const std::string &path, PosPtr pos) {
+cp::Text EvalState::realisePath(std::string_view path, PosPtr pos) {
   // Store paths are realised through string context (realiseContext); here we
   // only map logical store paths to their physical location.
-  const std::string &sd = store->storeDir();
+  const cp::Text &sd = store->storeDir();
   if (path == sd || path == sd + "/" || nixstore::isInStore(sd, path)) return store->toReal(path);
-  return path;
+  return cp::Text(path);
 }
 
 void EvalState::realiseContext(const NixStringContext &ctx, PosPtr pos) {
@@ -3169,7 +3192,7 @@ void EvalState::realiseContext(const NixStringContext &ctx, PosPtr pos) {
       } else if (c[0] == '=') {
         store->buildDerivation(c + 1);
       } else if (!store->isValidPath(c)) {
-        throw EvalError("path '" + std::string(c) + "' is not valid", pos);
+        throw EvalError(cp::cat("path '", c, "' is not valid"), pos);
       }
     } catch (nixstore::Error &e) {
       throw EvalError(e.what(), pos);
@@ -3177,76 +3200,83 @@ void EvalState::realiseContext(const NixStringContext &ctx, PosPtr pos) {
   }
 }
 
-std::string EvalState::findFile(Value &searchPath, std::string_view name, PosPtr pos) {
+cp::Text EvalState::findFile(Value &searchPath, std::string_view name, PosPtr pos) {
   forceList(searchPath, pos);
   for (Value &e : searchPath.values()) {
     forceAttrs(e, pos);
-    std::string prefix;
-    if (const Attr *a = e.attrs->get(s.prefix)) prefix = std::string(forceStringNoCtx(*a->value, pos));
+    cp::Text prefix;
+    if (const Attr *a = e.attrs->get(s.prefix)) prefix = cp::Text(forceStringNoCtx(*a->value, pos));
     const Attr *pa = e.attrs->get(s.path);
     if (!pa) throw EvalError("attribute 'path' missing", pos);
     NixStringContext ctx;
-    std::string p = coerceToString(*pa->value, ctx, false, false, pos);
+    cp::Text p = coerceToString(*pa->value, ctx, false, false, pos);
     realiseContext(ctx, pos);
-    std::string rest;
+    cp::Text rest;
     if (!prefix.empty()) {
       if (name.substr(0, prefix.size()) != prefix) continue;
       if (name.size() > prefix.size() && name[prefix.size()] != '/') continue;
-      rest = std::string(name.substr(prefix.size()));
+      rest = cp::Text(name.substr(prefix.size()));
     } else {
-      rest = "/" + std::string(name);
+      rest = cp::cat("/", name);
     }
-    if (p.find("://") != std::string::npos) continue; // URL entries are not fetched implicitly
-    std::string full = nixfe::canonPath(p + rest);
+    if (p.find("://") != cp::npos) continue; // URL entries are not fetched implicitly
+    cp::Text full = nixfe::canonPath(p + rest);
     if (nixstore::pathExists(realisePath(full, pos))) return full;
   }
-  if (name.substr(0, 4) == "nix/") return "/__corepkgs__" + std::string(name.substr(3));
+  if (name.substr(0, 4) == "nix/") return cp::cat("/__corepkgs__", name.substr(3));
   if (settings.pureEval)
-    throw ThrownError("cannot look up '<" + std::string(name) + ">' in pure evaluation mode (use '--impure' to override)", pos);
-  throw ThrownError("file '" + std::string(name) +
-                        "' was not found in the Nix search path (add it using $NIX_PATH or -I)",
-                    pos);
+    throw ThrownError(cp::cat("cannot look up '<", name, ">' in pure evaluation mode (use '--impure' to override)"), pos);
+  throw ThrownError(cp::cat("file '", name, "' was not found in the Nix search path (add it using $NIX_PATH or -I)"), pos);
 }
 
 //===----------------------------------------------------------------------===//
 // Error formatting
 //===----------------------------------------------------------------------===//
 
-static std::string chomp(std::string s) {
+static cp::Text chomp(cp::Text s) {
   while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\n' || s.back() == '\r')) s.pop_back();
   return s;
 }
 
-static void appendCodeLines(std::string &out, std::string_view text, unsigned line, unsigned col,
+static void appendCodeLines(cp::Text &out, std::string_view text, unsigned line, unsigned col,
                             unsigned indent = 7) {
-  composite::MutableSeries<std::string> lines;
+  composite::MutableSeries<std::string_view> lines; // windows on `text`, which outlives them
   size_t start = 0;
   while (true) {
     size_t nl = text.find('\n', start);
     if (nl == std::string_view::npos) {
-      lines.append(std::string(text.substr(start)));
+      lines.append(text.substr(start));
       break;
     }
-    lines.append(std::string(text.substr(start, nl - start)));
+    lines.append(text.substr(start, nl - start));
     start = nl + 1;
   }
   auto fmtLine = [&](unsigned n) {
     char buf[16];
     snprintf(buf, sizeof buf, "%5u", n);
-    return chomp(std::string(indent + 1, ' ') + buf + "| " + lines[n - 1]);
+    cp::Text l;
+    l.put(indent + 1, ' ');
+    l.put(buf).put("| ").put(lines[n - 1]);
+    return chomp(cp::mv(l));
   };
-  if (line >= 2 && line - 1 <= lines.size()) out += "\n" + fmtLine(line - 1);
+  if (line >= 2 && line - 1 <= lines.size()) out.put('\n').put(fmtLine(line - 1));
   if (line >= 1 && line <= lines.size()) {
-    out += "\n" + fmtLine(line);
-    if (col > 0) out += "\n" + std::string(indent, ' ') + "      |" + std::string(col, ' ') + "^";
+    out.put('\n').put(fmtLine(line));
+    if (col > 0) {
+      out.put('\n');
+      out.put(indent, ' ');
+      out.put("      |");
+      out.put(col, ' ');
+      out.put('^');
+    }
   }
-  if (line + 1 <= lines.size()) out += "\n" + fmtLine(line + 1);
+  if (line + 1 <= lines.size()) out.put('\n').put(fmtLine(line + 1));
 }
 
-static std::string sourceFor(EvalState *state, const std::string &file) {
+static cp::Text sourceFor(EvalState *state, std::string_view file) {
   if (state)
     for (auto &o : state->origins)
-      if (o->name == file && o->text) return std::string(o->text->view());
+      if (o->name == file && o->text) return cp::Text(o->text->view());
   if (!file.empty() && file[0] == '/' && nixstore::pathExists(file)) {
     try {
       return nixstore::readFile(file);
@@ -3256,19 +3286,19 @@ static std::string sourceFor(EvalState *state, const std::string &file) {
   return "";
 }
 
-static void appendPos(std::string &out, EvalState *state, const std::string &file, unsigned line, unsigned col) {
-  out += "\n       at " + file + ":" + std::to_string(line) + ":" + std::to_string(col) + ":";
-  std::string text = sourceFor(state, file);
+static void appendPos(cp::Text &out, EvalState *state, std::string_view file, unsigned line, unsigned col) {
+  out.put("\n       at ").put(file).put(':').putUnsigned(line).put(':').putUnsigned(col).put(':');
+  cp::Text text = sourceFor(state, file);
   if (!text.empty()) appendCodeLines(out, text, line, col);
 }
 
-std::string formatError(EvalState *state, const EvalError &e) {
-  std::string out;
+cp::Text formatError(EvalState *state, const EvalError &e) {
+  cp::Text out;
   // Traces are printed outermost first.
   if (state && state->settings.showTrace) {
     for (auto *it = e.traces.end(); it != e.traces.begin();) {
       --it;
-      out += "\n       … " + it->msg;
+      out.put("\n       … ").put(it->msg);
       if (auto f = nd::decodePos(it->pos)) {
         appendPos(out, state, f->file, f->line, f->col);
         out += "\n";
@@ -3277,24 +3307,25 @@ std::string formatError(EvalState *state, const EvalError &e) {
       }
     }
   }
-  std::string msg = e.msg;
+  const cp::Text &msg = e.msg;
   // Indent continuation lines of the message.
-  std::string ind;
+  cp::Text ind;
   for (size_t i = 0; i < msg.size(); i++) {
     ind += msg[i];
     if (msg[i] == '\n') ind += "       ";
   }
-  std::string res = out.empty() ? "error: " + ind : "error:" + out + "\n       error: " + ind;
+  cp::Text res = out.empty() ? cp::cat("error: ", ind) : cp::cat("error:", out, "\n       error: ", ind);
   if (auto f = nd::decodePos(e.pos)) appendPos(res, state, f->file, f->line, f->col);
   return res;
 }
 
-std::string formatParseError(const nixfe::ParseError &e, const char *kind) {
+cp::Text formatParseError(const nixfe::ParseError &e, const char *kind) {
   unsigned indent = strlen(kind) + 2;
-  std::string res = std::string(kind) + ": " + std::string(e.what());
+  cp::Text res = cp::cat(kind, ": ", e.what());
   if (e.pos.valid() && e.origin) {
-    res += "\n" + std::string(indent, ' ') + "at " + e.origin->name + ":" + std::to_string(e.pos.line) + ":" +
-           std::to_string(e.pos.col) + ":";
+    res.put('\n');
+    res.put(indent, ' ');
+    res.put("at ").put(e.origin->name).put(':').putUnsigned(e.pos.line).put(':').putUnsigned(e.pos.col).put(':');
     if (e.origin->text) appendCodeLines(res, e.origin->text->view(), e.pos.line, e.pos.col, indent);
   }
   return res;

@@ -34,10 +34,15 @@ static ParseResult parseAttrPath(OpAsmParser &p, SmallVectorImpl<nixfe::Name> &p
   if (p.parseLSquare())
     return failure();
   do {
-    std::string lit;
+    StringAttr lit;
     OpAsmParser::UnresolvedOperand operand;
-    if (succeeded(p.parseOptionalString(&lit))) {
-      path.push_back(nixfe::Name::persist(lit));
+    // The string alone, as parseOptionalString read it (which fills a standard string): the type given keeps the attribute parser
+    // from reading a `: type` after it.
+    OptionalParseResult s = p.parseOptionalAttribute(lit, p.getBuilder().getNoneType());
+    if (s.has_value()) {
+      if (failed(*s))
+        return failure();
+      path.push_back(nixfe::Name::persist(lit.getValue()));
     } else {
       OptionalParseResult r = p.parseOptionalOperand(operand);
       if (!r.has_value())
@@ -182,12 +187,12 @@ void nix::setPos(Operation *op, uint64_t word) {
 uint64_t nix::packLoc(Location loc) {
   auto f = dyn_cast<FileLineColLoc>(loc);
   if (!f) return 0;
-  return nixfe::PackedPos::pack(nixfe::FileTable::get().add(f.getFilename().str()), f.getLine(), f.getColumn());
+  return nixfe::PackedPos::pack(nixfe::FileTable::get().add(f.getFilename().getValue()), f.getLine(), f.getColumn());
 }
 
 Location nix::locOfWord(MLIRContext *ctx, uint64_t word) {
   if (!nixfe::PackedPos::is(word)) return UnknownLoc::get(ctx);
-  std::string file = nixfe::FileTable::get().name(nixfe::PackedPos::file(word));
+  std::string_view file = nixfe::FileTable::get().name(nixfe::PackedPos::file(word));
   if (file.empty()) return UnknownLoc::get(ctx);
   return FileLineColLoc::get(ctx, file, nixfe::PackedPos::line(word), nixfe::PackedPos::col(word));
 }
@@ -196,12 +201,12 @@ std::optional<SrcPos> nix::decodePos(const void *p) {
   uint64_t raw = reinterpret_cast<uintptr_t>(p);
   if (!raw) return std::nullopt;
   auto ofWord = [](uint64_t w) -> std::optional<SrcPos> {
-    std::string file = nixfe::FileTable::get().name(nixfe::PackedPos::file(w));
+    std::string_view file = nixfe::FileTable::get().name(nixfe::PackedPos::file(w));
     if (file.empty()) return std::nullopt;
-    return SrcPos{std::move(file), nixfe::PackedPos::line(w), nixfe::PackedPos::col(w)};
+    return SrcPos{file, nixfe::PackedPos::line(w), nixfe::PackedPos::col(w)};
   };
   auto ofLoc = [](Location l) -> std::optional<SrcPos> {
-    if (auto f = dyn_cast<FileLineColLoc>(l)) return SrcPos{f.getFilename().str(), f.getLine(), f.getColumn()};
+    if (auto f = dyn_cast<FileLineColLoc>(l)) return SrcPos{f.getFilename().getValue(), f.getLine(), f.getColumn()}; // the context's bytes
     return std::nullopt;
   };
   if (nixfe::PackedPos::is(raw)) return ofWord(raw);
@@ -274,10 +279,10 @@ OpFoldResult ConcatStringsOp::fold(FoldAdaptor adaptor) {
       return {};
   // `"a" + "b"`, `"${"a"}"`: all string literals.
   if (llvm::all_of(ops, [](Attribute a) { return isa<StringAttr>(a); })) {
-    std::string s;
+    composite::Text s;
     for (Attribute a : ops)
       s += cast<StringAttr>(a).getValue();
-    return StringAttr::get(getContext(), s);
+    return StringAttr::get(getContext(), llvm::StringRef(s));
   }
   if (getForceString())
     return {};

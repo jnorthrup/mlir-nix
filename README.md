@@ -22,6 +22,12 @@ filled and then drained. The C++ side is `include/Composite/`. Tokens are (start
 regions of series cells in an arena, positions and names are packed words. Some of it is consumed by the evaluator and some is built and
 tested only (the `join` dialect and its densify pass); [docs/COMPOSITE.md](docs/COMPOSITE.md) says which.
 
+**No `std::string`.** Owning text is `composite::Text` (`include/Composite/Text.h`): chars in a `MutableSeries` with a NUL after the last,
+so `c_str()` costs nothing, and a copy is `clone()`, said out loud. What only reads is a window, `Chars` (`CharSeries.h`) or
+`std::string_view`; a `Text` converts to either, and to `llvm::StringRef`, at no cost. `lib/`, `include/` and `tools/` name no
+`std::string`, `std::to_string`, `std::sto*`, string stream or `<iostream>`; the checks under `scripts/` keep the standard library as the
+oracle `Text` is tested against (`vocab-check.cc`: 60,000 random operations).
+
 **Abstractions offloaded to MLIR dialects.** The language is the core `nix` dialect (28 ops). All 105 base-environment primops are declared
 as ops of 24 IRDL dialects in `include/NixDialect/NixPrims.irdl.mlir` and defined at load time by a loader that names none of them. Passes
 (`nix-prims`, `nix-fold`, `nix-dce`) and MLIR's own `cse` and `canonicalize` work on the IR because identity and effects are declared on
@@ -80,8 +86,9 @@ exists yet beyond the query and opt tools. The next steps the measurements suppo
   what moving them across is worth, and the design).
 - Keep the footprint down: `mlnix` still holds about 1.7 times Nix's peak memory (1072 MB against 630 MB on nixos-toplevel, 1161 MB
   prelowered), and the fill-then-drain containers of the evaluator are mapped in [docs/FILL-DRAIN.md](docs/FILL-DRAIN.md).
-- Collapse the primop set into its declaration: it is declared once in IRDL and registered again in C++, and `scripts/check-prims.py` only
-  checks that the two agree. And give the syntax a dialect of its own (Google's JSIR is the existence proof, [docs/MLIR.md](docs/MLIR.md)).
+- Collapse the primop set into its declaration: a primop's arity is read from its IRDL declaration (one registered without one stops the
+  evaluator at start-up), but each name is still said twice, in IRDL and where C++ registers it, and `scripts/check-prims.py` checks that the
+  two agree. And give the syntax a dialect of its own (Google's JSIR is the existence proof, [docs/MLIR.md](docs/MLIR.md)).
 - Parse into the IR with no syntax tree, as in [Sam H. Smith's talk](https://www.youtube.com/watch?v=NxiKlnUtyio). The front end builds a
   tree (5.4 to 5.5 bytes per byte of source, 180 to 190 MB of the NixOS toplevel's footprint) and walks it into ops; the tree, its printer and the
   walk are 1,185 lines of C++, the largest cut on the table now that the C++ total is ratcheted down (`scripts/cxx-lines.py`).

@@ -57,17 +57,21 @@ def Nix_NameProp : Property<"::nixfe::Name", "name", "const ::nixfe::Name &"> {
     return ::mlir::success();
   }];
   let hashProperty = "::nixfe::hash_value($_storage)";
+  // A string attribute read with a type of its own (none), so that a trailing `: type` is left alone; its text is copied into the Name.
   let parser = [{
-    std::string text;
-    if (::mlir::failed($_parser.parseString(&text)))
+    ::mlir::StringAttr text;
+    if (::mlir::failed($_parser.parseAttribute(text, $_parser.getBuilder().getNoneType())))
       return ::mlir::failure();
-    $_storage = ::nixfe::Name::persist(text);
+    $_storage = ::nixfe::Name::persist(text.getValue());
   }];
   let optionalParser = [{
-    std::string text;
-    if (::mlir::failed($_parser.parseOptionalString(&text)))
+    ::mlir::StringAttr text;
+    ::mlir::OptionalParseResult parsed = $_parser.parseOptionalAttribute(text, $_parser.getBuilder().getNoneType());
+    if (!parsed.has_value())
       return std::nullopt;
-    $_storage = ::nixfe::Name::persist(text);
+    if (::mlir::failed(*parsed))
+      return ::mlir::failure();
+    $_storage = ::nixfe::Name::persist(text.getValue());
   }];
   let printer = "$_printer.printString($_storage.str())";
   let readFromMlirBytecode = [{
@@ -166,7 +170,7 @@ def Nix_Dialect : Dialect {
     }
     /// Grouping of the continent dialects (`nix.scope` / `nix.continent` in the IRDL).
     struct DialectInfo {
-      std::string scope, continent;
+      ::llvm::StringRef scope, continent; // views on the IRDL declaration's attributes, which the context keeps for its whole life
     };
     ::llvm::StringMap<DialectInfo> continents;
 

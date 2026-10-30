@@ -58,6 +58,10 @@ template <class A, class B> struct Join {
   constexpr const B &second() const { return b; }
   /// A Series over memory gives its pointer back.
   constexpr auto data() const requires kPtr<B> { return b.p; }
+  /// A window of characters is any view made of a pointer and a count (std::string_view, llvm::StringRef): the old words take it as it is.
+  template <class V> requires(same<A, uint32_t> && same<B, Ptr<const char>> && !same<V, Join> && __is_trivially_copyable(V) && sizeof(V) == 2 * sizeof(void *) &&
+                              __is_constructible(V, const char *, size_t))
+  constexpr operator V() const { return V(b.p, size_t(a)); }
   constexpr decltype(auto) operator[](const A &k) const {
     return b(k);
   }

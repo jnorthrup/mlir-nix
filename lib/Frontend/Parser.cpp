@@ -18,6 +18,7 @@
 #include "Nix/Confix.h"
 #include "Nix/LexRules.h"
 #include "Nix/MLIRGen.h"
+#include "Nix/Numbers.h"
 #include "Nix/Pos.h"
 #include "mlir/IR/Builders.h"
 #include "llvm/ADT/ArrayRef.h"
@@ -32,11 +33,10 @@
 #include <cstring>
 #include <map>
 #include <optional>
-#include <sstream>
 #include <variant>
 
 namespace nixfe {
-PathLiterals *pathLiterals = nullptr;
+composite::TextSet *pathLiterals = nullptr;
 using composite::α;
 
 namespace {
@@ -57,10 +57,10 @@ struct Token {
   Pos pos;
 };
 
-std::string tokName(const Token &t) {
-  if (t.t != T_CHAR) return stringifyTok(t.t).str();
-  if ((unsigned char)t.ch >= 0x80) return "invalid token";
-  return std::string("'") + t.ch + "'";
+composite::Text tokName(const Token &t) {
+  if (t.t != T_CHAR) return composite::Text(stringifyTok(t.t));
+  if ((unsigned char)t.ch >= 0x80) return composite::Text("invalid token");
+  return composite::cat("'", t.ch, "'");
 }
 
 using namespace lex; // the character classes and matchers shared with the Confix scan
@@ -139,7 +139,7 @@ struct Lexer : public lex::Rules {
     return q ? static_cast<size_t>(static_cast<const char *>(q) - src.data()) : src.size();
   }
 
-  [[noreturn]] void error(const std::string &msg, size_t off) {
+  [[noreturn]] void error(std::string_view msg, size_t off) {
     throw ParseError(msg, posAt(off), origin);
   }
 
@@ -148,13 +148,13 @@ struct Lexer : public lex::Rules {
   const ParseOptions &opts;
   /// Texts that are not slices of the input (unescaped strings, `''$`, ...), appended and never
   /// mutated.  Deque: entries do not move.  The four fixed ones are kFixed (a span of second() 1).
-  composite::MutableSeries<std::string, composite::Chunked<std::string>> derived;
+  composite::MutableSeries<composite::Text, composite::Chunked<composite::Text>> derived;
   static constexpr std::string_view kFixed[] = {"$", "''", "'", "~/"};
   enum Fixed : uint32_t { F_DOLLAR, F_TWO_QUOTES, F_QUOTE, F_HOME };
   void setSlice(Token &t, size_t from, size_t to) { t.span = join::TwInt(uint32_t(from), uint32_t(to)); }
   void setFixed(Token &t, Fixed f) { t.derived = true; t.span = join::TwInt(uint32_t(f), 1); }
-  void setDerived(Token &t, std::string s) {
-    derived.append(std::move(s));
+  void setDerived(Token &t, composite::Text s) {
+    derived.append(composite::mv(s));
     t.derived = true;
     t.span = join::TwInt(uint32_t(derived.size() - 1), 0);
   }
@@ -173,8 +173,8 @@ struct Lexer : public lex::Rules {
   State top() { return stack.back(); }
   void push(State s) { stack.append(s); }
   void pop() { if (stack.size() > 1) stack.pop(); }
-  static std::string unescapeStr(std::string_view s) {
-    std::string t;
+  static composite::Text unescapeStr(std::string_view s) {
+    composite::Text t;
     t.reserve(s.size());
     for (size_t i = 0; i < s.size();) {
       char c = s[i++];
@@ -454,7 +454,6 @@ struct Lexer : public lex::Rules {
     lex::Match best = matchDefault(i, c); // the longest rule, the earlier winning a tie (LexRules.h)
 
     size_t len = best.len;
-    auto number = [&] { return std::string(src.substr(i, len)); }; // strtoull/strtod need a NUL
     int r = best.rule;
     p = i + len;
     if (r < lex::R_OPERATOR) { t.t = kwTok[r]; return true; }
@@ -467,22 +466,19 @@ struct Lexer : public lex::Rules {
     switch (r) {
     case lex::R_ID: t.t = T_ID; setSlice(t, i, i + len); return true;
     case lex::R_INT: {
-      errno = 0;
-      char *end;
-      std::string txt = number();
-      unsigned long long v = strtoull(txt.c_str(), &end, 10);
-      if (errno || v > (unsigned long long)INT64_MAX)
-        error("invalid integer '" + txt + "'", i);
+      composite::text::Reading n = nixsys::readUnsigned(src.substr(i, len)); // the facet reads the lexeme where it lies: no NUL, no copy
+      if (n.overflow || n.value > (uint64_t)INT64_MAX)
+        error(composite::cat("invalid integer '", src.substr(i, len), "'"), i);
       t.t = T_INT;
-      t.i = (int64_t)v;
+      t.i = (int64_t)n.value;
       return true;
     }
     case lex::R_FLOAT:
       errno = 0;
       {
-        std::string txt = number();
+        nixsys::CStr txt(src.substr(i, len)); // strtod needs a NUL: the lexeme is copied to the stack (CStr), not to the heap
         t.f = strtod(txt.c_str(), nullptr);
-        if (errno) error("invalid float '" + txt + "'", i);
+        if (errno) error(composite::cat("invalid float '", src.substr(i, len), "'"), i);
       }
       t.t = T_FLOAT;
       return true;
@@ -624,16 +620,16 @@ struct Parser {
     done();
     return e;
   }
-  std::string show() {
+  composite::Text show() {
     Node e = top();
-    return txt(e);
+    return composite::Text(txt(e));
   }
 
   nd::ExprOp genTop(llvm::StringRef sym) {
     b.setInsertionPointToEnd(module.getBody());
     auto op = nd::ExprOp::create(b, noLoc(), b.getStringAttr(sym),
-                                 origin->path.empty() ? mlir::StringAttr() : b.getStringAttr(origin->path),
-                                 b.getStringAttr(origin->baseDir));
+                                 origin->path.empty() ? mlir::StringAttr() : b.getStringAttr(llvm::StringRef(origin->path)),
+                                 b.getStringAttr(llvm::StringRef(origin->baseDir)));
     topBlock = new mlir::Block();
     op.getBody().push_back(topBlock);
     b.setInsertionPointToEnd(topBlock);
@@ -724,7 +720,9 @@ struct Parser {
   /// Every binding of the parse: the scopes' rows, a fixed buffer that only grows while the parse runs.
   composite::Cursor<Name, uint32_t, Value> binds{BindCol{}};
   /// Show: the text of each node printed, a row each.
-  composite::MutableSeries<std::string> texts;
+  composite::MutableSeries<composite::Text> texts; // a row is never written to once it is made: a window on its bytes (txt) holds
+  /// stripIndentation: the piece being rewritten, one for all (the allocation is made once, not for each piece).
+  composite::Text piece;
   /// The bindings band being parsed: the statement it is at, and that statement's static path.  A set literal that is a
   /// binding's whole value links to the band it is bound in (`up`): what the bindings after it add can land in it.
   struct Ctx {
@@ -778,14 +776,14 @@ struct Parser {
   }
 
   [[noreturn]] void unexpected(std::string_view expecting = {}) {
-    std::string msg = "syntax error, unexpected " + tokName(cur());
-    if (!expecting.empty()) msg += ", expecting " + std::string(expecting);
+    composite::Text msg = composite::cat("syntax error, unexpected ", tokName(cur()));
+    if (!expecting.empty()) msg.put(", expecting ").put(expecting);
     throw ParseError(msg, cur().pos, origin);
   }
-  [[noreturn]] void error(const std::string &msg, Pos p) { throw ParseError(msg, p, origin); }
+  [[noreturn]] void error(std::string_view msg, Pos p) { throw ParseError(msg, p, origin); }
   void expectChar(char c, std::string_view expecting = {}) {
     if (!atChar(c)) {
-      if (expecting.empty()) unexpected(std::string("'") + c + "'");
+      if (expecting.empty()) unexpected(composite::cat("'", c, "'"));
       unexpected(expecting);
     }
     take();
@@ -794,7 +792,7 @@ struct Parser {
     if (cur().t != t) unexpected(what);
     take();
   }
-  std::string fmtPos(Pos p) { return origin->name + ":" + std::to_string(p.line) + ":" + std::to_string(p.col); }
+  composite::Text fmtPos(Pos p) { return composite::cat(origin->name, ':', p.line, ':', p.col); }
   void done() {
     if (orphans) error("internal error: a set was given names ahead that no binding gave it", Pos{});
     if (undefinedErr) throw *undefinedErr;
@@ -898,7 +896,7 @@ struct Parser {
     s.rows = ::join::TwInt(s.rows.first(), s.rows.second() + 1);
   }
   void undefined(Name n, Pos p) {
-    ParseError e("undefined variable '" + n.toString() + "'", p, origin);
+    ParseError e(composite::cat("undefined variable '", n.str(), "'"), p, origin);
     if (minting) throw e;
     if (!undefinedErr) undefinedErr = e;
   }
@@ -914,9 +912,9 @@ struct Parser {
     n.v = v;
     return n;
   }
-  Node text(std::string s, Kind k, Pos p) {
+  Node text(composite::Text s, Kind k, Pos p) {
     Node n = mk(k, p);
-    n.shownAt = texts.append(std::move(s));
+    n.shownAt = texts.append(composite::mv(s));
     return n;
   }
   /// The value of a node (Gen): a set or a string is made when it is first used.
@@ -929,24 +927,31 @@ struct Parser {
     }
     return n.v;
   }
-  std::string txt(Node &n) {
+  /// The text of a node (Show): a window on its row of `texts`.
+  std::string_view txt(Node &n) {
     if (n.k == K_SET) {
-      std::string s = showSet(n.set);
-      n.shownAt = texts.append(std::move(s));
+      composite::Text s = showSet(n.set);
+      n.shownAt = texts.append(composite::mv(s));
       n.k = K_EXPR;
     }
     return texts[n.shownAt];
   }
-  static std::string ident(Name n) {
-    std::ostringstream os;
-    printIdentifier(os, n.str());
-    return os.str();
+  static composite::Text ident(Name n) {
+    composite::Text t;
+    printIdentifier(t, n.str());
+    return t;
   }
-  std::string showPath(llvm::ArrayRef<Comp> path) {
-    std::string s;
+  composite::Text showPath(llvm::ArrayRef<Comp> path) {
+    composite::Text s;
     for (const Comp &c : path) {
       if (!s.empty()) s += '.';
-      s += c.computed() ? "\"${" + (mode == Mode::Show ? texts[c.expr.shownAt] : std::string()) + "}\"" : ident(c.name);
+      if (c.computed()) {
+        s.put("\"${");
+        if (mode == Mode::Show) s.put(texts[c.expr.shownAt]);
+        s.put("}\"");
+      } else {
+        s.put(ident(c.name));
+      }
     }
     return s;
   }
@@ -994,9 +999,10 @@ struct Parser {
   }
   Node call(Pos p, Node &f, llvm::MutableArrayRef<Node> args) {
     if (mode == Mode::Show) {
-      std::string s = "(" + txt(f);
-      for (Node &a : args) s += " " + txt(a);
-      return text(s + ")", K_CALL, p);
+      composite::Text s = composite::cat("(", txt(f));
+      for (Node &a : args) s.put(' ').put(txt(a));
+      s.put(')');
+      return text(composite::mv(s), K_CALL, p);
     }
     if (mode == Mode::Skip) return mk(K_CALL, p);
     Value fv = val(f);
@@ -1006,10 +1012,11 @@ struct Parser {
   /// `(f a) b` is `f a b` (upstream's makeCall): an argument after a call is one more argument of that call.
   Node extend(Node f, llvm::MutableArrayRef<Node> args) {
     if (mode == Mode::Show) {
-      std::string s = texts[f.shownAt];
+      composite::Text s = texts[f.shownAt].clone();
       s.pop_back();
-      for (Node &a : args) s += " " + txt(a);
-      f.shownAt = texts.append(s + ")");
+      for (Node &a : args) s.put(' ').put(txt(a));
+      s.put(')');
+      f.shownAt = texts.append(composite::mv(s));
     } else if (mode == Mode::Gen) {
       auto ap = f.v.getDefiningOp<nd::ApplyOp>();
       llvm::SmallVector<Value> av(ap.getArgs().begin(), ap.getArgs().end());
@@ -1023,9 +1030,9 @@ struct Parser {
     if (mode == Mode::Show) {
       for (Comp &c : path)
         if (c.computed()) txt(c.expr);
-      std::string s = "(" + txt(e) + ")." + showPath(path);
-      if (def) s += " or (" + txt(*def) + ")";
-      return text(s, K_EXPR, p);
+      composite::Text s = composite::cat("(", txt(e), ").", showPath(path));
+      if (def) s.put(" or (").put(txt(*def)).put(')');
+      return text(composite::mv(s), K_EXPR, p);
     }
     if (mode == Mode::Skip) return mk(K_EXPR, p);
     Value base = val(e);
@@ -1042,7 +1049,7 @@ struct Parser {
     if (mode == Mode::Show) {
       for (Comp &c : path)
         if (c.computed()) txt(c.expr);
-      return text("((" + txt(e) + ") ? " + showPath(path) + ")", K_EXPR, p);
+      return text(composite::cat("((", txt(e), ") ? ", showPath(path), ")"), K_EXPR, p);
     }
     if (mode == Mode::Skip) return mk(K_EXPR, p);
     Value base = val(e);
@@ -1055,14 +1062,14 @@ struct Parser {
     return mk(K_EXPR, p, nd::HasAttrOp::create(b, noLoc(), valTy(), base, dyn, comps, at(p)));
   }
   Node not_(Pos p, Node e) {
-    if (mode == Mode::Show) return text("(! " + txt(e) + ")", K_EXPR, p);
+    if (mode == Mode::Show) return text(composite::cat("(! ", txt(e), ")"), K_EXPR, p);
     if (mode == Mode::Skip) return mk(K_EXPR, p);
     return mk(K_EXPR, p, nd::NotOp::create(b, noLoc(), valTy(), val(e), at(p)));
   }
   enum Bin { B_EQ, B_NEQ, B_AND, B_OR, B_IMPL, B_UPDATE, B_CONCAT };
   Node bin(Bin k, Pos p, Node &l, Node &r) {
     static const char *const ops[] = {"==", "!=", "&&", "||", "->", "//", "++"};
-    if (mode == Mode::Show) return text("(" + txt(l) + " " + ops[k] + " " + txt(r) + ")", K_EXPR, p);
+    if (mode == Mode::Show) return text(composite::cat("(", txt(l), " ", ops[k], " ", txt(r), ")"), K_EXPR, p);
     if (mode == Mode::Skip) return mk(K_EXPR, p);
     Value a = val(l), c = val(r);
     int64_t w = at(p);
@@ -1080,25 +1087,26 @@ struct Parser {
   }
   Node concat(Pos p, bool forceString, llvm::MutableArrayRef<Node> parts) {
     if (mode == Mode::Show) {
-      std::string s = "(";
-      for (Node &x : parts) s += (s.size() > 1 ? " + " : "") + txt(x);
-      return text(s + ")", K_EXPR, p);
+      composite::Text s("(");
+      for (Node &x : parts) s.put(s.size() > 1 ? " + " : "").put(txt(x));
+      s.put(')');
+      return text(composite::mv(s), K_EXPR, p);
     }
     if (mode == Mode::Skip) return mk(K_EXPR, p);
     auto vs = llvm::to_vector(parts |α| [&](Node &x) { return positioned(val(x), x.pos); });
     return mk(K_EXPR, p, nd::ConcatStringsOp::create(b, noLoc(), valTy(), vs, forceString, at(p)));
   }
   Node intLit(int64_t v, Pos p) {
-    if (mode == Mode::Show) return text(std::to_string(v), K_EXPR, p);
+    if (mode == Mode::Show) return text(composite::str(v), K_EXPR, p);
     return mk(K_EXPR, p, mode == Mode::Gen ? Value(nd::IntOp::create(b, noLoc(), valTy(), b.getI64IntegerAttr(v))) : Value());
   }
   Node strLit(Name t, Pos p) {
     Node n = mk(K_STR, p);
     n.text = t;
     if (mode == Mode::Show) {
-      std::ostringstream os;
-      printLiteralString(os, t.str());
-      n.shownAt = texts.append(os.str());
+      composite::Text lit;
+      printLiteralString(lit, t.str());
+      n.shownAt = texts.append(composite::mv(lit));
     }
     return n;
   }
@@ -1371,7 +1379,7 @@ struct Parser {
     }
   }
   [[noreturn]] void dupAttr(llvm::ArrayRef<Comp> path, Pos pos, Pos prev) {
-    error("attribute '" + showPath(path) + "' already defined at " + fmtPos(prev), pos);
+    error(composite::cat("attribute '", showPath(path), "' already defined at ", fmtPos(prev)), pos);
   }
   /// Where the value of `path = ...;` in set si is parsed, and the set a literal there merges with (NixOS/nix#9020: a
   /// binding that lands in a `rec` set is parsed in its scope).  A path goes through the sets that will be one when
@@ -1449,7 +1457,7 @@ struct Parser {
   /// The value of a group member's placeholder (Gen); a name it was given ahead that nothing bound is an orphan.
   Value member(Scope &s, const Name &n) {
     Value *v = lookup(s, n, hashOf(n));
-    if (!v) error("internal error: the heads of a set missed '" + n.toString() + "'", Pos{});
+    if (!v) error(composite::cat("internal error: the heads of a set missed '", n.str(), "'"), Pos{});
     return *v;
   }
   /// Names a group was given ahead that no binding gave it: only a binding the parse refuses can leave one, so the parse
@@ -1495,24 +1503,25 @@ struct Parser {
     release(si);
     return r;
   }
-  std::string showSet(uint32_t si) {
-    std::string r = sets[si].rec ? "rec { " : "{ ";
-    return r + bindings(si) + "}";
+  composite::Text showSet(uint32_t si) {
+    composite::Text r(sets[si].rec ? "rec { " : "{ ");
+    r.put(bindings(si)).put('}');
+    return r;
   }
   /// The bindings as `--parse` prints them: the inherits, those of each source, the plain ones, the dynamic ones.
-  std::string bindings(uint32_t si) {
+  composite::Text bindings(uint32_t si) {
     Set &s = sets[si];
     order(s);
-    std::string r, inherits;
-    std::map<uint32_t, std::string> from;
+    composite::Text r, inherits;
+    std::map<uint32_t, composite::Text> from;
     for (Def &d : s.defs)
-      if (d.kind == D_INHERITED) inherits += " " + ident(d.name);
-      else if (d.kind == D_FROM) from[d.from] += " " + ident(d.name);
-    if (!inherits.empty()) r += "inherit" + inherits + "; ";
-    for (auto &[i, names] : from) r += "inherit (" + txt(s.froms[i]) + ")" + names + "; ";
+      if (d.kind == D_INHERITED) inherits.put(' ').put(ident(d.name));
+      else if (d.kind == D_FROM) from[d.from].put(' ').put(ident(d.name));
+    if (!inherits.empty()) r.put("inherit").put(inherits).put("; ");
+    for (auto &[i, names] : from) r.put("inherit (").put(txt(s.froms[i])).put(')').put(names).put("; ");
     for (Def &d : s.defs)
-      if (d.kind == D_PLAIN) r += ident(d.name) + " = " + txt(d.val) + "; ";
-    for (Dyn &d : s.dyns) r += "\"${" + txt(d.name) + "}\" = " + txt(d.val) + "; ";
+      if (d.kind == D_PLAIN) r.put(ident(d.name)).put(" = ").put(txt(d.val)).put("; ");
+    for (Dyn &d : s.dyns) r.put("\"${").put(txt(d.name)).put("}\" = ").put(txt(d.val)).put("; ");
     release(si);
     return r;
   }
@@ -1547,7 +1556,7 @@ struct Parser {
             unexpected();
           }
           if (Def *prev = findDef(sets[si], name))
-            error("attribute '" + ident(name) + "' already defined at " + fmtPos(prev->pos), apos);
+            error(composite::cat("attribute '", ident(name), "' already defined at ", fmtPos(prev->pos)), apos);
           Def d;
           d.name = name;
           d.pos = apos;
@@ -1666,10 +1675,10 @@ struct Parser {
       Node c = parseExpr();
       expectChar(';');
       Node body = parseFunction();
-      if (mode == Mode::Show) return text("assert " + txt(c) + "; " + txt(body), K_EXPR, pos);
+      if (mode == Mode::Show) return text(composite::cat("assert ", txt(c), "; ", txt(body)), K_EXPR, pos);
       if (mode == Mode::Skip) return mk(K_EXPR, pos);
       Value cv = val(c), bv = val(body);
-      return mk(K_EXPR, pos, nd::AssertOp::create(b, noLoc(), valTy(), cv, bv, b.getStringAttr(shown(c0, cp)), at(pos)));
+      return mk(K_EXPR, pos, nd::AssertOp::create(b, noLoc(), valTy(), cv, bv, b.getStringAttr(llvm::StringRef(shown(c0, cp))), at(pos)));
     }
     if (t.t == T_WITH) {
       take();
@@ -1683,7 +1692,7 @@ struct Parser {
       sc = &ns;
       Node body = parseFunction();
       sc = s0;
-      if (mode == Mode::Show) return text("(with " + txt(a) + "; " + txt(body) + ")", K_EXPR, pos);
+      if (mode == Mode::Show) return text(composite::cat("(with ", txt(a), "; ", txt(body), ")"), K_EXPR, pos);
       return shared(body, pos);
     }
     if (t.t == T_LET && !isChar(peek(), '{')) {
@@ -1698,9 +1707,9 @@ struct Parser {
       if (cur().t != T_IN) unexpected("'in'");
       take();
       if (!sets[si].dyns.empty()) error("dynamic attributes not allowed in let", pos);
-      std::string head;
+      composite::Text head;
       if (mode == Mode::Show) {
-        head = "(let " + bindings(si) + "in ";
+        head = composite::cat("(let ", bindings(si), "in ");
       } else {
         Set &s = sets[si];
         order(s);
@@ -1722,21 +1731,21 @@ struct Parser {
       sc = &ns;
       Node body = parseFunction();
       sc = s0;
-      if (mode == Mode::Show) return text(head + txt(body) + ")", K_EXPR, pos);
+      if (mode == Mode::Show) return text(composite::cat(head, txt(body), ")"), K_EXPR, pos);
       return shared(body, pos);
     }
     return parseIf();
   }
 
   /// The text `--parse` prints for the expression at `off` (the message of a failed assertion), parsed again.
-  std::string shown(uint32_t off, Pos pos) {
+  composite::Text shown(uint32_t off, Pos pos) {
     ParseOptions quiet;
     quiet.pipeOperators = opts.pipeOperators;
     quiet.home = opts.home;
     Parser p(Mode::Show, origin, quiet, nullptr);
     p.jump(off, pos);
     Node e = p.parseExpr();
-    return p.txt(e);
+    return composite::Text(p.txt(e));
   }
 
   //===--------------------------------------------------------------------===//
@@ -1751,7 +1760,7 @@ struct Parser {
     Hdr h;
     if (mode == Mode::Show) {
       Node body = lambdaBody(h, Value());
-      std::string s = "(";
+      composite::Text s("(");
       if (h.formals) {
         s += "{ ";
         bool first = true;
@@ -1759,14 +1768,15 @@ struct Parser {
           if (!first) s += ", ";
           first = false;
           s += ident(f.name);
-          if (f.hasDef) s += " ? " + txt(f.def);
+          if (f.hasDef) s.put(" ? ").put(txt(f.def));
         }
         if (h.ellipsis) s += first ? "..." : ", ...";
         s += " }";
         if (!h.arg.isNull()) s += " @ ";
       }
       if (!h.arg.isNull()) s += ident(h.arg);
-      return text(s + ": " + txt(body) + ")", K_LAMBDA, pos);
+      s.put(": ").put(txt(body)).put(')');
+      return text(composite::mv(s), K_LAMBDA, pos);
     }
     if (mode == Mode::Skip) { // what reaches its edge is free in it: an enclosing skim keeps that for the lambda's own call
       Free free;
@@ -1944,10 +1954,10 @@ struct Parser {
         const Formal *d = &fs[i + 1];
         if (!dup || d->pos.line < dup->pos.line || (d->pos.line == dup->pos.line && d->pos.col < dup->pos.col)) dup = d;
       }
-    if (dup) error("duplicate formal function argument '" + dup->name.toString() + "'", dup->pos);
+    if (dup) error(composite::cat("duplicate formal function argument '", dup->name.str(), "'"), dup->pos);
     if (!h.arg.isNull())
       for (auto &f : fs)
-        if (f.name == h.arg) error("duplicate formal function argument '" + h.arg.toString() + "'", pos);
+        if (f.name == h.arg) error(composite::cat("duplicate formal function argument '", h.arg.str(), "'"), pos);
   }
 
   //===--------------------------------------------------------------------===//
@@ -1962,7 +1972,7 @@ struct Parser {
       Node t = parseExpr();
       expect(T_ELSE, "'else'");
       Node e = parseExpr();
-      if (mode == Mode::Show) return text("(if " + txt(c) + " then " + txt(t) + " else " + txt(e) + ")", K_EXPR, pos);
+      if (mode == Mode::Show) return text(composite::cat("(if ", txt(c), " then ", txt(t), " else ", txt(e), ")"), K_EXPR, pos);
       if (mode == Mode::Skip) return mk(K_EXPR, pos);
       Value cv = val(c), tv = val(t), ev = val(e);
       return mk(K_EXPR, pos, nd::IfOp::create(b, noLoc(), valTy(), cv, tv, ev, at(pos)));
@@ -2211,9 +2221,9 @@ struct Parser {
     case T_FLOAT: {
       double f = take().f;
       if (mode == Mode::Show) {
-        std::ostringstream os;
-        os << f;
-        return text(os.str(), K_EXPR, pos);
+        composite::Text shown;
+        printFloat(shown, f);
+        return text(composite::mv(shown), K_EXPR, pos);
       }
       return mk(K_EXPR, pos, mode == Mode::Gen ? Value(nd::FloatOp::create(b, noLoc(), valTy(), b.getF64FloatAttr(f))) : Value());
     }
@@ -2269,8 +2279,8 @@ struct Parser {
     case T_URI: {
       if (opts.lintUrls != Lint::Ignore) // the message is built only when something will read it
         diagnose(opts.lintUrls, "lint-url-literals",
-                 std::string("URL literals are ") + (opts.lintUrls == Lint::Fatal ? "disallowed" : "discouraged") +
-                     ". Consider using a string literal \"" + std::string(lx.text(t)) + "\" instead",
+                 composite::cat("URL literals are ", opts.lintUrls == Lint::Fatal ? "disallowed" : "discouraged",
+                                ". Consider using a string literal \"", lx.text(t), "\" instead"),
                  pos);
       return strLit(nameOf(take()), pos);
     }
@@ -2311,9 +2321,10 @@ struct Parser {
         }
         take();
         if (mode == Mode::Show) {
-          std::string s = "[ ";
-          for (Node &e : elems) s += "(" + txt(e) + ") ";
-          return text(s + "]", K_EXPR, pos);
+          composite::Text s("[ ");
+          for (Node &e : elems) s.put('(').put(txt(e)).put(") ");
+          s.put(']');
+          return text(composite::mv(s), K_EXPR, pos);
         }
         if (mode == Mode::Skip) return mk(K_EXPR, pos);
         auto vs = llvm::to_vector(elems |α| [&](Node &e) { return val(e); });
@@ -2325,9 +2336,9 @@ struct Parser {
     }
   }
 
-  void diagnose(Lint setting, const char *name, std::string msg, Pos p) {
+  void diagnose(Lint setting, const char *name, composite::Text msg, Pos p) {
     if (setting == Lint::Ignore) return;
-    msg += std::string(" (") + name + ")";
+    msg.put(" (").put(name).put(')');
     ParseError e(msg, p, origin);
     if (setting == Lint::Fatal) throw e;
     if (opts.onWarning) opts.onWarning(e);
@@ -2338,34 +2349,36 @@ struct Parser {
     if (t.t == T_HPATH) {
       if (opts.lintAbsolutePaths != Lint::Ignore)
         diagnose(opts.lintAbsolutePaths, "lint-absolute-path-literals",
-                 "home path literals are not portable. Consider replacing path literal '" + std::string(lit) +
-                     "' by a string, relative path, or parameter",
+                 composite::cat("home path literals are not portable. Consider replacing path literal '", lit,
+                                "' by a string, relative path, or parameter"),
                  t.pos);
     } else if (lit[0] == '/') {
       if (opts.lintAbsolutePaths != Lint::Ignore)
         diagnose(opts.lintAbsolutePaths, "lint-absolute-path-literals",
-                 "absolute path literals are not portable. Consider replacing path literal '" + std::string(lit) +
-                     "' by a string, relative path, or parameter",
+                 composite::cat("absolute path literals are not portable. Consider replacing path literal '", lit,
+                                "' by a string, relative path, or parameter"),
                  t.pos);
     } else if (lit[0] != '.') {
       if (opts.lintShortPaths != Lint::Ignore)
         diagnose(opts.lintShortPaths, "lint-short-path-literals",
-                 "relative path literal '" + std::string(lit) + "' should be prefixed with '.' for clarity: './" +
-                     std::string(lit) + "'",
+                 composite::cat("relative path literal '", lit, "' should be prefixed with '.' for clarity: './", lit, "'"),
                  t.pos);
     }
-    std::string path;
+    static thread_local composite::Text path; // the literal's canonical text, written here and copied once (into the arena, or a node)
+    path.clear();
     Pos pos = t.pos;
     if (t.t == T_HPATH) {
-      path = opts.home + std::string(lit.substr(1));
+      path.put(opts.home.data(), uint32_t(opts.home.size())).put(lit.data() + 1, uint32_t(lit.size() - 1));
       pos = Pos{};
     } else {
-      path = canonPath(lit[0] == '/' ? std::string(lit) : origin->baseDir + "/" + std::string(lit));
-      if (lit.size() > 1 && lit.back() == '/') path += '/';
+      composite::Chars litChars = composite::chars(lit.data(), uint32_t(lit.size()));
+      if (lit[0] == '/') canonPath(path, litChars);
+      else canonPath(path, composite::chars(origin->baseDir.data(), uint32_t(origin->baseDir.size())), litChars);
+      if (lit.size() > 1 && lit.back() == '/') path.put('/');
     }
-    if (mode == Mode::Show) return text(path, K_EXPR, pos);
-    if (pathLiterals && mode == Mode::Gen) pathLiterals->insert(path);
-    return mk(K_EXPR, pos, mode == Mode::Gen ? Value(nd::PathOp::create(b, noLoc(), valTy(), Name::persist(path))) : Value());
+    if (mode == Mode::Show) return text(path.clone(), K_EXPR, pos);
+    if (pathLiterals && mode == Mode::Gen) pathLiterals->insert(path.data(), path.size());
+    return mk(K_EXPR, pos, mode == Mode::Gen ? Value(nd::PathOp::create(b, noLoc(), valTy(), Name::persist(llvm::StringRef(path.data(), path.size())))) : Value());
   }
 
   Node stripIndentation(Pos pos, composite::MutableSeries<std::pair<Pos, std::variant<Node, Token>>> &es) {
@@ -2407,7 +2420,8 @@ struct Parser {
         continue;
       }
       const Token &t = std::get<Token>(it->second);
-      std::string s2;
+      composite::Text &s2 = piece;
+      s2.clear();
       for (char c : lx.text(t)) {
         if (atStartOfLine) {
           if (c == ' ') {
@@ -2427,7 +2441,7 @@ struct Parser {
       }
       if (n == 1) {
         auto p = s2.find_last_of('\n');
-        if (p != std::string::npos && s2.find_first_not_of(' ', p + 1) == std::string::npos) s2 = s2.substr(0, p + 1);
+        if (p != composite::npos && s2.find_first_not_of(' ', p + 1) == composite::npos) s2.truncate(p + 1);
       }
       if (!s2.empty()) es2.push_back(strLit(Name::persist(s2), Pos{}));
     }
@@ -2439,23 +2453,32 @@ struct Parser {
 
 } // namespace
 
-std::string canonPath(std::string_view path) {
-  composite::MutableSeries<std::string_view> parts;
-  size_t i = 0;
-  while (i < path.size()) {
-    while (i < path.size() && path[i] == '/') i++;
-    size_t j = i;
-    while (j < path.size() && path[j] != '/') j++;
-    std::string_view seg = path.substr(i, j - i);
-    i = j;
-    if (seg.empty() || seg == ".") continue;
-    if (seg == "..") { if (!parts.empty()) parts.pop(); continue; }
-    parts.append(seg);
-  }
-  if (parts.empty()) return "/";
-  std::string out;
-  for (auto s : parts) { out += '/'; out += s; }
-  return out;
+void canonPath(composite::Text &out, composite::Chars a, composite::Chars b) {
+  uint32_t from = out.size();
+  auto walk = [&](composite::Chars rest) {
+    while (rest.size()) {
+      uint32_t len = composite::firstWhere(rest, [](char c) { return c == '/'; }); // the segment: up to the next slash, or all that is left
+      composite::Chars seg = composite::slice(rest, 0, len);
+      rest = composite::slice(rest, len < rest.size() ? len + 1 : len, rest.size());
+      if (len == 0 || (len == 1 && seg[0] == '.')) continue;
+      if (len == 2 && seg[0] == '.' && seg[1] == '.') { // the last segment written goes, if there is one
+        uint32_t k = out.size();
+        while (k > from && out.data()[k - 1] != '/') k--;
+        if (k > from) out.truncate(k - 1);
+        continue;
+      }
+      out.put('/').put(seg);
+    }
+  };
+  walk(a);
+  walk(b);
+  if (out.size() == from) out.put('/');
+}
+
+composite::Text canonPath(std::string_view path) {
+  composite::Text t;
+  canonPath(t, composite::chars(path.data(), uint32_t(path.size())));
+  return t;
 }
 
 /// The fixed buffer of bands and statements, reused from source to source (a pool keeps its own, for its bodies' calls).
@@ -2475,11 +2498,11 @@ void mintBody(nd::LambdaOp lam, FilePool &pool, uint32_t row, const GenOptions &
   Parser(Mode::Gen, pool.origin, pool.opts, &pool.bands, lam->getParentOfType<mlir::ModuleOp>(), &opts).mint(lam, pool, row);
 }
 
-void showSource(std::ostream &os, Origin *origin, const ParseOptions &po) {
+void showSource(composite::Text &out, Origin *origin, const ParseOptions &po) {
   confix::Bands &bands = scratchBands(); // the parse checks each statement's end against the scan's (layer 1)
   bands.clear();
   bool scannedOk = confix::scan(origin->text->view(), bands);
-  os << Parser(Mode::Show, origin, po, scannedOk ? &bands : nullptr).show();
+  out.put(Parser(Mode::Show, origin, po, scannedOk ? &bands : nullptr).show());
 }
 
 void skim(Origin *origin, const ParseOptions &po) {

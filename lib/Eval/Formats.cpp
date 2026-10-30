@@ -8,11 +8,8 @@
 
 #include <cmath>
 #include <cstring>
-#include <map>
-#include <set>
 #include <unistd.h>
 #include <climits>
-#include <sstream>
 
 using namespace mlir;
 namespace nd = mlir::nix;
@@ -20,7 +17,20 @@ namespace nd = mlir::nix;
 namespace nixev {
 
 using A = Value **;
-static std::string str(std::string_view s) { return std::string(s); }
+static composite::Text str(std::string_view s) { return composite::Text(s); }
+
+/// Whether `k` is one of `names` (a fixed set of words, asked by count() before).
+template <size_t N> static bool oneOf(std::string_view k, const char *const (&names)[N]) {
+  for (const char *n : names)
+    if (k == n) return true;
+  return false;
+}
+
+/// Drops one row of a SortedMap (the store's has no erase): the rows after it move down a place, as SortedSet::erase moves its rows.
+template <class V> static void eraseRow(nixstore::SortedMap<V> &m, typename nixstore::SortedMap<V>::Row *at) {
+  for (typename nixstore::SortedMap<V>::Row *r = at; r + 1 != m.end(); ++r) nixstore::SortedMap<V>::swapRows(r[0], r[1]);
+  m.rows.pop();
+}
 
 //===----------------------------------------------------------------------===//
 // JSON output
@@ -40,8 +50,8 @@ static void checkUTF8(std::string_view s) {
           if (((unsigned char)s[i + k] >> 6) != 2) { bad = i + k; break; }
       const char hex[] = "0123456789ABCDEF";
       unsigned char byte = (unsigned char)s[bad];
-      throw EvalError("JSON serialization error: [json.exception.type_error.316] invalid UTF-8 byte at index " + std::to_string(bad) + ": 0x" +
-                      hex[byte >> 4] + hex[byte & 15]);
+      throw EvalError(composite::cat("JSON serialization error: [json.exception.type_error.316] invalid UTF-8 byte at index ", bad, ": 0x",
+                                     hex[byte >> 4], hex[byte & 15]));
     }
     i += n;
   }
@@ -108,7 +118,7 @@ void EvalState::printValueAsJSON(JsonOut &out, Value &v, bool strict, NixStringC
     out.putString(v.sv());
     break;
   case VType::Path:
-    if (copyToStore) out.putString(copyPathToStore(ctx, std::string(v.pathView())));
+    if (copyToStore) out.putString(copyPathToStore(ctx, v.pathView()));
     else out.putString(v.pathView());
     break;
   case VType::Null: out.put("null"); break;
@@ -131,7 +141,7 @@ void EvalState::printValueAsJSON(JsonOut &out, Value &v, bool strict, NixStringC
       try {
         printValueAsJSON(out, *a->value, strict, ctx, copyToStore, positionOf(*a));
       } catch (EvalError &e) {
-        e.addTrace(positionOf(*a), "while evaluating attribute '" + symbols[a->name].str() + "'");
+        e.addTrace(positionOf(*a), composite::cat("while evaluating attribute '", symbols[a->name], "'"));
         throw;
       }
     }
@@ -146,7 +156,7 @@ void EvalState::printValueAsJSON(JsonOut &out, Value &v, bool strict, NixStringC
       try {
         printValueAsJSON(out, *v.list.elems[i], strict, ctx, copyToStore, pos);
       } catch (EvalError &e) {
-        e.addTrace(pos, "while evaluating list element at index " + std::to_string(i));
+        e.addTrace(pos, composite::cat("while evaluating list element at index ", i));
         throw;
       }
     }
@@ -157,7 +167,7 @@ void EvalState::printValueAsJSON(JsonOut &out, Value &v, bool strict, NixStringC
     out.put("null");
     break;
   default:
-    throw EvalError(std::string("cannot convert ") + showType(v) + " to JSON", pos);
+    throw EvalError(composite::cat("cannot convert ", showType(v), " to JSON"), pos);
   }
 }
 
@@ -170,14 +180,14 @@ struct JSONParser {
   EvalState &st;
   std::string_view s;
   size_t p = 0;
-  [[noreturn]] void fail(const std::string &what) {
-    throw EvalError("[json.exception.parse_error.101] parse error at line 1, column " + std::to_string(p + 1) +
-                    ": syntax error while parsing value - " + what);
+  [[noreturn]] void fail(std::string_view what) {
+    throw EvalError(composite::cat("[json.exception.parse_error.101] parse error at line 1, column ", p + 1,
+                                   ": syntax error while parsing value - ", what));
   }
   void ws() {
     while (p < s.size() && (s[p] == ' ' || s[p] == '\t' || s[p] == '\n' || s[p] == '\r')) p++;
   }
-  static void utf8(std::string &out, uint32_t cp) {
+  static void utf8(composite::Text &out, uint32_t cp) {
     if (cp < 0x80) out += char(cp);
     else if (cp < 0x800) { out += char(0xC0 | (cp >> 6)); out += char(0x80 | (cp & 0x3F)); }
     else if (cp < 0x10000) { out += char(0xE0 | (cp >> 12)); out += char(0x80 | ((cp >> 6) & 0x3F)); out += char(0x80 | (cp & 0x3F)); }
@@ -196,27 +206,27 @@ struct JSONParser {
     }
     return v;
   }
-  std::string string() {
-    std::string r = stringRaw();
-    if (r.find('\0') != std::string::npos) {
-      std::string shown;
+  composite::Text string() {
+    composite::Text r = stringRaw();
+    if (r.find('\0') != composite::npos) {
+      composite::Text shown;
       for (char c : r) {
         if (c == '\0') shown += "\u2400";
         else shown += c;
       }
       // U+2400 SYMBOL FOR NULL, as UTF-8.
-      std::string out2;
+      composite::Text out2;
       for (size_t i = 0; i < shown.size(); i++) {
-        if (shown.compare(i, 6, "\u2400") == 0) { out2 += "\xe2\x90\x80"; i += 5; }
+        if (shown.substr(i, 6) == "\u2400") { out2 += "\xe2\x90\x80"; i += 5; }
         else out2 += shown[i];
       }
-      throw EvalError("input string '" + out2 + "' cannot be represented as Nix string because it contains null bytes");
+      throw EvalError(composite::cat("input string '", out2, "' cannot be represented as Nix string because it contains null bytes"));
     }
     return r;
   }
-  std::string stringRaw() {
+  composite::Text stringRaw() {
     p++; // "
-    std::string out;
+    composite::Text out;
     while (true) {
       if (p >= s.size()) fail("invalid string: missing closing quote");
       char c = s[p++];
@@ -258,25 +268,35 @@ struct JSONParser {
     if (c == '{') {
       p++;
       EvalState::BindingsBuilder bb(st);
-      std::map<std::string, Value *> m;
+      // The members in the order they came, sorted once below: an object of n members costs n log n whatever the order of its keys.
+      composite::MutableSeries<composite::Text> keys;
+      composite::MutableSeries<Value *> vals;
       ws();
       if (p < s.size() && s[p] == '}') { p++; st.mkAttrs(v, bb.finish()); return; }
       while (true) {
         ws();
         if (p >= s.size() || s[p] != '"') fail("invalid literal; expected string literal");
-        std::string k = string();
+        composite::Text k = string();
         ws();
         if (p >= s.size() || s[p] != ':') fail("syntax error; expected ':'");
         p++;
         Value *e = st.allocValue();
         value(*e);
-        m[k] = e; // last wins
+        keys.append(composite::mv(k));
+        vals.append(e);
         ws();
         if (p < s.size() && s[p] == ',') { p++; continue; }
         if (p < s.size() && s[p] == '}') { p++; break; }
         fail("syntax error; expected '}'");
       }
-      for (auto &[k, e] : m) bb.insert(k, e);
+      // In key order, as the sorted map they were in gave them; sortRows is stable, so of equal keys the last in the text is the last here: it wins.
+      composite::MutableSeries<uint32_t> order;
+      for (uint32_t i = 0; i < keys.size(); i++) order.append(i);
+      composite::sortRows(order.begin(), order.size(), [&](uint32_t a, uint32_t b) { return keys[a] < keys[b]; });
+      for (uint32_t i = 0; i < order.size(); i++) {
+        if (i + 1 < order.size() && keys[order[i]] == keys[order[i + 1]]) continue;
+        bb.insert(keys[order[i]], vals[order[i]]);
+      }
       st.mkAttrs(v, bb.finish());
       return;
     }
@@ -313,7 +333,7 @@ struct JSONParser {
         if (p < s.size() && (s[p] == '+' || s[p] == '-')) p++;
         while (p < s.size() && composite::isAsciiDigit(s[p])) p++;
       }
-      std::string num(s.substr(start, p - start));
+      composite::Text num(s.substr(start, p - start));
       if (!isFloat) {
         // The integer facets (composite::text::Integer), the reading strtoll and strtoull make: overflow is ERANGE.
         composite::CharSeries digits = composite::chars(num);
@@ -325,7 +345,7 @@ struct JSONParser {
           composite::text::Reading r = composite::facet<composite::text::Integer<10, false>>(digits);
           if (r.overflow) { st.mkFloat(v, strtod(num.c_str(), nullptr)); return; }
           if (r.value > (uint64_t)INT64_MAX)
-            throw EvalError("unsigned json number " + num + " outside of Nix integer range");
+            throw EvalError(composite::cat("unsigned json number ", num, " outside of Nix integer range"));
           st.mkInt(v, (int64_t)r.value);
         }
       } else {
@@ -351,55 +371,86 @@ void parseJSON(EvalState &state, std::string_view json, Value &v) {
 
 namespace {
 struct XMLWriter {
-  std::ostream &out;
-  composite::MutableSeries<std::string> stack{};
-  using Attrs = std::map<std::string, std::string>;
+  composite::Text &out;
+  composite::MutableSeries<composite::Text> stack{};
+  /// An element's attributes: a few rows, written in name order (as Nix's std::map wrote them); a name set again is replaced.
+  struct Attrs {
+    struct Row {
+      const char *k;
+      composite::Text v;
+    };
+    composite::MutableSeries<Row, composite::Spill<Row, 4>> rows;
+    Attrs() = default;
+    Attrs(const char *k, composite::Text v) { set(k, composite::mv(v)); }
+    void set(const char *k, composite::Text v) {
+      for (Row &r : rows)
+        if (strcmp(r.k, k) == 0) {
+          r.v = composite::mv(v);
+          return;
+        }
+      rows.append(Row{k, composite::mv(v)});
+    }
+  };
+  void indent(size_t depth) {
+    for (size_t i = 0; i < depth * 2; i++) out.put(' ');
+  }
+  void put(std::string_view s) { out.put(s.data(), uint32_t(s.size())); }
   void attrs(const Attrs &as) {
-    for (auto &[k, v] : as) {
-      out << " " << k << "=\"";
-      for (char c : v) {
-        if (c == '"') out << "&quot;";
-        else if (c == '<') out << "&lt;";
-        else if (c == '>') out << "&gt;";
-        else if (c == '&') out << "&amp;";
-        else if (c == '\n') out << "&#xA;";
-        else out << c;
+    composite::MutableSeries<const Attrs::Row *> sorted;
+    for (const Attrs::Row &r : as.rows) sorted.append(&r);
+    composite::sortRows(sorted.data(), sorted.size(), [](const Attrs::Row *a, const Attrs::Row *b) { return strcmp(a->k, b->k) < 0; });
+    for (const Attrs::Row *r : sorted) {
+      out.put(' ').put(r->k).put("=\"");
+      for (char c : r->v) {
+        if (c == '"') out.put("&quot;");
+        else if (c == '<') out.put("&lt;");
+        else if (c == '>') out.put("&gt;");
+        else if (c == '&') out.put("&amp;");
+        else if (c == '\n') out.put("&#xA;");
+        else out.put(c);
       }
-      out << "\"";
+      out.put('"');
     }
   }
-  void open(const std::string &n, const Attrs &as = {}) {
-    out << std::string(stack.size() * 2, ' ') << "<" << n;
+  void open(std::string_view n, const Attrs &as = {}) {
+    indent(stack.size());
+    out.put('<');
+    put(n);
     attrs(as);
-    out << ">\n";
-    stack.append(n);
+    out.put(">\n");
+    stack.append(composite::Text(n));
   }
   void close() {
-    out << std::string((stack.size() - 1) * 2, ' ') << "</" << stack.back() << ">\n";
+    indent(stack.size() - 1);
+    out.put("</");
+    put(stack.back());
+    out.put(">\n");
     stack.pop();
   }
-  void empty(const std::string &n, const Attrs &as = {}) {
-    out << std::string(stack.size() * 2, ' ') << "<" << n;
+  void empty(std::string_view n, const Attrs &as = {}) {
+    indent(stack.size());
+    out.put('<');
+    put(n);
     attrs(as);
-    out << " />\n";
+    out.put(" />\n");
   }
 };
 
 void posToXML(EvalState &st, XMLWriter::Attrs &as, PosPtr pos) {
   auto loc = nd::decodePos(pos);
   if (!loc) return;
-  if (!loc->file.empty() && loc->file[0] == '/') as["path"] = loc->file;
-  as["line"] = std::to_string(loc->line);
-  as["column"] = std::to_string(loc->col);
+  if (!loc->file.empty() && loc->file[0] == '/') as.set("path", composite::Text(loc->file));
+  as.set("line", composite::str(loc->line));
+  as.set("column", composite::str(loc->col));
 }
 
-void toXML(EvalState &st, XMLWriter &doc, Value &v, bool strict, bool location, NixStringContext &ctx,
-           std::set<std::string> &drvsSeen, PosPtr pos);
+void toXML(EvalState &st, XMLWriter &doc, Value &v, bool strict, bool location, NixStringContext &ctx, composite::TextSet &drvsSeen,
+           PosPtr pos);
 
-void showAttrsXML(EvalState &st, XMLWriter &doc, Bindings *attrs, bool strict, bool location,
-                  NixStringContext &ctx, std::set<std::string> &drvsSeen) {
+void showAttrsXML(EvalState &st, XMLWriter &doc, Bindings *attrs, bool strict, bool location, NixStringContext &ctx,
+                  composite::TextSet &drvsSeen) {
   for (const Attr *a : attrs->lexicographicOrder(st.symbols)) {
-    XMLWriter::Attrs as{{"name", st.symbols[a->name].str()}};
+    XMLWriter::Attrs as("name", composite::Text(st.symbols[a->name]));
     if (location) posToXML(st, as, st.positionOf(*a));
     doc.open("attr", as);
     toXML(st, doc, *a->value, strict, location, ctx, drvsSeen, st.positionOf(*a));
@@ -407,38 +458,41 @@ void showAttrsXML(EvalState &st, XMLWriter &doc, Bindings *attrs, bool strict, b
   }
 }
 
-std::string fmtFloatXML(double d) {
-  std::ostringstream os;
-  os << d;
-  return os.str();
+composite::Text fmtFloatXML(double d) {
+  composite::Text t;
+  nixfe::printFloat(t, d);
+  return t;
 }
 
-void toXML(EvalState &st, XMLWriter &doc, Value &v, bool strict, bool location, NixStringContext &ctx,
-           std::set<std::string> &drvsSeen, PosPtr pos) {
+void toXML(EvalState &st, XMLWriter &doc, Value &v, bool strict, bool location, NixStringContext &ctx, composite::TextSet &drvsSeen,
+           PosPtr pos) {
   if (strict) st.forceValue(v, pos);
   switch (v.type) {
-  case VType::Int: doc.empty("int", {{"value", std::to_string(v.integer)}}); break;
-  case VType::Bool: doc.empty("bool", {{"value", v.boolean ? "true" : "false"}}); break;
+  case VType::Int: doc.empty("int", XMLWriter::Attrs("value", composite::str(v.integer))); break;
+  case VType::Bool: doc.empty("bool", XMLWriter::Attrs("value", v.boolean ? "true" : "false")); break;
   case VType::String:
     st.copyContext(v, ctx);
-    doc.empty("string", {{"value", str(v.sv())}});
+    doc.empty("string", XMLWriter::Attrs("value", str(v.sv())));
     break;
-  case VType::Path: doc.empty("path", {{"value", str(v.pathView())}}); break;
+  case VType::Path: doc.empty("path", XMLWriter::Attrs("value", str(v.pathView()))); break;
   case VType::Null: doc.empty("null"); break;
   case VType::Attrs:
     if (st.isDerivation(v)) {
       XMLWriter::Attrs as;
-      std::string drvPath;
+      composite::Text drvPath;
       if (const Attr *a = v.attrs->get(st.s.drvPath)) {
         if (strict) st.forceValue(*a->value, st.positionOf(*a));
-        if (a->value->type == VType::String) as["drvPath"] = drvPath = str(a->value->sv());
+        if (a->value->type == VType::String) {
+          drvPath = str(a->value->sv());
+          as.set("drvPath", drvPath.clone());
+        }
       }
       if (const Attr *a = v.attrs->get(st.s.outPath)) {
         if (strict) st.forceValue(*a->value, st.positionOf(*a));
-        if (a->value->type == VType::String) as["outPath"] = str(a->value->sv());
+        if (a->value->type == VType::String) as.set("outPath", str(a->value->sv()));
       }
       doc.open("derivation", as);
-      if (!drvPath.empty() && drvsSeen.insert(drvPath).second)
+      if (!drvPath.empty() && drvsSeen.insert(drvPath.data(), uint32_t(drvPath.size())))
         showAttrsXML(st, doc, v.attrs, strict, location, ctx, drvsSeen);
       else
         doc.empty("repeated");
@@ -461,8 +515,8 @@ void toXML(EvalState &st, XMLWriter &doc, Value &v, bool strict, bool location, 
     doc.open("function", as);
     if (lam.getFormals()) {
       XMLWriter::Attrs pa;
-      if (auto n = lam.getArgName()) pa["name"] = n->str();
-      if (lam.getEllipsis()) pa["ellipsis"] = "1";
+      if (auto n = lam.getArgName()) pa.set("name", composite::Text(*n));
+      if (lam.getEllipsis()) pa.set("ellipsis", "1");
       doc.open("attrspat", pa);
       composite::MutableSeries<llvm::StringRef> names; // the formals' bytes are the attributes' own: windows on them are sorted
       ArrayAttr formals = *lam.getFormals();
@@ -470,26 +524,26 @@ void toXML(EvalState &st, XMLWriter &doc, Value &v, bool strict, bool location, 
       composite::sortRows(names.data(), names.size(), [](llvm::StringRef a, llvm::StringRef b) {
         return composite::lessChars(composite::series(a.data(), uint32_t(a.size())), composite::series(b.data(), uint32_t(b.size())));
       });
-      for (llvm::StringRef n : names) doc.empty("attr", {{"name", n.str()}});
+      for (llvm::StringRef n : names) doc.empty("attr", XMLWriter::Attrs("name", composite::Text(n)));
       doc.close();
     } else {
-      doc.empty("varpat", {{"name", lam.getArgName() ? lam.getArgName()->str() : ""}});
+      doc.empty("varpat", XMLWriter::Attrs("name", composite::Text(lam.getArgName() ? *lam.getArgName() : llvm::StringRef(""))));
     }
     doc.close();
     break;
   }
   case VType::PrimOp: case VType::PrimOpApp: doc.empty("unevaluated"); break;
-  case VType::Float: doc.empty("float", {{"value", fmtFloatXML(v.fpoint)}}); break;
+  case VType::Float: doc.empty("float", XMLWriter::Attrs("value", fmtFloatXML(v.fpoint))); break;
   default: doc.empty("unevaluated"); break;
   }
 }
 } // namespace
 
-void EvalState::printValueAsXML(std::ostream &out, Value &v, bool strict, bool location, NixStringContext &ctx) {
-  out << "<?xml version='1.0' encoding='utf-8'?>\n";
+void EvalState::printValueAsXML(composite::Text &out, Value &v, bool strict, bool location, NixStringContext &ctx) {
+  out.put("<?xml version='1.0' encoding='utf-8'?>\n");
   XMLWriter doc{out};
   doc.open("expr");
-  std::set<std::string> drvsSeen;
+  composite::TextSet drvsSeen;
   toXML(*this, doc, v, strict, location, ctx, drvsSeen, nullptr);
   doc.close();
 }
@@ -517,14 +571,14 @@ struct TomlParser {
   composite::Bump keyBytes;                                  // every key of every table
   TomlNode *make() { return nodes[nodes.append(composite::own<TomlNode>())].get(); }
   /// The child of `t` named `k`, null when there is none yet: a reference to fill.  It holds until t's next new key.
-  TomlNode *&child(TomlNode &t, const std::string &k) {
+  TomlNode *&child(TomlNode &t, std::string_view k) {
     return t.table.at(k.data(), uint32_t(k.size()), [&] { return keyBytes.copy(k.data(), uint32_t(k.size())); });
   }
   size_t p = 0;
   int line = 1;
 
-  [[noreturn]] void fail(const std::string &m) {
-    throw EvalError("while parsing TOML: " + m + " (line " + std::to_string(line) + ")");
+  [[noreturn]] void fail(std::string_view m) {
+    throw EvalError(composite::cat("while parsing TOML: ", m, " (line ", line, ")"));
   }
   bool eof() { return p >= s.size(); }
   char peek(size_t o = 0) { return p + o < s.size() ? s[p + o] : '\0'; }
@@ -553,19 +607,19 @@ struct TomlParser {
   }
   static bool isBare(char c) { return composite::isAsciiAlnum(c) || c == '_' || c == '-'; }
 
-  static void utf8(std::string &out, uint32_t cp) {
+  static void utf8(composite::Text &out, uint32_t cp) {
     if (cp < 0x80) out += char(cp);
     else if (cp < 0x800) { out += char(0xC0 | (cp >> 6)); out += char(0x80 | (cp & 0x3F)); }
     else if (cp < 0x10000) { out += char(0xE0 | (cp >> 12)); out += char(0x80 | ((cp >> 6) & 0x3F)); out += char(0x80 | (cp & 0x3F)); }
     else { out += char(0xF0 | (cp >> 18)); out += char(0x80 | ((cp >> 12) & 0x3F)); out += char(0x80 | ((cp >> 6) & 0x3F)); out += char(0x80 | (cp & 0x3F)); }
   }
 
-  std::string escape() {
+  composite::Text escape() {
     // at backslash
     p++;
     char e = peek();
     p++;
-    std::string out;
+    composite::Text out;
     switch (e) {
     case 'b': return "\b";
     case 't': return "\t";
@@ -590,16 +644,16 @@ struct TomlParser {
       utf8(out, cp);
       return out;
     }
-    default: fail(std::string("invalid escape sequence '\\") + e + "'");
+    default: fail(composite::cat("invalid escape sequence '\\", e, "'"));
     }
   }
 
-  std::string basicString() {
+  composite::Text basicString() {
     if (s.substr(p, 3) == "\"\"\"") {
       p += 3;
       if (peek() == '\n') { p++; line++; }
       else if (peek() == '\r' && peek(1) == '\n') { p += 2; line++; }
-      std::string out;
+      composite::Text out;
       while (true) {
         if (eof()) fail("unterminated multi-line string");
         if (s.substr(p, 3) == "\"\"\"") {
@@ -631,7 +685,7 @@ struct TomlParser {
       }
     }
     p++;
-    std::string out;
+    composite::Text out;
     while (true) {
       if (eof() || peek() == '\n') fail("unterminated string");
       char c = s[p];
@@ -641,12 +695,12 @@ struct TomlParser {
       p++;
     }
   }
-  std::string literalString() {
+  composite::Text literalString() {
     if (s.substr(p, 3) == "'''") {
       p += 3;
       if (peek() == '\n') { p++; line++; }
       else if (peek() == '\r' && peek(1) == '\n') { p += 2; line++; }
-      std::string out;
+      composite::Text out;
       while (true) {
         if (eof()) fail("unterminated multi-line literal string");
         if (s.substr(p, 3) == "'''") {
@@ -660,7 +714,7 @@ struct TomlParser {
       }
     }
     p++;
-    std::string out;
+    composite::Text out;
     while (true) {
       if (eof() || peek() == '\n') fail("unterminated literal string");
       if (peek() == '\'') { p++; return out; }
@@ -668,21 +722,21 @@ struct TomlParser {
     }
   }
 
-  composite::MutableSeries<std::string> key() {
-    composite::MutableSeries<std::string> parts;
+  composite::MutableSeries<composite::Text> key() {
+    composite::MutableSeries<composite::Text> parts;
     while (true) {
       wsInline();
-      std::string k;
+      composite::Text k;
       if (peek() == '"') k = basicString();
       else if (peek() == '\'') k = literalString();
       else {
         size_t start = p;
         while (!eof() && isBare(s[p])) p++;
         if (p == start) fail("expected a key");
-        k = std::string(s.substr(start, p - start));
+        k = composite::Text(s.substr(start, p - start));
       }
-      if (k.find('\0') != std::string::npos) fail("key contains a NUL byte");
-      parts.append(k);
+      if (k.find('\0') != composite::npos) fail("key contains a NUL byte");
+      parts.append(composite::mv(k));
       wsInline();
       if (peek() == '.') { p++; continue; }
       return parts;
@@ -697,54 +751,55 @@ struct TomlParser {
     return false;
   }
 
-  std::string dateTime() {
+  composite::Text dateTime() {
     size_t start = p;
     auto take = [&](auto pred) { while (!eof() && pred(s[p])) p++; };
     take([](char c) { return composite::isAsciiDigit(c) || c == '-' || c == ':'; });
-    std::string res(s.substr(start, p - start));
+    composite::Text res(s.substr(start, p - start));
     // date-time separator
-    if ((peek() == 'T' || peek() == 't' || (peek() == ' ' && composite::isAsciiDigit(peek(1)))) && res.find('-') != std::string::npos) {
+    if ((peek() == 'T' || peek() == 't' || (peek() == ' ' && composite::isAsciiDigit(peek(1)))) && res.find('-') != composite::npos) {
       p++;
       res += 'T';
       size_t ts = p;
       take([](char c) { return composite::isAsciiDigit(c) || c == ':'; });
-      res += std::string(s.substr(ts, p - ts));
+      res += s.substr(ts, p - ts);
     }
     if (peek() == '.') {
       p++;
       size_t fs = p;
       take([](char c) { return composite::isAsciiDigit(c); });
-      std::string frac(s.substr(fs, p - fs));
+      composite::Text frac(s.substr(fs, p - fs));
       size_t padTo = frac.size() <= 3 ? 3 : frac.size() <= 6 ? 6 : 9;
-      if (frac.size() > 9) frac = frac.substr(0, 9);
+      if (frac.size() > 9) frac.truncate(9);
       while (frac.size() < padTo) frac += '0';
-      res += "." + frac;
+      res += '.';
+      res += frac;
     }
     if (peek() == 'Z' || peek() == 'z') { p++; res += "Z"; }
     else if ((peek() == '+' || peek() == '-') && composite::isAsciiDigit(peek(1))) {
       size_t os = p;
       p++;
       take([](char c) { return composite::isAsciiDigit(c) || c == ':'; });
-      res += std::string(s.substr(os, p - os));
+      res += s.substr(os, p - os);
     }
     return res;
   }
 
   Value *number() {
     size_t start = p;
-    std::string tok;
+    composite::Text tok;
     while (!eof() && (composite::isAsciiAlnum(s[p]) || s[p] == '_' || s[p] == '+' || s[p] == '-' || s[p] == '.'))
       tok += s[p++];
     if (tok.empty()) fail("expected a value");
     Value *v = st.allocValue();
-    std::string t = tok;
+    std::string_view t = tok; // windows on tok, which is not written to again
     bool neg = false;
-    std::string body = t;
+    std::string_view body = t;
     if (body[0] == '+' || body[0] == '-') { neg = body[0] == '-'; body = body.substr(1); }
     if (body == "inf") { st.mkFloat(*v, neg ? -INFINITY : INFINITY); return v; }
     if (body == "nan") { st.mkFloat(*v, NAN); return v; }
-    auto strip = [&](std::string x) {
-      std::string r;
+    auto strip = [&](std::string_view x) {
+      composite::Text r;
       for (size_t i = 0; i < x.size(); i++) {
         if (x[i] == '_') {
           if (i == 0 || i + 1 >= x.size() || !composite::isAsciiAlnum(x[i - 1]) || !composite::isAsciiAlnum(x[i + 1]))
@@ -758,7 +813,7 @@ struct TomlParser {
     if (body.size() > 2 && body[0] == '0' && (body[1] == 'x' || body[1] == 'o' || body[1] == 'b')) {
       if (t[0] == '+' || t[0] == '-') fail("sign not allowed on non-decimal integer");
       int base = body[1] == 'x' ? 16 : body[1] == 'o' ? 8 : 2;
-      std::string digits = strip(body.substr(2));
+      composite::Text digits = strip(body.substr(2));
       composite::CharSeries cs = composite::chars(digits);
       composite::text::Reading r = base == 16 ? composite::facet<composite::text::Integer<16, false>>(cs)
                                  : base == 8  ? composite::facet<composite::text::Integer<8, false>>(cs)
@@ -768,20 +823,20 @@ struct TomlParser {
       st.mkInt(*v, (int64_t)r.value);
       return v;
     }
-    std::string clean = strip(t);
-    bool isFloat = clean.find_first_of(".eE") != std::string::npos;
+    composite::Text clean = strip(t);
+    bool isFloat = clean.find_first_of(".eE") != composite::npos;
     if (isFloat) {
       char *end;
       double d = strtod(clean.c_str(), &end);
-      if (*end) fail("invalid float '" + tok + "'");
+      if (*end) fail(composite::cat("invalid float '", tok, "'"));
       st.mkFloat(*v, d);
       return v;
     }
-    std::string digits = clean[0] == '+' || clean[0] == '-' ? clean.substr(1) : clean;
+    std::string_view digits = clean[0] == '+' || clean[0] == '-' ? std::string_view(clean).substr(1) : std::string_view(clean);
     if (digits.size() > 1 && digits[0] == '0') fail("leading zeros are not allowed");
     composite::text::Reading r = composite::facet<composite::text::Integer<10, true>>(composite::chars(clean));
     long long n = (long long)r.value;
-    if (r.consumed != clean.size()) fail("invalid value '" + tok + "'");
+    if (r.consumed != clean.size()) fail(composite::cat("invalid value '", tok, "'"));
     if (r.overflow) {
       if (clean[0] == '-')
         throw EvalError("while parsing TOML: [error] toml::parse_dec_integer: too small integer: current min digits = -2^63");
@@ -795,8 +850,8 @@ struct TomlParser {
   Value *value() {
     char c = peek();
     if (c == '"') {
-      std::string sv = basicString();
-      if (sv.find('\0') != std::string::npos) fail("string contains a NUL byte");
+      composite::Text sv = basicString();
+      if (sv.find('\0') != composite::npos) fail("string contains a NUL byte");
       Value *v = st.newString(sv);
       return v;
     }
@@ -843,7 +898,7 @@ struct TomlParser {
       return toValue(*node);
     }
     if (isDateAhead()) {
-      std::string dt = dateTime();
+      composite::Text dt = dateTime();
       if (!timestamps) throw EvalError("while parsing TOML: Dates and times are not supported");
       Value *v = st.allocValue();
       EvalState::BindingsBuilder bb(st);
@@ -855,16 +910,16 @@ struct TomlParser {
     return number();
   }
 
-  void setKey(TomlNode &tbl, const composite::MutableSeries<std::string> &k, Value *v) {
+  void setKey(TomlNode &tbl, const composite::MutableSeries<composite::Text> &k, Value *v) {
     TomlNode *cur = &tbl;
     for (size_t i = 0; i + 1 < k.size(); i++) {
       TomlNode *&n = child(*cur, k[i]);
       if (!n) n = make();
-      else if (n->kind != TomlNode::Table || n->inlineTable) fail("cannot redefine key '" + k[i] + "'");
+      else if (n->kind != TomlNode::Table || n->inlineTable) fail(composite::cat("cannot redefine key '", k[i], "'"));
       cur = n;
     }
     TomlNode *&leaf = child(*cur, k.back());
-    if (leaf) fail("duplicate key '" + k.back() + "'");
+    if (leaf) fail(composite::cat("duplicate key '", k.back(), "'"));
     leaf = make();
     leaf->kind = TomlNode::Leaf;
     leaf->leaf = v;
@@ -907,18 +962,18 @@ struct TomlParser {
           if (!n) n = make();
           if (n->kind == TomlNode::Array) t = n->array.back();
           else if (n->kind == TomlNode::Table && !n->inlineTable) t = n;
-          else fail("cannot redefine key '" + k[i] + "'");
+          else fail(composite::cat("cannot redefine key '", k[i], "'"));
         }
         TomlNode *&last = child(*t, k.back());
         if (aot) {
           if (!last) { last = make(); last->kind = TomlNode::Array; last->arrayOfTables = true; }
-          if (last->kind != TomlNode::Array || !last->arrayOfTables) fail("cannot redefine key '" + k.back() + "'");
+          if (last->kind != TomlNode::Array || !last->arrayOfTables) fail(composite::cat("cannot redefine key '", k.back(), "'"));
           TomlNode *nt = make();
           last->array.append(nt);
           cur = nt;
         } else {
           if (!last) last = make();
-          else if (last->kind != TomlNode::Table || last->defined) fail("table '" + k.back() + "' already defined");
+          else if (last->kind != TomlNode::Table || last->defined) fail(composite::cat("table '", k.back(), "' already defined"));
           last->defined = true;
           cur = last;
         }
@@ -958,19 +1013,19 @@ bool tomlTimestamps = false;
 // Flake references (parseFlakeRef / flakeRefToString)
 //===----------------------------------------------------------------------===//
 
-static std::string percentDecode(std::string_view s) {
-  std::string r;
+static composite::Text percentDecode(std::string_view s) {
+  composite::Text r;
   for (size_t i = 0; i < s.size(); i++) {
     if (s[i] == '%' && i + 2 < s.size() && composite::isDigitIn(s[i + 1], 16) && composite::isDigitIn(s[i + 2], 16)) {
-      r += char(std::stoi(std::string(s.substr(i + 1, 2)), nullptr, 16));
+      r += char(composite::facet<composite::text::Integer<16, false>>(composite::chars(s.data() + i + 1, 2)).value);
       i += 2;
     } else r += s[i];
   }
   return r;
 }
 
-static std::string percentEncode(std::string_view s, const char *keep = "-._~/:@!$'()*+,;=") {
-  std::string r;
+static composite::Text percentEncode(std::string_view s, const char *keep = "-._~/:@!$'()*+,;=") {
+  composite::Text r;
   for (unsigned char c : s) {
     if (composite::isAsciiAlnum(char(c)) || c == 0 || std::string_view(keep).find(char(c)) != std::string_view::npos) r += char(c);
     else {
@@ -981,8 +1036,8 @@ static std::string percentEncode(std::string_view s, const char *keep = "-._~/:@
   return r;
 }
 
-static std::map<std::string, std::string> parseQuery(std::string_view q) {
-  std::map<std::string, std::string> m;
+static nixstore::SortedMap<composite::Text> parseQuery(std::string_view q) {
+  nixstore::SortedMap<composite::Text> m;
   size_t i = 0;
   while (i < q.size()) {
     size_t amp = q.find('&', i);
@@ -1003,73 +1058,74 @@ static bool isHexRev(std::string_view s) {
   return true;
 }
 
-static void putFlakeAttr(EvalState &st, EvalState::BindingsBuilder &bb, const std::string &k, const std::string &v) {
-  static const std::set<std::string> ints = {"revCount", "lastModified"};
-  static const std::set<std::string> bools = {"submodules", "shallow", "allRefs", "exportIgnore", "lfs", "verifyCommit"};
+static void putFlakeAttr(EvalState &st, EvalState::BindingsBuilder &bb, std::string_view k, std::string_view v) {
+  static const char *const ints[] = {"revCount", "lastModified"};
+  static const char *const bools[] = {"submodules", "shallow", "allRefs", "exportIgnore", "lfs", "verifyCommit"};
   Value &x = bb.alloc(k);
-  if (ints.count(k)) st.mkInt(x, (int64_t)composite::facet<composite::text::Integer<10, true>>(composite::chars(v)).value);
-  else if (bools.count(k)) st.mkBool(x, v == "1" || v == "true");
+  if (oneOf(k, ints)) st.mkInt(x, (int64_t)composite::facet<composite::text::Integer<10, true>>(composite::chars(v)).value);
+  else if (oneOf(k, bools)) st.mkBool(x, v == "1" || v == "true");
   else st.mkString(x, v);
 }
 
 static void parseFlakeRef(EvalState &st, std::string_view ref, Value &v, PosPtr pos) {
-  std::string s(ref);
-  std::string query;
-  if (auto q = s.find('?'); q != std::string::npos) {
-    query = s.substr(q + 1);
-    s = s.substr(0, q);
+  composite::Text s(ref);
+  composite::Text query;
+  if (auto q = s.find('?'); q != composite::npos) {
+    query.put(s.substr(q + 1));
+    s.truncate(q);
   }
-  if (auto h = s.find('#'); h != std::string::npos) s = s.substr(0, h);
+  if (auto h = s.find('#'); h != composite::npos) s.truncate(h);
   auto params = parseQuery(query);
   EvalState::BindingsBuilder bb(st);
   auto colon = s.find(':');
-  std::string scheme = colon == std::string::npos ? "" : s.substr(0, colon);
+  composite::Text scheme;
+  if (colon != composite::npos) scheme.put(s.substr(0, colon));
   if (scheme == "github" || scheme == "gitlab" || scheme == "sourcehut") {
-    std::string rest = s.substr(colon + 1);
-    composite::MutableSeries<std::string> parts;
+    composite::Text rest(s.substr(colon + 1));
+    composite::MutableSeries<composite::Text> parts;
     size_t i = 0;
     while (true) {
       size_t sl = rest.find('/', i);
-      parts.append(percentDecode(rest.substr(i, sl == std::string::npos ? std::string::npos : sl - i)));
-      if (sl == std::string::npos) break;
+      parts.append(percentDecode(rest.substr(i, sl == composite::npos ? composite::npos : sl - i)));
+      if (sl == composite::npos) break;
       i = sl + 1;
     }
     if (parts.size() < 2 || parts.size() > 3)
-      throw EvalError("'" + std::string(ref) + "' is not a valid URL", pos);
+      throw EvalError(composite::cat("'", ref, "' is not a valid URL"), pos);
     st.mkString(bb.alloc("type"), scheme);
     st.mkString(bb.alloc("owner"), parts[0]);
     st.mkString(bb.alloc("repo"), parts[1]);
     if (parts.size() == 3) {
-      if (isHexRev(parts[2])) params["rev"] = parts[2];
-      else params["ref"] = parts[2];
+      if (isHexRev(parts[2])) params["rev"] = parts[2].clone();
+      else params["ref"] = parts[2].clone();
     }
     for (auto &[k, val] : params) putFlakeAttr(st, bb, k, val);
-  } else if (scheme == "path" || (scheme.empty() && (s[0] == '/' || s[0] == '.'))) {
+  } else if (scheme == "path" || (scheme.empty() && !s.empty() && (s[0] == '/' || s[0] == '.'))) {
     st.mkString(bb.alloc("type"), "path");
-    std::string p = scheme.empty() ? s : s.substr(colon + 1);
+    composite::Text p(scheme.empty() ? s.chars() : s.substr(colon + 1));
     if (!p.empty() && p[0] != '/') {
       char buf[PATH_MAX];
-      p = nixfe::canonPath(std::string(getcwd(buf, sizeof buf) ? buf : "/") + "/" + p);
+      p = nixfe::canonPath(composite::cat(getcwd(buf, sizeof buf) ? buf : "/", '/', p));
     }
     st.mkString(bb.alloc("path"), percentDecode(p));
     for (auto &[k, val] : params) putFlakeAttr(st, bb, k, val);
   } else if (scheme.rfind("git+", 0) == 0 || scheme.rfind("hg+", 0) == 0 || scheme.rfind("tarball+", 0) == 0 ||
              scheme.rfind("file+", 0) == 0) {
     auto plus = scheme.find('+');
-    std::string type = scheme.substr(0, plus);
-    st.mkString(bb.alloc("type"), type == "hg" ? "mercurial" : type);
-    std::string url = s.substr(plus + 1);
-    std::map<std::string, std::string> keep;
+    composite::Text type(scheme.substr(0, plus));
+    st.mkString(bb.alloc("type"), type == "hg" ? std::string_view("mercurial") : std::string_view(type));
+    composite::Text url(s.substr(plus + 1));
+    nixstore::SortedMap<composite::Text> keep;
     for (auto &[k, val] : params) {
-      static const std::set<std::string> attrs = {"ref", "rev", "dir", "narHash", "revCount", "lastModified",
-                                                  "submodules", "shallow", "allRefs", "exportIgnore", "lfs"};
-      if (attrs.count(k)) putFlakeAttr(st, bb, k, val);
-      else keep[k] = val;
+      static const char *const attrs[] = {"ref", "rev", "dir", "narHash", "revCount", "lastModified",
+                                          "submodules", "shallow", "allRefs", "exportIgnore", "lfs"};
+      if (oneOf(k, attrs)) putFlakeAttr(st, bb, k, val);
+      else keep[k] = val.clone();
     }
     if (!keep.empty()) {
       url += "?";
       bool first = true;
-      for (auto &[k, val] : keep) { url += (first ? "" : "&") + k + "=" + val; first = false; }
+      for (auto &[k, val] : keep) { url.put(first ? "" : "&").put(k).put('=').put(val); first = false; }
     }
     st.mkString(bb.alloc("url"), url);
   } else if (scheme == "http" || scheme == "https" || scheme == "file") {
@@ -1078,19 +1134,19 @@ static void parseFlakeRef(EvalState &st, std::string_view ref, Value &v, PosPtr 
     for (auto *e : exts)
       if (s.size() >= strlen(e) && s.substr(s.size() - strlen(e)) == e) tarball = true;
     st.mkString(bb.alloc("type"), tarball ? "tarball" : "file");
-    std::string url = s;
-    if (!query.empty()) url += "?" + query;
+    composite::Text url = s.clone();
+    if (!query.empty()) url.put('?').put(query);
     st.mkString(bb.alloc("url"), url);
   } else {
     // Indirect: [flake:]id[/ref-or-rev]
-    std::string rest = scheme == "flake" ? s.substr(colon + 1) : s;
+    composite::Text rest(scheme == "flake" ? s.substr(colon + 1) : s.chars());
     auto sl = rest.find('/');
     st.mkString(bb.alloc("type"), "indirect");
     st.mkString(bb.alloc("id"), rest.substr(0, sl));
-    if (sl != std::string::npos) {
-      std::string r = rest.substr(sl + 1);
-      if (isHexRev(r)) params["rev"] = r;
-      else params["ref"] = r;
+    if (sl != composite::npos) {
+      composite::Text r(rest.substr(sl + 1));
+      if (isHexRev(r)) params["rev"] = composite::mv(r);
+      else params["ref"] = composite::mv(r);
     }
     for (auto &[k, val] : params) putFlakeAttr(st, bb, k, val);
   }
@@ -1099,58 +1155,58 @@ static void parseFlakeRef(EvalState &st, std::string_view ref, Value &v, PosPtr 
 
 static void flakeRefToString(EvalState &st, Value &arg, Value &v, PosPtr pos) {
   st.forceAttrs(arg, pos, "while evaluating the argument passed to builtins.flakeRefToString");
-  std::map<std::string, std::string> m;
+  nixstore::SortedMap<composite::Text> m;
   for (auto &a : *arg.attrs) {
     st.forceValue(*a.value, pos);
-    std::string k = st.symbols[a.name].str();
+    std::string_view k = st.symbols[a.name]; // the symbol table's bytes: they never move
     switch (a.value->type) {
-    case VType::String: m[k] = std::string(a.value->sv()); break;
+    case VType::String: m[k] = composite::Text(a.value->sv()); break;
     case VType::Int:
       if (a.value->integer < 0)
-        throw EvalError("negative value given for flake ref attr " + k + ": " + std::to_string(a.value->integer), pos);
-      m[k] = std::to_string(a.value->integer);
+        throw EvalError(composite::cat("negative value given for flake ref attr ", k, ": ", a.value->integer), pos);
+      m[k] = composite::str(a.value->integer);
       break;
-    case VType::Bool: m[k] = a.value->boolean ? "1" : "0"; break;
+    case VType::Bool: m[k] = composite::Text(a.value->boolean ? "1" : "0"); break;
     default:
-      throw EvalError("flake reference attribute sets may only contain integers, Booleans, and strings, but attribute '" +
-                          k + "' is " + EvalState::showType(*a.value),
+      throw EvalError(composite::cat("flake reference attribute sets may only contain integers, Booleans, and strings, but attribute '",
+                                     k, "' is ", EvalState::showType(*a.value)),
                       pos);
     }
   }
-  auto take = [&](const std::string &k) {
+  auto take = [&](std::string_view k) {
     auto it = m.find(k);
-    if (it == m.end()) return std::string();
-    std::string r = it->second;
-    m.erase(it);
+    if (it == m.end()) return composite::Text();
+    composite::Text r = composite::mv(it->second);
+    eraseRow(m, it);
     return r;
   };
-  std::string type = take("type");
+  composite::Text type = take("type");
   if (type.empty()) throw EvalError("attribute 'type' is missing in call to 'fetchTree'", pos);
-  std::string res;
+  composite::Text res;
   if (type == "github" || type == "gitlab" || type == "sourcehut") {
-    std::string owner = take("owner"), repo = take("repo"), rev = take("rev"), ref = take("ref");
-    res = type + ":" + percentEncode(owner) + "/" + percentEncode(repo);
-    if (!rev.empty()) res += "/" + rev;
-    else if (!ref.empty()) res += "/" + percentEncode(ref);
+    composite::Text owner = take("owner"), repo = take("repo"), rev = take("rev"), ref = take("ref");
+    res = composite::cat(type, ':', percentEncode(owner), '/', percentEncode(repo));
+    if (!rev.empty()) res.put('/').put(rev);
+    else if (!ref.empty()) res.put('/').put(percentEncode(ref));
   } else if (type == "path") {
-    res = "path:" + percentEncode(take("path"));
+    res = composite::cat("path:", percentEncode(take("path")));
   } else if (type == "git" || type == "mercurial" || type == "tarball" || type == "file") {
-    std::string url = take("url");
-    std::string prefix = type == "mercurial" ? "hg" : type;
-    res = prefix + "+" + url;
+    composite::Text url = take("url");
+    std::string_view prefix = type == "mercurial" ? std::string_view("hg") : std::string_view(type);
+    res = composite::cat(prefix, '+', url);
   } else if (type == "indirect") {
-    res = "flake:" + take("id");
-    std::string rev = take("rev"), ref = take("ref");
-    if (!ref.empty()) res += "/" + ref;
-    if (!rev.empty()) res += "/" + rev;
+    res = composite::cat("flake:", take("id"));
+    composite::Text rev = take("rev"), ref = take("ref");
+    if (!ref.empty()) res.put('/').put(ref);
+    if (!rev.empty()) res.put('/').put(rev);
   } else {
-    throw EvalError("unsupported flake reference type '" + type + "'", pos);
+    throw EvalError(composite::cat("unsupported flake reference type '", type, "'"), pos);
   }
   if (!m.empty()) {
     res += "?";
     bool first = true;
     for (auto &[k, val] : m) {
-      res += (first ? "" : "&") + percentEncode(k, "-._~") + "=" + percentEncode(val, "-._~/:");
+      res.put(first ? "" : "&").put(percentEncode(k, "-._~")).put('=').put(percentEncode(val, "-._~/:"));
       first = false;
     }
   }
@@ -1159,20 +1215,20 @@ static void flakeRefToString(EvalState &st, Value &arg, Value &v, PosPtr pos) {
 
 void registerFormatBuiltins(EvalState &state) {
   auto &S = state;
-  S.addPrimOp("__parseFlakeRef", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
+  S.addPrimOp("__parseFlakeRef", [](EvalState &st, A args, Value &v, PosPtr pos) {
     auto s = st.forceStringNoCtx(*args[0], pos, "while evaluating the argument passed to builtins.parseFlakeRef");
     parseFlakeRef(st, s, v, pos);
   });
-  S.addPrimOp("__flakeRefToString", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
+  S.addPrimOp("__flakeRefToString", [](EvalState &st, A args, Value &v, PosPtr pos) {
     flakeRefToString(st, *args[0], v, pos);
   });
-  S.addPrimOp("__toJSON", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
+  S.addPrimOp("__toJSON", [](EvalState &st, A args, Value &v, PosPtr pos) {
     JsonOut os;
     NixStringContext ctx;
     st.printValueAsJSON(os, *args[0], true, ctx, true, pos);
     st.mkString(v, os.view(), ctx);
   });
-  S.addPrimOp("__fromJSON", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
+  S.addPrimOp("__fromJSON", [](EvalState &st, A args, Value &v, PosPtr pos) {
     auto s = st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.fromJSON");
     try {
       parseJSON(st, s, v);
@@ -1181,13 +1237,13 @@ void registerFormatBuiltins(EvalState &state) {
       throw;
     }
   });
-  S.addPrimOp("__toXML", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
-    std::ostringstream os;
+  S.addPrimOp("__toXML", [](EvalState &st, A args, Value &v, PosPtr pos) {
+    composite::Text xml;
     NixStringContext ctx;
-    st.printValueAsXML(os, *args[0], true, false, ctx);
-    st.mkString(v, os.str(), ctx);
+    st.printValueAsXML(xml, *args[0], true, false, ctx);
+    st.mkString(v, std::string_view(xml.data(), xml.size()), ctx);
   });
-  S.addPrimOp("fromTOML", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
+  S.addPrimOp("fromTOML", [](EvalState &st, A args, Value &v, PosPtr pos) {
     auto s = st.forceString(*args[0], pos, "while evaluating the argument passed to builtins.fromTOML");
     TomlParser P{st, s, tomlTimestamps};
     try {

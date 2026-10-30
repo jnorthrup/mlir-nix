@@ -80,7 +80,7 @@ struct GenOptions {
   const void *baseNames = nullptr;
   /// Extra lexical scope for scopedImport.  When non-empty the generated
   /// expression is `scope: <expr>`, and these names resolve to `scope.name`.
-  composite::MutableSeries<std::string> scopeNames;
+  composite::MutableSeries<composite::Text> scopeNames;
   bool scoped = false;
   /// Sea-of-nodes schedule (MLNIX_DEFER): mint no lambda body at lowering time.  The op carries
   /// the captures and a `body_index` into `pool`; the body is minted on the first call.

@@ -229,6 +229,23 @@ private:
   MutableSeries<uint32_t> spill;
 };
 
+/// A set of byte strings that keeps its own copy of each (what a std::set or unordered_set of std::string was): a TextTable over a Bump.
+struct TextSet {
+  TextTable<char> set;
+  Bump bytes;
+  /// False when the bytes were in the set already.
+  bool insert(const char *p, uint32_t n) {
+    if (set.find(p, n)) return false;
+    set.set(p, n, 1, [&] { return bytes.copy(p, n); });
+    return true;
+  }
+  bool contains(const char *p, uint32_t n) const { return set.find(p, n) != nullptr; }
+  uint32_t size() const { return set.size(); }
+  /// The members in the order they came: r.p and r.n.
+  const TextTable<char>::Row *begin() const { return set.begin(); }
+  const TextTable<char>::Row *end() const { return set.end(); }
+};
+
 } // namespace composite
 
 #endif // COMPOSITE_TABLE_H
