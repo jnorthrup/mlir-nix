@@ -13,6 +13,7 @@
 #ifndef NIX_EVAL_H
 #define NIX_EVAL_H
 
+#include "Composite/Patricia.h"
 #include "Composite/Pool.h"
 #include "Composite/Rows.h"
 #include "Composite/Views.h"
@@ -128,11 +129,37 @@ struct Bindings {
   composite::Frozen<const Attr *> lexicographicOrder(const SymbolTable &st) const;
 };
 
-/// String context: sorted set of encoded elements
+/// String context: the set of encoded elements
 ///   "/nix/store/..."          opaque path
 ///   "=/nix/store/x.drv"       derivation with all outputs (drvDeep)
 ///   "!out!/nix/store/x.drv"   built output
-using NixStringContext = std::set<std::string>;
+/// as a string being made gathers them: C strings that outlive the set (a string's own context's elements, arena copies made with
+/// copyString, literals), held where they lie and appended as they come, with no node and no copy per element.  Read, it is a set: sorted
+/// by bytes, each element once, as the first read after an append leaves it (Rows' sortRows, then the repeats dropped).
+struct NixStringContext {
+  NixStringContext() = default;
+  explicit NixStringContext(const char *e) { insert(e); }
+  void insert(const char *e) {
+    normal = rows.empty() || (normal && lessBytes(rows.back(), e));
+    rows.append(e);
+  }
+  template <class It> void insert(It b, It e) {
+    for (; b != e; ++b) insert(*b);
+  }
+  bool empty() const { return rows.empty(); }
+  uint32_t size() const { settle(); return rows.size(); }
+  const char *const *begin() const { settle(); return rows.data(); }
+  const char *const *end() const { settle(); return rows.data() + rows.size(); }
+  static bool lessBytes(const char *a, const char *b) {
+    while (*a && *a == *b) ++a, ++b;
+    return (unsigned char)*a < (unsigned char)*b;
+  }
+
+private:
+  void settle() const;
+  mutable composite::MutableSeries<const char *> rows;
+  mutable bool normal = true; // sorted, each element once
+};
 struct StringContext {
   size_t n;
   const char *elems[0];
@@ -150,6 +177,7 @@ struct PieceContexts {
 };
 
 struct PrimOp;
+
 
 /// Failed: a thunk whose evaluation threw an evaluation error.  Forcing it again throws a fresh copy of that error as it stands then (the
 /// first throw may still be gathering traces on its way out), not the evaluation again: Nix 2.34's memoised errors.  The tags up to
@@ -206,19 +234,14 @@ struct Value {
 static_assert(sizeof(Value) == 24, "a Value is a tag, a count and two words");
 
 
-/// A primop is a function pointer: most are lambdas without captures, and a call through a std::function costs two indirect calls
-/// (the line profile put 1.6% of a run on them).  The few made by a registering loop that captures (type predicates, arithmetic,
-/// bit operations, rounding) keep a closure.
+/// A primop is a function pointer: a lambda without captures.  A registering loop (type predicates, arithmetic, bit operations, rounding)
+/// makes one per constant, the constant a template parameter (K in Builtins.cpp), not a capture: there is no closure to call through.
 using PrimFn = void (*)(EvalState &, Value **args, Value &out, PosPtr pos);
 struct PrimOp {
   std::string name;
   unsigned arity;
-  PrimFn fn; // null for a closure
-  std::function<void(EvalState &, Value **args, Value &out, PosPtr pos)> closure;
-  void call(EvalState &st, Value **args, Value &out, PosPtr pos) const {
-    if (fn) fn(st, args, out, pos);
-    else closure(st, args, out, pos);
-  }
+  PrimFn fn;
+  void call(EvalState &st, Value **args, Value &out, PosPtr pos) const { fn(st, args, out, pos); }
 };
 
 struct RegionInfo {
@@ -460,6 +483,9 @@ struct EvalState {
   void mkBool(Value &v, bool b) { if (statsEnabled) ++nVT[unsigned(VType::Bool)];  v.type = VType::Bool; v.boolean = b; }
   void mkNull(Value &v) { if (statsEnabled) ++nVT[unsigned(VType::Null)];  v.type = VType::Null; }
   void mkString(Value &v, std::string_view s, const NixStringContext &ctx = {});
+  /// A store path that is its own context (a copied source, a fixed output, a store path read back): one arena copy is both the string's
+  /// bytes and its context's element.
+  void mkStoreString(Value &v, std::string_view path);
   /// A string literal: a window on the bytes the lowered op already holds (a Name: a slice of a mapped input or a never-freed arena), no copy.
   void mkStringWindow(Value &v, llvm::StringRef r) {
     std::string_view s(r.data(), r.size());
@@ -605,7 +631,6 @@ struct EvalState {
   static constexpr unsigned kMaxPrimArity = 8;
   void addPrimOp(const std::string &name, unsigned arity, PrimFn fn);
   /// For a primop that captures (a registering loop's parameter).
-  void addPrimOpClosure(const std::string &name, unsigned arity, std::function<void(EvalState &, Value **, Value &, PosPtr)> fn);
   void addConstant(const std::string &name, Value *v);
   void registerPrimOp(const std::string &name, PrimOp *p);
   void createBaseEnv();
@@ -699,9 +724,10 @@ struct EvalState {
 
   unsigned callDepth = 0;
   unsigned tryLevel = 0;
-  std::map<std::string, std::string> srcToStore;
-  std::map<std::string, Value *> fileEvalCache;
-  std::map<std::string, Value *> scopedImportCache;
+  // By path, in crit-bit tries (Composite/Patricia.h): the keys share long prefixes, and are copied into the arena once, when new.
+  composite::Patricia<const char *> srcToStore; // a source path's store path, an arena string: the context element of every copy
+  composite::Patricia<Value *> fileEvalCache;
+  composite::Patricia<Value *> scopedImportCache; // by the file's path and the scope's names
   composite::MutableSeries<std::shared_ptr<nixfe::Origin>> origins;
   /// MLNIX_DEFER: one pool of deferred lambdas per lowered file.  The `body_index` of a nix.lambda is a
   /// nixfe::BodyIndex (`file j row`) into these.

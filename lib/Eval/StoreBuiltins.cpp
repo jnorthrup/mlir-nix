@@ -24,7 +24,7 @@ static void addOutputsToResult(EvalState &st, EvalState::BindingsBuilder &bb, co
   for (auto &[name, o] : drv.outputs) {
     std::string p = o.kind == nixstore::DerivationOutput::CAFixed && o.path.empty()
                         ? o.fixedPath(st.store->storeDir(), drv.name, name) : o.path;
-    st.mkString(bb.alloc(name), p, NixStringContext{"!" + name + "!" + drvPath});
+    st.mkString(bb.alloc(name), p, NixStringContext{st.copyString("!" + name + "!" + drvPath)});
   }
 }
 
@@ -59,7 +59,6 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
     nixstore::Derivation drv;
     drv.name = drvName;
     nixstore::DrvInputs moduloInputs; // the input derivations as the output paths' hash saw them, for the derivation's modulo hash
-    bool hashLater = false;
     NixStringContext context;                         // what coercions make: paths copied to the store, and the rarer attributes
     composite::MutableSeries<const StringContext *> owns; // each string attribute's own context, interned: its elements are not copied
     std::string coerced;
@@ -238,23 +237,26 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
         drv.env[o] = "";
         drv.outputs[o] = nixstore::DerivationOutput{};
       }
+    }
+
+    // A derivation made before with this content has its paths already, and neither hash below is made again: 37% of a NixOS
+    // evaluation's derivations and 44% of nixpkgs-73's are made again by another call with equal attributes.
+    std::string drvPath;
+    uint64_t fingerprint;
+    if (const std::string *same = st.store->sameDerivation(drv, fingerprint)) {
+      drvPath = *same;
+    } else {
       try {
-        st.store->fillInOutputPaths(drv, &moduloInputs);
-        hashLater = true;
+        if (!outputHash) st.store->fillInOutputPaths(drv, &moduloInputs);
+        drvPath = st.store->writeDerivation(std::move(drv));
+        st.store->rememberDerivation(fingerprint, drvPath);
+        if (!outputHash) st.store->hashLater(drvPath, std::move(moduloInputs)); // its modulo hash, for its dependents, made off this thread
       } catch (nixstore::Error &e) {
         throw EvalError(e.what(), pos);
       }
     }
-
-    std::string drvPath;
-    try {
-      drvPath = st.store->writeDerivation(std::move(drv));
-      if (hashLater) st.store->hashLater(drvPath, std::move(moduloInputs)); // its modulo hash, for its dependents, made off this thread
-    } catch (nixstore::Error &e) {
-      throw EvalError(e.what(), pos);
-    }
     EvalState::BindingsBuilder bb(st);
-    st.mkString(bb.alloc(st.s.drvPath), drvPath, NixStringContext{"=" + drvPath});
+    st.mkString(bb.alloc(st.s.drvPath), drvPath, NixStringContext{st.copyString("=" + drvPath)});
     addOutputsToResult(st, bb, drvPath, st.store->readDerivation(drvPath)); // the derivation as the store keeps it, not a copy
     st.mkAttrs(v, bb.finish());
   } catch (EvalError &e) {
@@ -322,7 +324,7 @@ static void addPath(EvalState &st, PosPtr pos, std::string name, const std::stri
   } catch (nixstore::Error &e) {
     throw EvalError(e.what(), pos);
   }
-  st.mkString(v, dst, NixStringContext{dst});
+  st.mkStoreString(v, dst);
 }
 
 static std::string downloadToTemp(const std::string &url, PosPtr pos) {
@@ -388,7 +390,7 @@ static void fetchImpl(EvalState &st, A args, Value &v, PosPtr pos, bool unpack, 
   if (expected) {
     std::string exp = nixstore::makeFixedOutputPath(st.store->storeDir(), name, method, *expected);
     if (st.store->isValidPath(exp)) {
-      st.mkString(v, exp, NixStringContext{exp});
+      st.mkStoreString(v, exp);
       return;
     }
   }
@@ -426,7 +428,7 @@ static void fetchImpl(EvalState &st, A args, Value &v, PosPtr pos, bool unpack, 
   } catch (nixstore::Error &e) {
     throw EvalError(e.what(), pos);
   }
-  st.mkString(v, dst, NixStringContext{dst});
+  st.mkStoreString(v, dst);
 }
 
 static void fetchGit(EvalState &st, A args, Value &v, PosPtr pos) {
@@ -494,7 +496,7 @@ static void fetchGit(EvalState &st, A args, Value &v, PosPtr pos) {
   auto [narHash, narSize] = nixstore::hashPath(st.store->toReal(dst));
   nixstore::deletePathRecursive(tmpl);
   EvalState::BindingsBuilder bb(st);
-  st.mkString(bb.alloc(st.s.outPath), dst, NixStringContext{dst});
+  st.mkStoreString(bb.alloc(st.s.outPath), dst);
   st.mkString(bb.alloc(st.s.rev), headRev);
   st.mkString(bb.alloc(st.s.shortRev), headRev.substr(0, 7));
   int64_t lm = atoll(timeS.c_str());
@@ -536,7 +538,7 @@ void registerStoreBuiltins(EvalState &state) {
     } catch (nixstore::Error &e) {
       throw EvalError(e.what(), pos);
     }
-    st.mkString(v, p, NixStringContext{p});
+    st.mkStoreString(v, p);
   });
   S.addPrimOp("__storePath", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
     if (st.settings.pureEval) throw EvalError("'builtins.storePath' is not allowed in pure evaluation mode", pos);
@@ -546,7 +548,7 @@ void registerStoreBuiltins(EvalState &state) {
       throw EvalError("path '" + p + "' is not in the Nix store", pos);
     std::string sp = nixstore::toStorePath(st.store->storeDir(), p);
     if (!st.store->isValidPath(sp)) st.store->ensurePath(sp);
-    ctx.insert(sp);
+    ctx.insert(st.copyString(sp));
     st.mkString(v, p, ctx);
   });
   S.addPrimOp("__toPath", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
@@ -592,7 +594,7 @@ void registerStoreBuiltins(EvalState &state) {
     if (nixstore::isInStore(st.store->storeDir(), p)) {
       std::string sp = nixstore::toStorePath(st.store->storeDir(), p);
       if (auto info = st.store->queryPathInfo(sp))
-        for (auto &r : info->references) refs.insert(r);
+        for (auto &r : info->references) refs.insert(st.copyString(r));
     }
     st.mkString(v, s, refs);
   });

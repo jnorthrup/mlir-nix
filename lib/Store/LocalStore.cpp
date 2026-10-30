@@ -16,6 +16,8 @@
 #include "Composite/Mutable.h"
 #include "Composite/Rows.h"
 #include "Nix/Store.h"
+#include "llvm/ADT/ArrayRef.h" // xxh3_64bits' ArrayRef overload lives here from LLVM 23, in xxhash.h before
+#include "llvm/Support/xxhash.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -286,6 +288,79 @@ std::string Store::writeDerivation(Derivation &&drv) {
   const Derivation &kept = drvCache.try_emplace(path, std::move(drv)).first->second; // a path names its text: the first is kept, never rewritten
   if (!settings.readOnly) addTextToStore(kept.name + ".drv", text, drvReferences(kept));
   return path;
+}
+
+/// A fingerprint of a derivation's content: each of its strings through xxh3, in order, with the counts that delimit its lists.  Equal content
+/// gives equal fingerprints; sameContent checks the converse.
+static uint64_t contentFingerprint(const Derivation &drv) {
+  uint64_t h = 0;
+  auto word = [&](uint64_t w) { h = (h ^ w) * 0x9e3779b97f4a7c15ull; h ^= h >> 29; };
+  auto str = [&](std::string_view s) { word(llvm::xxh3_64bits(llvm::ArrayRef<uint8_t>(reinterpret_cast<const uint8_t *>(s.data()), s.size()))); };
+  str(drv.name), str(drv.platform), str(drv.builder);
+  word(drv.args.size());
+  for (const std::string &a : drv.args) str(a);
+  word(drv.inputSrcs.size());
+  for (const std::string &s : drv.inputSrcs) str(s);
+  word(drv.inputDrvs.size());
+  for (auto &[p, outs] : drv.inputDrvs) {
+    str(p), word(outs.size());
+    for (const std::string &o : outs) str(o);
+  }
+  word(drv.outputs.size());
+  for (auto &[n, o] : drv.outputs) str(n), word(o.kind), str(o.path);
+  word(drv.env.size());
+  for (auto &[k, v] : drv.env) str(k), str(v);
+  word(drv.structuredAttrs.has_value());
+  if (drv.structuredAttrs) str(*drv.structuredAttrs);
+  return h;
+}
+
+/// Whether `c`, a derivation as writeDerivation keeps it, is `n` with its output paths filled in: equal in every field but what filling in
+/// writes, an input-addressed output's path and its env entry (empty in n, as derivationStrict leaves them).
+static bool sameContent(const Derivation &n, const Derivation &c) {
+  if (n.name != c.name || n.platform != c.platform || n.builder != c.builder || n.structuredAttrs != c.structuredAttrs ||
+      n.args.size() != c.args.size() || !(n.inputSrcs == c.inputSrcs) || n.inputDrvs.size() != c.inputDrvs.size() ||
+      n.outputs.size() != c.outputs.size() || n.env.size() != c.env.size())
+    return false;
+  for (uint32_t i = 0; i < n.args.size(); i++)
+    if (n.args[i] != c.args[i]) return false;
+  for (size_t i = 0; i < n.inputDrvs.size(); i++) {
+    auto &a = n.inputDrvs.begin()[i], &b = c.inputDrvs.begin()[i];
+    if (a.first != b.first || !(a.second == b.second)) return false;
+  }
+  for (size_t i = 0; i < n.outputs.size(); i++) {
+    auto &[an, a] = n.outputs.begin()[i];
+    auto &[bn, b] = c.outputs.begin()[i];
+    if (an != bn) return false;
+    if (a.kind == DerivationOutput::Deferred) {
+      if (b.kind != DerivationOutput::InputAddressed) return false;
+    } else if (a.kind != b.kind || a.path != b.path || a.method != b.method || a.hashAlgo != b.hashAlgo || !(a.hash == b.hash)) {
+      return false;
+    }
+  }
+  for (size_t i = 0; i < n.env.size(); i++) {
+    auto &[ak, av] = n.env.begin()[i];
+    auto &[bk, bv] = c.env.begin()[i];
+    if (ak != bk) return false;
+    if (av != bv) { // only an output's entry may differ, which filling in wrote
+      auto o = n.outputs.find(ak);
+      if (o == n.outputs.end() || o->second.kind != DerivationOutput::Deferred || !av.empty()) return false;
+    }
+  }
+  return true;
+}
+
+const std::string *Store::sameDerivation(const Derivation &drv, uint64_t &fingerprint) const {
+  fingerprint = contentFingerprint(drv);
+  const ContentRow *r = drvByContent.get(ContentRow{fingerprint, nullptr});
+  if (!r) return nullptr;
+  auto d = drvCache.find(*r->path);
+  return d != drvCache.end() && sameContent(drv, d->second) ? r->path : nullptr;
+}
+
+void Store::rememberDerivation(uint64_t fingerprint, const std::string &drvPath) {
+  auto d = drvCache.find(drvPath);
+  if (d != drvCache.end()) drvByContent.put(ContentRow{fingerprint, &d->first}); // a fingerprint's first derivation stays
 }
 
 const Derivation &Store::readDerivation(const std::string &drvPath) {

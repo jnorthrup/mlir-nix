@@ -151,14 +151,26 @@ const char *EvalState::copyString(std::string_view s) {
   return p;
 }
 
+void NixStringContext::settle() const {
+  if (normal) return;
+  cp::sortRows(rows.data(), rows.size(), lessBytes);
+  uint32_t m = 0;
+  for (uint32_t i = 0; i < rows.size(); i++)
+    if (m == 0 || lessBytes(rows[m - 1], rows[i])) rows[m++] = rows[i]; // sorted: an element not after the last kept is a repeat
+  while (rows.size() > m) rows.pop();
+  normal = true;
+}
+
+/// The context `c` as a value's: its elements are already strings that outlive it, so the array holds them where they lie.
 const StringContext *EvalState::makeContext(const NixStringContext &c) {
   if (c.empty()) return nullptr;
-  if (statsEnabled) nCtxBytes += sizeof(StringContext) + c.size() * sizeof(const char *);
-  void *mem = alloc.Allocate(sizeof(StringContext) + c.size() * sizeof(const char *), alignof(StringContext));
+  uint32_t n = c.size();
+  if (statsEnabled) nCtxBytes += sizeof(StringContext) + n * sizeof(const char *);
+  void *mem = alloc.Allocate(sizeof(StringContext) + n * sizeof(const char *), alignof(StringContext));
   auto *ctx = new (mem) StringContext();
-  ctx->n = c.size();
-  size_t i = 0;
-  for (auto &e : c) ctx->elems[i++] = copyString(e);
+  ctx->n = n;
+  const char *const *e = c.begin();
+  for (uint32_t i = 0; i < n; i++) ctx->elems[i] = e[i];
   return ctx;
 }
 
@@ -168,6 +180,15 @@ void EvalState::mkString(Value &v, std::string_view s, const NixStringContext &c
   v.str.s = copyString(s);
   v.aux = static_cast<uint32_t>(s.size());
   v.str.ctx = makeContext(ctx);
+}
+
+void EvalState::mkStoreString(Value &v, std::string_view path) {
+  if (path.size() > UINT32_MAX) throw EvalError("string of 4 GiB or more");
+  const char *p = copyString(path);
+  v.type = VType::String; if (statsEnabled) ++nVT[unsigned(VType::String)];
+  v.str.s = p;
+  v.aux = static_cast<uint32_t>(path.size());
+  v.str.ctx = makeContext(NixStringContext{p});
 }
 
 void EvalState::mkStringOf(Value &v, llvm::ArrayRef<composite::Chars> pieces, const StringContext *ctx) {
@@ -746,12 +767,7 @@ Value *EvalState::baseEnvValue(llvm::StringRef name) {
 static std::string primOpName(const std::string &name) { return name.rfind("__", 0) == 0 ? name.substr(2) : name; }
 
 void EvalState::addPrimOp(const std::string &name, unsigned arity, PrimFn fn) {
-  registerPrimOp(name, new PrimOp{primOpName(name), arity, fn, nullptr});
-}
-
-void EvalState::addPrimOpClosure(const std::string &name, unsigned arity,
-                                 std::function<void(EvalState &, Value **, Value &, PosPtr)> fn) {
-  registerPrimOp(name, new PrimOp{primOpName(name), arity, nullptr, std::move(fn)});
+  registerPrimOp(name, new PrimOp{primOpName(name), arity, fn});
 }
 
 void EvalState::registerPrimOp(const std::string &name, PrimOp *p) {
@@ -2362,20 +2378,19 @@ std::string EvalState::copyPathToStore(NixStringContext &ctx, const std::string 
   std::string base = nixstore::baseNameOf(path);
   if (base.size() >= 4 && base.substr(base.size() - 4) == ".drv")
     throw EvalError("file names are not allowed to end in '.drv'");
-  auto it = srcToStore.find(path);
-  std::string dst;
-  if (it != srcToStore.end()) {
-    dst = it->second;
+  const char *dst;
+  if (const char **hit = srcToStore.find(path.data(), uint32_t(path.size()))) {
+    dst = *hit;
   } else {
     std::string real = path;
     if (nixstore::isInStore(store->storeDir(), path)) real = store->toReal(path);
     if (!nixstore::pathExists(real)) throw EvalError("path '" + path + "' does not exist");
     try {
-      dst = store->addToStore(base, real);
+      dst = copyString(store->addToStore(base, real));
     } catch (nixstore::Error &e) {
       throw EvalError(e.what());
     }
-    srcToStore[path] = dst;
+    srcToStore.set(path.data(), uint32_t(path.size()), dst, [&] { return copyString(path); });
   }
   ctx.insert(dst);
   return dst;
@@ -2962,16 +2977,18 @@ std::string EvalState::resolveExprPath(std::string path) {
 
 Value *EvalState::evalFile(const std::string &pathIn) {
   std::string path = pathIn;
-  auto it = fileEvalCache.find(path);
-  if (it != fileEvalCache.end()) return it->second;
+  if (Value **hit = fileEvalCache.find(path.data(), uint32_t(path.size()))) return *hit;
   std::string real = realisePath(path, nullptr);
   std::string resolved = resolveExprPath(real);
   // Map back from the physical location when using a chroot store.
   std::string logical = resolved;
   if (!store->config().realRoot.empty() && resolved.rfind(store->config().realRoot, 0) == 0)
     logical = resolved.substr(store->config().realRoot.size());
-  auto it2 = fileEvalCache.find(logical);
-  if (it2 != fileEvalCache.end()) return fileEvalCache[path] = it2->second;
+  if (Value **hit = fileEvalCache.find(logical.data(), uint32_t(logical.size()))) {
+    Value *same = *hit; // read before the set, which may move the rows
+    fileEvalCache.set(path.data(), uint32_t(path.size()), same, [&] { return copyString(path); });
+    return same;
+  }
 
   Value *result;
   if (resolved.size() > 5 && resolved.substr(resolved.size() - 5) == ".mlir") {
@@ -2997,8 +3014,8 @@ Value *EvalState::evalFile(const std::string &pathIn) {
       result = evalExprOp(lowerToMLIR(origin));
     }
   }
-  fileEvalCache[path] = result;
-  fileEvalCache[logical] = result;
+  fileEvalCache.set(path.data(), uint32_t(path.size()), result, [&] { return copyString(path); });
+  fileEvalCache.set(logical.data(), uint32_t(logical.size()), result, [&] { return copyString(logical); });
   return result;
 }
 
@@ -3038,16 +3055,16 @@ std::string EvalState::realisePath(const std::string &path, PosPtr pos) {
 }
 
 void EvalState::realiseContext(const NixStringContext &ctx, PosPtr pos) {
-  for (auto &c : ctx) {
+  for (const char *c : ctx) {
     try {
       if (c[0] == '!') {
-        auto p = c.find('!', 1);
-        std::string drv = c.substr(p + 1);
-        store->buildDerivation(drv);
+        const char *drv = c + 1;
+        while (*drv && *drv != '!') ++drv;
+        store->buildDerivation(*drv ? drv + 1 : drv);
       } else if (c[0] == '=') {
-        store->buildDerivation(c.substr(1));
+        store->buildDerivation(c + 1);
       } else if (!store->isValidPath(c)) {
-        throw EvalError("path '" + c + "' is not valid", pos);
+        throw EvalError("path '" + std::string(c) + "' is not valid", pos);
       }
     } catch (nixstore::Error &e) {
       throw EvalError(e.what(), pos);

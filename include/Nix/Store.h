@@ -11,6 +11,7 @@
 
 #include <cstdint>
 
+#include "Composite/Funnel.h"
 #include "Composite/Mutable.h"
 #include <functional>
 #include <map>
@@ -363,6 +364,24 @@ struct Store {
   };
   std::map<std::string, DrvModulo> drvHashes;
   std::map<std::string, Derivation> drvCache;
+  /// A content fingerprint's first derivation, the key of its drvCache entry, in Krapivin's table (Composite/Funnel.h): the keys are
+  /// already 64-bit hashes.
+  struct ContentRow {
+    uint64_t k;
+    const std::string *path;
+    friend constexpr bool operator<(const ContentRow &a, const ContentRow &b) { return a.k < b.k; }
+    friend constexpr bool operator==(const ContentRow &a, const ContentRow &b) { return a.k == b.k; }
+  };
+  struct ContentHash {
+    constexpr uint64_t operator()(const ContentRow &r) const { return r.k; }
+  };
+  composite::GrowFunnel<ContentRow, 15, 8, 5, ContentHash> drvByContent;
+  /// The path of a derivation this evaluation made before with the same content, or null.  `drv` is as derivationStrict has it before its
+  /// output paths are filled in.  Some 40% of the derivations an evaluation makes are made again, by another call with equal attributes (a
+  /// bootstrap stage's fetchurl, a package called twice); one found by a fingerprint of its strings and a compare skips both SHA-256 passes.
+  /// `fingerprint` receives the fingerprint, for rememberDerivation when there is no such derivation.
+  const std::string *sameDerivation(const Derivation &drv, uint64_t &fingerprint) const;
+  void rememberDerivation(uint64_t fingerprint, const std::string &drvPath);
   std::string infoFile(const std::string &path) const;
   void makeStoreWritable();
   std::map<std::string, std::string> realise(const std::string &drvPath,

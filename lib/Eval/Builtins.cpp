@@ -74,6 +74,10 @@ static int compareVersions(std::string_view v1, std::string_view v2) {
 
 /// A string result that is `w`, a window on the bytes of `arg` when the argument was a string: those bytes and its context are shared,
 /// nothing is copied.  Any other argument was coerced into text of its own, so the result is made from it with `ctx`.
+/// A constant as a type, so that a registering loop can make one plain function per constant: a template lambda's body sees V as a
+/// constant, not a capture, and converts to a primop's function pointer.
+template <auto V> struct K {};
+
 static void mkSharedString(EvalState &st, Value &v, const Value &arg, composite::Chars w, const NixStringContext &ctx) {
   if (arg.type != VType::String) return st.mkString(v, composite::view(w), ctx);
   v.type = VType::String;
@@ -332,29 +336,32 @@ void registerBuiltins(EvalState &state) {
   });
 
   // -- Types ---------------------------------------------------------------
-  auto typePred = [&](const char *name, auto pred) {
-    S.addPrimOpClosure(name, 1, [pred](EvalState &st, A args, Value &v, PosPtr pos) {
+  auto typePred = [&]<VType T>(const char *name, K<T>) {
+    S.addPrimOp(name, 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
       st.forceValue(*args[0], pos);
-      st.mkBool(v, pred(*args[0]));
+      st.mkBool(v, args[0]->type == T);
     });
   };
-  typePred("isNull", [](Value &x) { return x.type == VType::Null; });
-  typePred("__isFunction", [](Value &x) { return x.isFunction(); });
-  typePred("__isInt", [](Value &x) { return x.type == VType::Int; });
-  typePred("__isFloat", [](Value &x) { return x.type == VType::Float; });
-  typePred("__isString", [](Value &x) { return x.type == VType::String; });
-  typePred("__isBool", [](Value &x) { return x.type == VType::Bool; });
-  typePred("__isPath", [](Value &x) { return x.type == VType::Path; });
-  typePred("__isAttrs", [](Value &x) { return x.type == VType::Attrs; });
-  typePred("__isList", [](Value &x) { return x.type == VType::List; });
+  typePred("isNull", K<VType::Null>{});
+  S.addPrimOp("__isFunction", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
+    st.forceValue(*args[0], pos);
+    st.mkBool(v, args[0]->isFunction());
+  });
+  typePred("__isInt", K<VType::Int>{});
+  typePred("__isFloat", K<VType::Float>{});
+  typePred("__isString", K<VType::String>{});
+  typePred("__isBool", K<VType::Bool>{});
+  typePred("__isPath", K<VType::Path>{});
+  typePred("__isAttrs", K<VType::Attrs>{});
+  typePred("__isList", K<VType::List>{});
   S.addPrimOp("__typeOf", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceValue(*args[0], pos);
     st.mkString(v, EvalState::typeOf(*args[0]));
   });
 
   // -- Arithmetic ------------------------------------------------------------
-  auto arith = [&](const char *name, char op) {
-    S.addPrimOpClosure(name, 2, [op](EvalState &st, A args, Value &v, PosPtr pos) {
+  auto arith = [&]<char op>(const char *name, K<op>) {
+    S.addPrimOp(name, 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
       st.forceValue(*args[0], pos);
       st.forceValue(*args[1], pos);
       Value &a = *args[0], &b = *args[1];
@@ -395,24 +402,24 @@ void registerBuiltins(EvalState &state) {
       st.mkInt(v, r);
     });
   };
-  arith("__add", '+');
-  arith("__sub", '-');
-  arith("__mul", '*');
-  arith("__div", '/');
-  auto bitop = [&](const char *name, char op) {
-    S.addPrimOpClosure(name, 2, [op](EvalState &st, A args, Value &v, PosPtr pos) {
+  arith("__add", K<'+'>{});
+  arith("__sub", K<'-'>{});
+  arith("__mul", K<'*'>{});
+  arith("__div", K<'/'>{});
+  auto bitop = [&]<char op>(const char *name, K<op>) {
+    S.addPrimOp(name, 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
       int64_t a = st.forceInt(*args[0], pos), b = st.forceInt(*args[1], pos);
       st.mkInt(v, op == '&' ? (a & b) : op == '|' ? (a | b) : (a ^ b));
     });
   };
-  bitop("__bitAnd", '&');
-  bitop("__bitOr", '|');
-  bitop("__bitXor", '^');
+  bitop("__bitAnd", K<'&'>{});
+  bitop("__bitOr", K<'|'>{});
+  bitop("__bitXor", K<'^'>{});
   S.addPrimOp("__lessThan", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.mkBool(v, st.lessThan(*args[0], *args[1], pos));
   });
-  auto rounding = [&](const char *name, bool up) {
-    S.addPrimOpClosure(name, 1, [up](EvalState &st, A args, Value &v, PosPtr pos) {
+  auto rounding = [&]<bool up>(const char *name, K<up>) {
+    S.addPrimOp(name, 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
       st.forceValue(*args[0], pos);
       if (args[0]->type == VType::Int) { v = *args[0]; return; }
       double d = st.forceFloat(*args[0], pos);
@@ -422,8 +429,8 @@ void registerBuiltins(EvalState &state) {
       st.mkInt(v, (int64_t)r);
     });
   };
-  rounding("__ceil", true);
-  rounding("__floor", false);
+  rounding("__ceil", K<true>{});
+  rounding("__floor", K<false>{});
 
   // -- Strings ---------------------------------------------------------------
   S.addPrimOp("toString", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
@@ -657,7 +664,7 @@ void registerBuiltins(EvalState &state) {
     NixStringContext ctx, out;
     std::string scratch;
     auto w = st.coerceToWindow(*args[0], ctx, false, true, pos, "", scratch);
-    for (auto &c : ctx) out.insert(c[0] == '=' ? c.substr(1) : c);
+    for (const char *c : ctx) out.insert(c[0] == '=' ? c + 1 : c); // the path after '=' is a suffix of the element: nothing copied
     st.mkString(v, composite::view(w), out);
   });
   S.addPrimOp("__addDrvOutputDependencies", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
@@ -672,14 +679,15 @@ void registerBuiltins(EvalState &state) {
         throw EvalError("path '" + c + "' is not a derivation", pos);
       c = "=" + c;
     }
-    st.mkString(v, s, NixStringContext{c});
+    st.mkString(v, s, NixStringContext{st.copyString(c)});
   });
   S.addPrimOp("__getContext", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
     NixStringContext ctx;
     st.forceString(*args[0], ctx, pos, "while evaluating the argument passed to builtins.getContext");
     struct Info { bool path = false, all = false; composite::MutableSeries<std::string> outputs; };
     std::map<std::string, Info> m;
-    for (auto &c : ctx) {
+    for (const char *e : ctx) {
+      std::string c = e;
       if (c[0] == '=') m[c.substr(1)].all = true;
       else if (c[0] == '!') {
         auto p = c.find('!', 1);
@@ -710,19 +718,19 @@ void registerBuiltins(EvalState &state) {
         throw EvalError("context key '" + path + "' is not a store path", pos);
       st.forceAttrs(*a.value, pos);
       if (const Attr *p = a.value->attrs->get(st.symbols.create("path")))
-        if (st.forceBool(*p->value, pos)) ctx.insert(path);
+        if (st.forceBool(*p->value, pos)) ctx.insert(st.copyString(path));
       if (const Attr *p = a.value->attrs->get(st.symbols.create("allOutputs")))
         if (st.forceBool(*p->value, pos)) {
           if (path.size() < 4 || path.substr(path.size() - 4) != ".drv")
             throw EvalError("tried to add all-outputs context of " + path + ", which is not a derivation, to a string", pos);
-          ctx.insert("=" + path);
+          ctx.insert(st.copyString("=" + path));
         }
       if (const Attr *p = a.value->attrs->get(st.s.outputs)) {
         st.forceList(*p->value, pos);
         if (p->value->listSize() && (path.size() < 4 || path.substr(path.size() - 4) != ".drv"))
           throw EvalError("tried to add derivation output context of " + path + ", which is not a derivation, to a string", pos);
         for (size_t i = 0; i < p->value->listSize(); i++)
-          ctx.insert("!" + str(st.forceStringNoCtx(*p->value->list.elems[i], pos)) + "!" + path);
+          ctx.insert(st.copyString("!" + str(st.forceStringNoCtx(*p->value->list.elems[i], pos)) + "!" + path));
       }
     }
     st.mkString(v, s, ctx);
@@ -1141,8 +1149,7 @@ void registerBuiltins(EvalState &state) {
     std::string key = real;
     for (auto &n : names) key += "\n" + n;
     Value *fn;
-    auto it = st.scopedImportCache.find(key);
-    if (it != st.scopedImportCache.end()) fn = it->second;
+    if (Value **hit = st.scopedImportCache.find(key.data(), uint32_t(key.size()))) fn = *hit;
     else {
       std::string text;
       try {
@@ -1157,7 +1164,7 @@ void registerBuiltins(EvalState &state) {
       origin->text = nixfe::Source::fromString(text);
       st.origins.append(origin);
       fn = st.evalExprOp(st.lowerToMLIR(origin, &names));
-      st.scopedImportCache[key] = fn;
+      st.scopedImportCache.set(key.data(), uint32_t(key.size()), fn, [&] { return st.copyString(key); });
     }
     st.callFunction(*fn, *args[0], v, pos);
   });
