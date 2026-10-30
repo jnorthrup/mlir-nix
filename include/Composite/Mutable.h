@@ -84,6 +84,103 @@ private:
   void release() { dropAll(); ::operator delete(p); p = nullptr; cap = 0; }
 };
 
+/// The spilling body: N cells inline, in the series itself, then the language's operator new, doubling (what llvm::SmallVector was used
+/// for): no heap while the cells fit, which is most of the time for the short runs it is chosen for.  Cells move when it spills or grows,
+/// and when the series moves while they are inline, so none is held by address across an append or a move.  Move-only, as Growable is.
+template <class T, uint32_t N> struct Spill {
+  static_assert(N > 0, "a spill with no inline cells is a Growable");
+  static constexpr bool growable = true;
+  static constexpr bool contiguous = true;
+
+  Spill() = default;
+  Spill(const Spill &) = delete;
+  Spill &operator=(const Spill &) = delete;
+  Spill(Spill &&o) noexcept { take(o); }
+  Spill &operator=(Spill &&o) noexcept {
+    if (this != &o) {
+      release();
+      take(o);
+    }
+    return *this;
+  }
+  ~Spill() { release(); }
+
+  constexpr T *base() { return p; }
+  constexpr const T *base() const { return p; }
+  constexpr T &at(uint32_t i) { return p[i]; }
+  constexpr const T &at(uint32_t i) const { return p[i]; }
+  constexpr T *first() { return p; }
+  constexpr T *last() { return p + n; }
+  constexpr const T *first() const { return p; }
+  constexpr const T *last() const { return p + n; }
+  constexpr uint32_t count() const { return n; }
+  constexpr bool room() const { return true; }
+  void put(T v) {
+    if (n == cap) [[unlikely]] grow(n + 1);
+    ::new (At{p + n}) T(mv(v));
+    ++n;
+  }
+  void dropLast() { p[--n].~T(); }
+  void grow(size_t need) {
+    static_assert(alignof(T) <= 16, "the buffer comes from the default operator new");
+    size_t nc = size_t(cap) * 2;
+    if (nc < need) nc = need;
+    T *q = static_cast<T *>(::operator new(nc * sizeof(T)));
+    moveCells(q);
+    if (!inlined()) ::operator delete(p);
+    p = q;
+    cap = uint32_t(nc);
+  }
+  void reserveCells(size_t m) { if (m > cap) grow(m); }
+  void sizeTo(size_t m) {
+    reserveCells(m);
+    while (n < m) { ::new (At{p + n}) T(); ++n; }
+    while (n > m) p[--n].~T();
+  }
+  void fill(size_t m, const T &v) {
+    dropAll();
+    reserveCells(m);
+    while (n < m) { ::new (At{p + n}) T(v); ++n; }
+  }
+  void dropAll() { while (n) p[--n].~T(); }
+
+private:
+  T *inl() { return reinterpret_cast<T *>(raw); }
+  bool inlined() const { return p == reinterpret_cast<const T *>(raw); }
+  void moveCells(T *q) {
+    if constexpr (plainData<T>) {
+      for (uint32_t i = 0; i < n; i++) q[i] = p[i];
+    } else {
+      for (uint32_t i = 0; i < n; i++) { ::new (At{q + i}) T(mv(p[i])); p[i].~T(); }
+    }
+  }
+  void take(Spill &o) { // o's cells: its heap buffer when it has one, else moved into these inline cells
+    if (o.inlined()) {
+      p = inl();
+      cap = N;
+      n = 0;
+      for (uint32_t i = 0; i < o.n; i++) { ::new (At{p + i}) T(mv(o.p[i])); o.p[i].~T(); }
+      n = o.n;
+    } else {
+      p = o.p;
+      n = o.n;
+      cap = o.cap;
+    }
+    o.p = o.inl();
+    o.n = 0;
+    o.cap = N;
+  }
+  void release() {
+    dropAll();
+    if (!inlined()) ::operator delete(p);
+    p = inl();
+    cap = N;
+  }
+  alignas(T) unsigned char raw[N * sizeof(T)];
+  T *p = reinterpret_cast<T *>(raw);
+  uint32_t n = 0, cap = N;
+};
+
 /// The body of a frozen Series: cells that were built and are now only read.  Move-only, so the promotion from MutableSeries
 /// is a move and a stray copy is a compile error, not a quiet materialization.
 template <class T> struct Cells {
