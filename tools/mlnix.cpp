@@ -611,7 +611,7 @@ int cmdStore(int argc, char **argv, int start) {
           if (!info) throw nixstore::Error("path '" + p + "' is not valid");
           for (auto &r : info->references) out.insert(r);
         } else if (queryReqs) {
-          auto c = store.computeFSClosure({p}, includeOutputs);
+          auto c = store.computeFSClosure(nixstore::SortedSet::of(p), includeOutputs);
           out.insert(c.begin(), c.end());
         } else if (queryReferrers) {
           auto r = store.queryReferrers(p);
@@ -722,7 +722,7 @@ int cmdHash(int argc, char **argv, int start) {
         continue;
       }
       nixstore::Hash h = (flat || mode == "file") ? nixstore::hashFile(algo, absPath(a))
-                                                  : nixstore::hashPath(absPath(a), nullptr, algo).first;
+                                                  : nixstore::hashPath(absPath(a), nullptr, algo).a;
       if (sri) std::cout << h.to_string(nixstore::HashFormat::SRI, true) << "\n";
       else std::cout << h.to_string(fmt, false) << "\n";
     }

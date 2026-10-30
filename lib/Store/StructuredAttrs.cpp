@@ -17,22 +17,49 @@
 namespace nixstore {
 
 namespace {
+struct Member;
 struct JV {
   enum T { Null, Bool, Num, Str, Arr, Obj } t = Null;
   bool b = false;
   std::string raw; // number text or string value
   composite::MutableSeries<JV> arr;
-  std::map<std::string, JV> obj;
+  composite::MutableSeries<Member> obj; // the members in key order, as a JSON object is written: rows, no tree
   JV() = default;
   JV(JV &&) = default;
   JV &operator=(JV &&) = default;
-  /// A JSON value is copied into its parent; the array is copied cell by cell, spelled out.
-  JV(const JV &o) : t(o.t), b(o.b), raw(o.raw), obj(o.obj) { for (const JV &x : o.arr) arr.append(x); }
+  /// A JSON value is copied into its parent; its arrays and members are copied cell by cell, spelled out.
+  JV(const JV &o);
+  /// The member named k, made null first when there is none, where its key sorts.
+  JV &member(std::string_view k);
   JV &operator=(const JV &o) {
     if (this != &o) { JV c(o); *this = static_cast<JV &&>(c); }
     return *this;
   }
 };
+struct Member {
+  std::string key;
+  JV value;
+};
+JV::JV(const JV &o) : t(o.t), b(o.b), raw(o.raw) {
+  for (const JV &x : o.arr) arr.append(x);
+  for (const Member &m : o.obj) obj.append(Member{m.key, m.value});
+}
+JV &JV::member(std::string_view k) {
+  uint32_t lo = 0, hi = obj.size();
+  while (lo < hi) {
+    uint32_t mid = (lo + hi) / 2;
+    if (std::string_view(obj[mid].key) < k) lo = mid + 1;
+    else hi = mid;
+  }
+  if (lo < obj.size() && obj[lo].key == k) return obj[lo].value;
+  obj.append(Member{std::string(k), JV()});
+  for (uint32_t j = obj.size() - 1; j > lo; j--) { // the new row moves down to its place
+    Member t = composite::mv(obj[j]);
+    obj[j] = composite::mv(obj[j - 1]);
+    obj[j - 1] = composite::mv(t);
+  }
+  return obj[lo].value;
+}
 
 struct P {
   std::string_view s;
@@ -92,7 +119,7 @@ struct P {
         std::string k = str();
         ws();
         p++; // :
-        v.obj[k] = val();
+        v.member(k) = val();
         ws();
         if (s[p] == ',') { p++; continue; }
         p++;
@@ -157,21 +184,21 @@ std::string shellEscape(std::string_view s) {
   return r + "'";
 }
 
-std::optional<std::string> simple(const JV &v) {
+composite::Maybe<std::string> simple(const JV &v) {
   switch (v.t) {
   case JV::Str: return shellEscape(v.raw);
   case JV::Num: {
     double f = strtod(v.raw.c_str(), nullptr);
     if (std::ceil((float)f) == (float)f) return std::to_string((int)f);
-    return std::nullopt;
+    return nullptr;
   }
   case JV::Null: return std::string("''");
   case JV::Bool: return v.b ? std::string("1") : std::string("");
-  default: return std::nullopt;
+  default: return nullptr;
   }
 }
 
-void rewrite(JV &v, const std::map<std::string, std::string> &rw) {
+void rewrite(JV &v, const SortedMap<std::string> &rw) {
   auto fix = [&](std::string &s) {
     for (auto &[from, to] : rw) {
       size_t pos = 0;
@@ -188,9 +215,9 @@ void rewrite(JV &v, const std::map<std::string, std::string> &rw) {
 } // namespace
 
 /// Produce (.attrs.json, .attrs.sh) for a structured-attrs derivation.
-std::pair<std::string, std::string> structuredAttrsFiles(const std::string &json,
-                                                         const std::map<std::string, std::string> &outputs,
-                                                         const std::map<std::string, std::string> &rewrites) {
+composite::Join<std::string, std::string> structuredAttrsFiles(const std::string &json,
+                                                         const SortedMap<std::string> &outputs,
+                                                         const SortedMap<std::string> &rewrites) {
   P parser{json};
   JV root = parser.val();
   if (root.t != JV::Obj) throw Error("structured attributes must be a JSON object");
@@ -201,9 +228,9 @@ std::pair<std::string, std::string> structuredAttrsFiles(const std::string &json
     JV s;
     s.t = JV::Str;
     s.raw = p;
-    outs.obj[n] = s;
+    outs.member(n) = s;
   }
-  root.obj["outputs"] = outs;
+  root.member("outputs") = outs;
   static const std::regex shVarName("[A-Za-z_][A-Za-z0-9_]*");
   std::string sh;
   for (auto &[key, value] : root.obj) {

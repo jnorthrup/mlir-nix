@@ -14,6 +14,7 @@
 #include "Composite/Funnel.h"
 #include "Composite/Mutable.h"
 #include "Composite/Patricia.h"
+#include "Composite/Vocab.h"
 #include <functional>
 #include <map>
 #include <memory>
@@ -31,6 +32,108 @@ struct Error : std::runtime_error {
 };
 
 //===----------------------------------------------------------------------===//
+// Sorted rows: the store's sets and maps by string
+//===----------------------------------------------------------------------===//
+
+/// A set of strings kept as one series sorted in byte order (std::set's): no node per entry.  An insert in order is an append, which is how a
+/// derivation's inputs arrive (from a sorted context) and how its text is parsed (sorted).
+struct SortedSet {
+  composite::MutableSeries<std::string> rows;
+  SortedSet() = default;
+  SortedSet(SortedSet &&) = default;
+  SortedSet &operator=(SortedSet &&) = default;
+  SortedSet(const SortedSet &o) { rows.reserve(o.rows.size()); for (const std::string &r : o.rows) rows.append(r); }
+  SortedSet &operator=(const SortedSet &o) { if (this != &o) { SortedSet t(o); *this = std::move(t); } return *this; }
+  template <class It> SortedSet(It b, It e) { insert(b, e); }
+  /// The set of one string.
+  static SortedSet of(std::string_view one) {
+    SortedSet s;
+    s.insert(one);
+    return s;
+  }
+  const std::string *begin() const { return rows.begin(); }
+  const std::string *end() const { return rows.end(); }
+  size_t size() const { return rows.size(); }
+  bool empty() const { return rows.empty(); }
+  size_t lowerBound(std::string_view k) const {
+    size_t lo = 0, hi = rows.size();
+    while (lo < hi) { size_t mid = (lo + hi) / 2; if (std::string_view(rows[uint32_t(mid)]) < k) lo = mid + 1; else hi = mid; }
+    return lo;
+  }
+  size_t count(std::string_view k) const { size_t i = lowerBound(k); return i < rows.size() && rows[uint32_t(i)] == k; }
+  bool insert(std::string_view k) {
+    if (rows.empty() || std::string_view(rows.back()) < k) { rows.append(std::string(k)); return true; }
+    size_t i = lowerBound(k);
+    if (i < rows.size() && rows[uint32_t(i)] == k) return false;
+    rows.append(std::string(k));
+    for (size_t j = rows.size() - 1; j > i; j--) rows[uint32_t(j)].swap(rows[uint32_t(j - 1)]);
+    return true;
+  }
+  template <class It> void insert(It b, It e) { for (; b != e; ++b) insert(std::string_view(*b)); }
+  bool contains(std::string_view k) const { return count(k) != 0; }
+  /// Drops k; false when it was not there.  The rows after it move down one.
+  bool erase(std::string_view k) {
+    size_t i = lowerBound(k);
+    if (i >= rows.size() || rows[uint32_t(i)] != k) return false;
+    for (size_t j = i; j + 1 < rows.size(); j++) rows[uint32_t(j)].swap(rows[uint32_t(j + 1)]);
+    rows.pop();
+    return true;
+  }
+  bool operator==(const SortedSet &o) const { return rows == o.rows; }
+};
+
+/// A map from strings kept as rows sorted in byte order (std::map's) in one series: no node per entry.  Lookups bisect; an entry added in key
+/// order is an append, which is how a derivation's environment arrives (its attributes are visited by name) and how its text is parsed.
+template <class V> struct SortedMap {
+  struct Row {
+    std::string first;
+    V second;
+  };
+  composite::MutableSeries<Row> rows;
+  SortedMap() = default;
+  SortedMap(SortedMap &&) = default;
+  SortedMap &operator=(SortedMap &&) = default;
+  SortedMap(const SortedMap &o) { rows.reserve(o.rows.size()); for (const Row &r : o.rows) rows.append(Row{r.first, r.second}); }
+  SortedMap &operator=(const SortedMap &o) { if (this != &o) { SortedMap t(o); *this = std::move(t); } return *this; }
+  static void swapRows(Row &x, Row &y) { Row t{composite::mv(x.first), composite::mv(x.second)}; x = composite::mv(y); y = composite::mv(t); }
+  Row *begin() { return rows.begin(); }
+  Row *end() { return rows.end(); }
+  const Row *begin() const { return rows.begin(); }
+  const Row *end() const { return rows.end(); }
+  size_t size() const { return rows.size(); }
+  bool empty() const { return rows.empty(); }
+  size_t lowerBound(std::string_view k) const {
+    size_t lo = 0, hi = rows.size();
+    while (lo < hi) { size_t mid = (lo + hi) / 2; if (std::string_view(rows[uint32_t(mid)].first) < k) lo = mid + 1; else hi = mid; }
+    return lo;
+  }
+  Row *find(std::string_view k) { size_t i = lowerBound(k); return i < rows.size() && rows[uint32_t(i)].first == k ? begin() + i : end(); }
+  const Row *find(std::string_view k) const { size_t i = lowerBound(k); return i < rows.size() && rows[uint32_t(i)].first == k ? begin() + i : end(); }
+  size_t count(std::string_view k) const { return find(k) != end(); }
+  /// The row for k, made (with V()) where k sorts when there is none.
+  Row *place(std::string_view k) {
+    if (rows.empty() || std::string_view(rows.back().first) < k) { rows.append(Row{std::string(k), V()}); return end() - 1; }
+    size_t i = lowerBound(k);
+    if (i < rows.size() && rows[uint32_t(i)].first == k) return begin() + i;
+    rows.append(Row{std::string(k), V()});
+    for (size_t j = rows.size() - 1; j > i; j--) swapRows(rows[uint32_t(j)], rows[uint32_t(j - 1)]);
+    return begin() + i;
+  }
+  V &operator[](std::string_view k) { return place(k)->second; }
+  V &at(std::string_view k) { Row *r = find(k); if (r == end()) throw std::out_of_range("no entry '" + std::string(k) + "'"); return r->second; }
+  const V &at(std::string_view k) const { const Row *r = find(k); if (r == end()) throw std::out_of_range("no entry '" + std::string(k) + "'"); return r->second; }
+  /// An entry, moved in: at the end when it sorts there (the hint is the end), else where it sorts; an existing key keeps its value.
+  Row *emplace_hint(Row *, std::string k, V v) {
+    if (rows.empty() || rows.back().first < k) { rows.append(Row{std::move(k), std::move(v)}); return end() - 1; }
+    size_t i = lowerBound(k);
+    if (i < rows.size() && rows[uint32_t(i)].first == k) return begin() + i;
+    rows.append(Row{std::move(k), std::move(v)});
+    for (size_t j = rows.size() - 1; j > i; j--) swapRows(rows[uint32_t(j)], rows[uint32_t(j - 1)]);
+    return begin() + i;
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // Hashes
 //===----------------------------------------------------------------------===//
 
@@ -39,7 +142,7 @@ enum class HashFormat { Base16, Nix32, Base64, SRI };
 
 size_t hashSize(HashAlgo a);
 std::string algoName(HashAlgo a);
-std::optional<HashAlgo> parseHashAlgo(std::string_view s);
+composite::Maybe<HashAlgo> parseHashAlgo(std::string_view s);
 
 struct Hash {
   HashAlgo algo = HashAlgo::SHA256;
@@ -67,10 +170,10 @@ Hash hashString(HashAlgo a, std::string_view s);
 Hash hashFile(HashAlgo a, const std::string &path);
 /// Parse a hash in any supported encoding; `algo` is required when the string
 /// carries no algorithm prefix.  Throws Error.
-Hash parseHash(std::string_view s, std::optional<HashAlgo> algo);
+Hash parseHash(std::string_view s, composite::Maybe<HashAlgo> algo);
 /// Like parseHash, but the empty string yields an all-zero hash (with a warning
 /// returned via `warning`).
-Hash parseHashAllowEmpty(std::string_view s, std::optional<HashAlgo> algo,
+Hash parseHashAllowEmpty(std::string_view s, composite::Maybe<HashAlgo> algo,
                          std::string *warning);
 Hash compressHash(const Hash &h, size_t newSize);
 
@@ -80,8 +183,8 @@ std::string nix32Encode(const uint8_t *d, size_t n);
 void appendBase16(std::string &out, const uint8_t *d, size_t n);
 void appendNix32(std::string &out, const uint8_t *d, size_t n);
 std::string base64Encode(std::string_view s);
-std::optional<std::string> base64Decode(std::string_view s);
-std::optional<std::string> nix32Decode(std::string_view s, size_t size);
+composite::Maybe<std::string> base64Decode(std::string_view s);
+composite::Maybe<std::string> nix32Decode(std::string_view s, size_t size);
 extern const char nix32Chars[33];
 
 //===----------------------------------------------------------------------===//
@@ -90,8 +193,8 @@ extern const char nix32Chars[33];
 
 /// Whether an entry of a tree is kept: called with the entry's path and, when the caller knows it, its type as builtins.path's filter is
 /// told it ("regular", "directory", "symlink", "unknown"); empty when it does not.
-using PathFilter = std::function<bool(const std::string &path, std::string_view type)>;
-using Sink = std::function<void(std::string_view)>;
+using PathFilter = composite::Fn<bool(const std::string &path, std::string_view type)>;
+using Sink = composite::Fn<void(std::string_view)>;
 
 /// Serialise `path` as a Nix ARchive.  Throws Error on I/O failure.
 void dumpPath(const std::string &path, const Sink &sink,
@@ -99,7 +202,7 @@ void dumpPath(const std::string &path, const Sink &sink,
 /// Restore a NAR into `path` (which must not exist).
 void restorePath(const std::string &path, std::string_view nar);
 /// sha256 of the NAR serialisation, and the NAR size.
-std::pair<Hash, uint64_t> hashPath(const std::string &path,
+composite::Join<Hash, uint64_t> hashPath(const std::string &path,
                                    const PathFilter &filter = nullptr,
                                    HashAlgo algo = HashAlgo::SHA256);
 /// Source trees hashed ahead.  The NAR hashes a recorded run made (nixprefetch::replayHashes) are made again by a helper thread at start-up,
@@ -119,12 +222,12 @@ void checkName(std::string_view name);
 std::string makeStorePath(const std::string &storeDir, std::string_view type,
                           const Hash &hash, std::string_view name);
 std::string makeType(const std::string &storeDir, std::string type,
-                     const std::set<std::string> &refs, bool hasSelfRef);
+                     const SortedSet &refs, bool hasSelfRef);
 std::string makeTextPath(const std::string &storeDir, std::string_view name,
-                         const Hash &hash, const std::set<std::string> &refs);
+                         const Hash &hash, const SortedSet &refs);
 std::string makeFixedOutputPath(const std::string &storeDir, std::string_view name,
                                 FileIngestionMethod method, const Hash &hash,
-                                const std::set<std::string> &refs = {});
+                                const SortedSet &refs = {});
 std::string makeOutputPath(const std::string &storeDir, std::string_view output,
                            const Hash &drvHash, std::string_view drvName);
 std::string outputPathName(std::string_view drvName, std::string_view output);
@@ -142,87 +245,6 @@ std::string storePathHashPart(std::string_view storePath);
 // Derivations
 //===----------------------------------------------------------------------===//
 
-/// A set of strings kept as one series sorted in byte order (std::set's): no node per entry.  An insert in order is an append, which is how a
-/// derivation's inputs arrive (from a sorted context) and how its text is parsed (sorted).
-struct SortedSet {
-  composite::MutableSeries<std::string> rows;
-  SortedSet() = default;
-  SortedSet(SortedSet &&) = default;
-  SortedSet &operator=(SortedSet &&) = default;
-  SortedSet(const SortedSet &o) { rows.reserve(o.rows.size()); for (const std::string &r : o.rows) rows.append(r); }
-  SortedSet &operator=(const SortedSet &o) { if (this != &o) { SortedSet t(o); *this = std::move(t); } return *this; }
-  template <class It> SortedSet(It b, It e) { insert(b, e); }
-  const std::string *begin() const { return rows.begin(); }
-  const std::string *end() const { return rows.end(); }
-  size_t size() const { return rows.size(); }
-  bool empty() const { return rows.empty(); }
-  size_t lowerBound(std::string_view k) const {
-    size_t lo = 0, hi = rows.size();
-    while (lo < hi) { size_t mid = (lo + hi) / 2; if (std::string_view(rows[uint32_t(mid)]) < k) lo = mid + 1; else hi = mid; }
-    return lo;
-  }
-  size_t count(std::string_view k) const { size_t i = lowerBound(k); return i < rows.size() && rows[uint32_t(i)] == k; }
-  bool insert(std::string_view k) {
-    if (rows.empty() || std::string_view(rows.back()) < k) { rows.append(std::string(k)); return true; }
-    size_t i = lowerBound(k);
-    if (i < rows.size() && rows[uint32_t(i)] == k) return false;
-    rows.append(std::string(k));
-    for (size_t j = rows.size() - 1; j > i; j--) std::swap(rows[uint32_t(j)], rows[uint32_t(j - 1)]);
-    return true;
-  }
-  template <class It> void insert(It b, It e) { for (; b != e; ++b) insert(std::string_view(*b)); }
-  bool operator==(const SortedSet &o) const { return rows == o.rows; }
-};
-
-/// A map from strings kept as rows sorted in byte order (std::map's) in one series: no node per entry.  Lookups bisect; an entry added in key
-/// order is an append, which is how a derivation's environment arrives (its attributes are visited by name) and how its text is parsed.
-template <class V> struct SortedMap {
-  struct Row {
-    std::string first;
-    V second;
-  };
-  composite::MutableSeries<Row> rows;
-  SortedMap() = default;
-  SortedMap(SortedMap &&) = default;
-  SortedMap &operator=(SortedMap &&) = default;
-  SortedMap(const SortedMap &o) { rows.reserve(o.rows.size()); for (const Row &r : o.rows) rows.append(Row{r.first, r.second}); }
-  SortedMap &operator=(const SortedMap &o) { if (this != &o) { SortedMap t(o); *this = std::move(t); } return *this; }
-  Row *begin() { return rows.begin(); }
-  Row *end() { return rows.end(); }
-  const Row *begin() const { return rows.begin(); }
-  const Row *end() const { return rows.end(); }
-  size_t size() const { return rows.size(); }
-  bool empty() const { return rows.empty(); }
-  size_t lowerBound(std::string_view k) const {
-    size_t lo = 0, hi = rows.size();
-    while (lo < hi) { size_t mid = (lo + hi) / 2; if (std::string_view(rows[uint32_t(mid)].first) < k) lo = mid + 1; else hi = mid; }
-    return lo;
-  }
-  Row *find(std::string_view k) { size_t i = lowerBound(k); return i < rows.size() && rows[uint32_t(i)].first == k ? begin() + i : end(); }
-  const Row *find(std::string_view k) const { size_t i = lowerBound(k); return i < rows.size() && rows[uint32_t(i)].first == k ? begin() + i : end(); }
-  size_t count(std::string_view k) const { return find(k) != end(); }
-  /// The row for k, made (with V()) where k sorts when there is none.
-  Row *place(std::string_view k) {
-    if (rows.empty() || std::string_view(rows.back().first) < k) { rows.append(Row{std::string(k), V()}); return end() - 1; }
-    size_t i = lowerBound(k);
-    if (i < rows.size() && rows[uint32_t(i)].first == k) return begin() + i;
-    rows.append(Row{std::string(k), V()});
-    for (size_t j = rows.size() - 1; j > i; j--) std::swap(rows[uint32_t(j)], rows[uint32_t(j - 1)]);
-    return begin() + i;
-  }
-  V &operator[](std::string_view k) { return place(k)->second; }
-  V &at(std::string_view k) { Row *r = find(k); if (r == end()) throw std::out_of_range("no entry '" + std::string(k) + "'"); return r->second; }
-  const V &at(std::string_view k) const { const Row *r = find(k); if (r == end()) throw std::out_of_range("no entry '" + std::string(k) + "'"); return r->second; }
-  /// An entry, moved in: at the end when it sorts there (the hint is the end), else where it sorts; an existing key keeps its value.
-  Row *emplace_hint(Row *, std::string k, V v) {
-    if (rows.empty() || rows.back().first < k) { rows.append(Row{std::move(k), std::move(v)}); return end() - 1; }
-    size_t i = lowerBound(k);
-    if (i < rows.size() && rows[uint32_t(i)].first == k) return begin() + i;
-    rows.append(Row{std::move(k), std::move(v)});
-    for (size_t j = rows.size() - 1; j > i; j--) std::swap(rows[uint32_t(j)], rows[uint32_t(j - 1)]);
-    return begin() + i;
-  }
-};
 using DrvInputs = SortedMap<SortedSet>;
 
 struct DerivationOutput {
@@ -244,7 +266,7 @@ struct Derivation {
   std::string platform, builder;
   composite::MutableSeries<std::string> args;
   SortedMap<std::string> env;
-  std::optional<std::string> structuredAttrs; // JSON text (env "__json")
+  composite::Maybe<std::string> structuredAttrs; // JSON text (env "__json")
 
   Derivation() = default;
   Derivation(Derivation &&) = default;
@@ -279,7 +301,7 @@ struct PathInfo {
   std::string path;
   Hash narHash;
   uint64_t narSize = 0;
-  std::set<std::string> references;
+  SortedSet references;
   std::string deriver;
   std::string ca;
 };
@@ -307,9 +329,9 @@ struct Store {
   std::string toReal(const std::string &logical) const;
 
   bool isValidPath(const std::string &path);
-  std::optional<PathInfo> queryPathInfo(const std::string &path);
+  composite::Maybe<PathInfo> queryPathInfo(const std::string &path);
   void registerValidPath(const PathInfo &info);
-  std::set<std::string> queryReferrers(const std::string &path);
+  SortedSet queryReferrers(const std::string &path);
   composite::MutableSeries<std::string> allValidPaths();
 
   /// Copy a file system object into the store (content-addressed).
@@ -317,10 +339,10 @@ struct Store {
                          FileIngestionMethod method = FileIngestionMethod::NixArchive,
                          HashAlgo algo = HashAlgo::SHA256,
                          const PathFilter &filter = nullptr,
-                         const std::set<std::string> &refs = {},
-                         std::optional<Hash> expected = std::nullopt);
+                         const SortedSet &refs = {},
+                         composite::Maybe<Hash> expected = nullptr);
   std::string addTextToStore(std::string_view name, std::string_view text,
-                             const std::set<std::string> &refs);
+                             const SortedSet &refs);
   /// Path addToStore would produce without writing anything.
   std::string computeStorePathForPath(std::string name, const std::string &srcPath,
                                       FileIngestionMethod method, HashAlgo algo,
@@ -337,22 +359,22 @@ struct Store {
   /// hashDerivationModulo; returns per-output hashes for fixed outputs (key
   /// "out") or a single drv hash (key "").  `inputsOut`, when given, receives the input derivations as the hash saw them (their own
   /// modulo hashes), for the derivation's next hash (hashLater).
-  std::map<std::string, Hash> hashDerivationModulo(const Derivation &drv, bool maskOutputs, DrvInputs *inputsOut = nullptr);
+  SortedMap<Hash> hashDerivationModulo(const Derivation &drv, bool maskOutputs, DrvInputs *inputsOut = nullptr);
   void fillInOutputPaths(Derivation &drv, DrvInputs *inputsOut = nullptr);
   /// The modulo hash of a derivation this evaluation wrote (its third hash, after the masked one that names its outputs and the one that
   /// names its path), made off the evaluator's thread from the cached derivation and the inputs its first hash saw, and collected when a
   /// dependent's hash asks for it.  The cached derivation is never written again (writeDerivation keeps the first of a path).
   void hashLater(const std::string &drvPath, DrvInputs &&inputs);
   struct LaterHashes;
-  bool takeLater(const std::string &drvPath, std::map<std::string, Hash> &out);
-  std::shared_ptr<LaterHashes> later; // shared with the hasher thread, which outlives nothing: the process ends with it waiting
+  bool takeLater(const std::string &drvPath, SortedMap<Hash> &out);
+  LaterHashes *later = nullptr; // the hasher thread's too: never freed, as the thread may still wait on it when the process ends
 
-  std::set<std::string> computeFSClosure(const std::set<std::string> &paths,
+  SortedSet computeFSClosure(const SortedSet &paths,
                                          bool includeOutputs = false);
 
   /// Realise derivation outputs (building as necessary).  Returns the output
   /// paths by name.
-  std::map<std::string, std::string> buildDerivation(const std::string &drvPath);
+  SortedMap<std::string> buildDerivation(const std::string &drvPath);
   void ensurePath(const std::string &path);
 
   /// Add a symlink GC root.
@@ -361,13 +383,13 @@ struct Store {
   bool collectGarbage(bool dryRun, composite::MutableSeries<std::string> &deleted);
   bool deletePath(const std::string &path);
 
-  std::function<void(const std::string &)> log;
+  void (*log)(const std::string &) = nullptr;
 
   StoreSettings settings;
   /// A derivation's modulo hashes as its dependents read them: hashDerivationModulo's answer, and for an input-addressed derivation (one
   /// hash, key "") that hash in base 16 already, as a dependent's text names the input.
   struct DrvModulo {
-    std::map<std::string, Hash> hashes;
+    SortedMap<Hash> hashes;
     std::string hex;
   };
   /// A derivation the store made or read, by its path: the derivation, and its modulo hashes once a dependent's hash asked for them.  A
@@ -403,17 +425,17 @@ struct Store {
   void rememberDerivation(uint64_t fingerprint, const std::string &drvPath);
   std::string infoFile(const std::string &path) const;
   void makeStoreWritable();
-  std::map<std::string, std::string> realise(const std::string &drvPath,
-                                             std::set<std::string> &visiting);
+  SortedMap<std::string> realise(const std::string &drvPath,
+                                             SortedSet &visiting);
   void runBuilder(const std::string &drvPath, const Derivation &drv,
-                  const std::map<std::string, std::string> &outputs);
-  void builtinFetchurl(const Derivation &drv, const std::map<std::string, std::string> &outputs);
+                  const SortedMap<std::string> &outputs);
+  void builtinFetchurl(const Derivation &drv, const SortedMap<std::string> &outputs);
 };
 
 /// (.attrs.json, .attrs.sh) contents for a structured-attrs derivation.
-std::pair<std::string, std::string> structuredAttrsFiles(const std::string &json,
-                                                         const std::map<std::string, std::string> &outputs,
-                                                         const std::map<std::string, std::string> &rewrites);
+composite::Join<std::string, std::string> structuredAttrsFiles(const std::string &json,
+                                                         const SortedMap<std::string> &outputs,
+                                                         const SortedMap<std::string> &rewrites);
 
 /// Helpers.
 std::string readFile(const std::string &path);

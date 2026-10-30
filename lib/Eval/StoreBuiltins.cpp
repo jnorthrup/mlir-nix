@@ -63,9 +63,9 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
     composite::MutableSeries<const StringContext *> owns; // each string attribute's own context, interned: its elements are not copied
     std::string coerced;
     bool contentAddressed = false, isImpure = false;
-    std::optional<std::string> outputHash;
-    std::optional<nixstore::HashAlgo> outputHashAlgo;
-    std::optional<nixstore::FileIngestionMethod> ingestionMethod;
+    composite::Maybe<std::string> outputHash;
+    composite::Maybe<nixstore::HashAlgo> outputHashAlgo;
+    composite::Maybe<nixstore::FileIngestionMethod> ingestionMethod;
     nixstore::SortedSet outputs; // the output names: rows kept sorted, in the order the derivation lists them
     outputs.insert("out");
     std::string jsonObj = "{";
@@ -89,8 +89,8 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
       }
       if (outputs.empty()) throw EvalError("derivation cannot have an empty set of outputs", pos);
     };
-    auto parseAlgo = [&](std::string_view s) -> std::optional<nixstore::HashAlgo> {
-      if (s.empty()) return std::nullopt;
+    auto parseAlgo = [&](std::string_view s) -> composite::Maybe<nixstore::HashAlgo> {
+      if (s.empty()) return nullptr;
       auto a = nixstore::parseHashAlgo(s);
       if (!a) throw EvalError("unknown hash algorithm '" + str(s) + "', expect 'blake3', 'md5', 'sha1', 'sha256', or 'sha512'", pos);
       return a;
@@ -195,7 +195,7 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
       std::string_view c = elems[uint32_t(ei)];
       if (c[0] == '=') {
         std::string d(c.substr(1));
-        auto refs = st.store->computeFSClosure({d});
+        auto refs = st.store->computeFSClosure(nixstore::SortedSet::of(d));
         for (auto &j : refs) {
           drv.inputSrcs.insert(j);
           if (isDrvPath(j)) {
@@ -301,24 +301,24 @@ static const char *dirEntryType(const std::string &dir, const dirent &e) {
 
 /// Shared implementation of builtins.path and builtins.filterSource.
 static void addPath(EvalState &st, PosPtr pos, std::string name, const std::string &path, Value *filterFun,
-                    nixstore::FileIngestionMethod method, std::optional<nixstore::Hash> expected, Value &v,
+                    nixstore::FileIngestionMethod method, composite::Maybe<nixstore::Hash> expected, Value &v,
                     const NixStringContext &ctx) {
   st.realiseContext(ctx, pos);
   std::string real = st.realisePath(path, pos);
   if (!nixstore::pathExists(real)) throw EvalError("path '" + path + "' does not exist", pos);
+  // The Nix filter, as the store's walk asks it: named here, so the PathFilter that lends it to the walk refers to a live callable.
+  auto askFilter = [&](const std::string &p, std::string_view type) {
+    // Map physical path back to the logical one.
+    std::string logical = path + p.substr(real.size());
+    Value *arg1 = st.newString(logical);
+    Value *arg2 = st.newString(type.empty() ? fileTypeOf(p) : std::string(type)); // a prehashed tree's walk knows the type
+    Value *fargs[2] = {arg1, arg2};
+    Value r;
+    st.callFunction(*filterFun, 2, fargs, r, pos);
+    return st.forceBool(r, pos, "while evaluating the return value of the path filter function");
+  };
   nixstore::PathFilter filter;
-  if (filterFun) {
-    filter = [&](const std::string &p, std::string_view type) {
-      // Map physical path back to the logical one.
-      std::string logical = path + p.substr(real.size());
-      Value *arg1 = st.newString(logical);
-      Value *arg2 = st.newString(type.empty() ? fileTypeOf(p) : std::string(type)); // a prehashed tree's walk knows the type
-      Value *fargs[2] = {arg1, arg2};
-      Value r;
-      st.callFunction(*filterFun, 2, fargs, r, pos);
-      return st.forceBool(r, pos, "while evaluating the return value of the path filter function");
-    };
-  }
+  if (filterFun) filter = askFilter;
   try {
     nixstore::checkName(name);
   } catch (nixstore::Error &e) {
@@ -368,7 +368,7 @@ static std::string urlBaseName(const std::string &url) {
 
 static void fetchImpl(EvalState &st, A args, Value &v, PosPtr pos, bool unpack, const char *who) {
   std::string url, name;
-  std::optional<nixstore::Hash> expected;
+  composite::Maybe<nixstore::Hash> expected;
   st.forceValue(*args[0], pos);
   if (args[0]->type == VType::Attrs) {
     for (auto &a : *args[0]->attrs) {
@@ -384,7 +384,7 @@ static void fetchImpl(EvalState &st, A args, Value &v, PosPtr pos, bool unpack, 
       } else if (n == "hash") {
         auto h = st.forceStringNoCtx(*a.value, pos);
         try {
-          expected = nixstore::parseHash(h, std::nullopt);
+          expected = nixstore::parseHash(h, nullptr);
         } catch (nixstore::Error &e) {
           throw EvalError(e.what(), pos);
         }
@@ -536,7 +536,7 @@ void registerStoreBuiltins(EvalState &state) {
     auto name = str(st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.toFile"));
     NixStringContext ctx;
     auto contents = str(st.forceString(*args[1], ctx, pos, "while evaluating the second argument passed to builtins.toFile"));
-    std::set<std::string> refs;
+    nixstore::SortedSet refs;
     for (auto &c : ctx) {
       if (c[0] == '=' || c[0] == '!')
         throw EvalError("files created by builtins.toFile may not reference derivations, but " + name +
@@ -665,7 +665,7 @@ void registerStoreBuiltins(EvalState &state) {
     const Attr *h = args[0]->attrs->get(st.symbols.create("hash"));
     if (!h) throw EvalError("attribute 'hash' missing", pos);
     auto hs = st.forceStringNoCtx(*h->value, pos, "while evaluating the attribute 'hash'");
-    std::optional<nixstore::HashAlgo> algo;
+    composite::Maybe<nixstore::HashAlgo> algo;
     if (const Attr *a = args[0]->attrs->get(st.symbols.create("hashAlgo"))) {
       auto as = st.forceStringNoCtx(*a->value, pos, "while evaluating the attribute 'hashAlgo'");
       algo = nixstore::parseHashAlgo(as);
@@ -692,7 +692,7 @@ void registerStoreBuiltins(EvalState &state) {
     std::string path, name;
     Value *filter = nullptr;
     auto method = nixstore::FileIngestionMethod::NixArchive;
-    std::optional<nixstore::Hash> expected;
+    composite::Maybe<nixstore::Hash> expected;
     NixStringContext ctx;
     for (auto &a : *args[0]->attrs) {
       auto n = st.symbols[a.name];
@@ -717,7 +717,7 @@ void registerStoreBuiltins(EvalState &state) {
     std::string path = st.coerceToPath(*args[1], ctx, pos, "while evaluating the second argument (the path to filter) passed to 'builtins.filterSource'");
     st.forceFunction(*args[0], pos);
     addPath(st, pos, nixstore::baseNameOf(path), path, args[0], nixstore::FileIngestionMethod::NixArchive,
-            std::nullopt, v, ctx);
+            nullptr, v, ctx);
   });
   S.addPrimOp("__fetchurl", 1, [](EvalState &st, A args, Value &v, PosPtr pos) { fetchImpl(st, args, v, pos, false, "fetchurl"); });
   S.addPrimOp("fetchTarball", 1, [](EvalState &st, A args, Value &v, PosPtr pos) { fetchImpl(st, args, v, pos, true, "fetchTarball"); });

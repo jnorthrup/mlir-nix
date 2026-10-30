@@ -45,12 +45,12 @@ std::string algoName(HashAlgo a) {
   return "?";
 }
 
-std::optional<HashAlgo> parseHashAlgo(std::string_view s) {
+composite::Maybe<HashAlgo> parseHashAlgo(std::string_view s) {
   if (s == "md5") return HashAlgo::MD5;
   if (s == "sha1") return HashAlgo::SHA1;
   if (s == "sha256") return HashAlgo::SHA256;
   if (s == "sha512") return HashAlgo::SHA512;
-  return std::nullopt;
+  return nullptr;
 }
 
 //===----------------------------------------------------------------------===//
@@ -279,18 +279,18 @@ std::string nix32Encode(const uint8_t *d, size_t n) {
   return s;
 }
 
-std::optional<std::string> nix32Decode(std::string_view s, size_t size) {
+composite::Maybe<std::string> nix32Decode(std::string_view s, size_t size) {
   std::string out(size, '\0');
   for (size_t n = 0; n < s.size(); n++) {
     char c = s[s.size() - n - 1];
     const char *p = strchr(nix32Chars, c);
-    if (!p || !c) return std::nullopt;
+    if (!p || !c) return nullptr;
     unsigned digit = p - nix32Chars;
     unsigned b = n * 5, i = b / 8, j = b % 8;
-    if (i >= size) return std::nullopt;
+    if (i >= size) return nullptr;
     out[i] = char((unsigned char)out[i] | (digit << j));
     if (i + 1 < size) out[i + 1] = char((unsigned char)out[i + 1] | (digit >> (8 - j)));
-    else if (digit >> (8 - j)) return std::nullopt;
+    else if (digit >> (8 - j)) return nullptr;
   }
   return out;
 }
@@ -313,7 +313,7 @@ std::string base64Encode(std::string_view s) {
   return res;
 }
 
-std::optional<std::string> base64Decode(std::string_view s) {
+composite::Maybe<std::string> base64Decode(std::string_view s) {
   int decode[256];
   for (int i = 0; i < 256; i++) decode[i] = -1;
   for (int i = 0; i < 64; i++) decode[(unsigned char)b64chars[i]] = i;
@@ -323,7 +323,7 @@ std::optional<std::string> base64Decode(std::string_view s) {
     if (c == '=') break;
     if (c == '\n') continue;
     int digit = decode[(unsigned char)c];
-    if (digit < 0) return std::nullopt;
+    if (digit < 0) return nullptr;
     bits += 6;
     d = d << 6 | digit;
     if (bits >= 8) {
@@ -396,11 +396,11 @@ static Hash parseRest(std::string_view rest, HashAlgo algo, bool isSRI, std::str
   throw bad();
 }
 
-Hash parseHash(std::string_view s, std::optional<HashAlgo> algo) {
+Hash parseHash(std::string_view s, composite::Maybe<HashAlgo> algo) {
   std::string_view orig = s;
   auto colon = s.find(':');
   bool isSRI = false;
-  std::optional<HashAlgo> parsed;
+  composite::Maybe<HashAlgo> parsed;
   if (colon != std::string_view::npos) {
     parsed = parseHashAlgo(s.substr(0, colon));
     if (!parsed) throw Error("unknown hash algorithm '" + std::string(s.substr(0, colon)) + "', expect 'blake3', 'md5', 'sha1', 'sha256', or 'sha512'");
@@ -422,7 +422,7 @@ Hash parseHash(std::string_view s, std::optional<HashAlgo> algo) {
   return parseRest(s, parsed ? *parsed : *algo, isSRI, orig);
 }
 
-Hash parseHashAllowEmpty(std::string_view s, std::optional<HashAlgo> algo, std::string *warning) {
+Hash parseHashAllowEmpty(std::string_view s, composite::Maybe<HashAlgo> algo, std::string *warning) {
   if (s.empty()) {
     if (!algo) throw Error("empty hash requires explicit hash algorithm");
     Hash h;

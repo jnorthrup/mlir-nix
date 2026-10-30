@@ -426,15 +426,16 @@ void startPrehash() {
       if (!p->state.compare_exchange_strong(s, Prehash::Hashing)) continue; // claimed: the evaluator got there first
       try {
         HashSink hs(HashAlgo::SHA256);
-        Sink sink = [&](std::string_view d) { hs.update(d); };
-        PathFilter keep = [p](const std::string &c, std::string_view) {
+        auto update = [&](std::string_view d) { hs.update(d); }; // the callables a Sink and a PathFilter lend: named, so they outlive the walk
+        auto keepIt = [p](const std::string &c, std::string_view) {
           bool k = p->kept.find(c.data(), uint32_t(c.size())) != nullptr;
           uint32_t off = p->text.size();
           p->text.appendAll(c.data(), uint32_t(c.size()));
           p->seen.append({off, uint32_t(c.size()), typeOf(c), k});
           return k;
         };
-        PathFilter none;
+        Sink sink = update;
+        PathFilter keep = keepIt, none;
         NarWriter w{sink, p->filtered ? keep : none};
         w.str("nix-archive-1");
         w.dump(p->root);
@@ -450,19 +451,23 @@ void startPrehash() {
   }).detach();
 }
 
-std::pair<Hash, uint64_t> hashPath(const std::string &path, const PathFilter &filter, HashAlgo algo) {
+composite::Join<Hash, uint64_t> hashPath(const std::string &path, const PathFilter &filter, HashAlgo algo) {
   composite::Patricia<char> given; // a prehashed tree whose filter answered otherwise: the answers it gave (1 kept, 2 not), then the filter
+  auto answerIt = [&given, &filter](const std::string &c, std::string_view t) {
+    char *a = given.find(c.data(), uint32_t(c.size()));
+    return a ? *a == 1 : filter(c, t);
+  };
   PathFilter answered;
   if (prehashes && algo == HashAlgo::SHA256)
     if (Prehash *p = takePrehash(path, bool(filter))) {
-      if (!filter) return ++prehashTaken, std::pair<Hash, uint64_t>{p->hash, p->size};
+      if (!filter) return ++prehashTaken, composite::Join<Hash, uint64_t>{p->hash, p->size};
       uint32_t k = 0;
       bool d = false;
       for (; k < p->seen.size(); k++) {
         const Prehash::Seen &s = p->seen[k];
         if ((d = filter(std::string(p->path(s)), typeName(s.type))) != s.kept) break;
       }
-      if (k == p->seen.size()) return ++prehashTaken, std::pair<Hash, uint64_t>{p->hash, p->size};
+      if (k == p->seen.size()) return ++prehashTaken, composite::Join<Hash, uint64_t>{p->hash, p->size};
       ++prehashRefiltered;
       // Entry k is answered otherwise: the tree is walked here.  The entries asked about so far come first in the walk too, and keep
       // their answers, so the filter is asked about each entry once.
@@ -470,13 +475,11 @@ std::pair<Hash, uint64_t> hashPath(const std::string &path, const PathFilter &fi
         std::string_view e = p->path(p->seen[i]);
         given.set(e.data(), uint32_t(e.size()), (i < k ? p->seen[i].kept : d) ? 1 : 2, [&] { return e.data(); }); // `text` is done growing
       }
-      answered = [&given, &filter](const std::string &c, std::string_view t) {
-        char *a = given.find(c.data(), uint32_t(c.size()));
-        return a ? *a == 1 : filter(c, t);
-      };
+      answered = answerIt;
     }
   HashSink hs(algo);
-  Sink sink = [&](std::string_view d) { hs.update(d); };
+  auto update = [&](std::string_view d) { hs.update(d); };
+  Sink sink = update;
   const PathFilter &f = answered ? answered : filter;
   NarWriter w{sink, f};
   w.noteKept = algo == HashAlgo::SHA256 && nixprefetch::noteRoot(filter ? 'G' : 'H', path.c_str()) && filter;
@@ -506,7 +509,7 @@ void restorePath(const std::string &path, std::string_view nar) {
   auto expect = [&](std::string_view s) {
     if (str() != s) throw Error("bad NAR: expected '" + std::string(s) + "'");
   };
-  std::function<void(const std::string &)> node = [&](const std::string &dst) {
+  auto node = [&](auto &self, const std::string &dst) -> void {
     expect("(");
     expect("type");
     auto t = str();
@@ -535,7 +538,7 @@ void restorePath(const std::string &path, std::string_view nar) {
         if (name.empty() || name == "." || name == ".." || name.find('/') != std::string::npos)
           throw Error("NAR contains invalid file name '" + name + "'");
         expect("node");
-        node(dst + "/" + name);
+        self(self, dst + "/" + name);
         expect(")");
       }
     } else {
@@ -543,7 +546,7 @@ void restorePath(const std::string &path, std::string_view nar) {
     }
   };
   expect("nix-archive-1");
-  node(path);
+  node(node, path);
 }
 
 //===----------------------------------------------------------------------===//
@@ -598,7 +601,7 @@ std::string makeStorePath(const std::string &storeDir, std::string_view type, co
   return path;
 }
 
-std::string makeType(const std::string &storeDir, std::string type, const std::set<std::string> &refs,
+std::string makeType(const std::string &storeDir, std::string type, const SortedSet &refs,
                      bool hasSelfRef) {
   for (auto &r : refs) {
     type += ":";
@@ -609,13 +612,13 @@ std::string makeType(const std::string &storeDir, std::string type, const std::s
 }
 
 std::string makeTextPath(const std::string &storeDir, std::string_view name, const Hash &hash,
-                         const std::set<std::string> &refs) {
+                         const SortedSet &refs) {
   return makeStorePath(storeDir, makeType(storeDir, "text", refs, false), hash, name);
 }
 
 std::string makeFixedOutputPath(const std::string &storeDir, std::string_view name,
                                 FileIngestionMethod method, const Hash &hash,
-                                const std::set<std::string> &refs) {
+                                const SortedSet &refs) {
   if (method == FileIngestionMethod::Text) return makeTextPath(storeDir, name, hash, refs);
   if (method == FileIngestionMethod::NixArchive && hash.algo == HashAlgo::SHA256)
     return makeStorePath(storeDir, makeType(storeDir, "source", refs, false), hash, name);

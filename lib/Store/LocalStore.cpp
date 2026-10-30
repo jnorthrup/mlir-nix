@@ -81,9 +81,9 @@ bool Store::isValidPath(const std::string &path) {
   return pathExists(infoFile(path)) && pathExists(toReal(path));
 }
 
-std::optional<PathInfo> Store::queryPathInfo(const std::string &path) {
+composite::Maybe<PathInfo> Store::queryPathInfo(const std::string &path) {
   std::string f = infoFile(path);
-  if (!pathExists(f) || !pathExists(toReal(path))) return std::nullopt;
+  if (!pathExists(f) || !pathExists(toReal(path))) return nullptr;
   PathInfo info;
   info.path = path;
   std::istringstream in(readFile(f));
@@ -92,7 +92,7 @@ std::optional<PathInfo> Store::queryPathInfo(const std::string &path) {
     auto c = line.find(": ");
     if (c == std::string::npos) continue;
     std::string k = line.substr(0, c), v = line.substr(c + 2);
-    if (k == "narHash") info.narHash = parseHash(v, std::nullopt);
+    if (k == "narHash") info.narHash = parseHash(v, nullptr);
     else if (k == "narSize") info.narSize = std::stoull(v);
     else if (k == "ref") info.references.insert(v);
     else if (k == "deriver") info.deriver = v;
@@ -135,8 +135,8 @@ composite::MutableSeries<std::string> Store::allValidPaths() {
   return sorted;
 }
 
-std::set<std::string> Store::queryReferrers(const std::string &path) {
-  std::set<std::string> res;
+SortedSet Store::queryReferrers(const std::string &path) {
+  SortedSet res;
   for (auto &p : allValidPaths())
     if (auto info = queryPathInfo(p))
       if (info->references.count(path)) res.insert(p);
@@ -203,16 +203,16 @@ static void copyRecursive(const std::string &from, const std::string &to, const 
 std::string Store::computeStorePathForPath(std::string name, const std::string &srcPath,
                                            FileIngestionMethod method, HashAlgo algo,
                                            const PathFilter &filter) {
-  Hash h = method == FileIngestionMethod::NixArchive ? hashPath(srcPath, filter, algo).first
+  Hash h = method == FileIngestionMethod::NixArchive ? hashPath(srcPath, filter, algo).a
                                                      : hashFile(algo, srcPath);
   return makeFixedOutputPath(settings.storeDir, name, method, h);
 }
 
 std::string Store::addToStore(std::string name, const std::string &srcPath, FileIngestionMethod method,
                               HashAlgo algo, const PathFilter &filter,
-                              const std::set<std::string> &refs, std::optional<Hash> expected) {
+                              const SortedSet &refs, composite::Maybe<Hash> expected) {
   Hash h;
-  if (method == FileIngestionMethod::NixArchive) h = hashPath(srcPath, filter, algo).first;
+  if (method == FileIngestionMethod::NixArchive) h = hashPath(srcPath, filter, algo).a;
   else if (method == FileIngestionMethod::Text) h = hashString(HashAlgo::SHA256, readFile(srcPath));
   else h = hashFile(algo, srcPath);
   if (expected && !(*expected == h))
@@ -244,7 +244,7 @@ std::string Store::addToStore(std::string name, const std::string &srcPath, File
 }
 
 std::string Store::addTextToStore(std::string_view name, std::string_view text,
-                                  const std::set<std::string> &refs) {
+                                  const SortedSet &refs) {
   Hash h = hashString(HashAlgo::SHA256, text);
   std::string dst = makeTextPath(settings.storeDir, name, h, refs);
   if (settings.readOnly || isValidPath(dst)) return dst;
@@ -268,8 +268,8 @@ std::string Store::addTextToStore(std::string_view name, std::string_view text,
 // Derivations in the store
 //===----------------------------------------------------------------------===//
 
-static std::set<std::string> drvReferences(const Derivation &drv) {
-  std::set<std::string> refs(drv.inputSrcs.begin(), drv.inputSrcs.end());
+static SortedSet drvReferences(const Derivation &drv) {
+  SortedSet refs(drv.inputSrcs.begin(), drv.inputSrcs.end());
   for (auto &[p, o] : drv.inputDrvs) refs.insert(p);
   return refs;
 }
@@ -387,13 +387,16 @@ const Derivation &Store::readDerivation(const std::string &drvPath) {
 }
 
 struct Store::LaterHashes {
-  struct Job { std::string path; const Derivation *drv; DrvInputs inputs; };
-  struct Answer { bool done = false; Hash hash; std::exception_ptr error; };
+  struct Answer { bool done = false, taken = false; Hash hash; std::exception_ptr error; };
+  struct Job { Answer *answer; const Derivation *drv; DrvInputs inputs; };
   std::mutex m;
   std::condition_variable cv; // a job queued (the hasher waits for one) or an answer made (a dependent waits for it)
   composite::MutableSeries<Job> queue;
   uint32_t head = 0, pending = 0; // pending: queued or being hashed (a store torn down waits for none, as the jobs read its cache)
-  std::map<std::string, Answer> answers; // by path: queued, then done; taken out by the dependent that asks first
+  /// By path, the derivation record's own bytes (they never move): queued, then done, then taken by the dependent that asks first.  The
+  /// trie is the evaluator's alone (under the lock); the hasher writes an answer through its job.  Never freed, as the store's thread may
+  /// still wait on them when the process ends.
+  composite::Patricia<Answer *> answers;
 };
 
 Store::~Store() {
@@ -407,7 +410,7 @@ Store::~Store() {
 void Store::hashLater(const std::string &drvPath, DrvInputs &&inputs) {
   if (DrvRecord *rec = drvAt(drvPath); rec && rec->hasModulo) return;
   if (!later) {
-    later = std::make_shared<LaterHashes>();
+    later = new LaterHashes();
     std::thread([L = later] {
       for (;;) {
         LaterHashes::Job job;
@@ -417,35 +420,39 @@ void Store::hashLater(const std::string &drvPath, DrvInputs &&inputs) {
           job = std::move(L->queue[L->head++]);
           if (L->head == L->queue.size()) { L->queue.clear(); L->head = 0; }
         }
-        LaterHashes::Answer a;
+        Hash h;
+        std::exception_ptr error;
         try {
-          a.hash = job.drv->hashUnparsed(false, &job.inputs);
+          h = job.drv->hashUnparsed(false, &job.inputs);
         } catch (...) {
-          a.error = std::current_exception();
+          error = std::current_exception();
         }
-        a.done = true;
         {
           std::lock_guard<std::mutex> lk(L->m);
-          L->answers[job.path] = std::move(a);
+          job.answer->hash = h;
+          job.answer->error = error;
+          job.answer->done = true;
           --L->pending;
         }
         L->cv.notify_all();
       }
     }).detach();
   }
-  const Derivation &kept = drvAt(drvPath)->drv; // written just before
+  DrvRecord *rec = drvAt(drvPath); // written just before
   {
     std::lock_guard<std::mutex> lk(later->m);
-    if (!later->answers.try_emplace(drvPath).second) return; // queued already
-    later->queue.append({drvPath, &kept, std::move(inputs)});
+    if (later->answers.find(drvPath.data(), uint32_t(drvPath.size()))) return; // queued already
+    auto *a = new LaterHashes::Answer();
+    later->answers.set(rec->path.data(), uint32_t(rec->path.size()), a, [rec] { return rec->path.c_str(); });
+    later->queue.append({a, &rec->drv, std::move(inputs)});
     ++later->pending;
   }
   later->cv.notify_all();
 }
 
-std::map<std::string, Hash> Store::hashDerivationModulo(const Derivation &drv, bool maskOutputs, DrvInputs *inputsOut) {
+SortedMap<Hash> Store::hashDerivationModulo(const Derivation &drv, bool maskOutputs, DrvInputs *inputsOut) {
   if (drv.isFixed()) {
-    std::map<std::string, Hash> res;
+    SortedMap<Hash> res;
     for (auto &[name, o] : drv.outputs) {
       std::string p = o.fixedPath(settings.storeDir, drv.name, name);
       res[name] = hashString(HashAlgo::SHA256, "fixed:out:" + o.methodAlgo() + ":" +
@@ -478,24 +485,29 @@ std::map<std::string, Hash> Store::hashDerivationModulo(const Derivation &drv, b
       }
     }
   }
-  Hash h = drv.hashUnparsed(maskOutputs, &inputs2);
+  SortedMap<Hash> res;
+  res[""] = drv.hashUnparsed(maskOutputs, &inputs2);
   if (inputsOut) *inputsOut = std::move(inputs2);
-  return {{"", h}};
+  return res;
 }
 
 /// The hasher's answer for `drvPath`, if it was asked for one: waited for when it is not made yet, and taken out (a path's hash is asked
 /// for once; drvHashes keeps it from then on).
-bool Store::takeLater(const std::string &drvPath, std::map<std::string, Hash> &out) {
+bool Store::takeLater(const std::string &drvPath, SortedMap<Hash> &out) {
   if (!later) return false;
   std::exception_ptr error;
   {
     std::unique_lock<std::mutex> lk(later->m);
-    auto it = later->answers.find(drvPath);
-    if (it == later->answers.end()) return false;
-    later->cv.wait(lk, [&] { return it->second.done; });
-    if (it->second.error) error = it->second.error;
-    else out = {{"", it->second.hash}};
-    later->answers.erase(it);
+    LaterHashes::Answer **found = later->answers.find(drvPath.data(), uint32_t(drvPath.size()));
+    if (!found || (*found)->taken) return false;
+    LaterHashes::Answer *a = *found;
+    later->cv.wait(lk, [&] { return a->done; });
+    if (a->error) error = a->error;
+    else {
+      out = SortedMap<Hash>();
+      out[""] = a->hash;
+    }
+    a->taken = true;
   }
   if (error) std::rethrow_exception(error);
   return true;
@@ -513,14 +525,14 @@ void Store::fillInOutputPaths(Derivation &drv, DrvInputs *inputsOut) {
   }
 }
 
-std::set<std::string> Store::computeFSClosure(const std::set<std::string> &paths, bool includeOutputs) {
-  std::set<std::string> res;
+SortedSet Store::computeFSClosure(const SortedSet &paths, bool includeOutputs) {
+  SortedSet res;
   composite::MutableSeries<std::string> todo;
   for (const auto &pth : paths) todo.append(pth);
   while (!todo.empty()) {
     std::string p = todo.back();
     todo.pop();
-    if (!res.insert(p).second) continue;
+    if (!res.insert(p)) continue;
     if (auto info = queryPathInfo(p)) {
       for (auto &r : info->references) todo.append(r);
     } else if (DrvRecord *rec = drvAt(p)) {
@@ -543,12 +555,12 @@ std::set<std::string> Store::computeFSClosure(const std::set<std::string> &paths
 // Building
 //===----------------------------------------------------------------------===//
 
-static std::set<std::string> scanForReferences(const std::string &path,
-                                               const std::set<std::string> &candidates) {
-  std::map<std::string, std::string> byHash;
+static SortedSet scanForReferences(const std::string &path,
+                                               const SortedSet &candidates) {
+  SortedMap<std::string> byHash;
   for (auto &c : candidates) byHash[storePathHashPart(c)] = c;
-  std::set<std::string> found;
-  std::function<void(const std::string &)> scan = [&](const std::string &p) {
+  SortedSet found;
+  auto scan = [&](auto &self, const std::string &p) -> void { // a walk that calls itself: no std::function to hold it
     struct stat st;
     if (lstat(p.c_str(), &st) != 0) return;
     std::string data;
@@ -566,7 +578,7 @@ static std::set<std::string> scanForReferences(const std::string &path,
         if (n != "." && n != "..") names.append(n);
       }
       closedir(d);
-      for (auto &n : names) scan(p + "/" + n);
+      for (auto &n : names) self(self, p + "/" + n);
       return;
     }
     // Scan for 32-character runs of nix32 characters.
@@ -590,7 +602,7 @@ static std::set<std::string> scanForReferences(const std::string &path,
       }
     }
   };
-  scan(path);
+  scan(scan, path);
   return found;
 }
 
@@ -599,16 +611,16 @@ void Store::ensurePath(const std::string &path) {
   throw Error("path '" + path + "' is not valid and cannot be substituted (no binary caches)");
 }
 
-std::map<std::string, std::string> Store::buildDerivation(const std::string &drvPath) {
-  std::set<std::string> visiting;
+SortedMap<std::string> Store::buildDerivation(const std::string &drvPath) {
+  SortedSet visiting;
   return realise(drvPath, visiting);
 }
 
-std::map<std::string, std::string> Store::realise(const std::string &drvPath,
-                                                  std::set<std::string> &visiting) {
-  if (!visiting.insert(drvPath).second) throw Error("cycle in derivation graph at '" + drvPath + "'");
+SortedMap<std::string> Store::realise(const std::string &drvPath,
+                                                  SortedSet &visiting) {
+  if (!visiting.insert(drvPath)) throw Error("cycle in derivation graph at '" + drvPath + "'");
   Derivation drv = readDerivation(drvPath);
-  std::map<std::string, std::string> outputs;
+  SortedMap<std::string> outputs;
   for (auto &[name, o] : drv.outputs) {
     if (o.kind == DerivationOutput::InputAddressed || o.kind == DerivationOutput::CAFixed)
       outputs[name] = o.kind == DerivationOutput::CAFixed && o.path.empty()
@@ -639,9 +651,9 @@ std::map<std::string, std::string> Store::realise(const std::string &drvPath,
   else runBuilder(drvPath, drv, outputs);
 
   // Post-process outputs.
-  std::set<std::string> candidates;
+  SortedSet candidates;
   {
-    std::set<std::string> inputs(drv.inputSrcs.begin(), drv.inputSrcs.end());
+    SortedSet inputs(drv.inputSrcs.begin(), drv.inputSrcs.end());
     for (auto &[inDrv, outs] : drv.inputDrvs) {
       Derivation d = readDerivation(inDrv);
       for (auto &o : outs) {
@@ -661,7 +673,7 @@ std::map<std::string, std::string> Store::realise(const std::string &drvPath,
     canonicalisePathMetaData(real);
     auto &o = drv.outputs.at(name);
     if (o.kind == DerivationOutput::CAFixed) {
-      Hash got = o.method == FileIngestionMethod::NixArchive ? hashPath(real, nullptr, o.hash.algo).first
+      Hash got = o.method == FileIngestionMethod::NixArchive ? hashPath(real, nullptr, o.hash.algo).a
                                                              : hashFile(o.hash.algo, real);
       if (!(got == o.hash)) {
         deletePathRecursive(real);
@@ -675,7 +687,7 @@ std::map<std::string, std::string> Store::realise(const std::string &drvPath,
     auto [nh, ns] = hashPath(real);
     info.narHash = nh;
     info.narSize = ns;
-    info.references = o.kind == DerivationOutput::CAFixed ? std::set<std::string>{}
+    info.references = o.kind == DerivationOutput::CAFixed ? SortedSet{}
                                                          : scanForReferences(real, candidates);
     info.deriver = drvPath;
     if (o.kind == DerivationOutput::CAFixed)
@@ -689,7 +701,7 @@ std::map<std::string, std::string> Store::realise(const std::string &drvPath,
 
 
 void Store::runBuilder(const std::string &drvPath, const Derivation &drv,
-                       const std::map<std::string, std::string> &outputs) {
+                       const SortedMap<std::string> &outputs) {
   const char *tmp = getenv("TMPDIR");
   std::string tmpBase = tmp && *tmp ? tmp : "/tmp";
   std::string tmpl = tmpBase + "/nix-build-" + drv.name + "-XXXXXX";
@@ -699,7 +711,7 @@ void Store::runBuilder(const std::string &drvPath, const Derivation &drv,
   if (!mkdtemp(buf.data())) throw Error("creating build directory: " + std::string(strerror(errno)));
   std::string top = buf.data();
 
-  std::map<std::string, std::string> env;
+  SortedMap<std::string> env;
   env["PATH"] = "/path-not-set";
   env["HOME"] = "/homeless-shelter";
   env["NIX_STORE"] = settings.storeDir;
@@ -721,7 +733,7 @@ void Store::runBuilder(const std::string &drvPath, const Derivation &drv,
   }
   // Output placeholders (builtins.placeholder) are rewritten to the real
   // output paths in the environment, arguments and structured attributes.
-  std::map<std::string, std::string> rewrites;
+  SortedMap<std::string> rewrites;
   for (auto &[n, p] : outputs) rewrites[hashPlaceholder(n)] = p;
   auto rewrite = [&](std::string s) {
     for (auto &[from, to] : rewrites) {
@@ -783,7 +795,7 @@ void Store::runBuilder(const std::string &drvPath, const Derivation &drv,
   deletePathRecursive(top);
 }
 
-void Store::builtinFetchurl(const Derivation &drv, const std::map<std::string, std::string> &outputs) {
+void Store::builtinFetchurl(const Derivation &drv, const SortedMap<std::string> &outputs) {
   auto get = [&](const std::string &k) {
     auto it = drv.env.find(k);
     return it == drv.env.end() ? std::string() : it->second;
@@ -836,8 +848,8 @@ bool Store::deletePath(const std::string &path) {
 }
 
 bool Store::collectGarbage(bool dryRun, composite::MutableSeries<std::string> &deleted) {
-  std::set<std::string> roots;
-  std::function<void(const std::string &)> scanRoots = [&](const std::string &dir) {
+  SortedSet roots;
+  auto scanRoots = [&](auto &self, const std::string &dir) -> void {
     DIR *d = opendir(dir.c_str());
     if (!d) return;
     composite::MutableSeries<std::string> names;
@@ -850,7 +862,7 @@ bool Store::collectGarbage(bool dryRun, composite::MutableSeries<std::string> &d
       std::string p = dir + "/" + n;
       struct stat st;
       if (lstat(p.c_str(), &st) != 0) continue;
-      if (S_ISDIR(st.st_mode)) { scanRoots(p); continue; }
+      if (S_ISDIR(st.st_mode)) { self(self, p); continue; }
       if (!S_ISLNK(st.st_mode)) continue;
       char buf[PATH_MAX + 1];
       ssize_t len = readlink(p.c_str(), buf, PATH_MAX);
@@ -866,32 +878,34 @@ bool Store::collectGarbage(bool dryRun, composite::MutableSeries<std::string> &d
       else if (len2 <= 0 && !pathExists(target)) unlink(p.c_str());
     }
   };
-  scanRoots(settings.stateDir + "/gcroots");
+  scanRoots(scanRoots, settings.stateDir + "/gcroots");
   auto live = computeFSClosure(roots, true);
   composite::MutableSeries<std::string> dead;
   for (auto &p : allValidPaths())
     if (!live.count(p)) dead.append(p);
   // Delete in referrer-safe order: repeat until no progress.
   bool progress = true;
-  std::set<std::string> remaining(dead.begin(), dead.end());
+  SortedSet remaining(dead.begin(), dead.end());
   while (progress && !remaining.empty()) {
     progress = false;
-    for (auto it = remaining.begin(); it != remaining.end();) {
+    SortedSet kept, gone; // still referenced by another dead path (the next round's); deleted in this round (no longer a referrer)
+    for (const std::string &p : remaining) {
       bool referenced = false;
-      for (auto &q : remaining) {
-        if (q == *it) continue;
+      for (const std::string &q : remaining) {
+        if (q == p || gone.contains(q)) continue;
         if (auto info = queryPathInfo(q))
-          if (info->references.count(*it)) { referenced = true; break; }
+          if (info->references.count(p)) { referenced = true; break; }
       }
-      if (referenced) { ++it; continue; }
+      if (referenced) { kept.insert(p); continue; }
       if (!dryRun) {
-        deletePathRecursive(toReal(*it));
-        unlink(infoFile(*it).c_str());
+        deletePathRecursive(toReal(p));
+        unlink(infoFile(p).c_str());
       }
-      deleted.append(*it);
-      it = remaining.erase(it);
+      deleted.append(p);
+      gone.insert(p);
       progress = true;
     }
+    remaining = std::move(kept);
   }
   return true;
 }

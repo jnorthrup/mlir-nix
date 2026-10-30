@@ -2868,8 +2868,8 @@ void EvalState::prelowerLoop() {
         pl->op = nixfe::genExpr(*pl->mod, origin, pre->po, "expr", go);
         // The bodies the recorded run minted in this file, minted here in its order (the rows of nested lambdas follow from it): the
         // evaluator only indexes them at their first call.  If one fails (the file changed since), the whole file is left to the evaluator.
-        if (auto mints = nixprefetch::replayMints.find(path); mints != nixprefetch::replayMints.end())
-          for (uint32_t row : mints->second) {
+        if (const auto *mints = nixprefetch::replayMints(path))
+          for (uint32_t row : *mints) {
             if (row >= pl->pool->rows.size()) break;
             auto lam = dyn_cast_or_null<nd::LambdaOp>(pl->pool->rows.col<nixfe::PoolCol::Op>()[row]);
             if (!lam || !lam.getBody().front().empty()) continue;

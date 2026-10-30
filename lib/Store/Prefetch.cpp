@@ -1,6 +1,7 @@
 //===- Prefetch.cpp - Record and replay the file accesses of an evaluation ---------===//
 
 #include "Composite/Mutable.h"
+#include "Composite/Patricia.h"
 #include "Nix/Prefetch.h"
 
 #include <atomic>
@@ -16,7 +17,6 @@
 #include <string>
 #include <thread>
 #include <unistd.h>
-#include <unordered_set>
 #include <vector>
 
 #ifdef MLNIX_HAVE_URING
@@ -27,7 +27,23 @@ namespace nixprefetch {
 
 bool recording = false;
 composite::MutableSeries<std::string> replayFiles;
-std::unordered_map<std::string, composite::MutableSeries<uint32_t>> replayMints;
+namespace {
+/// A key's bytes, copied once where they never move: the keys of the tries below live as long as the process.
+const char *keep(std::string_view s) {
+  char *p = static_cast<char *>(::operator new(s.size() + 1));
+  memcpy(p, s.data(), s.size());
+  p[s.size()] = 0;
+  return p;
+}
+/// The bodies minted, by file (crit-bit trie of the paths): an index into mintRows.
+composite::Patricia<uint32_t> mintsByPath;
+composite::MutableSeries<composite::MutableSeries<uint32_t>> mintRows;
+} // namespace
+
+const composite::MutableSeries<uint32_t> *replayMints(std::string_view path) {
+  uint32_t *i = mintsByPath.find(path.data(), uint32_t(path.size()));
+  return i ? &mintRows[*i] : nullptr;
+}
 composite::MutableSeries<ReplayHash> replayHashes;
 
 namespace {
@@ -38,10 +54,17 @@ namespace {
 
 struct Trace {
   composite::MutableSeries<std::string> order;
-  std::unordered_set<std::string> seen;
+  composite::Patricia<char> seen; // the lines kept so far, each once (their bytes copied where they never move)
   std::string file;
 };
 Trace *trace = nullptr; // never destroyed: it is written from an atexit handler
+
+/// True the first time the trace meets this line, which is then kept in `seen`.
+bool firstTime(const std::string &line) {
+  if (trace->seen.find(line.data(), uint32_t(line.size()))) return false;
+  trace->seen.set(line.data(), uint32_t(line.size()), 1, [&] { return keep(line); });
+  return true;
+}
 
 std::string absolute(const char *p) {
   if (p[0] == '/') return p;
@@ -170,12 +193,12 @@ void noteSlow(char kind, const char *path) {
   line.push_back(kind);
   line.push_back(' ');
   line += absolute(path);
-  if (trace->seen.insert(line).second) trace->order.append(std::move(line));
+  if (firstTime(line)) trace->order.append(std::move(line));
 }
 
 void noteMintSlow(const char *path, uint32_t row) {
   std::string line = "M " + absolute(path) + " " + std::to_string(row);
-  if (trace->seen.insert(line).second) trace->order.append(std::move(line));
+  if (firstTime(line)) trace->order.append(std::move(line));
 }
 
 bool noteRootSlow(char kind, const char *path) {
@@ -183,7 +206,7 @@ bool noteRootSlow(char kind, const char *path) {
   line.push_back(kind);
   line.push_back(' ');
   line += absolute(path);
-  if (!trace->seen.insert(line).second) return false;
+  if (!firstTime(line)) return false;
   trace->order.append(std::move(line));
   return true;
 }
@@ -227,7 +250,12 @@ void init(int argc, char **argv) {
     for (std::string l; std::getline(in, l);)
       if (l.size() > 2 && l[1] == ' ' && l[0] == 'M') { // a minted body: for the prelowering helpers, nothing to read ahead
         size_t sp = l.rfind(' ');
-        if (sp > 2) replayMints[l.substr(2, sp - 2)].append(uint32_t(strtoul(l.c_str() + sp + 1, nullptr, 10)));
+        if (sp > 2) {
+          std::string_view path = std::string_view(l).substr(2, sp - 2);
+          uint32_t *i = mintsByPath.find(path.data(), uint32_t(path.size()));
+          if (!i) i = mintsByPath.set(path.data(), uint32_t(path.size()), mintRows.append({}), [&] { return keep(path); });
+          mintRows[*i].append(uint32_t(strtoul(l.c_str() + sp + 1, nullptr, 10)));
+        }
       } else if (l.size() > 2 && l[1] == ' ' && (l[0] == 'H' || l[0] == 'G')) { // a hashed tree: for the prehashing helper
         replayHashes.append({l.substr(2), l[0] == 'G', {}});
       } else if (l.size() > 2 && l[1] == ' ' && l[0] == 'g') {
