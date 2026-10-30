@@ -4,8 +4,8 @@
 
 #include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/ArrayRef.h"
-#include <array>
-#include <memory>
+#include "Composite/Core.h"
+#include "Composite/Vocab.h"
 
 namespace mlir { class Operation; class Value; }
 namespace nixev {
@@ -17,9 +17,9 @@ struct Frame;
 /// Native code never forces a value. The host resolves each closure's captures and demands only the persistent
 /// cells required by the original graph, in its original order. A miss runs the interpreter exactly once.
 class ScalarJIT {
-  struct CurriedCache { std::array<void *, 3> byArity{}; };
+  struct CurriedCache { composite::Arr<void *, 3> byArity{}; };
 public:
-  static std::unique_ptr<ScalarJIT> create();
+  static composite::Own<ScalarJIT> create();
   ~ScalarJIT();
   /// Refused regions stay on the inline interpreter path; diagnostics can still observe every call.
   bool accepts(const void *cache) const { return profiling || cache != refused; }
@@ -39,7 +39,7 @@ public:
 private:
   ScalarJIT();
   struct Impl;
-  std::unique_ptr<Impl> impl;
+  composite::Own<Impl> impl;
   const void *refused;
   const bool profiling;
   const bool curried;

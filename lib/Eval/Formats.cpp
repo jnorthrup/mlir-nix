@@ -501,8 +501,8 @@ void EvalState::printValueAsXML(std::ostream &out, Value &v, bool strict, bool l
 namespace {
 struct TomlNode {
   enum Kind { Table, Array, Leaf } kind = Table;
-  std::map<std::string, std::shared_ptr<TomlNode>> table;
-  composite::MutableSeries<std::shared_ptr<TomlNode>> array;
+  composite::TextTable<TomlNode *> table;     // by key, the keys' bytes in the parser's Bump; no order (the set is sorted when built)
+  composite::MutableSeries<TomlNode *> array; // the nodes are the parser's
   Value *leaf = nullptr;
   bool defined = false;       // explicitly defined via [header]
   bool inlineTable = false;   // immutable
@@ -513,6 +513,13 @@ struct TomlParser {
   EvalState &st;
   std::string_view s;
   bool timestamps;
+  composite::MutableSeries<composite::Own<TomlNode>> nodes; // every node of the parse, owned here
+  composite::Bump keyBytes;                                  // every key of every table
+  TomlNode *make() { return nodes[nodes.append(composite::own<TomlNode>())].get(); }
+  /// The child of `t` named `k`, null when there is none yet: a reference to fill.  It holds until t's next new key.
+  TomlNode *&child(TomlNode &t, const std::string &k) {
+    return t.table.at(k.data(), uint32_t(k.size()), [&] { return keyBytes.copy(k.data(), uint32_t(k.size())); });
+  }
   size_t p = 0;
   int line = 1;
 
@@ -817,7 +824,7 @@ struct TomlParser {
     }
     if (c == '{') {
       p++;
-      auto node = std::make_shared<TomlNode>();
+      TomlNode *node = make();
       wsInline();
       if (peek() == '}') { p++; return toValue(*node); }
       while (true) {
@@ -851,14 +858,14 @@ struct TomlParser {
   void setKey(TomlNode &tbl, const composite::MutableSeries<std::string> &k, Value *v) {
     TomlNode *cur = &tbl;
     for (size_t i = 0; i + 1 < k.size(); i++) {
-      auto &n = cur->table[k[i]];
-      if (!n) n = std::make_shared<TomlNode>();
+      TomlNode *&n = child(*cur, k[i]);
+      if (!n) n = make();
       else if (n->kind != TomlNode::Table || n->inlineTable) fail("cannot redefine key '" + k[i] + "'");
-      cur = n.get();
+      cur = n;
     }
-    auto &leaf = cur->table[k.back()];
+    TomlNode *&leaf = child(*cur, k.back());
     if (leaf) fail("duplicate key '" + k.back() + "'");
-    leaf = std::make_shared<TomlNode>();
+    leaf = make();
     leaf->kind = TomlNode::Leaf;
     leaf->leaf = v;
   }
@@ -871,7 +878,7 @@ struct TomlParser {
       return v;
     }
     EvalState::BindingsBuilder bb(st);
-    for (auto &[k, c] : n.table) bb.insert(k, toValue(*c));
+    for (auto &r : n.table) bb.insert(llvm::StringRef(r.p, r.n), toValue(*r.v));
     st.mkAttrs(*v, bb.finish());
     return v;
   }
@@ -896,24 +903,24 @@ struct TomlParser {
         }
         TomlNode *t = &root;
         for (size_t i = 0; i + 1 < k.size(); i++) {
-          auto &n = t->table[k[i]];
-          if (!n) n = std::make_shared<TomlNode>();
-          if (n->kind == TomlNode::Array) t = n->array.back().get();
-          else if (n->kind == TomlNode::Table && !n->inlineTable) t = n.get();
+          TomlNode *&n = child(*t, k[i]);
+          if (!n) n = make();
+          if (n->kind == TomlNode::Array) t = n->array.back();
+          else if (n->kind == TomlNode::Table && !n->inlineTable) t = n;
           else fail("cannot redefine key '" + k[i] + "'");
         }
-        auto &last = t->table[k.back()];
+        TomlNode *&last = child(*t, k.back());
         if (aot) {
-          if (!last) { last = std::make_shared<TomlNode>(); last->kind = TomlNode::Array; last->arrayOfTables = true; }
+          if (!last) { last = make(); last->kind = TomlNode::Array; last->arrayOfTables = true; }
           if (last->kind != TomlNode::Array || !last->arrayOfTables) fail("cannot redefine key '" + k.back() + "'");
-          auto nt = std::make_shared<TomlNode>();
+          TomlNode *nt = make();
           last->array.append(nt);
-          cur = nt.get();
+          cur = nt;
         } else {
-          if (!last) last = std::make_shared<TomlNode>();
+          if (!last) last = make();
           else if (last->kind != TomlNode::Table || last->defined) fail("table '" + k.back() + "' already defined");
           last->defined = true;
-          cur = last.get();
+          cur = last;
         }
         wsInline();
         comment();

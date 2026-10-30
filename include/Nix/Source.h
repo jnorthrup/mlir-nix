@@ -10,20 +10,24 @@
 #define NIX_SOURCE_H
 
 #include <cstdint>
-#include <functional>
-#include <memory>
-#include <unordered_set>
 #include <ostream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <vector>
 
+#include "Composite/Table.h"
 #include "Nix/Name.h"
 
 namespace nixfe {
-/// MLNIX_STATS_IMPORTS: when set, the parser adds every path literal it lowers (canonical text) to this set.
-extern std::unordered_set<std::string> *pathLiterals;
+/// MLNIX_STATS_IMPORTS: when set, the parser adds every path literal it lowers (canonical text) to this set (its bytes copied into `bytes`).
+struct PathLiterals {
+  composite::TextTable<char> set;
+  composite::Bump bytes;
+  void insert(std::string_view p) { set.set(p.data(), uint32_t(p.size()), 1, [&] { return bytes.copy(p.data(), uint32_t(p.size())); }); }
+  bool count(std::string_view p) const { return set.find(p.data(), uint32_t(p.size())) != nullptr; }
+  uint32_t size() const { return set.size(); }
+};
+extern PathLiterals *pathLiterals;
 
 
 struct Pos {
@@ -33,14 +37,15 @@ struct Pos {
 
 /// The immutable bytes of one input.  A file is mapped read-only; anything else is owned.  Nothing
 /// ever writes to it: the lexer's tokens are segments (start, end) of it, and text that is not a
-/// slice of it (an unescaped string) is a separate, appended entry.
+/// slice of it (an unescaped string) is a separate, appended entry.  A source is never freed (a Name,
+/// and so the IR, may be a slice of it), so it is held by a plain pointer.
 struct Source {
   Source(const Source &) = delete;
   Source &operator=(const Source &) = delete;
   ~Source();
-  static std::shared_ptr<const Source> fromString(std::string text);
+  static const Source *fromString(std::string text);
   /// Maps a regular, non-empty file; null when that is not possible (the caller reads it).
-  static std::shared_ptr<const Source> mapFile(const std::string &path);
+  static const Source *mapFile(const std::string &path);
   std::string_view view() const { return {data_, size_}; }
 
   Source() = default;
@@ -50,20 +55,22 @@ struct Source {
   void *map_ = nullptr;
 };
 
-/// Origin of source text: a file path, or "«string»"/"«stdin»".
+/// Origin of source text: a file path, or "«string»"/"«stdin»".  Made by newOrigin() and never freed, as its source is not: positions,
+/// errors and the IR name it for the whole run, so it too is held by a plain pointer.
 struct Origin {
   std::string name;   // what errors print
   std::string path;   // absolute file path if a file, else empty
   std::string baseDir;
-  std::shared_ptr<const Source> text;
+  const Source *text = nullptr;
   uint32_t fileId = 0; // number in nixfe::FileTable, given the first time a position of this file is made
 };
+/// A new origin, kept for the run (under the lock the sources are kept under: a prelowering helper makes them too).
+Origin *newOrigin();
 
 struct ParseError : std::runtime_error {
   Pos pos;
-  std::shared_ptr<Origin> origin;
-  ParseError(std::string msg, Pos p, std::shared_ptr<Origin> o)
-      : std::runtime_error(std::move(msg)), pos(p), origin(std::move(o)) {}
+  Origin *origin;
+  ParseError(std::string msg, Pos p, Origin *o) : std::runtime_error(std::move(msg)), pos(p), origin(o) {}
 };
 
 enum class Lint { Ignore, Warn, Fatal };
@@ -71,15 +78,15 @@ enum class Lint { Ignore, Warn, Fatal };
 struct ParseOptions {
   bool pipeOperators = false;
   Lint lintAbsolutePaths = Lint::Ignore, lintShortPaths = Lint::Ignore, lintUrls = Lint::Ignore;
-  /// Receives lint warnings (formatted by the caller).
-  std::function<void(const ParseError &)> onWarning;
+  /// Receives lint warnings (formatted by the caller).  A plain function: the options are copied into every file's pool.
+  void (*onWarning)(const ParseError &) = nullptr;
   std::string home;                     // for ~/ paths
 };
 
 /// Print a source in the format of `nix-instantiate --parse`.  Throws ParseError.
-void showSource(std::ostream &os, std::shared_ptr<Origin> origin, const ParseOptions &opts);
+void showSource(std::ostream &os, Origin *origin, const ParseOptions &opts);
 /// Parse a source and build nothing: its syntax errors, at the cost of the parse alone.  Throws ParseError.
-void skim(std::shared_ptr<Origin> origin, const ParseOptions &opts);
+void skim(Origin *origin, const ParseOptions &opts);
 
 /// Print a string literal with Nix escaping.
 void printLiteralString(std::ostream &os, std::string_view s);

@@ -118,8 +118,14 @@ void warmFiles(const composite::MutableSeries<Entry> &es) {
     io_uring_queue_exit(&ring);
     return;
   }
-  std::unique_ptr<char[]> bufs(new char[W * kBuf]);
-  std::unique_ptr<struct statx[]> stx(new struct statx[W]);
+  struct Buffers { // a read's bytes and a stat's answer, a slot each, for this warm-up (not zeroed: the kernel writes them)
+    char *bytes = new char[W * kBuf];
+    struct statx *stat = new struct statx[W];
+    ~Buffers() {
+      delete[] bytes;
+      delete[] stat;
+    }
+  } buf;
   unsigned pending[W] = {};
   composite::MutableSeries<unsigned> freeSlots;
   for (unsigned s = 0; s < W; s++) freeSlots.append(s);
@@ -131,7 +137,7 @@ void warmFiles(const composite::MutableSeries<Entry> &es) {
       io_uring_sqe_set_flags(a, IOSQE_IO_LINK);
       a->user_data = uint64_t(slot) << 2;
       io_uring_sqe *r = io_uring_get_sqe(&ring);
-      io_uring_prep_read(r, int(slot), bufs.get() + size_t(slot) * kBuf, kBuf, 0);
+      io_uring_prep_read(r, int(slot), buf.bytes + size_t(slot) * kBuf, kBuf, 0);
       io_uring_sqe_set_flags(r, IOSQE_FIXED_FILE | IOSQE_IO_LINK);
       r->user_data = (uint64_t(slot) << 2) | 1;
       io_uring_sqe *c = io_uring_get_sqe(&ring);
@@ -140,7 +146,7 @@ void warmFiles(const composite::MutableSeries<Entry> &es) {
       pending[slot] = 3;
     } else {
       io_uring_sqe *s = io_uring_get_sqe(&ring);
-      io_uring_prep_statx(s, AT_FDCWD, e.path.c_str(), e.kind == 'L' ? AT_SYMLINK_NOFOLLOW : 0, STATX_TYPE | STATX_SIZE, &stx[slot]);
+      io_uring_prep_statx(s, AT_FDCWD, e.path.c_str(), e.kind == 'L' ? AT_SYMLINK_NOFOLLOW : 0, STATX_TYPE | STATX_SIZE, &buf.stat[slot]);
       s->user_data = uint64_t(slot) << 2;
       pending[slot] = 1;
     }

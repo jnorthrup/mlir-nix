@@ -1,4 +1,4 @@
-// The pure zone's vocabulary against the standard library it replaces: Fn (std::function), Maybe (std::optional), Text (ostringstream,
+// The pure zone's vocabulary against the standard library it replaces: Fn (std::function), Maybe (std::optional), Own (std::unique_ptr), Text (ostringstream,
 // std::to_string), the Spill body (llvm::SmallVector, checked against std::vector) and WordTable (DenseMap, checked against
 // std::unordered_map).
 //   clang++ -std=c++20 -O1 -g -fsanitize=address,undefined -I include scripts/vocab-check.cc -o /tmp/vocab-check && /tmp/vocab-check
@@ -98,6 +98,41 @@ int main() {
   w.clear();
   require(w.size() == 0 && !w.find(123456789), "clear empties the table");
   require(w.insert(77, 1) && *w.find(77) == 1, "a cleared table takes keys again");
+  // A table mostly empty when cleared is made small first; one mostly full is emptied in place.  Either way it takes keys again.
+  for (int round = 0; round < 3; round++) {
+    for (uint64_t i = 1; i <= 100000; i++) w.insert(i * 7919, i);
+    w.clear();
+    for (uint64_t i = 1; i <= 10; i++) w.insert(i, i);
+    w.clear(); // ten keys in a table sized for a hundred thousand: the small one
+    require(w.size() == 0 && !w.find(3) && !w.find(7919), "a cleared table is empty, made small or not");
+    for (uint64_t i = 1; i <= 1000; i++) require(w.insert(i, i * 2), "a table made small takes keys");
+    for (uint64_t i = 1; i <= 1000; i++) require(*w.find(i) == i * 2, "and finds them");
+    w.clear();
+  }
+
+  // Own: one owner, moved, released, converted to a base; destroyed once, never twice, never forgotten.
+  static int alive = 0;
+  struct Base { virtual ~Base() { --alive; } Base() { ++alive; } };
+  struct Derived : Base { int x; explicit Derived(int x) : x(x) {} };
+  {
+    Own<Derived> a = own<Derived>(5);
+    require(alive == 1 && a && a->x == 5, "own makes the object");
+    Own<Derived> b(mv(a));
+    require(!a && b && alive == 1, "a move hands it over");
+    Own<Base> c(mv(b));
+    require(!b && c && alive == 1, "an owner of the base takes it");
+    Derived *raw = static_cast<Derived *>(c.release());
+    require(!c && alive == 1 && raw->x == 5, "release gives it up");
+    delete raw;
+    require(alive == 0, "and the taker deletes it");
+    MutableSeries<Own<Derived>> many;
+    for (int i = 0; i < 1000; i++) many.append(own<Derived>(i));
+    require(alive == 1000, "a growing series of owners moves them, deleting none");
+    for (int i = 0; i < 1000; i++) require(many[i]->x == i, "each keeps its object");
+    many[7] = nullptr;
+    require(alive == 999, "assigning null deletes");
+  }
+  require(alive == 0, "every owner deletes its object when it goes");
 
   // TextTable and Bump against unordered_map<string>: names of every length, values replaced, misses.
   Bump bump;
@@ -116,5 +151,5 @@ int main() {
     require(!tt.find(k.data(), uint32_t(k.size())), "bytes never stored miss");
   }
   require(tt.find("", 0) == nullptr && *tt.set("", 0, 9, [&] { return bump.copy("", 0); }) == 9 && *tt.find("", 0) == 9, "the empty string is a key");
-  std::printf("vocabulary: Fn, Maybe, Text (100000 numbers), Spill (2000 rounds of moves), WordTable, TextTable (%u names) PASS\n", tt.size());
+  std::printf("vocabulary: Fn, Maybe, Text (100000 numbers), Spill (2000 rounds of moves), WordTable, TextTable (%u names) PASS; Own\n", tt.size());
 }

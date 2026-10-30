@@ -6,7 +6,7 @@
 
 #include <array>
 #include <cstdint>
-#include <memory>
+#include "Composite/Vocab.h"
 
 namespace mlir { class Operation; class Value; class ModuleOp; }
 namespace llvm { class raw_ostream; }
@@ -43,12 +43,12 @@ public:
     unsigned projectionRequests = 0, projectionForces = 0, projectionDeopts = 0;
     unsigned projectionFlat = 0, projectionLayered = 0, projectionCachedFlat = 0;
   };
-  static std::unique_ptr<LazyJITPlan> create(EvalState &, mlir::Operation *lambda,
+  static composite::Own<LazyJITPlan> create(EvalState &, mlir::Operation *lambda,
                                              mlir::Value result);
   /// Exactly saturated direct unary-lambda chains, using only indexed bodies.
   /// The root environment belongs to the outer closure; no intermediate frame
   /// or closure is needed for substituted formal argument handles.
-  static std::unique_ptr<LazyJITPlan> createSaturated(EvalState &, mlir::Operation *outerLambda,
+  static composite::Own<LazyJITPlan> createSaturated(EvalState &, mlir::Operation *outerLambda,
                                                       unsigned nargs);
   ~LazyJITPlan();
   bool needsSpecialization() const;
@@ -79,8 +79,8 @@ public:
 
 private:
   struct Impl;
-  explicit LazyJITPlan(std::unique_ptr<Impl>);
-  std::unique_ptr<Impl> impl;
+  explicit LazyJITPlan(composite::Own<Impl>);
+  composite::Own<Impl> impl;
 };
 } // namespace nixev
 #endif

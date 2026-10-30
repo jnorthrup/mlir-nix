@@ -19,6 +19,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "Composite/Vocab.h"
 #include "NixDialect/NixDialect.h"
 
 #include "mlir/Dialect/IRDL/IR/IRDL.h"
@@ -172,14 +173,14 @@ LogicalResult mlir::nix::loadPrimDialects(MLIRContext *ctx, NixDialect &core) {
   // The declaration is data, so it can be swapped without rebuilding:
   // MLNIX_PRIMS_IRDL=other.irdl.mlir (used by the mutation tests in test/mlir).
   StringRef source = kPrimsIRDL, name = "NixPrims.irdl.mlir";
-  std::unique_ptr<llvm::MemoryBuffer> override;
+  composite::Own<llvm::MemoryBuffer> override;
   if (const char *path = getenv("MLNIX_PRIMS_IRDL")) {
     auto buf = llvm::MemoryBuffer::getFile(path);
     if (!buf) {
       emitError(UnknownLoc::get(ctx)) << "cannot read MLNIX_PRIMS_IRDL=" << path << ": " << buf.getError().message();
       return failure();
     }
-    override = std::move(*buf);
+    override = composite::Own<llvm::MemoryBuffer>(buf->release()); // LLVM hands it over as a unique_ptr
     source = override->getBuffer();
     name = path;
   }

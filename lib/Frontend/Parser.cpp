@@ -36,7 +36,7 @@
 #include <variant>
 
 namespace nixfe {
-std::unordered_set<std::string> *pathLiterals = nullptr;
+PathLiterals *pathLiterals = nullptr;
 using composite::α;
 
 namespace {
@@ -73,8 +73,8 @@ Tok keywordOf(std::string_view w) {
 }
 
 struct Lexer : public lex::Rules {
-  Lexer(std::shared_ptr<Origin> o, const ParseOptions &opts)
-      : Rules(o->text->view()), origin(std::move(o)), opts(opts) {
+  Lexer(Origin *o, const ParseOptions &opts)
+      : Rules(o->text->view()), origin(o), opts(opts) {
     if (src.size() >= UINT32_MAX) throw ParseError("input too large (segments are 32-bit)", Pos{1, 1}, origin);
   }
 
@@ -144,7 +144,7 @@ struct Lexer : public lex::Rules {
   }
 
   enum State { S_INITIAL, S_DEFAULT, S_STRING, S_IND_STRING, S_INPATH, S_INPATH_SLASH };
-  std::shared_ptr<Origin> origin;
+  Origin *origin; // kept for the run (newOrigin)
   const ParseOptions &opts;
   /// Texts that are not slices of the input (unescaped strings, `''$`, ...), appended and never
   /// mutated.  Deque: entries do not move.  The four fixed ones are kFixed (a span of second() 1).
@@ -612,9 +612,9 @@ struct Hdr {
 };
 
 struct Parser {
-  Parser(Mode m, std::shared_ptr<Origin> o, const ParseOptions &po, confix::Bands *bands,
+  Parser(Mode m, Origin *o, const ParseOptions &po, confix::Bands *bands,
          mlir::ModuleOp module = {}, const GenOptions *go = nullptr)
-      : mode(m), origin(std::move(o)), opts(po), lx(origin, opts), bands(bands), module(module),
+      : mode(m), origin(o), opts(po), lx(origin, opts), bands(bands), module(module),
         b(module ? module.getContext() : nullptr), go(go) {}
 
   /// The whole source.
@@ -700,7 +700,7 @@ struct Parser {
   }
 
   Mode mode;
-  std::shared_ptr<Origin> origin;
+  Origin *origin; // kept for the run (newOrigin)
   const ParseOptions &opts;
   Lexer lx;
   std::optional<Lexer> hl; // the heads': statement starts, read for the names they bind
@@ -873,7 +873,7 @@ struct Parser {
     uint32_t h = hashOf(n);
     for (Scope *c = sc; c; c = c->parent)
       if (Value *v = c->isWith ? nullptr : lookup(*c, n, h)) return *v;
-    if (go->isBaseName && go->isBaseName(n.str())) return baseRef(n.str());
+    if (go->isBaseName && go->isBaseName(go->baseNames, n.str())) return baseRef(n.str());
     return Value();
   }
   /// The cell of `n` (hash h) in scope s, or null.
@@ -967,7 +967,7 @@ struct Parser {
       if (Value *v = lookup(*c, n, h)) return mk(K_VAR, p, *v);
     }
     if (mode == Mode::Skip) return mk(K_VAR, p);
-    if (go->isBaseName && go->isBaseName(name)) return mk(K_VAR, p, baseRef(name));
+    if (go->isBaseName && go->isBaseName(go->baseNames, name)) return mk(K_VAR, p, baseRef(name));
     if (withs.empty()) {
       undefined(n, p);
       return mk(K_VAR, p, baseRef("null"));
@@ -2464,7 +2464,7 @@ static confix::Bands &scratchBands() {
   return b;
 }
 
-nd::ExprOp genExpr(mlir::ModuleOp module, std::shared_ptr<Origin> origin, const ParseOptions &po, llvm::StringRef symName,
+nd::ExprOp genExpr(mlir::ModuleOp module, Origin *origin, const ParseOptions &po, llvm::StringRef symName,
                    const GenOptions &opts) {
   confix::Bands &bands = opts.pool ? opts.pool->bands : scratchBands();
   bands.clear(origin->text->view());
@@ -2475,20 +2475,20 @@ void mintBody(nd::LambdaOp lam, FilePool &pool, uint32_t row, const GenOptions &
   Parser(Mode::Gen, pool.origin, pool.opts, &pool.bands, lam->getParentOfType<mlir::ModuleOp>(), &opts).mint(lam, pool, row);
 }
 
-void showSource(std::ostream &os, std::shared_ptr<Origin> origin, const ParseOptions &po) {
+void showSource(std::ostream &os, Origin *origin, const ParseOptions &po) {
   confix::Bands &bands = scratchBands(); // the parse checks each statement's end against the scan's (layer 1)
   bands.clear();
   bool scannedOk = confix::scan(origin->text->view(), bands);
   os << Parser(Mode::Show, origin, po, scannedOk ? &bands : nullptr).show();
 }
 
-void skim(std::shared_ptr<Origin> origin, const ParseOptions &po) {
+void skim(Origin *origin, const ParseOptions &po) {
   confix::Bands &bands = scratchBands();
   bands.clear(origin->text->view());
   Parser(Mode::Skip, origin, po, &bands).top();
 }
 
-bool confix::lexBands(std::shared_ptr<Origin> origin, const ParseOptions &opts, confix::Bands &out) {
+bool confix::lexBands(Origin *origin, const ParseOptions &opts, confix::Bands &out) {
   try {
     Lexer lx(origin, opts);
     confix::Layers ls(out);

@@ -126,7 +126,7 @@ struct Layers {
 bool scan(std::string_view src, Bands &out);
 
 /// The same table from the tokens of the real lexer.  The oracle of `scan`; it costs a lex.
-bool lexBands(std::shared_ptr<Origin> origin, const ParseOptions &opts, Bands &out);
+bool lexBands(Origin *origin, const ParseOptions &opts, Bands &out);
 
 } // namespace nixfe::confix
 

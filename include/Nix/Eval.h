@@ -440,20 +440,17 @@ struct EvalSettings {
 using AutoArgs = composite::Patricia<Value *>;
 
 struct EvalState {
-  EvalState(EvalSettings settings, std::shared_ptr<nixstore::Store> store);
+  EvalState(EvalSettings settings, nixstore::Store *store); // the store is lent: it outlives the state
   ~EvalState();
 
   EvalSettings settings;
-  std::shared_ptr<nixstore::Store> store;
+  nixstore::Store *store;
   SymbolTable symbols;
   mlir::MLIRContext ctx;
   mlir::OwningOpRef<mlir::ModuleOp> module;
   /// The optimization pipeline (text: settings.pipeline / MLNIX_PIPELINE), built on first use.
-  std::unique_ptr<mlir::PassManager> optimizer;
-  /// The demand schedule's optimizer: devirtualization (the default pipeline's one stage) with its
-  /// pattern set frozen once.  A lambda body is not IsolatedFromAbove, so no PassManager runs on it.
-  std::unique_ptr<mlir::FrozenRewritePatternSet> devirt;
-  std::unique_ptr<ScalarJIT> scalarJIT; // opt-in, guarded native tier; initialized without an MLIR/LLVM context
+  composite::Own<mlir::PassManager> optimizer;
+  composite::Own<ScalarJIT> scalarJIT; // opt-in, guarded native tier; initialized without an MLIR/LLVM context
   Arena alloc;
 
   // Frequently used symbols.
@@ -670,7 +667,7 @@ struct EvalState {
   /// Parse only.
   nixfe::ParseOptions parseOptions();
   /// Parse a source into the module (kept alive by the state, as its origin is).
-  mlir::nix::ExprOp lowerToMLIR(std::shared_ptr<nixfe::Origin> origin, const composite::MutableSeries<std::string> *scopeNames = nullptr);
+  mlir::nix::ExprOp lowerToMLIR(nixfe::Origin *origin, const composite::MutableSeries<std::string> *scopeNames = nullptr);
   Value *evalExprOp(mlir::nix::ExprOp op);
   /// Load all nix.expr ops of an MLIR module (from mlnix compile) and
   /// evaluate the one named `sym` (or the first).
@@ -804,12 +801,12 @@ struct EvalState {
   composite::Patricia<const char *> srcToStore; // a source path's store path, an arena string: the context element of every copy
   composite::Patricia<Value *> fileEvalCache;
   composite::Patricia<Value *> scopedImportCache; // by the file's path and the scope's names
-  composite::MutableSeries<std::shared_ptr<nixfe::Origin>> origins;
+  composite::MutableSeries<nixfe::Origin *> origins; // the files and strings lowered (an origin is kept for the run: nixfe::newOrigin)
   /// MLNIX_DEFER: one pool of deferred lambdas per lowered file.  The `body_index` of a nix.lambda is a
   /// nixfe::BodyIndex (`file j row`) into these.
-  composite::MutableSeries<std::unique_ptr<nixfe::FilePool>> pools; // indexed by FilePool::file; a slot is empty while its file is only prelowered
+  composite::MutableSeries<composite::Own<nixfe::FilePool>> pools; // indexed by FilePool::file; a slot is empty while its file is only prelowered
   std::atomic<uint32_t> nextPoolId{0};
-  void installPool(std::unique_ptr<nixfe::FilePool> p);
+  void installPool(composite::Own<nixfe::FilePool> p);
   unsigned exprCounter = 0;
 
   /// MLNIX_PRELOWER=1 with MLNIX_PREFETCH=auto (the files a previous run of this invocation evaluated; the first run records them), or MLNIX_PRELOWER_LIST=file (such a list): a helper thread lexes, parses
@@ -817,18 +814,20 @@ struct EvalState {
   /// no evaluation and no optimization (the prim folder calls back into the evaluator), only genExpr into a module of its own.
   struct Indexer;
   struct Prelowered {
-    std::shared_ptr<nixfe::Origin> origin;
+    nixfe::Origin *origin = nullptr;
     mlir::OwningOpRef<mlir::ModuleOp> mod;
     mlir::nix::ExprOp op;
-    std::unique_ptr<nixfe::FilePool> pool;
+    composite::Own<nixfe::FilePool> pool;
     bool done = false, ok = false;
     bool optimized = false; // devirtualized by the helper (the demand schedule's whole pipeline): adoption runs no pass
-    std::unique_ptr<Indexer> index; // the file's body indexed by the helper: adoption installs its regions and captures
+    composite::Own<Indexer> index; // the file's body indexed by the helper: adoption installs its regions and captures
   };
   struct PrelowerState {
     std::mutex m;
     std::condition_variable cv;
-    std::unordered_map<std::string, std::shared_ptr<Prelowered>> byPath;
+    composite::Patricia<Prelowered *> byPath; // the file's lowering, by path (the paths' bytes in pathBytes)
+    composite::Bump pathBytes;
+    composite::MutableSeries<composite::Own<Prelowered>> lowered; // every Prelowered, owned here until the state goes
     composite::MutableSeries<std::string> queue; // paths, appended; the helpers drain them from `head` (a cell leaves, an empty one stays)
     uint32_t head = 0;
     composite::TextTable<char> baseNames; // a set: the base environment's names when the helpers started (they read it, nothing writes it)
@@ -837,10 +836,11 @@ struct EvalState {
     bool stop = false;
     uint64_t adopted = 0, waited = 0, missed = 0;
   };
-  std::unique_ptr<PrelowerState> pre;
+  composite::Own<PrelowerState> pre;
   void startPrelower();
   void prelowerLoop();
   mlir::nix::ExprOp takePrelowered(const std::string &resolved);
+  Prelowered *newPrelowered(const std::string &path);
   void (*printTrace)(const std::string &) = nullptr; // builtins.trace's line
 
   // The record of each SSA value, by the value's address: the evaluator reads the records an op's record points at and never asks; the JITs,
@@ -877,7 +877,7 @@ struct EvalState {
     void index(mlir::Region &r);
   };
   Indexer indexer{*this, false};
-  composite::MutableSeries<std::unique_ptr<Indexer>> helperIndexers; // adopted with their files: their arenas hold those files' nodes
+  composite::MutableSeries<composite::Own<Indexer>> helperIndexers; // adopted with their files: their arenas hold those files' nodes
   void setNode(void *key, Node *n) {
     nodeMap.at(uint64_t(uintptr_t(key))) = n;
     NodeCacheEntry &e = nodeCache[(reinterpret_cast<uintptr_t>(key) >> 4) & (kNodeCache - 1)];

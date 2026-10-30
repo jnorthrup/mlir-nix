@@ -1155,7 +1155,7 @@ void registerBuiltins(EvalState &state) {
       } catch (nixstore::Error &e) {
         throw EvalError(e.what(), pos);
       }
-      auto origin = std::make_shared<nixfe::Origin>();
+      nixfe::Origin *origin = nixfe::newOrigin();
       origin->name = real;
       origin->path = real;
       origin->baseDir = nixstore::dirOf(real);

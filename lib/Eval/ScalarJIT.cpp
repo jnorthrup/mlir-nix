@@ -184,8 +184,8 @@ struct ScalarJIT::Impl {
     Fn fn = nullptr;
     PointerFn pointerFn = nullptr;
     PointerPlan pointer;
-    std::unique_ptr<Plan> scalarPlan;
-    std::unique_ptr<LazyJITPlan> lazyPlan;
+    composite::Own<Plan> scalarPlan;
+    composite::Own<LazyJITPlan> lazyPlan;
     LazyJITPlan::Fn lazyFn = nullptr;
     unsigned scalarResult = 0, curriedArity = 0;
     uint64_t curriedCalls = 0, curriedCompletions = 0, curriedDeopts = 0;
@@ -194,18 +194,18 @@ struct ScalarJIT::Impl {
     std::string curriedLocation;
     // ExecutionEngine accepts a function_ref; keep its callable alive until after the engine is destroyed.
     std::function<llvm::Error(llvm::Module *)> transformer;
-    std::unique_ptr<mlir::ExecutionEngine> engine;
+    composite::Own<mlir::ExecutionEngine> engine;
     void releaseLazyCode() {
-      engine.reset();
+      engine = nullptr;
       transformer = {};
       lazyFn = nullptr;
-      lazyPlan.reset();
+      lazyPlan = nullptr;
       retirePending = false;
     }
   };
-  composite::MutableSeries<std::unique_ptr<Entry>> entries;
-  composite::MutableSeries<std::unique_ptr<CurriedCache>> curriedCaches;
-  composite::MutableSeries<std::unique_ptr<Entry>> curriedEntries;
+  composite::MutableSeries<composite::Own<Entry>> entries;
+  composite::MutableSeries<composite::Own<CurriedCache>> curriedCaches;
+  composite::MutableSeries<composite::Own<Entry>> curriedEntries;
   const bool curriedEnabled = [] {
     const char *setting = getenv("MLNIX_JIT_CURRIED");
     return !setting || std::string_view(setting) != "0";
@@ -223,7 +223,7 @@ struct ScalarJIT::Impl {
   const bool profiling = getenv("MLNIX_JIT_PROFILE") != nullptr;
   llvm::DenseMap<mlir::Operation *, Profile> profiles;
   uint64_t profileDropped = 0;
-  std::unique_ptr<mlir::MLIRContext> ctx;
+  composite::Own<mlir::MLIRContext> ctx;
   const unsigned hot = threshold();
   unsigned attempts = 0;
   uint64_t compileNs = 0; // elapsed compilation wall time, including failed attempts and first context setup
@@ -268,7 +268,7 @@ struct ScalarJIT::Impl {
     });
     if (nativeFailed) return false;
     if (!ctx) {
-      ctx = std::make_unique<MLIRContext>();
+      ctx = composite::own<MLIRContext>();
       ctx->disableMultithreading();
       ctx->loadDialect<arith::ArithDialect, cf::ControlFlowDialect, func::FuncDialect, LLVM::LLVMDialect>();
       registerBuiltinDialectTranslation(*ctx);
@@ -395,7 +395,7 @@ struct ScalarJIT::Impl {
     }
     else if (plan) entry.fn = reinterpret_cast<Fn>(*address);
     else { entry.pointerFn = reinterpret_cast<PointerFn>(*address); ++pointerCompiled; }
-    entry.engine = std::move(*engine);
+    entry.engine = composite::Own<ExecutionEngine>(engine->release()); // MLIR hands it over as a unique_ptr
     ++compiled;
     return true;
   }
@@ -438,7 +438,7 @@ struct ScalarJIT::Impl {
           cache = &p.refused;
           ++p.rejected; ++p.booleanPreflightRejections;
           p.curriedRejected += e.curriedArity != 0;
-          e.lazyPlan.reset(); // no native run exists before this entry's first compilation
+          e.lazyPlan = nullptr; // no native run exists before this entry's first compilation
         };
         if (!e.lazyPlan && e.curriedArity) {
           e.lazyPlan = LazyJITPlan::createSaturated(st, lambda, e.curriedArity);
@@ -604,13 +604,13 @@ struct ScalarJIT::Impl {
   }
 };
 
-ScalarJIT::ScalarJIT() : impl(std::make_unique<Impl>()), refused(&impl->refused), profiling(impl->profiling), curried(impl->curriedEnabled) {}
+ScalarJIT::ScalarJIT() : impl(composite::own<Impl>()), refused(&impl->refused), profiling(impl->profiling), curried(impl->curriedEnabled) {}
 ScalarJIT::~ScalarJIT() = default;
-std::unique_ptr<ScalarJIT> ScalarJIT::create() {
+composite::Own<ScalarJIT> ScalarJIT::create() {
   const char *enabled = getenv("MLNIX_JIT");
   // A replacement primop declaration can change the semantics behind an operation name.
   if (!enabled || std::string_view(enabled) != "1" || getenv("MLNIX_PRIMS_IRDL")) return nullptr;
-  return std::unique_ptr<ScalarJIT>(new ScalarJIT());
+  return composite::Own<ScalarJIT>(new ScalarJIT());
 }
 
 bool ScalarJIT::evaluateSaturated(EvalState &st, mlir::Operation *lambda, mlir::Value result,
@@ -631,9 +631,9 @@ bool ScalarJIT::evaluateSaturated(EvalState &st, mlir::Operation *lambda, mlir::
         p.curriedCaches.size() >= kMaxCandidates) {
       cache = &p.refused; ++p.curriedRejected; return false;
     }
-    auto slots = std::make_unique<CurriedCache>();
+    auto slots = composite::own<CurriedCache>();
     cache = slots.get();
-    p.curriedCaches.append(std::move(slots));
+    p.curriedCaches.append(composite::mv(slots));
   }
   void *&slot = static_cast<CurriedCache *>(cache)->byArity[args.size() - 2];
   if (slot == refused) return false;
@@ -641,11 +641,11 @@ bool ScalarJIT::evaluateSaturated(EvalState &st, mlir::Operation *lambda, mlir::
     if (p.curriedEntries.size() >= kMaxCandidates) {
       slot = &p.refused; ++p.curriedRejected; return false;
     }
-    auto entry = std::make_unique<Impl::Entry>();
+    auto entry = composite::own<Impl::Entry>();
     entry->curriedArity = args.size();
     if (p.profiling) entry->curriedLocation = st.showPos(nd::posOfOp(lambda));
     slot = entry.get();
-    p.curriedEntries.append(std::move(entry));
+    p.curriedEntries.append(composite::mv(entry));
   }
   auto &e = *static_cast<Impl::Entry *>(slot);
   if (e.rejected) return false;
@@ -693,7 +693,7 @@ void ScalarJIT::evaluate(EvalState &st, mlir::Operation *lambda, mlir::Value res
   if (!cache) {
     if (p.entries.size() >= kMaxCandidates) { cache = &p.refused; interpret(); return; }
     auto lam = mlir::cast<nd::LambdaOp>(lambda);
-    auto entry = std::make_unique<Impl::Entry>();
+    auto entry = composite::own<Impl::Entry>();
     entry->pointer = pointerPlan(lam, result);
     if (entry->pointer.capture) {
       const nixev::Node *slot = st.nodeOf(entry->pointer.capture.getAsOpaquePointer());
@@ -707,15 +707,15 @@ void ScalarJIT::evaluate(EvalState &st, mlir::Operation *lambda, mlir::Value res
           lam.getBody().front().getNumArguments() != 1) {
         cache = &p.refused; ++p.rejected; interpret(); return;
       }
-      entry->scalarPlan = std::make_unique<Plan>(lam.getBody());
+      entry->scalarPlan = composite::own<Plan>(lam.getBody());
       if (!entry->scalarPlan->visit(result, entry->scalarResult)) {
-        entry->scalarPlan.reset();
+        entry->scalarPlan = nullptr;
         entry->lazyPlan = LazyJITPlan::create(st, lambda, result);
         if (!entry->lazyPlan) { cache = &p.refused; ++p.rejected; interpret(); return; }
       }
     }
     cache = entry.get();
-    p.entries.append(std::move(entry));
+    p.entries.append(composite::mv(entry));
   }
   auto &e = *static_cast<Impl::Entry *>(cache);
   if (e.rejected) { interpret(); return; }
@@ -788,7 +788,7 @@ void ScalarJIT::evaluate(EvalState &st, mlir::Operation *lambda, mlir::Value res
       e.rejected = true; ++p.rejected; interpret(); return;
     }
     bool compiled = p.compile(e, e.scalarPlan.get(), e.scalarResult);
-    e.scalarPlan.reset();
+    e.scalarPlan = nullptr;
     if (!compiled) {
       e.rejected = true; ++p.compileFailures; interpret(); return;
     }

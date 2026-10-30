@@ -34,11 +34,11 @@ int main(int argc, char **argv) {
   }
   std::ifstream list(argv[a]);
   // Read everything first: the time reported is the parser's, not the file system's.
-  composite::MutableSeries<std::pair<std::string, std::shared_ptr<const nixfe::Source>>> corpus;
+  composite::MutableSeries<std::pair<std::string, const nixfe::Source *>> corpus;
   std::string path;
   size_t bytes = 0;
   while (std::getline(list, path)) {
-    std::shared_ptr<const nixfe::Source> src = map ? nixfe::Source::mapFile(path) : nullptr;
+    const nixfe::Source *src = map ? nixfe::Source::mapFile(path) : nullptr;
     if (!src) {
       std::ifstream f(path, std::ios::binary);
       std::stringstream ss;
@@ -72,7 +72,7 @@ int main(int argc, char **argv) {
     opts.pipeOperators = true;
     opts.home = "/home";
     for (auto &[name, text] : corpus) {
-      auto origin = std::make_shared<nixfe::Origin>();
+      nixfe::Origin *origin = nixfe::newOrigin();
       origin->name = origin->path = name;
       origin->baseDir = ".";
       origin->text = text;
@@ -138,7 +138,7 @@ int main(int argc, char **argv) {
             }
           }
           auto src = nixfe::Source::fromString(t);
-          auto origin = std::make_shared<nixfe::Origin>();
+          nixfe::Origin *origin = nixfe::newOrigin();
           origin->name = origin->path = corpus[f].first;
           origin->baseDir = ".";
           origin->text = src;
@@ -173,7 +173,7 @@ int main(int argc, char **argv) {
   size_t files = 0, errors = 0;
   auto t0 = std::chrono::steady_clock::now();
   for (auto &[name, text] : corpus) {
-    auto origin = std::make_shared<nixfe::Origin>();
+    nixfe::Origin *origin = nixfe::newOrigin();
     origin->name = origin->path = name;
     origin->baseDir = ".";
     origin->text = text;

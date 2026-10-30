@@ -18,9 +18,6 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 
-#include <functional>
-#include <memory>
-#include <vector>
 
 namespace nixev { struct RegionInfo; }
 
@@ -48,7 +45,7 @@ struct FilePool {
     ::join::TwInt free; // start j count, into freeCol
   };
   uint32_t file;                  // this pool's index in EvalState::pools: the `a` of every body_index
-  std::shared_ptr<Origin> origin; // one origin for every row
+  Origin *origin;                 // one origin for every row
   ParseOptions opts;              // the source's, without lints: a body parsed again warns no second time
   confix::Bands bands;
   composite::Cursor<uint32_t, Pos, mlir::Operation *, uint32_t, ::join::TwInt, nixev::RegionInfo *> rows{PoolCol{}};
@@ -56,8 +53,7 @@ struct FilePool {
   llvm::DenseMap<uint32_t, Seen> seen;
   composite::MutableSeries<FreeName> freeCol;
 
-  FilePool(uint32_t file, std::shared_ptr<Origin> origin, const ParseOptions &po)
-      : file(file), origin(std::move(origin)), opts(po) {
+  FilePool(uint32_t file, Origin *origin, const ParseOptions &po) : file(file), origin(origin), opts(po) {
     opts.lintAbsolutePaths = opts.lintShortPaths = opts.lintUrls = Lint::Ignore;
     opts.onWarning = nullptr;
   }
@@ -78,9 +74,10 @@ struct FilePool {
 };
 
 struct GenOptions {
-  /// Names visible in the global base environment (true/false/null, map,
-  /// builtins, __sub, ...).
-  std::function<bool(llvm::StringRef)> isBaseName;
+  /// Names visible in the global base environment (true/false/null, map, builtins, __sub, ...): asked of `baseNames` (the evaluator, or a
+  /// prelowering helper's copy of its names) through a plain function, so nothing is captured or owned.
+  bool (*isBaseName)(const void *baseNames, llvm::StringRef name) = nullptr;
+  const void *baseNames = nullptr;
   /// Extra lexical scope for scopedImport.  When non-empty the generated
   /// expression is `scope: <expr>`, and these names resolve to `scope.name`.
   composite::MutableSeries<std::string> scopeNames;
@@ -93,7 +90,7 @@ struct GenOptions {
 
 /// Parse `origin` into a new `nix.expr @symName` appended to `module`.
 /// Throws ParseError on syntax errors and static errors (undefined variables).
-mlir::nix::ExprOp genExpr(mlir::ModuleOp module, std::shared_ptr<Origin> origin, const ParseOptions &po,
+mlir::nix::ExprOp genExpr(mlir::ModuleOp module, Origin *origin, const ParseOptions &po,
                           llvm::StringRef symName, const GenOptions &opts);
 
 /// Mint the body of a deferred lambda from its pool row: the demand half of the schedule.  The same

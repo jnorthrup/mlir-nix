@@ -355,25 +355,28 @@ std::string lookupFileArg(EvalState &st, const std::string &s) {
   return absPath(s);
 }
 
-int runEvalCommandIn(Options &o, bool build, EvalState &st, std::shared_ptr<nixstore::Store> store);
+int runEvalCommandIn(Options &o, bool build, EvalState &st, nixstore::Store *store);
 
 int runEvalCommand(Options &o, bool build) {
   finishOptions(o);
   if (o.evalOnly && !o.readWrite) o.store.readOnly = true;
-  auto store = std::make_shared<nixstore::Store>(o.store);
   // An evaluation never destroys its state: the process exits right after, and taking a module of a
   // million ops, the attribute uniquer and the arenas apart one object at a time cost 6.6% of a NixOS
   // evaluation (docs/PERFORMANCE.md).  The one thing the destructor did, printing the statistics, is
-  // done here.  `build` keeps the ordinary teardown.
+  // done here.  `build` keeps the ordinary teardown.  The store lives as long as the state.
+  nixstore::Store *store = new nixstore::Store(o.store);
   EvalState *stp = new EvalState(std::move(o.eval), store); // the settings are the state's from here on
   struct Teardown {
     EvalState *st;
+    nixstore::Store *store;
     bool leak;
     ~Teardown() {
-      if (!leak) delete st;
-      else if (st->statsEnabled) st->printStats();
+      if (!leak) {
+        delete st;
+        delete store;
+      } else if (st->statsEnabled) st->printStats();
     }
-  } teardown{stp, !build};
+  } teardown{stp, store, !build};
   EvalState &st = *stp;
   try {
     return runEvalCommandIn(o, build, st, store);
@@ -392,14 +395,14 @@ int runEvalCommand(Options &o, bool build) {
   }
 }
 
-int runEvalCommandIn(Options &o, bool build, EvalState &st, std::shared_ptr<nixstore::Store> store) {
+int runEvalCommandIn(Options &o, bool build, EvalState &st, nixstore::Store *store) {
   auto autoArgs = buildAutoArgs(st, o);
   if (o.attrPaths.empty()) o.attrPaths.append("");
 
 
   auto handleParsed = [&](const std::string &text, const std::string &baseDir, const std::string &name,
                           const std::string &path) -> Value * {
-    auto origin = std::make_shared<nixfe::Origin>();
+    nixfe::Origin *origin = nixfe::newOrigin();
     origin->name = name;
     origin->path = path;
     origin->baseDir = baseDir;
@@ -825,8 +828,8 @@ int realMain(int argc, char **argv) {
     o.readOnly = true;
     finishOptions(o);
     o.store.readOnly = true;
-    auto store = std::make_shared<nixstore::Store>(o.store);
-    EvalState st(std::move(o.eval), store);
+    nixstore::Store store(o.store);
+    EvalState st(std::move(o.eval), &store);
     using Entry = composite::TextTable<Value *>::Row;
     composite::MutableSeries<const Entry *> v; // the entries where they lie, ordered by name
     for (auto &e : st.baseEnv)

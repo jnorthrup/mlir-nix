@@ -600,21 +600,21 @@ struct LazyJITPlan::Impl {
   }
 };
 
-LazyJITPlan::LazyJITPlan(std::unique_ptr<Impl> impl) : impl(std::move(impl)) {}
+LazyJITPlan::LazyJITPlan(composite::Own<Impl> impl) : impl(composite::mv(impl)) {}
 LazyJITPlan::~LazyJITPlan() = default;
-std::unique_ptr<LazyJITPlan> LazyJITPlan::create(EvalState &st, mlir::Operation *lambda, mlir::Value result) {
+composite::Own<LazyJITPlan> LazyJITPlan::create(EvalState &st, mlir::Operation *lambda, mlir::Value result) {
   auto lam = mlir::dyn_cast<nd::LambdaOp>(lambda);
   if (!lam || lam.getFormals() || !llvm::hasSingleElement(lam.getBody()) ||
       lam.getBody().front().getNumArguments() != 1) return {};
-  auto p = std::make_unique<Impl>(st, lam.getBody(), result);
+  auto p = composite::own<Impl>(st, lam.getBody(), result);
   unsigned resultNode = p->visit(result);
   if (p->failed) return {};
   p->root = p->cps(resultNode, kTrueDest, kFalseDest, nullptr, p->valuesEnabled ? kValueDest : kNoValueDest);
   llvm::SmallVector<bool, 16> seen(p->continuations.size(), false);
   if (p->failed || (!p->completes(p->root, seen) && !p->pending)) return {};
-  return std::unique_ptr<LazyJITPlan>(new LazyJITPlan(std::move(p)));
+  return composite::Own<LazyJITPlan>(new LazyJITPlan(composite::mv(p)));
 }
-std::unique_ptr<LazyJITPlan> LazyJITPlan::createSaturated(EvalState &st, mlir::Operation *outerLambda,
+composite::Own<LazyJITPlan> LazyJITPlan::createSaturated(EvalState &st, mlir::Operation *outerLambda,
                                                        unsigned nargs) {
   if (nargs < 2 || nargs > kMaxArguments) return {};
   llvm::SmallVector<mlir::Value, kMaxArguments> arguments;
@@ -640,7 +640,7 @@ std::unique_ptr<LazyJITPlan> LazyJITPlan::createSaturated(EvalState &st, mlir::O
   // never inspect or mint opaque descendant bodies: visit only compiles known
   // Boolean operations and keeps their unsupported branches as deopts.
   if (result.getDefiningOp<nd::LambdaOp>()) return {};
-  auto p = std::make_unique<Impl>(st, *regions.back(), result);
+  auto p = composite::own<Impl>(st, *regions.back(), result);
   p->arguments = std::move(arguments);
   p->chainRegions = std::move(regions);
   unsigned resultNode = p->visit(result);
@@ -648,7 +648,7 @@ std::unique_ptr<LazyJITPlan> LazyJITPlan::createSaturated(EvalState &st, mlir::O
   p->root = p->cps(resultNode, kTrueDest, kFalseDest, nullptr, p->valuesEnabled ? kValueDest : kNoValueDest);
   llvm::SmallVector<bool, 16> seen(p->continuations.size(), false);
   if (p->failed || (!p->completes(p->root, seen) && !p->pending)) return {};
-  return std::unique_ptr<LazyJITPlan>(new LazyJITPlan(std::move(p)));
+  return composite::Own<LazyJITPlan>(new LazyJITPlan(composite::mv(p)));
 }
 unsigned LazyJITPlan::nodeCount() const { return impl->nodes.size() + impl->projectionComponents + impl->literals.size(); }
 unsigned LazyJITPlan::leafCount() const { return impl->leaves.size(); }
@@ -669,7 +669,7 @@ bool LazyJITPlan::specialize(EvalState &st, Frame *env, Value &arg) {
 bool LazyJITPlan::specialize(EvalState &st, Frame *env, llvm::ArrayRef<Value *> args) {
   if (!impl->acceptsArguments(args)) return false;
   if (!impl->pending) return true;
-  auto p = std::make_unique<Impl>(st, impl->region, impl->result);
+  auto p = composite::own<Impl>(st, impl->region, impl->result);
   p->arguments = impl->arguments;
   p->chainRegions = impl->chainRegions;
   p->specializing = true;
@@ -683,7 +683,7 @@ bool LazyJITPlan::specialize(EvalState &st, Frame *env, llvm::ArrayRef<Value *> 
   p->pending = false;
   p->observedArgs = {};
   p->observedEnvs.fill(nullptr); // observed environments are never retained by generated code
-  impl = std::move(p);
+  impl = composite::mv(p);
   return true;
 }
 

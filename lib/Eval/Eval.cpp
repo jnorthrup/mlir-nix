@@ -270,12 +270,11 @@ void EvalState::copyContext(const Value &v, NixStringContext &ctx) {
 // Construction
 //===----------------------------------------------------------------------===//
 
-EvalState::EvalState(EvalSettings st, std::shared_ptr<nixstore::Store> store)
-    : settings(std::move(st)), store(std::move(store)) {
+EvalState::EvalState(EvalSettings st, nixstore::Store *store) : settings(std::move(st)), store(store) {
   statsEnabled = getenv("MLNIX_STATS") != nullptr;
   recordEdges = statsEnabled && getenv("MLNIX_STATS_EDGES");
   instrumented = statsEnabled || recordEdges;
-  if (getenv("MLNIX_STATS_IMPORTS")) nixfe::pathLiterals = new std::unordered_set<std::string>();
+  if (getenv("MLNIX_STATS_IMPORTS")) nixfe::pathLiterals = new nixfe::PathLiterals();
   Bindings::countGets = statsEnabled;
   scalarJIT = ScalarJIT::create();
   settings.mapSources = !getenv("MLNIX_NOMMAP"); // ablation switch: read and copy every file, as before
@@ -609,15 +608,15 @@ void EvalState::printStats() {
     } }
   if (pre) llvm::errs() << "== prelowering: " << pre->adopted << " files adopted (" << pre->waited << " of them waited for), " << pre->missed << " lowered by the evaluator\n";
   if (nixfe::pathLiterals) { // how predictable is the next file: a file is predicted if a literal naming it (or its directory) was lowered before it was evaluated
-    size_t pred = 0, firstSeen = 0, nix = 0;
-    std::unordered_set<std::string> hit;
+    size_t pred = 0, nix = 0;
+    nixfe::PathLiterals hit; // the literals that named an evaluated file: its path, its directory, the directory with a slash
     for (auto &ef : evaluatedFiles) {
       std::string dir = nixstore::dirOf(ef.first);
       bool p = nixfe::pathLiterals->count(ef.first) || nixfe::pathLiterals->count(dir) || nixfe::pathLiterals->count(dir + "/");
       pred += p; if (p) { hit.insert(ef.first); hit.insert(dir); hit.insert(dir + "/"); }
     }
-    for (auto &l : *nixfe::pathLiterals) nix += l.size() > 4 && l.compare(l.size() - 4, 4, ".nix") == 0;
-    size_t litHit = 0; for (auto &l : *nixfe::pathLiterals) litHit += hit.count(l);
+    for (auto &l : nixfe::pathLiterals->set) nix += l.n > 4 && memcmp(l.p + l.n - 4, ".nix", 4) == 0;
+    size_t litHit = 0; for (auto &l : nixfe::pathLiterals->set) litHit += hit.count(std::string_view(l.p, l.n));
     llvm::errs() << "== import prediction: " << evaluatedFiles.size() << " files evaluated, " << pred << " named by a path literal lowered earlier (recall "
                  << llvm::format("%.1f", evaluatedFiles.empty() ? 0.0 : 100.0 * pred / evaluatedFiles.size()) << "%); " << nixfe::pathLiterals->size() << " distinct path literals ("
                  << nix << " end in .nix), " << litHit << " of them led to an evaluated file (precision "
@@ -804,6 +803,8 @@ EvalState::~EvalState() {
 }
 
 bool EvalState::isBaseName(llvm::StringRef name) const { return baseEnv.find(name.data(), uint32_t(name.size())) != nullptr; }
+/// GenOptions::isBaseName over the state: a plain function, the state its context.
+static bool baseNameOf(const void *st, llvm::StringRef name) { return static_cast<const EvalState *>(st)->isBaseName(name); }
 
 Value *EvalState::baseEnvValue(llvm::StringRef name) {
   Value **v = baseEnv.find(name.data(), uint32_t(name.size()));
@@ -970,7 +971,7 @@ void EvalState::Indexer::index(Region &r) {
   // captures are what goes into the map of every value (below, with the operands); and every value does when a JIT, which reads any value
   // by its address, is on.  (An op evaluated through the interface model puts its operands there itself: evalOther.)
   ++depth;
-  bool everyValue = st.scalarJIT != nullptr;
+  bool everyValue = bool(st.scalarJIT);
   auto publish = [&](mlir::Value v, Node *n) {
     void *key = v.getAsOpaquePointer();
     blockNodes.at(uint64_t(uintptr_t(key))) = n;
@@ -1534,7 +1535,7 @@ std::string_view EvalState::forceStringNoCtx(Value &v, PosPtr pos, std::string_v
 /// lowering defers lambdas; the first call of a lambda drains its row: the body is parsed again from where
 /// the lambda starts, by the same path as at lowering time, optimized, and indexed, and the row keeps
 /// only its anchor, the indexed region.  Every later call reads the anchor.
-static std::unique_ptr<mlir::PassManager> makeOptimizer(mlir::MLIRContext &,
+static cp::Own<mlir::PassManager> makeOptimizer(mlir::MLIRContext &,
                                                         const EvalSettings &);
 
 /// The pass pipeline as text: MLNIX_PIPELINE over the setting.
@@ -1548,7 +1549,8 @@ RegionInfo *EvalState::mintLambda(nixfe::FilePool &p, uint32_t row) {
   auto lam = cast<nd::LambdaOp>(p.rows.col<nixfe::PoolCol::Op>()[row]);
   if (lam.getBody().front().empty()) { // not minted ahead by the helper that prelowered the file
     nixfe::GenOptions go;
-    go.isBaseName = [this](llvm::StringRef n) { return isBaseName(n); };
+    go.isBaseName = baseNameOf;
+    go.baseNames = this;
     go.deferBodies = true; // lambdas nested in this body wait for their own first call
     go.pool = &p;
     nixfe::mintBody(lam, p, row, go);
@@ -2777,7 +2779,7 @@ nixfe::ParseOptions EvalState::parseOptions() {
 
 /// The optimization pipeline is data: MLIR pass-pipeline text (EvalSettings::pipeline,
 /// overridden by MLNIX_PIPELINE), so any registered pass can be composed by name.
-static std::unique_ptr<mlir::PassManager> makeOptimizer(mlir::MLIRContext &ctx, const EvalSettings &settings) {
+static cp::Own<mlir::PassManager> makeOptimizer(mlir::MLIRContext &ctx, const EvalSettings &settings) {
   static const bool registered = [] { // the language runs a local static's initializer once, whichever thread comes first
     mlir::registerTransformsPasses();
     nd::registerNixPasses();
@@ -2785,7 +2787,7 @@ static std::unique_ptr<mlir::PassManager> makeOptimizer(mlir::MLIRContext &ctx, 
   }();
   (void)registered;
   std::string text = pipelineText(settings);
-  auto pm = std::make_unique<mlir::PassManager>(&ctx); // anchored on any op
+  auto pm = cp::own<mlir::PassManager>(&ctx); // anchored on any op
   pm->enableVerifier(false);
   std::string err;
   llvm::raw_string_ostream os(err);
@@ -2794,20 +2796,21 @@ static std::unique_ptr<mlir::PassManager> makeOptimizer(mlir::MLIRContext &ctx, 
   return pm;
 }
 
-nd::ExprOp EvalState::lowerToMLIR(std::shared_ptr<nixfe::Origin> origin, const composite::MutableSeries<std::string> *scopeNames) {
+nd::ExprOp EvalState::lowerToMLIR(nixfe::Origin *origin, const composite::MutableSeries<std::string> *scopeNames) {
   nixfe::ParseOptions po = parseOptions();
   nixfe::GenOptions go;
-  go.isBaseName = [this](llvm::StringRef n) { return isBaseName(n); };
+  go.isBaseName = baseNameOf;
+  go.baseNames = this;
   if (settings.deferBodies) {
     // A lambda body is not IsolatedFromAbove, so no PassManager can run on it when it is minted: the
     // demand schedule devirtualizes it directly, which is the whole default pipeline.  Any other
     // pipeline would be skipped silently on every minted body, so refuse it.
     if (settings.optimize && pipelineText(settings) != "nix-prims")
       throw EvalError("MLNIX_DEFER runs only the default pipeline 'nix-prims', not '" + pipelineText(settings) + "'");
-    auto pool = std::make_unique<nixfe::FilePool>(nextPoolId.fetch_add(1), origin, po);
+    auto pool = cp::own<nixfe::FilePool>(nextPoolId.fetch_add(1), origin, po);
     go.deferBodies = true;
     go.pool = pool.get();
-    installPool(std::move(pool));
+    installPool(cp::mv(pool));
   }
   if (scopeNames) {
     go.scoped = true;
@@ -2815,7 +2818,7 @@ nd::ExprOp EvalState::lowerToMLIR(std::shared_ptr<nixfe::Origin> origin, const c
   }
   std::string sym = "expr" + std::to_string(exprCounter++);
   uint64_t t0 = statsEnabled ? nixsys::monotonicNs() : 0;
-  nd::ExprOp op = nixfe::genExpr(*module, std::move(origin), po, sym, go);
+  nd::ExprOp op = nixfe::genExpr(*module, origin, po, sym, go);
   // The expression is IsolatedFromAbove and not yet referenced by any frame,
   // so it can be rewritten freely before evaluation starts.
   if (settings.optimize) {
@@ -2829,10 +2832,10 @@ nd::ExprOp EvalState::lowerToMLIR(std::shared_ptr<nixfe::Origin> origin, const c
   return op;
 }
 
-void EvalState::installPool(std::unique_ptr<nixfe::FilePool> p) {
+void EvalState::installPool(cp::Own<nixfe::FilePool> p) {
   uint32_t id = p->file;
   if (pools.size() <= id) pools.resize(id + 1);
-  pools[id] = std::move(p);
+  pools[id] = cp::mv(p);
 }
 
 void EvalState::startPrelower() {
@@ -2840,7 +2843,7 @@ void EvalState::startPrelower() {
   bool replayed = getenv("MLNIX_PRELOWER") && !nixprefetch::replayFiles.empty(); // MLNIX_PREFETCH=auto|replay:FILE supplies the list
   if (pre || !settings.deferBodies || (!list && !replayed)) return;
   if (replayed) nixstore::startPrehash(); // the source trees the recorded run hashed, hashed again off this thread
-  pre = std::make_unique<PrelowerState>();
+  pre = cp::own<PrelowerState>();
   for (auto &e : baseEnv) pre->baseNames.set(e.p, e.n, 1, [&] { return e.p; }); // the names' bytes are baseEnvNames', which never move
   pre->po = parseOptions();
   pre->po.lintAbsolutePaths = pre->po.lintShortPaths = pre->po.lintUrls = nixfe::Lint::Ignore;
@@ -2865,26 +2868,29 @@ void EvalState::startPrelower() {
 void EvalState::prelowerLoop() {
   for (;;) {
     std::string path;
-    std::shared_ptr<Prelowered> pl;
+    Prelowered *pl;
     {
       std::unique_lock<std::mutex> lk(pre->m);
       pre->cv.wait(lk, [&] { return pre->stop || pre->head < pre->queue.size(); });
       if (pre->stop) return;
       path = pre->queue.drain(pre->head++);
-      if (pre->byPath.count(path)) continue; // the evaluator took it first, or a duplicate
-      pl = pre->byPath[path] = std::make_shared<Prelowered>();
+      if (pre->byPath.find(path.data(), uint32_t(path.size()))) continue; // the evaluator took it first, or a duplicate
+      pl = newPrelowered(path);
     }
     try {
-      auto origin = std::make_shared<nixfe::Origin>();
+      nixfe::Origin *origin = nixfe::newOrigin();
       origin->name = path;
       origin->path = path;
       origin->baseDir = nixstore::dirOf(path);
       origin->text = nixfe::Source::mapFile(path);
       if (origin->text) {
         nixfe::GenOptions go;
-        go.isBaseName = [this](llvm::StringRef n) { return pre->baseNames.find(n.data(), uint32_t(n.size())) != nullptr; };
+        go.isBaseName = [](const void *names, llvm::StringRef n) {
+          return static_cast<const cp::TextTable<char> *>(names)->find(n.data(), uint32_t(n.size())) != nullptr;
+        };
+        go.baseNames = &pre->baseNames;
         go.deferBodies = true;
-        pl->pool = std::make_unique<nixfe::FilePool>(nextPoolId.fetch_add(1), origin, pre->po);
+        pl->pool = cp::own<nixfe::FilePool>(nextPoolId.fetch_add(1), origin, pre->po);
         go.pool = pl->pool.get();
         pl->mod = ModuleOp::create(UnknownLoc::get(&ctx));
         pl->op = nixfe::genExpr(*pl->mod, origin, pre->po, "expr", go);
@@ -2905,7 +2911,7 @@ void EvalState::prelowerLoop() {
           // Indexed here too, while this thread's caches hold the IR it just built: a file reads nothing from outside it.  Not when the
           // census counts indexing or a JIT reads every value by its address: the evaluator indexes then.
           if (!statsEnabled && !scalarJIT) {
-            pl->index = std::make_unique<Indexer>(*this, true);
+            pl->index = cp::own<Indexer>(*this, true);
             pl->index->index(pl->op.getBody());
           }
         }
@@ -2920,25 +2926,32 @@ void EvalState::prelowerLoop() {
   }
 }
 
+/// A new lowering of `path`, owned by the prelowering state and found by the path (called under pre->m).
+EvalState::Prelowered *EvalState::newPrelowered(const std::string &path) {
+  Prelowered *pl = pre->lowered[pre->lowered.append(cp::own<Prelowered>())].get();
+  pre->byPath.set(path.data(), uint32_t(path.size()), pl, [&] { return pre->pathBytes.copy(path.data(), uint32_t(path.size())); });
+  return pl;
+}
+
 /// The finished lowering of `resolved`, adopted into the evaluator's module (and optimized there: the prim folder is the evaluator's), or a null op.
 nd::ExprOp EvalState::takePrelowered(const std::string &resolved) {
   if (!pre) return {};
-  std::shared_ptr<Prelowered> pl;
+  Prelowered *pl;
   {
     std::unique_lock<std::mutex> lk(pre->m);
-    auto it = pre->byPath.find(resolved);
-    if (it == pre->byPath.end()) {
+    Prelowered **found = pre->byPath.find(resolved.data(), uint32_t(resolved.size()));
+    if (!found) {
       // not started: take it off the queue so the helper does not lower it again, and lower it here
-      pre->byPath[resolved] = std::make_shared<Prelowered>();
+      newPrelowered(resolved);
       ++pre->missed;
       return {};
     }
-    pl = it->second;
+    pl = *found;
     if (!pl->done) { ++pre->waited; pre->cv.wait(lk, [&] { return pl->done; }); }
   }
   if (!pl->ok) return {};
   ++pre->adopted;
-  installPool(std::move(pl->pool));
+  installPool(cp::mv(pl->pool));
   origins.append(pl->origin);
   nd::ExprOp op = pl->op;
   op->remove();
@@ -2952,7 +2965,7 @@ nd::ExprOp EvalState::takePrelowered(const std::string &resolved) {
   if (pl->index) { // indexed by the helper: its regions and the captures of the bodies minted later become the evaluator's
     for (auto &[r, ri] : pl->index->regions) regionInfos.at(uint64_t(uintptr_t(r))) = ri;
     for (auto &[key, n] : pl->index->captures) setNode(key, n);
-    helperIndexers.append(std::move(pl->index));
+    helperIndexers.append(cp::mv(pl->index));
   }
   return op;
 }
@@ -3086,7 +3099,7 @@ Value *EvalState::evalFile(const std::string &pathIn) {
   if (resolved.size() > 5 && resolved.substr(resolved.size() - 5) == ".mlir") {
     result = evalMLIRFile(resolved, "");
   } else {
-    auto origin = std::make_shared<nixfe::Origin>();
+    nixfe::Origin *origin = nixfe::newOrigin();
     origin->name = logical;
     origin->path = logical;
     origin->baseDir = nixstore::dirOf(logical);
@@ -3112,7 +3125,7 @@ Value *EvalState::evalFile(const std::string &pathIn) {
 }
 
 Value *EvalState::evalString(const std::string &text, const std::string &baseDir, const std::string &originName) {
-  auto origin = std::make_shared<nixfe::Origin>();
+  nixfe::Origin *origin = nixfe::newOrigin();
   origin->name = originName;
   origin->baseDir = baseDir;
   origin->text = nixfe::Source::fromString(text);
