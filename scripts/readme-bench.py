@@ -17,6 +17,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIR = os.path.join(ROOT, "docs", "bench", "kali")
 BEGIN, END = "<!-- bench:begin -->", "<!-- bench:end -->"
 WORKLOADS = ["nixos-toplevel", "nixpkgs-73"]
+OPTIONAL = ["ffmpeg"]  # in the generations that measured it: the closure asnix measures itself on
 FILES = ["summary.txt"] + [w + ".txt" for w in WORKLOADS]
 
 TOOL = re.compile(r"^\s+(Nix [\d.]+|Lix [\d.]+|mlnix demand|mlnix)\s+min\s+([\d.]+)s\s+median\s+([\d.]+)s\s+peak RSS\s+(\d+) MB(.*)$")
@@ -27,6 +28,9 @@ LANG = re.compile(r"lang (eager|demand)(?: \(rc=0\))?: TOTAL\s+semantic\s+(\d+/\
 FILECHECK = re.compile(r"mlir tests(?: \(rc=0\))?: mlir tests: (.*)$")
 PRIMOPS = re.compile(r"primops(?: \(rc=0\))?: primops: (\d+) registered, (\d+) declared")
 DIFFTEST = re.compile(r"difftest (eager|demand) \(rc=\d+\): (.*?);?$")
+# asnix (github.com/tomberek/asnix), timed in the same rounds when it answers: its time, or why it has none, and whether it answered as Nix did
+ASNIX = re.compile(r"^\s+asnix\s+(?:min\s+([\d.]+)s\s+median\s+([\d.]+)s\s+peak RSS\s+(\d+) MB\s+)?(.*)$")
+ASNIX_MEDIAN = re.compile(r"^\s+asnix / (Nix|Lix) [\d.]+\s+median x([\d.]+)")
 
 
 def fail(msg):
@@ -41,6 +45,8 @@ def fetch(sha):
     os.makedirs(dest)
     for f in FILES:
         subprocess.run(["scp", "-q", "kali:/tmp/kb/gen-%s/%s" % (sha, f), dest], check=True)
+    for f in OPTIONAL:
+        subprocess.run(["scp", "-q", "kali:/tmp/kb/gen-%s/%s.txt" % (sha, f), dest])
     if not open(os.path.join(dest, "summary.txt")).read().rstrip().endswith("done"):
         fail("%s: summary.txt does not end in 'done': the generation did not finish" % sha)
     print("fetched", dest)
@@ -60,6 +66,10 @@ def parse_workload(path):
                 w["pinned"].add(m[1])
         elif m := MEDIAN.match(ln):
             w["median"][(m[1], m[2])] = "×" + m[3]  # the host's own, from unrounded medians
+        elif m := ASNIX_MEDIAN.match(ln):
+            w.setdefault("asnix-median", {})[m[1]] = "×" + m[2]
+        elif m := ASNIX.match(ln):
+            w["asnix"] = (float(m[1]), float(m[2]), int(m[3]), m[4]) if m[1] else (None, None, None, m[4])
     if "name" not in w or len(w["tools"]) != 4:
         fail("%s: not the output of vs-nix.py (%d tool lines)" % (path, len(w["tools"])))
     if len(w["median"]) != 4:
@@ -94,7 +104,7 @@ def generations():
     for d in sorted(d for d in os.listdir(DIR) if re.match(r"\d\d-", d)):
         p = os.path.join(DIR, d)
         gens.append({"sha": d[3:], "summary": parse_summary(os.path.join(p, "summary.txt")),
-                     "w": {n: parse_workload(os.path.join(p, n + ".txt")) for n in WORKLOADS}})
+                     "w": {n: parse_workload(os.path.join(p, n + ".txt")) for n in WORKLOADS + OPTIONAL if os.path.exists(os.path.join(p, n + ".txt"))}})
     if not gens:
         fail("no generation under " + DIR)
     return gens
@@ -119,6 +129,15 @@ def table(w):
     m = w["median"]
     out.append("| **demand / Nix** | **%s** | **%s** | %s |" % (ratio(dem[0], nix[0]), m[("mlnix demand", "Nix")], ratio(dem[2], nix[2])))
     out.append("| demand / Lix | %s | %s | %s |" % (ratio(dem[0], lix[0]), m[("mlnix demand", "Lix")], ratio(dem[2], lix[2])))
+    if "asnix" in w:
+        amin, amed, arss, state = w["asnix"]
+        if amin is None:
+            out.append("| asnix | %s | | |" % state.replace("not timed: ", "").replace("|", "/"))
+        elif state.endswith(": yes"):
+            out.append("| asnix | %.2f s | %.2f s | %d MB |" % (amin, amed, arss))
+            out.append("| asnix / Nix | %s | %s | %s |" % (ratio(amin, nix[0]), w.get("asnix-median", {}).get("Nix", ""), ratio(arss, nix[2])))
+        else:
+            out.append("| asnix, answer not Nix's (not a comparison) | %.2f s | %.2f s | %d MB |" % (amin, amed, arss))
     return "\n".join(out)
 
 
@@ -131,8 +150,11 @@ def render(gens):
     L.append("Latest generation: commit `%s`, measured on an %s (%s, %s), %s interleaved rounds per workload, every evaluator's output identical to the others'." %
              (g["sha"], cpu, arch, threads, "/".join(map(str, sorted(rounds)))))
     L.append("")
-    for n in WORKLOADS:
+    for n in WORKLOADS + [o for o in OPTIONAL if o in g["w"]]:
         L += [table(g["w"][n]), ""]
+    if any("asnix" in w for w in g["w"].values()):
+        L += ["asnix ([github.com/tomberek/asnix](https://github.com/tomberek/asnix), built with `make release`) runs in the same rounds; its time "
+              "counts only where its answer is Nix's.", ""]
     L.append("Start-up (`--eval -E 1`, median of 5): %s." % w0["startup"])
     L.append("")
     same = lambda a, b: a == b

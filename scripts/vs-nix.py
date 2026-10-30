@@ -2,7 +2,7 @@
 """mlnix against reference Nix and Lix, interleaved on the same machine.
 
 usage: vs-nix.py [--runs N] [--budget SECONDS] [--workload NAME]... [--demand] [--mlnix PATH]
-                 [--native] [--no-copy] [--gc-heap SIZE] [--ref NAME=PATH ...]
+                 [--native] [--no-copy] [--gc-heap SIZE] [--ref NAME=PATH ...] [--asnix PATH]
 
 * Default: the reference evaluators run INSIDE the container "nixref" and are timed there
   (date +%s%N), so `docker exec` start-up is not counted.  nixpkgs is first copied into the
@@ -22,6 +22,10 @@ usage: vs-nix.py [--runs N] [--budget SECONDS] [--workload NAME]... [--demand] [
   actually run are printed.
 * Peak RSS of a reference comes from one extra, untimed run that polls /proc/<pid>/status; its
   CPU time and thunk count from NIX_SHOW_STATS in that same run.
+* --asnix PATH (with --native) times asnix (github.com/tomberek/asnix) in the same rounds.  It is not a
+  reference: its answer is checked against the first reference's (a text one where the workload asks
+  for JSON, which asnix does not print), and one that fails or differs is reported as such, with its
+  time when it has one, and no ratio.  The comparison of the others goes on either way.
 """
 import argparse, hashlib, math, os, platform, re, shlex, statistics, subprocess, sys, time
 
@@ -42,8 +46,30 @@ def workloads(work, np):
         "nixpkgs-73": {
             "mlnix": ["instantiate", "--readonly-mode", "--eval", "--strict", "--json", "test/nixpkgs-drvs.nix", "--argstr", "system", "x86_64-linux"],
             "nix": f"--eval --strict --json {work}/test/nixpkgs-drvs.nix --arg nixpkgs {np} --argstr system x86_64-linux",
+            "nix-text": f"--eval --strict {work}/test/nixpkgs-drvs.nix --arg nixpkgs {np} --argstr system x86_64-linux",
+        },
+        "ffmpeg": {
+            "mlnix": ["instantiate", "--readonly-mode", "--eval", "--strict", "test/nixpkgs-ffmpeg.nix", "--arg", "nixpkgs", "./.cache/nixpkgs"],
+            "nix": f"--eval --strict {work}/test/nixpkgs-ffmpeg.nix --arg nixpkgs {np}",
         },
     }
+
+
+def asnix_args(w):
+    """The workload as asnix's command line takes it: no --eval/--strict/--json, the file last."""
+    args = shlex.split(w["nix"])
+    out, rest = [], []
+    i = 0
+    while i < len(args):
+        if args[i] in ("--eval", "--strict", "--json"):
+            i += 1
+        elif args[i] in ("--arg", "--argstr"):
+            out += args[i:i + 3]
+            i += 3
+        else:
+            rest.append(args[i])
+            i += 1
+    return out + rest
 
 
 def host(script):
@@ -131,11 +157,14 @@ def main():
     ap.add_argument("--over", type=float, default=0.2)
     ap.add_argument("--records", default=os.path.join(ROOT, "docs", "bench", "kali"), help="the stored generations: pins and records")
     ap.add_argument("--diag", default="/tmp/vs-nix-diag", help="where the state of a stopped run is kept (scripts/runcap.py)")
+    ap.add_argument("--asnix", default="", help="also time asnix (github.com/tomberek/asnix) at this path, checked against the first reference (--native)")
     a = ap.parse_args()
     if a.runs <= 0:
         ap.error("--runs must be positive")
     if a.reuse_refs and a.gc_heap:
         ap.error("--gc-heap requires reference execution and cannot be used with --reuse-refs")
+    if a.asnix and (not a.native or a.reuse_refs):
+        ap.error("--asnix needs --native and a live first reference (its answer is checked against that one's)")
     # MLNIX_DEFER is a presence flag, so even "0" means demand. Control the
     # schedules here instead of silently timing demand twice if inherited.
     os.environ.pop("MLNIX_DEFER", None)
@@ -205,8 +234,23 @@ def main():
                 linux = NATIVE and sys.platform.startswith("linux")
                 caps[n] = dict(deadline=min(r[0] for r in rec) * (1 + a.over), diag=a.diag, tag=f"{name}-{n.replace(' ', '-')}",
                                mem=int(min(r[2] for r in rec) * (1 + a.over) * 2**20) if linux else None)
-        who_all = [n for n, _ in timed] + [n for n, _ in arms]
+        # asnix: one checked run first.  A failure is reported and not timed; an answer is compared with the first reference's.
+        as_state, as_hash, as_oracle = None, None, None
+        if a.asnix:
+            p = subprocess.run([a.asnix] + asnix_args(w), cwd=ROOT, capture_output=True)
+            if p.returncode:
+                last = (p.stderr.decode(errors="replace").strip().splitlines() or ["?"])[-1][:160]
+                as_state = f"not timed: fails rc={p.returncode}: {last}"
+            else:
+                as_hash = hashlib.sha256(p.stdout).hexdigest()[:12]
+                if "nix-text" in w:
+                    _, code_t, as_oracle = nix_once(w["nix-text"], work, binary=refs[0][1])
+                    if code_t:
+                        as_state = "not checked: the text answer of the first reference failed"
+        as_timed = a.asnix and as_state is None
+        who_all = [n for n, _ in timed] + [n for n, _ in arms] + (["asnix"] if as_timed else [])
         times = {n: [] for n in who_all}
+        as_peak = 0.0
         golden = reused[name][1] if a.reuse_refs else store.golden(name) if pinned else None
         if pinned and golden is None:
             print(f"{name}: pinned references have no output oracle; no performance comparison")
@@ -220,6 +264,12 @@ def main():
             r0 = time.monotonic()
             rot = who_all[i % len(who_all):] + who_all[:i % len(who_all)]
             for who in rot:
+                if who == "asnix":
+                    t, r, code, h = run_once(a.asnix, asnix_args(w), {})
+                    if code == 0:
+                        times[who].append(t)
+                        as_peak = max(as_peak, r)
+                    continue
                 if who in dict(arms):
                     t, r, code, h = run_once(a.mlnix, w["mlnix"], dict(arms)[who], cap=caps.get(who))
                     peak[who] = max(peak[who], r)
@@ -274,7 +324,17 @@ def main():
             print(f"   {refs[0][0]} with GC_INITIAL_HEAP_SIZE={a.gc_heap}: min {min(gt):5.2f}s  median {statistics.median(gt):5.2f}s")
         for n, _ in arms:
             print(f"   {n:<14s} min {min(times[n]):5.2f}s  median {statistics.median(times[n]):5.2f}s   peak RSS {peak[n]:5.0f} MB")
-        for n, _ in arms:
+        as_same = False
+        if a.asnix:
+            if as_state is None:
+                as_same = as_hash == (as_oracle or golden)
+                as_state = f"identical to {refs[0][0]}: " + ("yes" if as_same else f"NO, {as_hash} (not a comparison)")
+            if times.get("asnix"):
+                print(f"   {'asnix':<14s} min {min(times['asnix']):5.2f}s  median {statistics.median(times['asnix']):5.2f}s   "
+                      f"peak RSS {as_peak:5.0f} MB   {as_state}")
+            else:
+                print(f"   {'asnix':<14s} {as_state}")
+        for n, _ in arms + ([("asnix", {})] if as_same and times.get("asnix") else []):
             for r, _ in refs:
                 base = pinned[r]["median"] if r in pinned else statistics.median(times[r])
                 print(f"   {n} / {r:<12s} median x{statistics.median(times[n]) / base:.2f}")

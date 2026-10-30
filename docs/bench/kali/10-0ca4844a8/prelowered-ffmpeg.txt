@@ -1,0 +1,18 @@
+x86_64 | 8 threads | Intel(R) Core(TM) i7-6820HK CPU @ 2.70GHz
+  Nix 2.35.4: nix-instantiate (Nix) 2.35.4
+  Lix 2.91.3: nix-instantiate (Lix, like Nix) 2.91.3
+start-up (--eval -E 1), median of 5: Nix 2.35.4 38 ms, Lix 2.91.3 29 ms, mlnix 35 ms, mlnix demand 33 ms
+
+== ffmpeg  (7 interleaved rounds, 62 s; output sha256 e3a4fafd5224; identical output from all: yes)
+   Nix 2.35.4     min  1.90s  median  1.92s   peak RSS   356 MB   cpu 1.91s   thunks 2.0M
+   Lix 2.91.3     min  1.97s  median  2.01s   peak RSS   432 MB   cpu 1.85s   thunks 2.0M
+   mlnix          min  1.70s  median  1.72s   peak RSS   611 MB
+   mlnix demand   min  0.99s  median  1.00s   peak RSS   549 MB
+   asnix          min  1.18s  median  1.20s   peak RSS   512 MB   identical to Nix 2.35.4: yes
+   mlnix / Nix 2.35.4   median x0.89
+   mlnix / Lix 2.91.3   median x0.85
+   mlnix demand / Nix 2.35.4   median x0.52
+   mlnix demand / Lix 2.91.3   median x0.50
+   asnix / Nix 2.35.4   median x0.62
+   asnix / Lix 2.91.3   median x0.60
+
