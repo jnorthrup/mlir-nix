@@ -247,11 +247,11 @@ in
   addConstant("derivation", drvFun);
 
   // Build the `builtins` attribute set.
-  BindingsBuilder bb(*this);
+  BindingsBuilder bb(*this, baseEnv.size()); // a row a name at most
   for (auto &e : baseEnv) {
-    llvm::StringRef name = e.getKey();
+    llvm::StringRef name(e.p, e.n);
     if (name.starts_with("__")) name = name.drop_front(2);
-    bb.insert(name, e.getValue());
+    bb.insert(name, e.v);
   }
   builtinsAttrs = bb.finish();
   mkAttrs(*builtinsV, builtinsAttrs);
@@ -538,22 +538,25 @@ void registerBuiltins(EvalState &state) {
     NixStringContext ctx;
     std::string scratch;
     auto s = composite::view(st.coerceToWindow(*args[1], ctx, false, true, pos, "while evaluating the second argument passed to builtins.match", scratch));
-    if (st.statsEnabled) [[unlikely]] { ++st.nMatchCalls; ++st.matchPairs[str(re) + '\0' + str(s)]; }
+    composite::Text &key = st.matchKey; // built in a buffer that is reused
+    if (st.statsEnabled) [[unlikely]] {
+      ++st.nMatchCalls;
+      key.clear();
+      key.put(re.data(), uint32_t(re.size())).put('\0').put(s.data(), uint32_t(s.size())); // the regex, a 0 byte, the input
+      ++st.matchPairs.at(key.data(), key.size(), [&] { return st.keyText.copy(key.data(), key.size()); });
+    }
     // The answer is a function of the pattern's bytes and the input's, and it is a value nothing writes (null, or a list of strings with no
-    // context): a pair met before is answered from the memo, keyed by its content, built in a buffer that is reused (more than half of the
-    // calls of a NixOS evaluation repeat a pair).
-    std::string &key = st.matchKey; // the pattern's length, the pattern, the input: no two pairs share a key
+    // context): a pair met before is answered from the memo, keyed by its content (more than half of the calls of a NixOS evaluation repeat
+    // a pair).  The key is the pattern's length, the pattern and the input: no two pairs share one.
     uint32_t rlen = uint32_t(re.size());
-    key.assign(reinterpret_cast<const char *>(&rlen), sizeof rlen);
-    key.append(re.data(), re.size());
-    key.append(s.data(), s.size());
-    auto memo = st.matchMemo.find(key);
-    if (memo != st.matchMemo.end()) { v = memo->second; return; }
+    key.clear();
+    key.put(reinterpret_cast<const char *>(&rlen), sizeof rlen).put(re.data(), rlen).put(s.data(), uint32_t(s.size()));
+    if (Value *memo = st.matchMemo.find(key.data(), key.size())) { v = *memo; return; }
     // Kursive walks the pattern's program over the input's bytes where they lie: the groups are marks, and nothing is allocated.
     ku::Result r = kursiveRun(prog, re, pos, [&](ku::Scratch &k) { return ku::matchAll(prog, s.data(), uint32_t(s.size()), k); });
     if (r == ku::Result::NoMatch) st.mkNull(v);
     else kursiveGroups(st, v, prog, s, scratch);
-    st.matchMemo.try_emplace(key, v);
+    st.matchMemo.set(key.data(), key.size(), v, [&] { return st.keyText.copy(key.data(), key.size()); });
   });
   S.addPrimOp("__split", 2, [](EvalState &st, A args, Value &v, PosPtr pos) {
     auto re = st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.split");

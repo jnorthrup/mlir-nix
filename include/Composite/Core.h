@@ -50,6 +50,9 @@ template <class T, class U> constexpr T exchange(T &x, U &&v) {
   x = fw<U>(v);
   return old;
 }
+/// The lesser and the greater of two values of one type (std::min and std::max, by value).
+template <class T> constexpr T min(T a, T b) { return b < a ? b : a; }
+template <class T> constexpr T max(T a, T b) { return a < b ? b : a; }
 /// A value of type T in an unevaluated context.
 template <class T> T &&declval() noexcept;
 

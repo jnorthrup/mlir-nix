@@ -15,6 +15,8 @@
 
 #include "Composite/Patricia.h"
 #include "Composite/Table.h"
+#include "Composite/Text.h"
+#include "Composite/Vocab.h"
 #include "Composite/Pool.h"
 #include "Composite/Rows.h"
 #include "Composite/Views.h"
@@ -434,6 +436,9 @@ struct EvalSettings {
 // EvalState
 //===----------------------------------------------------------------------===//
 
+/// The arguments the command line gives the function it calls (--arg, --argstr), by name in byte order; the names are the state's arena copies.
+using AutoArgs = composite::Patricia<Value *>;
+
 struct EvalState {
   EvalState(EvalSettings settings, std::shared_ptr<nixstore::Store> store);
   ~EvalState();
@@ -467,7 +472,8 @@ struct EvalState {
   Value vTrue, vFalse, vNull, vEmptyAttrs, vEmptyList;
   Value *baseEnvValue(llvm::StringRef name);
   bool isBaseName(llvm::StringRef name) const;
-  llvm::StringMap<Value *> baseEnv;
+  composite::TextTable<Value *> baseEnv; // by name (Composite/Table.h), the names copied into baseEnvNames
+  composite::Bump baseEnvNames;
   Bindings *builtinsAttrs = nullptr;
 
   // -- Allocation --------------------------------------------------------
@@ -616,7 +622,7 @@ struct EvalState {
     Value *a = &arg;
     callFunction(fun, 1, &a, out, pos);
   }
-  void autoCallFunction(const std::map<std::string, Value *> &autoArgs, Value &fun, Value &out);
+  void autoCallFunction(const AutoArgs &autoArgs, Value &fun, Value &out);
 
   // -- Coercions -------------------------------------------------------------
   std::string coerceToString(Value &v, NixStringContext &ctx, bool coerceMore, bool copyToStore,
@@ -632,8 +638,7 @@ struct EvalState {
   std::string coerceToStorePath(Value &v, NixStringContext &ctx, PosPtr pos, std::string_view errorCtx = "");
   std::string copyPathToStore(NixStringContext &ctx, const std::string &path);
   bool isDerivation(Value &v);
-  std::optional<std::string> tryAttrsToString(Value &v, NixStringContext &ctx, bool coerceMore,
-                                              bool copyToStore);
+  composite::Maybe<std::string> tryAttrsToString(Value &v, NixStringContext &ctx, bool coerceMore, bool copyToStore);
 
   // -- Comparison ------------------------------------------------------------
   bool eqValues(Value &a, Value &b, PosPtr pos);
@@ -696,8 +701,19 @@ struct EvalState {
   /// The primop an IRDL-defined continent op stands for (cached per op name).
   const PrimOp *primFor(mlir::Operation *op);
   composite::WordTable<const PrimOp *> primForOp; // by the op name's address
+  /// MLNIX_STATS: a count by op kind, keyed by the kind's OperationName (one per name in a context, so a word, and no name is hashed).
+  struct OpCount {
+    llvm::StringRef name;
+    uint64_t n[2];
+  };
+  using OpCounts = composite::WordTable<OpCount>;
+  static OpCount &countOf(OpCounts &t, mlir::OperationName kind) {
+    OpCount &c = t.at(uint64_t(uintptr_t(kind.getAsOpaquePointer())));
+    c.name = kind.getStringRef();
+    return c;
+  }
   /// MLNIX_STATS=1: op histogram of every module lowered, printed at exit.
-  llvm::StringMap<size_t> opStats;
+  OpCounts opStats;
   bool statsEnabled = false;
   bool instrumented = false; // statsEnabled or recordEdges: forceValue always takes the out-of-line path
 
@@ -815,7 +831,7 @@ struct EvalState {
     std::unordered_map<std::string, std::shared_ptr<Prelowered>> byPath;
     composite::MutableSeries<std::string> queue; // paths, appended; the helpers drain them from `head` (a cell leaves, an empty one stays)
     uint32_t head = 0;
-    std::unordered_set<std::string> baseNames;
+    composite::TextTable<char> baseNames; // a set: the base environment's names when the helpers started (they read it, nothing writes it)
     nixfe::ParseOptions po;
     composite::MutableSeries<std::thread> workers;
     bool stop = false;
@@ -825,7 +841,7 @@ struct EvalState {
   void startPrelower();
   void prelowerLoop();
   mlir::nix::ExprOp takePrelowered(const std::string &resolved);
-  std::function<void(const std::string &)> printTrace;
+  void (*printTrace)(const std::string &) = nullptr; // builtins.trace's line
 
   // The record of each SSA value, by the value's address: the evaluator reads the records an op's record points at and never asks; the JITs,
   // the primop model and the cold paths ask here, through a direct-mapped cache in front of the hash map.  A value's address indexed again
@@ -877,14 +893,14 @@ struct EvalState {
   composite::MutableSeries<std::pair<std::string, size_t>> evaluatedFiles; // MLNIX_STATS_IMPORTS: files evalFile'd, with how many path literals had been lowered by then
   composite::MutableSeries<uint64_t> epochEvals; // MLNIX_STATS: evalOp calls per epoch (one epoch a derivation attribute the driver visits)
   void beginEpoch() { if (statsEnabled) epochEvals.append(0); }
-  llvm::DenseMap<const Value *, uint32_t> forcedBy; // MLNIX_STATS_EDGES: the epoch that first forced a cell
-  llvm::DenseSet<uint64_t> epochEdges;              // MLNIX_STATS_EDGES: (earlier epoch << 32 | later epoch) when the later one touched a cell the earlier one forced
+  composite::WordTable<uint32_t> forcedBy; // MLNIX_STATS_EDGES: the epoch that first forced a cell, by the cell's address
+  composite::WordTable<char> epochEdges;   // MLNIX_STATS_EDGES, a set: (earlier epoch << 32 | later epoch) when the later one touched a cell the earlier one forced
   bool recordEdges = false;
   void epochTouch(const Value &v);
   uint64_t nMaskBytes = 0, nLayerBytes = 0, nMergeBytes = 0, nCtxBytes = 0, nFormalBytes = 0; // MLNIX_STATS: arena bytes the by-use line did not name before
   uint64_t nLookups = 0, nLookupHits = 0, nHopHist[6] = {}; // MLNIX_STATS: lookupImpl calls, those answered by a filled slot, and the frame hops to the defining region (0, 1, 2, 3, 4, 5 or more)
-  llvm::DenseMap<const void *, std::pair<llvm::StringRef, std::array<uint64_t, 2>>> cellsByKind; // MLNIX_STATS: cells lookup made, by defining op: [evaluated at once, left a thunk]
-  llvm::DenseMap<const void *, std::pair<llvm::StringRef, uint64_t>> evalsByKind; // MLNIX_STATS: evalOp calls by op kind
+  OpCounts cellsByKind; // MLNIX_STATS: cells lookup made, by defining op: [evaluated at once, left a thunk]
+  OpCounts evalsByKind; // MLNIX_STATS: evalOp calls by op kind
   uint64_t nTouchAt[17] = {}, nFramesBySize[17] = {}; // MLNIX_STATS: first touches by slot index (16 = 16 or more), frames by slot count
   static constexpr unsigned kSrcClasses = 5; // 1 nixpkgs lib, 2 nixos modules, 3 pkgs, 4 other
   uint64_t nClsFrames[kSrcClasses] = {}, nClsSlots[kSrcClasses] = {}, nClsTouched[kSrcClasses] = {};
@@ -965,10 +981,11 @@ struct EvalState {
   // MLNIX_STATS: the select census.  A layout signature is the set's size and three sampled names; a site is mono-, few- or megamorphic
   // by how many distinct signatures it has seen.
   struct SelSite { uint64_t calls = 0, hits = 0, sameAsLast = 0, last = 0; cp::MutableSeries<uint64_t, cp::Inline<uint64_t, 6>> seen; bool dynamic = false; };
-  llvm::DenseMap<const void *, SelSite> selSites;
-  uint64_t nMatchCalls = 0; llvm::StringMap<uint64_t> matchPairs; // MLNIX_STATS: builtins.match calls, by (regex, input)
-  llvm::StringMap<Value> matchMemo; // builtins.match's answers, keyed by the pattern's length and bytes, then the input's
-  std::string matchKey;             // the key of the call at hand, built here so a lookup allocates nothing
+  composite::WordTable<SelSite> selSites; // by the select op's address
+  uint64_t nMatchCalls = 0; composite::TextTable<uint64_t> matchPairs; // MLNIX_STATS: builtins.match calls, by (regex, input)
+  composite::TextTable<Value> matchMemo; // builtins.match's answers, keyed by the pattern's length and bytes, then the input's
+  composite::Text matchKey;              // the key of the call at hand, built here so a lookup allocates nothing
+  composite::Bump keyText;               // the keys of matchMemo and of the census tables keyed by bytes
   uint64_t nSelects = 0, nSelectHits = 0, nSelectDyn = 0, nSelectLayered = 0, nSelectProbes = 0, nSelectSizeLog[18] = {};
   void statSelect(const void *site, const Bindings *b, Symbol key, bool dynamic);
   // MLNIX_STATS: a recycling allocator for frames, simulated.  A frame that returns with nothing made over it (no thunk, no closure) can never be
@@ -978,11 +995,11 @@ struct EvalState {
   uint64_t nSimReuseDist[5] = {};               // reuse distance in bytes allocated since the release: < 32 KiB, < 256 KiB, < 2 MiB, < 32 MiB, more
   uint64_t nSimHit = 0, nSimHitBytes = 0, nSimReleased = 0, nSimReleasedBytes = 0, nSimCaptured = 0;
   uint64_t nBuilders = 0, nBuilderRows = 0, nBuildersBig = 0, nBuilderBigRows = 0; // MLNIX_STATS: attribute-set builders, and those past the 12 inline rows (a malloc)
-  llvm::StringMap<std::pair<uint64_t, uint64_t>> thunksByOp; // MLNIX_STATS: frame-needing thunks by operation: count, packed operand counts
+  OpCounts thunksByOp; // MLNIX_STATS: frame-needing thunks by operation: count, packed operand counts
   uint64_t nProjThunks = 0, nHardThunks = 0, nImmediate = 0, nImmediateLater = 0; // MLNIX_STATS: frame-needing thunks forced as the very next thing
-  llvm::StringMap<uint64_t> immediateByConsumer; // MLNIX_STATS: the same, by the op whose operand the thunk was made for
+  OpCounts immediateByConsumer; // MLNIX_STATS: the same, by the op whose operand the thunk was made for
   const Value *lastThunk = nullptr;
-  llvm::StringMap<uint64_t> immediateByOp; // MLNIX_STATS: thunks made over a frame, projections and the rest
+  OpCounts immediateByOp; // MLNIX_STATS: thunks made over a frame, projections and the rest
   uint64_t nSelectorCalls = 0; // MLNIX_STATS: saturated calls of a recognized selector, made with no frame and no closure
   bool selectorsOn = true;     // MLNIX_NOSELECTORS turns the recognition off
   unsigned selectorShape(mlir::nix::LambdaOp outerLam, RegionInfo *outer);
@@ -1013,8 +1030,8 @@ void registerBuiltins(EvalState &state);
 void parseJSON(EvalState &state, std::string_view json, Value &v);
 void parseTOML(EvalState &state, std::string_view toml, Value &v);
 
-/// Run `fn` on a thread with a large stack (deep recursion in the evaluator).
-int runWithLargeStack(std::function<int()> fn);
+/// Run `fn` on a thread with a large stack (deep recursion in the evaluator); the thread is joined before this returns.
+int runWithLargeStack(composite::Fn<int()> fn);
 
 /// Attach the evaluator's external `NixEvalOpInterface` models to the ops of
 /// the Nix dialect family in `ctx` (EvalModels.cpp).

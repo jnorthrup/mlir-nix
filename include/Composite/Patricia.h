@@ -24,6 +24,7 @@ template <class V> struct Patricia {
   };
 
   uint32_t size() const { return rows.size(); }
+  bool empty() const { return rows.empty(); }
 
   /// The value stored for the key, or null.
   V *find(const char *k, uint32_t n) {
@@ -31,6 +32,13 @@ template <class V> struct Patricia {
     Row &r = rows[leafOf(k, n)];
     return r.len == n && __builtin_memcmp(r.key, k, n) == 0 ? &r.v : nullptr;
   }
+  const V *find(const char *k, uint32_t n) const {
+    if (rows.empty()) return nullptr;
+    const Row &r = rows[leafOf(k, n)];
+    return r.len == n && __builtin_memcmp(r.key, k, n) == 0 ? &r.v : nullptr;
+  }
+  /// Every row, in byte order: `emit(const Row &)`.
+  template <class Emit> void each(Emit &&emit) const { prefix("", 0, emit); }
 
   /// The key now stands for v.  `copy()` makes the key's bytes where they outlive the trie; it is called only for a key not stored yet.
   /// The value's address holds until the next set.

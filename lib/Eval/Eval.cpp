@@ -1,18 +1,16 @@
 //===- Eval.cpp - Lazy evaluator over the nix dialect ---------------------===//
 
 #include <sys/resource.h>
-#include <map>
 #include "Composite/Folds.h"
 #include "Composite/Mutable.h"
 #include "Nix/Prefetch.h"
-#include <bit>
 #include <fstream>
 #include "Nix/Eval.h"
+#include "Nix/Os.h"
 #include "Nix/ScalarJIT.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Transforms/Passes.h"
-#include <mutex>
 #include "llvm/Support/Format.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "Nix/MLIRGen.h"
@@ -24,12 +22,10 @@
 #include "llvm/Support/SourceMgr.h"
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <exception>
 #include <iostream>
-#include <limits>
 #include <pthread.h>
 #include <sstream>
 #include <sys/stat.h>
@@ -59,7 +55,7 @@ void EvalState::statSelect(const void *site, const Bindings *b, Symbol key, bool
     sig ^= uint64_t(b->attrs[n / 2].name) * 0x94D049BB133111EBull;
     sig ^= uint64_t(b->attrs[n - 1].name) * 0xD6E8FEB86659FD93ull;
   }
-  SelSite &s = selSites[site];
+  SelSite &s = selSites.at(uint64_t(uintptr_t(site)));
   ++s.calls; s.hits += hit; s.dynamic |= dynamic;
   if (s.calls > 1 && s.last == sig) ++s.sameAsLast;
   s.last = sig;
@@ -70,7 +66,7 @@ static const auto attrName = [](const Attr &a) { return a.name; };
 
 const Attr *Bindings::get(Symbol s) const {
   const Attr *r = cp::findRow(attrs, size_, s, attrName);
-  if (countGets) { unsigned b = size_ ? std::min(15, 63 - std::countl_zero(uint64_t(size_))) : 0; ++getCalls[b]; getSteps[b] += b; getMiss[b] += r == nullptr; }
+  if (countGets) { unsigned b = size_ ? cp::min(15, 63 - __builtin_clzll(uint64_t(size_))) : 0; ++getCalls[b]; getSteps[b] += b; getMiss[b] += r == nullptr; }
   return r;
 }
 
@@ -371,7 +367,7 @@ void EvalState::printStats() {
     for (auto &kv : regionInfos) if (kv.v->calls) top.append(kv.v);
     cp::sortRows(top.data(), top.size(), [](RegionInfo *a, RegionInfo *b) { return a->calls > b->calls; });
     size_t keep = 40;
-    if (const char *t = getenv("MLNIX_STATS_TOP")) keep = std::max<size_t>(1, strtoul(t, nullptr, 10));
+    if (const char *t = getenv("MLNIX_STATS_TOP")) keep = cp::max<size_t>(1, strtoul(t, nullptr, 10));
     llvm::errs() << "== the " << keep << " lambdas that make the most frames (calls, slots, where):\n";
     uint64_t cum = 0;
     for (size_t i = 0; i < top.size() && i < keep; ++i) {
@@ -382,25 +378,32 @@ void EvalState::printStats() {
   }
   if (nFrames && getenv("MLNIX_STATS_SHAPES")) {
     struct Group { uint64_t frames = 0, lambdas = 0; std::string example, shape; };
-    std::map<std::string, Group> byShape;
-    for (auto &kv : regionInfos) {
-      RegionInfo *ri = kv.v;
-      if (!ri->calls || !ri->region->getParentOp()) continue;
-      if (!isa<nd::LambdaOp>(ri->region->getParentOp())) continue;
+    cp::MutableSeries<Group> groups;
+    cp::TextTable<uint32_t> byShape; // a shape's group
+    // The lambdas first: shapeOf reaches the bodies of the lambdas inside them, and one not indexed yet is indexed (minted, even) then,
+    // which adds to regionInfos, so walking the table while taking shapes walked cells a growth had freed (a crash, now and then).
+    cp::MutableSeries<RegionInfo *> called;
+    for (auto &kv : regionInfos)
+      if (kv.v->calls && kv.v->region->getParentOp() && isa<nd::LambdaOp>(kv.v->region->getParentOp())) called.append(kv.v);
+    for (RegionInfo *ri : called) {
       std::string sh = shapeOf(ri);
       if (sh.size() > 400) sh = "(large)";
-      Group &g = byShape[sh];
-      if (g.frames == 0 || ri->calls > g.frames) {}
+      uint32_t *found = byShape.find(sh.data(), uint32_t(sh.size()));
+      if (!found) {
+        found = byShape.set(sh.data(), uint32_t(sh.size()), groups.size(), [&] { return keyText.copy(sh.data(), uint32_t(sh.size())); });
+        groups.append(Group{});
+      }
+      Group &g = groups[*found];
       if (g.example.empty()) g.example = showPos(nd::posOfOp(ri->region->getParentOp()));
       g.frames += ri->calls; ++g.lambdas; g.shape = sh;
     }
-    auto gs = ranked(byShape, [](auto &e) { return e.second.frames; });
+    auto gs = ranked(groups, [](auto &g) { return g.frames; });
     size_t keep = 30;
-    if (const char *t = getenv("MLNIX_STATS_SHAPES")) keep = std::max<size_t>(1, strtoul(t, nullptr, 10));
+    if (const char *t = getenv("MLNIX_STATS_SHAPES")) keep = cp::max<size_t>(1, strtoul(t, nullptr, 10));
     llvm::errs() << "== lambda shapes by the frames they make (" << gs.size() << " shapes, " << nFrames << " frames):\n";
     uint64_t cum = 0;
     for (size_t i = 0; i < gs.size() && i < keep; ++i) {
-      const Group &g = gs[i]->second;
+      const Group &g = *gs[i];
       cum += g.frames;
       llvm::errs() << llvm::format("   %9llu frames in %5llu lambdas  cum %5.1f%%  ", (unsigned long long)g.frames, (unsigned long long)g.lambdas, 100.0 * cum / nFrames)
                    << g.shape << "   e.g. " << g.example << "\n";
@@ -443,7 +446,7 @@ void EvalState::printStats() {
   if (nSelects) {
     uint64_t sites[4] = {}, siteCalls[4] = {}, sameLast = 0, dynSites = 0;
     for (auto &kv : selSites) {
-      const SelSite &x = kv.second;
+      const SelSite &x = kv.v;
       unsigned k = x.seen.size() <= 1 ? 0 : x.seen.size() <= 4 ? 1 : x.seen.size() <= 5 ? 2 : 3;   // 1, 2-4, 5, 6+ layouts
       ++sites[k]; siteCalls[k] += x.calls; sameLast += x.sameAsLast; dynSites += x.dynamic;
     }
@@ -457,28 +460,27 @@ void EvalState::printStats() {
       llvm::errs() << llvm::format("   %-26s %6llu sites, %5.1f%% of selects\n", nm[k], (unsigned long long)sites[k], 100.0 * siteCalls[k] / nSelects);
     llvm::errs() << llvm::format("   a one-entry cache per site (same layout as the site's last select) would hit %.1f%% of selects\n", 100.0 * sameLast / nSelects);
   }
-  if (!thunksByOp.empty()) {
-    auto v = ranked(thunksByOp, [](auto &e) { return e.getValue().first; });
+  if (thunksByOp.size()) {
+    auto v = ranked(thunksByOp, [](auto &e) { return e.v.n[0]; });
     llvm::errs() << "== thunks that need the frame, by operation (share of those; mean operands, of which defined in the same body):\n";
     uint64_t cum = 0;
     for (size_t i = 0; i < v.size() && i < 14; ++i) {
-      cum += v[i]->getValue().first;
-      uint64_t n = v[i]->getValue().first, packed = v[i]->getValue().second, ops = 0, inside = 0;
-      ops = packed / 8; inside = 0;   // the in-body count is accumulated separately below
-      (void)inside;
-      llvm::errs() << llvm::format("   %-22s %9llu  %5.1f%%  cum %5.1f%%   %.1f operands\n", v[i]->getKey().str().c_str(), (unsigned long long)n, 100.0 * n / nHardThunks, 100.0 * cum / nHardThunks, double(ops) / n);
+      const OpCount &c = v[i]->v;
+      cum += c.n[0];
+      uint64_t n = c.n[0], ops = c.n[1] / 8; // packed: the operands in the high part (the in-body count, the low byte, is not shown)
+      llvm::errs() << llvm::format("   %-22.*s %9llu  %5.1f%%  cum %5.1f%%   %.1f operands\n", int(c.name.size()), c.name.data(), (unsigned long long)n, 100.0 * n / nHardThunks, 100.0 * cum / nHardThunks, double(ops) / n);
     }
   }
   llvm::errs() << "values evaluated at their first touch, never a thunk (the caller forces them next): " << nEager << "\n";
   if (nHardThunks) {
     llvm::errs() << llvm::format("== of the thunks that need their frame, %llu (%.1f%%) are forced as the very next thing after they are made: eager evaluation would keep the order and never capture the frame\n",
                                  (unsigned long long)nImmediate, 100.0 * nImmediate / nHardThunks);
-    auto v = ranked(immediateByOp, [](auto &e) { return e.getValue(); });
+    auto v = ranked(immediateByOp, [](auto &e) { return e.v.n[0]; });
     llvm::errs() << "   by operation:";
-    for (size_t i = 0; i < v.size() && i < 8; ++i) llvm::errs() << llvm::format(" %s %.1f%%", v[i]->getKey().str().c_str(), 100.0 * v[i]->getValue() / nImmediate);
+    for (size_t i = 0; i < v.size() && i < 8; ++i) llvm::errs() << llvm::format(" %.*s %.1f%%", int(v[i]->v.name.size()), v[i]->v.name.data(), 100.0 * v[i]->v.n[0] / nImmediate);
     llvm::errs() << "\n   by the op whose operand it was made for:";
-    auto c = ranked(immediateByConsumer, [](auto &e) { return e.getValue(); });
-    for (size_t i = 0; i < c.size() && i < 10; ++i) llvm::errs() << llvm::format(" %s %.1f%%", c[i]->getKey().str().c_str(), 100.0 * c[i]->getValue() / nImmediate);
+    auto c = ranked(immediateByConsumer, [](auto &e) { return e.v.n[0]; });
+    for (size_t i = 0; i < c.size() && i < 10; ++i) llvm::errs() << llvm::format(" %.*s %.1f%%", int(c[i]->v.name.size()), c[i]->v.name.data(), 100.0 * c[i]->v.n[0] / nImmediate);
     llvm::errs() << "\n";
   }
   if (nProjThunks + nHardThunks) llvm::errs() << llvm::format("== thunks made over a frame: %llu, of which %llu (%.1f%%) are projections of the body's argument or a captured value (the rest %llu need the frame)\n",
@@ -543,19 +545,24 @@ void EvalState::printStats() {
   // How many ops of real programs live where: per tier of the dialect hierarchy
   // (scope > continent > dialect), read from the IRDL declaration.
   auto *core = ctx.getLoadedDialect<nd::NixDialect>();
-  llvm::StringMap<size_t> perDialect, perScope, perContinent;
-  size_t total = 0;
+  // By name: a dialect's is a prefix of its ops' names and a scope's or continent's is the dialect's declaration, bytes that live as long as
+  // the context, so a row keeps them where they lie.
+  cp::TextTable<uint64_t> perDialect, perScope, perContinent;
+  auto add = [](cp::TextTable<uint64_t> &m, llvm::StringRef name, uint64_t n) { m.at(name.data(), uint32_t(name.size()), [&] { return name.data(); }) += n; };
+  uint64_t total = 0;
   for (auto &e : opStats) {
-    llvm::StringRef dialect = e.getKey().split('.').first;
-    perDialect[dialect] += e.getValue();
+    llvm::StringRef dialect = e.v.name.split('.').first;
+    uint64_t n = e.v.n[0];
+    add(perDialect, dialect, n);
     auto it = core->continents.find(dialect);
-    perScope[it == core->continents.end() ? "core" : llvm::StringRef(it->second.scope)] += e.getValue();
-    perContinent[it == core->continents.end() ? "core" : llvm::StringRef(it->second.continent)] += e.getValue();
-    total += e.getValue();
+    add(perScope, it == core->continents.end() ? "core" : llvm::StringRef(it->second.scope), n);
+    add(perContinent, it == core->continents.end() ? "core" : llvm::StringRef(it->second.continent), n);
+    total += n;
   }
-  auto section = [&](const char *title, llvm::StringMap<size_t> &m) {
+  auto section = [&](const char *title, cp::TextTable<uint64_t> &m) {
     llvm::errs() << "== " << title << " (" << m.size() << ")\n";
-    for (auto *e : ranked(m, [](auto &e) { return e.getValue(); })) llvm::errs() << "  " << llvm::format("%-9s", e->getKey().str().c_str()) << llvm::format("%9zu", e->getValue()) << "\n";
+    for (auto *e : ranked(m, [](auto &e) { return e.v; }))
+      llvm::errs() << "  " << llvm::format("%-9.*s", int(e->n), e->p) << llvm::format("%9llu", (unsigned long long)e->v) << "\n";
   };
   // These writes include stack temporaries and repeated mutations of a cell. They
   // describe evaluator work, not a live-heap census or a per-facet allocation count.
@@ -570,18 +577,18 @@ void EvalState::printStats() {
   }
   { // The sea of nodes against its schedule: the ops the index holds against the ops that ever ran,
     // file code against the bodies demand minted.  The thunk cells are finer grain's rows.
-    llvm::DenseSet<RegionInfo *> minted;
+    cp::WordTable<char> minted; // a set, by the region's address
     for (auto &p : pools)
       if (p)
       for (nixev::RegionInfo *ri : p->rows.col<nixfe::PoolCol::Body>().view())
-        if (ri) minted.insert(ri);
+        if (ri) minted.insert(uint64_t(uintptr_t(ri)), 1);
     uint64_t fOps = 0, fRan = 0, fEvals = 0, fTh = 0, mOps = 0, mRan = 0, mEvals = 0, mTh = 0;
     unsigned fR = 0, mR = 0;
     for (auto &kv : regionInfos) {
       RegionInfo *ri = kv.v;
       uint64_t ran = 0;
-      for (uint64_t w : ri->everRan) ran += std::popcount(w);
-      if (minted.count(ri)) { mR++; mOps += ri->nOps; mRan += ran; mEvals += ri->nEvals; mTh += ri->nThunks; }
+      for (uint64_t w : ri->everRan) ran += __builtin_popcountll(w);
+      if (minted.find(uint64_t(uintptr_t(ri)))) { mR++; mOps += ri->nOps; mRan += ran; mEvals += ri->nEvals; mTh += ri->nThunks; }
       else { fR++; fOps += ri->nOps; fRan += ran; fEvals += ri->nEvals; fTh += ri->nThunks; }
     }
     llvm::errs() << "== sea of nodes: " << fR << " file regions hold " << fOps << " ops ("
@@ -614,18 +621,18 @@ void EvalState::printStats() {
     llvm::errs() << "== import prediction: " << evaluatedFiles.size() << " files evaluated, " << pred << " named by a path literal lowered earlier (recall "
                  << llvm::format("%.1f", evaluatedFiles.empty() ? 0.0 : 100.0 * pred / evaluatedFiles.size()) << "%); " << nixfe::pathLiterals->size() << " distinct path literals ("
                  << nix << " end in .nix), " << litHit << " of them led to an evaluated file (precision "
-                 << llvm::format("%.1f", 100.0 * litHit / std::max<size_t>(1, nixfe::pathLiterals->size())) << "%, of the .nix ones' neighbours not separated)\n";
+                 << llvm::format("%.1f", 100.0 * litHit / cp::max<size_t>(1, nixfe::pathLiterals->size())) << "%, of the .nix ones' neighbours not separated)\n";
   }
   if (recordEdges && epochEvals.size() > 1) { // the epochs' work and which later epoch needed what an earlier one forced, for a schedule simulation
     if (FILE *f = fopen(getenv("MLNIX_STATS_EDGES"), "w")) {
       for (uint32_t i = 0; i < epochEvals.size(); i++) fprintf(f, "w %u %llu\n", i, (unsigned long long)epochEvals[i]);
-      for (uint64_t e : epochEdges) fprintf(f, "e %u %u\n", uint32_t(e >> 32), uint32_t(e));
+      for (auto &e : epochEdges) fprintf(f, "e %u %u\n", uint32_t(e.k >> 32), uint32_t(e.k));
       fclose(f);
     }
   }
   if (epochEvals.size() > 1) { // how the work divides among the attributes the driver visited: a serial prefix or a flat spread
     uint64_t tot = 0, mx = 0;
-    for (uint64_t e : epochEvals) { tot += e; mx = std::max(mx, e); }
+    for (uint64_t e : epochEvals) { tot += e; mx = cp::max(mx, e); }
     composite::MutableSeries<uint64_t> sorted(epochEvals.size()); // the epochs are only read: the sort's first pass is the drain
     cp::sortRows(epochEvals.data(), sorted.data(), epochEvals.size(), [](uint64_t a, uint64_t b) { return a < b; });
     auto share = [&](size_t n) { uint64_t c = 0; for (size_t i = 0; i < n && i < epochEvals.size(); i++) c += epochEvals[i]; return 100.0 * c / tot; };
@@ -639,32 +646,39 @@ void EvalState::printStats() {
   if (nLookups) {
     llvm::errs() << "== lookupImpl: " << nLookups << " calls, " << nLookupHits << " answered by a filled slot ("
                  << llvm::format("%.1f", 100.0 * nLookupHits / nLookups) << "%); frame hops to the defining region: ";
-    for (unsigned i = 0; i < 6; i++) llvm::errs() << (i == 5 ? "5+" : std::to_string(i)) << " " << llvm::format("%.1f", 100.0 * nHopHist[i] / nLookups) << "%  ";
+    for (unsigned i = 0; i < 6; i++) {
+      if (i == 5) llvm::errs() << "5+";
+      else llvm::errs() << i;
+      llvm::errs() << " " << llvm::format("%.1f", 100.0 * nHopHist[i] / nLookups) << "%  ";
+    }
     llvm::errs() << '\n';
     uint64_t tot = 0;
-    for (auto &e : evalsByKind) tot += e.second.second;
-    auto ev = ranked(evalsByKind, [](auto &e) { return e.second.second; });
+    for (auto &e : evalsByKind) tot += e.v.n[0];
+    auto ev = ranked(evalsByKind, [](auto &e) { return e.v.n[0]; });
     { uint64_t ct = 0;
-      for (auto &e : cellsByKind) ct += e.second.second[0] + e.second.second[1];
-      auto cv = ranked(cellsByKind, [](auto &e) { return e.second.second[0] + e.second.second[1]; });
+      for (auto &e : cellsByKind) ct += e.v.n[0] + e.v.n[1];
+      auto cv = ranked(cellsByKind, [](auto &e) { return e.v.n[0] + e.v.n[1]; });
       llvm::errs() << "== cells made by lookup, by defining op (" << ct << " in all): evaluated at once (forced), left as a thunk\n";
       for (size_t i = 0; i < cv.size() && i < 14; i++)
-        llvm::errs() << "  " << llvm::format("%-26s", cv[i]->second.first.str().c_str()) << llvm::format("%12llu", (unsigned long long)cv[i]->second.second[0]) << llvm::format("%12llu", (unsigned long long)cv[i]->second.second[1]) << '\n'; }
+        llvm::errs() << "  " << llvm::format("%-26.*s", int(cv[i]->v.name.size()), cv[i]->v.name.data()) << llvm::format("%12llu", (unsigned long long)cv[i]->v.n[0]) << llvm::format("%12llu", (unsigned long long)cv[i]->v.n[1]) << '\n'; }
     llvm::errs() << "== evalOp calls by op kind (" << tot << " in all)\n";
     for (size_t i = 0; i < ev.size() && i < 16; i++)
-      llvm::errs() << "  " << llvm::format("%-26s", ev[i]->second.first.str().c_str()) << llvm::format("%12llu", (unsigned long long)ev[i]->second.second) << llvm::format("%7.1f%%", 100.0 * ev[i]->second.second / tot) << '\n';
+      llvm::errs() << "  " << llvm::format("%-26.*s", int(ev[i]->v.name.size()), ev[i]->v.name.data()) << llvm::format("%12llu", (unsigned long long)ev[i]->v.n[0]) << llvm::format("%7.1f%%", 100.0 * ev[i]->v.n[0] / tot) << '\n';
   }
   if (nMatchCalls) { // builtins.match: how often the same (regex, input) comes back, which a memo would answer without matching
-    uint64_t repeats = 0, regexes = 0;
-    llvm::StringMap<char> res;
-    for (auto &e : matchPairs) { repeats += e.getValue() - 1; res[e.getKey().split('\0').first] = 1; }
-    llvm::errs() << llvm::format("== builtins.match: %llu calls, %u distinct (regex, input) pairs over %u regexes; %llu calls (%.1f%%) repeat a pair already matched\n",
-                                 (unsigned long long)nMatchCalls, matchPairs.size(), res.size(), (unsigned long long)repeats, 100.0 * repeats / nMatchCalls);
-    if (getenv("MLNIX_STATS_REGEX")) { // every pattern, with its calls
-      llvm::StringMap<uint64_t> byRe;
-      for (auto &e : matchPairs) byRe[e.getKey().split('\0').first] += e.getValue();
-      for (auto &e : byRe) llvm::errs() << llvm::format("   regex %8llu  ", (unsigned long long)e.getValue()) << e.getKey() << "\n";
+    uint64_t repeats = 0;
+    // A pair's key is the regex, a 0 byte and the input, copied into keyText: the regex is a prefix of it that lives as long as the table.
+    auto regexOf = [](const cp::TextTable<uint64_t>::Row &e) { return llvm::StringRef(e.p, e.n).split('\0').first; };
+    cp::TextTable<uint64_t> byRe;
+    for (auto &e : matchPairs) {
+      repeats += e.v - 1;
+      llvm::StringRef re = regexOf(e);
+      byRe.at(re.data(), uint32_t(re.size()), [&] { return re.data(); }) += e.v;
     }
+    llvm::errs() << llvm::format("== builtins.match: %llu calls, %u distinct (regex, input) pairs over %u regexes; %llu calls (%.1f%%) repeat a pair already matched\n",
+                                 (unsigned long long)nMatchCalls, matchPairs.size(), byRe.size(), (unsigned long long)repeats, 100.0 * repeats / nMatchCalls);
+    if (getenv("MLNIX_STATS_REGEX")) // every pattern, with its calls
+      for (auto &e : byRe) llvm::errs() << llvm::format("   regex %8llu  ", (unsigned long long)e.v) << llvm::StringRef(e.p, e.n) << "\n";
   }
   { // The IR the evaluator reads: ops evaluated, and how many bytes of MLIR operations hold the hottest of them (what a compact form would shrink).
     struct Hot { uint32_t evals; uint32_t bytes; };
@@ -693,40 +707,50 @@ void EvalState::printStats() {
     llvm::errs() << llvm::format(" (all that ran: %.1f MB)\n", bytes / 1048576.0);
   }
   if (getenv("MLNIX_STATS_USES")) { // single-use census: per op kind, how many results have no use, one use, several (who could move, who must copy)
-    struct U { uint64_t ops = 0, zero = 0, one = 0, many = 0, ranOne = 0; };
-    llvm::StringMap<U> byKind;
+    struct U { llvm::StringRef name; uint64_t ops, zero, one, many, ranOne; };
+    cp::WordTable<U> byKind; // by the op kind's OperationName
     for (auto &kv : regionInfos) {
       RegionInfo *ri = kv.v;
       for (auto &o : ri->opIdx) {
         mlir::Operation *op = reinterpret_cast<mlir::Operation *>(uintptr_t(o.k));
         if (op->getNumResults() != 1) continue;
-        U &u = byKind[op->getName().getStringRef()];
+        U &u = byKind.at(uint64_t(uintptr_t(op->getName().getAsOpaquePointer())));
+        u.name = op->getName().getStringRef();
         u.ops++;
-        unsigned n = std::distance(op->getResult(0).use_begin(), op->getResult(0).use_end());
+        unsigned n = 0;
+        for (auto use = op->getResult(0).use_begin(); use != op->getResult(0).use_end(); ++use) n++;
         (n == 0 ? u.zero : n == 1 ? u.one : u.many)++;
         if (n == 1 && (ri->everRan[o.v >> 6] >> (o.v & 63) & 1)) u.ranOne++;
       }
     }
     { // who reads a single-use string, attrs or concatenation: the consumer's kind, and whether it sits in another region (read once per call of that region, not once)
-      llvm::StringMap<std::array<uint64_t, 3>> by; // [same region, nested region, producer evals]
+      cp::TextTable<cp::Arr<uint64_t, 3>> by; // by "producer -> consumer": [same region, nested region, producer evals]
+      cp::Text pair;
       for (auto &kv : regionInfos)
         for (auto &o : kv.v->opIdx) {
           mlir::Operation *op = reinterpret_cast<mlir::Operation *>(uintptr_t(o.k));
           if (op->getNumResults() != 1 || !op->hasOneUse()) continue;
           mlir::Operation *c = *op->getUsers().begin();
-          { auto &row = by[(op->getName().getStringRef() + " -> " + c->getName().getStringRef()).str()]; row[c->getParentRegion() == op->getParentRegion() ? 0 : 1]++; row[2] += kv.v->opEvals[o.v]; }
+          llvm::StringRef from = op->getName().getStringRef(), to = c->getName().getStringRef();
+          pair.clear();
+          pair.put(from.data(), uint32_t(from.size())).put(" -> ").put(to.data(), uint32_t(to.size()));
+          auto &row = by.at(pair.data(), pair.size(), [&] { return keyText.copy(pair.data(), pair.size()); });
+          row[c->getParentRegion() == op->getParentRegion() ? 0 : 1]++;
+          row[2] += kv.v->opEvals[o.v];
         }
-      auto r2 = ranked(by, [](auto &e) { return e.getValue()[2]; });
+      auto r2 = ranked(by, [](auto &e) { return e.v[2]; });
       llvm::errs() << "== single-use string/attrs/concat producers -> consumer: same region, nested region, producer evals (ranked by evals)\n";
       for (size_t i = 0; i < r2.size() && i < 30; i++)
-        llvm::errs() << "  " << llvm::format("%-44s", r2[i]->getKey().str().c_str()) << llvm::format("%9llu", (unsigned long long)r2[i]->getValue()[0]) << llvm::format("%9llu", (unsigned long long)r2[i]->getValue()[1]) << llvm::format("%11llu", (unsigned long long)r2[i]->getValue()[2]) << '\n';
+        llvm::errs() << "  " << llvm::format("%-44.*s", int(r2[i]->n), r2[i]->p) << llvm::format("%9llu", (unsigned long long)r2[i]->v[0]) << llvm::format("%9llu", (unsigned long long)r2[i]->v[1]) << llvm::format("%11llu", (unsigned long long)r2[i]->v[2]) << '\n';
     }
-    auto rows = ranked(byKind, [](auto &e) { return e.getValue().ops; });
+    auto rows = ranked(byKind, [](auto &e) { return e.v.ops; });
     llvm::errs() << "== single-use census (one-result ops): kind, ops, no use, one use, several, one-use that ran\n";
-    for (size_t i = 0; i < rows.size() && i < 40; i++)
-      llvm::errs() << "  " << llvm::format("%-26s", rows[i]->getKey().str().c_str()) << llvm::format("%9llu", (unsigned long long)rows[i]->getValue().ops)
-                   << llvm::format("%9llu", (unsigned long long)rows[i]->getValue().zero) << llvm::format("%9llu", (unsigned long long)rows[i]->getValue().one)
-                   << llvm::format("%9llu", (unsigned long long)rows[i]->getValue().many) << llvm::format("%9llu", (unsigned long long)rows[i]->getValue().ranOne) << '\n';
+    for (size_t i = 0; i < rows.size() && i < 40; i++) {
+      const U &u = rows[i]->v;
+      llvm::errs() << "  " << llvm::format("%-26.*s", int(u.name.size()), u.name.data()) << llvm::format("%9llu", (unsigned long long)u.ops)
+                   << llvm::format("%9llu", (unsigned long long)u.zero) << llvm::format("%9llu", (unsigned long long)u.one)
+                   << llvm::format("%9llu", (unsigned long long)u.many) << llvm::format("%9llu", (unsigned long long)u.ranOne) << '\n';
+    }
   }
   if (nSlotsAssigned)
     llvm::errs() << "== frame cells: " << nSlotsAssigned << " assigned, " << nSlotsNoRead
@@ -764,10 +788,10 @@ void EvalState::printStats() {
   section("scopes", perScope);
   section("continents", perContinent);
   section("dialects", perDialect);
-  auto o = ranked(opStats, [](auto &e) { return e.getValue(); });
+  auto o = ranked(opStats, [](auto &e) { return e.v.n[0]; });
   llvm::errs() << "== top ops\n";
   for (size_t i = 0; i < o.size() && i < 14; i++)
-    llvm::errs() << "  " << llvm::format("%-22s", o[i]->getKey().str().c_str()) << llvm::format("%9zu", o[i]->getValue()) << "\n";
+    llvm::errs() << "  " << llvm::format("%-22.*s", int(o[i]->v.name.size()), o[i]->v.name.data()) << llvm::format("%9llu", (unsigned long long)o[i]->v.n[0]) << "\n";
 }
 
 EvalState::~EvalState() {
@@ -779,11 +803,11 @@ EvalState::~EvalState() {
   if (statsEnabled) printStats();
 }
 
-bool EvalState::isBaseName(llvm::StringRef name) const { return baseEnv.count(name); }
+bool EvalState::isBaseName(llvm::StringRef name) const { return baseEnv.find(name.data(), uint32_t(name.size())) != nullptr; }
 
 Value *EvalState::baseEnvValue(llvm::StringRef name) {
-  auto it = baseEnv.find(name);
-  return it == baseEnv.end() ? nullptr : it->second;
+  Value **v = baseEnv.find(name.data(), uint32_t(name.size()));
+  return v ? *v : nullptr;
 }
 
 static std::string primOpName(const std::string &name) { return name.rfind("__", 0) == 0 ? name.substr(2) : name; }
@@ -806,9 +830,8 @@ void EvalState::registerPrimOp(const std::string &name, PrimOp *p) {
 }
 
 void EvalState::addConstant(const std::string &name, Value *v) {
-  baseEnv[name] = v;
-  std::string bare = name.rfind("__", 0) == 0 ? name.substr(2) : name;
-  (void)bare;
+  uint32_t n = uint32_t(name.size());
+  baseEnv.set(name.data(), n, v, [&] { return baseEnvNames.copy(name.data(), n); });
 }
 
 //===----------------------------------------------------------------------===//
@@ -998,7 +1021,7 @@ void EvalState::Indexer::index(Region &r) {
   // A deferred lambda's region is a shell until its first call; it is indexed when it is minted.
   for (Operation &op : blk) {
     auto lam = dyn_cast<nd::LambdaOp>(op);
-    if (lam && lam.getBodyIndex()) continue;
+    if (lam && lam.getBodyIndexAttr()) continue;
     for (Region &nested : op.getRegions())
       if (!nested.empty()) index(nested);
   }
@@ -1014,7 +1037,7 @@ void EvalState::Indexer::index(Region &r) {
     if (op.getNumResults() == 0 || k == 0) continue;
     auto **ops = static_cast<Node **>(allocate(k * sizeof(Node *), alignof(Node *)));
     for (unsigned i = 0; i < k; i++) ops[i] = recordOf(op.getOperand(i));
-    if (auto lam = dyn_cast<nd::LambdaOp>(op); lam && lam.getBodyIndex() && !everyValue)
+    if (auto lam = dyn_cast<nd::LambdaOp>(op); lam && lam.getBodyIndexAttr() && !everyValue)
       for (unsigned i = 0; i < k; i++)
         if (ops[i]) { // the captures of a body minted later
           void *key = op.getOperand(i).getAsOpaquePointer();
@@ -1192,17 +1215,17 @@ void EvalState::statHops(Frame *f, RegionInfo *ri, bool hit) {
 /// MLNIX_STATS: the census of a cell lookup makes (cold, out of line).
 void EvalState::statCell(Frame *f, Node *s, Value *nv, bool eager) {
   Operation *op = s->def;
-  auto &c = cellsByKind[op->getName().getAsOpaquePointer()]; c.first = op->getName().getStringRef(); ++c.second[eager ? 0 : 1];
+  ++countOf(cellsByKind, op->getName()).n[eager ? 0 : 1];
   if (eager || !f) return;
   if (nv->type == VType::Lambda) markPinned(f);
   else if (isProjection(op)) ++nProjThunks;          // in the simulated world this thunk holds (base cell, path), not the frame
   else {
     ++nHardThunks; markCaptured(f); lastThunk = nv; lastThunkFor = statCur;
-    auto &e = thunksByOp[op->getName().getStringRef()];
-    ++e.first;
+    OpCount &e = countOf(thunksByOp, op->getName());
+    ++e.n[0];
     unsigned inside = 0;                                // operands defined in this very body: cells the thunk would have to create first
     for (mlir::Value o : op->getOperands()) inside += !isa<mlir::BlockArgument>(o) && o.getParentRegion() == op->getParentRegion();
-    e.second += op->getNumOperands() * 8u + inside;     // packed: total operands in the high part, in-body operands in the low byte below
+    e.n[1] += op->getNumOperands() * 8u + inside;       // packed: total operands in the high part, in-body operands in the low byte below
   }
 }
 
@@ -1322,9 +1345,10 @@ struct DepthGuard {
 
 void EvalState::epochTouch(const Value &v) {
   uint32_t cur = epochEvals.size() - 1;
-  if (v.type == VType::Thunk || v.type == VType::App || v.type == VType::AttrApp) { forcedBy[&v] = cur; return; } // about to be forced here
-  auto it = forcedBy.find(&v);
-  if (it != forcedBy.end() && it->second != cur) epochEdges.insert(uint64_t(it->second) << 32 | cur);
+  uint64_t cell = uint64_t(uintptr_t(&v));
+  if (v.type == VType::Thunk || v.type == VType::App || v.type == VType::AttrApp) { forcedBy.at(cell) = cur; return; } // about to be forced here
+  const uint32_t *by = forcedBy.find(cell);
+  if (by && *by != cur) epochEdges.insert(uint64_t(*by) << 32 | cur, 1); // two epochs, so never the key 0
 }
 
 void EvalState::evalOpCounted(Node *n, Frame *env, Value &out) {
@@ -1342,8 +1366,9 @@ void EvalState::forceCell(Value &v, PosPtr pos) {
   if (statsEnabled && lastThunk) [[unlikely]] {
     if (&v == lastThunk && v.type == VType::Thunk) {
       ++nImmediate;
-      ++immediateByOp[v.thunk.node->def->getName().getStringRef()];
-      ++immediateByConsumer[lastThunkFor ? lastThunkFor->def->getName().getStringRef() : "(none)"];
+      ++countOf(immediateByOp, v.thunk.node->def->getName()).n[0];
+      if (lastThunkFor) ++countOf(immediateByConsumer, lastThunkFor->def->getName()).n[0];
+      else { OpCount &none = immediateByConsumer.at(1); none.name = "(none)"; ++none.n[0]; } // 1: no OperationName's address
     }
     lastThunk = nullptr;
   }
@@ -1420,26 +1445,26 @@ void EvalState::rethrowFailed(const Value &v) {
 }
 
 void EvalState::forceValueDeep(Value &v) {
-  std::set<const void *> seen;
-  std::function<void(Value &)> rec = [&](Value &v) {
+  cp::WordTable<char> seen; // a set: the cells walked, by address
+  auto rec = [&](auto &self, Value &v) -> void {
     if (callDepth >= settings.maxCallDepth) throw StackOverflowError("stack overflow; max-call-depth exceeded");
     DepthGuard g(callDepth);
     forceValue(v);
-    if (!seen.insert(&v).second) return;
+    if (!seen.insert(uint64_t(uintptr_t(&v)), 1)) return;
     if (v.type == VType::Attrs) {
       for (auto &a : *v.attrs) {
         try {
-          rec(*a.value);
+          self(self, *a.value);
         } catch (EvalError &e) {
           e.addTrace(positionOf(a), "while evaluating the attribute '" + symbols[a.name].str() + "'");
           throw;
         }
       }
     } else if (v.type == VType::List) {
-      for (size_t i = 0; i < v.listSize(); i++) rec(*v.list.elems[i]);
+      for (size_t i = 0; i < v.listSize(); i++) self(self, *v.list.elems[i]);
     }
   };
-  rec(v);
+  rec(rec, v);
 }
 
 int64_t EvalState::forceInt(Value &v, PosPtr pos, std::string_view c) {
@@ -1519,7 +1544,7 @@ static std::string pipelineText(const EvalSettings &settings) {
 }
 
 RegionInfo *EvalState::mintLambda(nixfe::FilePool &p, uint32_t row) {
-  auto t0 = std::chrono::steady_clock::now();
+  uint64_t t0 = statsEnabled ? nixsys::monotonicNs() : 0;
   auto lam = cast<nd::LambdaOp>(p.rows.col<nixfe::PoolCol::Op>()[row]);
   if (lam.getBody().front().empty()) { // not minted ahead by the helper that prelowered the file
     nixfe::GenOptions go;
@@ -1531,9 +1556,9 @@ RegionInfo *EvalState::mintLambda(nixfe::FilePool &p, uint32_t row) {
   }
   nixprefetch::noteMint(p.origin->path.c_str(), row);
   if (statsEnabled) {
-    lam.getBody().walk([&](mlir::Operation *o) { ++opStats[o->getName().getStringRef()]; });
+    lam.getBody().walk([&](mlir::Operation *o) { ++countOf(opStats, o->getName()).n[0]; });
     ++nDemandMinted;
-    nsMint += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+    nsMint += nixsys::monotonicNs() - t0;
   }
   p.drain(row);
   return regionInfo(&lam.getBody());
@@ -1547,8 +1572,8 @@ RegionInfo *EvalState::bodyOf(nixfe::BodyIndex idx) {
 
 /// The region of a lambda's body: the one hash lookup of a call, made once and passed down.
 RegionInfo *EvalState::infoOfSlow(nd::LambdaOp lam) {
-  std::optional<uint64_t> deferred = lam.getBodyIndex();
-  return deferred ? bodyOf(nixfe::BodyIndex(*deferred)) : regionInfo(&lam.getBody());
+  mlir::IntegerAttr deferred = lam.getBodyIndexAttr(); // null when the body is in the op
+  return deferred ? bodyOf(nixfe::BodyIndex(uint64_t(deferred.getInt()))) : regionInfo(&lam.getBody());
 }
 
 void EvalState::callLambda(Value &fun, Value *arg, Value &out, PosPtr pos) {
@@ -1707,8 +1732,7 @@ unsigned EvalState::selectorShape(nd::LambdaOp outerLam, RegionInfo *outer) {
   auto *innerOp = outer->result.getDefiningOp();
   auto inner = dyn_cast_or_null<nd::LambdaOp>(innerOp);
   if (!inner || inner.getFormals()) return 1;
-  std::optional<uint64_t> deferred = inner.getBodyIndex();
-  RegionInfo *ri = deferred ? bodyOf(nixfe::BodyIndex(*deferred)) : regionInfo(&inner.getBody());
+  RegionInfo *ri = infoOfSlow(inner);
   if (outer->region->front().getNumArguments() != 1 || ri->region->front().getNumArguments() != 1) return 1;
   mlir::Value c = outer->region->front().getArgument(0), x = ri->region->front().getArgument(0);
   auto iff = dyn_cast_or_null<nd::IfOp>(ri->result.getDefiningOp());
@@ -1731,13 +1755,17 @@ unsigned EvalState::selectorShape(nd::LambdaOp outerLam, RegionInfo *outer) {
 std::string EvalState::shapeOf(RegionInfo *ri, unsigned depth) {
   if (depth == 0 && !ri->shape.empty()) return ri->shape;
   std::string out;
-  llvm::DenseMap<const void *, std::string> ids;
+  cp::WordTable<uint32_t> ids; // a value's name, by its address: 2i for the argument aI, 2n + 1 for rN, the result of the Nth op
   mlir::Block &blk = ri->region->front();
-  for (unsigned i = 0; i < blk.getNumArguments(); ++i) ids[blk.getArgument(i).getAsOpaquePointer()] = "a" + std::to_string(i) + (depth ? "'" : "");
+  auto key = [](mlir::Value v) { return uint64_t(uintptr_t(v.getAsOpaquePointer())); };
+  for (unsigned i = 0; i < blk.getNumArguments(); ++i) ids.at(key(blk.getArgument(i))) = 2 * i;
   unsigned n = 0;
-  auto ref = [&](mlir::Value v) { auto it = ids.find(v.getAsOpaquePointer()); return it == ids.end() ? std::string("c") : it->second; };
+  auto ref = [&](mlir::Value v) {
+    const uint32_t *id = ids.find(key(v));
+    return id ? (*id & 1 ? "r" : "a") + std::to_string(*id >> 1) + (depth ? "'" : "") : std::string("c");
+  };
   for (mlir::Operation &op : blk) {
-    std::string id = "r" + std::to_string(n++) + (depth ? "'" : "");
+    uint32_t id = 2 * n++ + 1;
     out += op.getName().getStringRef().str();
     if (auto iv = dyn_cast<nd::IntOp>(op)) out += "=" + std::to_string(iv.getValue());
     else if (auto bv = dyn_cast<nd::BoolOp>(op)) out += bv.getValue() ? "=true" : "=false";
@@ -1745,8 +1773,8 @@ std::string EvalState::shapeOf(RegionInfo *ri, unsigned depth) {
     out += "(";
     if (auto lam = dyn_cast<nd::LambdaOp>(op)) {
       if (depth < 4) {
-        std::optional<uint64_t> deferred = lam.getBodyIndex();
-        RegionInfo *inner = deferred ? bodyOf(nixfe::BodyIndex(*deferred)) : regionInfo(&lam.getBody());
+        mlir::IntegerAttr deferred = lam.getBodyIndexAttr();
+        RegionInfo *inner = deferred ? bodyOf(nixfe::BodyIndex(uint64_t(deferred.getInt()))) : regionInfo(&lam.getBody());
         out += (lam.getFormals() ? "formals" : "arg") + std::string(": ") + shapeOf(inner, depth + 1);
       }
     } else {
@@ -1754,7 +1782,7 @@ std::string EvalState::shapeOf(RegionInfo *ri, unsigned depth) {
       for (mlir::Value v : op.getOperands()) { out += (first ? "" : ",") + ref(v); first = false; }
     }
     out += ") ";
-    for (mlir::Value r : op.getResults()) ids[r.getAsOpaquePointer()] = id;
+    for (mlir::Value r : op.getResults()) ids.at(key(r)) = id;
   }
   if (depth == 0) ri->shape = out;
   return out;
@@ -1883,7 +1911,7 @@ void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out,
   }
 }
 
-void EvalState::autoCallFunction(const std::map<std::string, Value *> &autoArgs, Value &fun, Value &out) {
+void EvalState::autoCallFunction(const AutoArgs &autoArgs, Value &fun, Value &out) {
   forceValue(fun);
   if (fun.type == VType::Attrs && fun.attrs->get(s.functor)) {
     Value *v = allocValue();
@@ -1903,16 +1931,15 @@ void EvalState::autoCallFunction(const std::map<std::string, Value *> &autoArgs,
   BindingsBuilder bb(*this, lam.getFormals()->size()); // a row a formal at most
   auto defs = *lam.getFormalDefaults();
   for (size_t i = 0; i < lam.getFormals()->size(); i++) {
-    std::string name = cast<StringAttr>((*lam.getFormals())[i]).getValue().str();
-    auto it = autoArgs.find(name);
-    if (it != autoArgs.end()) bb.insert(name, it->second);
+    llvm::StringRef name = cast<StringAttr>((*lam.getFormals())[i]).getValue();
+    if (Value *const *found = autoArgs.find(name.data(), uint32_t(name.size()))) bb.insert(name, *found);
     else if (!defs[i])
-      throw EvalError("cannot evaluate a function that has an argument without a value ('" + name +
+      throw EvalError("cannot evaluate a function that has an argument without a value ('" + name.str() +
                           "')\nNix attempted to evaluate a function as a top level expression; in this case it must have its arguments supplied either by default values, or passed explicitly with '--arg' or '--argstr'. See https://nix.dev/manual/nix/stable/language/syntax.html#functions.",
                       nd::posOfOp(lam));
   }
   if (lam.getEllipsis())
-    for (auto &[k, v] : autoArgs) bb.insert(k, v);
+    autoArgs.each([&](const AutoArgs::Row &r) { bb.insert(llvm::StringRef(r.key, r.len), r.v); });
   Value *arg = allocValue();
   mkAttrs(*arg, bb.finish());
   callFunction(fun, *arg, out, nullptr);
@@ -1925,7 +1952,7 @@ void EvalState::autoCallFunction(const std::map<std::string, Value *> &autoArgs,
 PosIdx EvalState::positionIndex(PosPtr pos) {
   if (!pos) return 0;
   if (PosIdx *found = dynamicPositions.find(uint64_t(uintptr_t(pos)))) return *found;
-  if (attributePositions.size() >= std::numeric_limits<PosIdx>::max())
+  if (attributePositions.size() >= PosIdx(~PosIdx(0)))
     throw EvalError("attribute position table exhausted");
   PosIdx index = attributePositions.append(pos);
   dynamicPositions.insert(uint64_t(uintptr_t(pos)), index);
@@ -1934,10 +1961,10 @@ PosIdx EvalState::positionIndex(PosPtr pos) {
 
 PosIdx EvalState::positionBase(nd::AttrsOp op) {
   auto positions = op.getPositions();
-  size_t count = std::min(positions.size(), op.getNames().size());
+  size_t count = cp::min(positions.size(), op.getNames().size());
   if (!count) return 0;
   if (PosIdx *found = attrPositionBases.find(uint64_t(uintptr_t(op.getOperation())))) return *found;
-  if (count > std::numeric_limits<PosIdx>::max() - attributePositions.size())
+  if (count > PosIdx(~PosIdx(0)) - attributePositions.size())
     throw EvalError("attribute position table exhausted");
   PosIdx base = attributePositions.size();
   for (size_t i = 0; i < count; ++i)
@@ -1996,7 +2023,7 @@ const AttrsShape *EvalState::attrsShapeOf(nd::AttrsOp op) {
   return shape;
 }
 
-/// Dynamic attributes are inserted one by one with duplicate checks: out of line, where the std::map lives.
+/// Dynamic attributes are inserted one by one with duplicate checks: out of line, where the table of names lives.
 void EvalState::evalAttrsDynamic(Node *node, Frame *env, Value &out) {
   auto op = cast<nd::AttrsOp>(node->def);
   auto names = op.getNames();
@@ -2010,9 +2037,10 @@ void EvalState::evalAttrsDynamic(Node *node, Frame *env, Value &out) {
     PosIdx p = i < positions.size() ? posBase + i : 0;
     bb.insertIndexed(symbolOf(names[i]), lookup(env, values[i]), p);
   }
-  std::map<Symbol, PosPtr> seen;
+  // The names defined so far, by symbol (+1: the key 0 is no key): a dynamic name's position, a static name's null (the set's own is shown).
+  cp::WordTable<PosPtr> seen;
   for (size_t i = 0; i < names.size(); i++)
-    seen[symbolOf(names[i])] = nullptr;
+    seen.insert(uint64_t(symbolOf(names[i])) + 1, nullptr);
   for (size_t j = 0; j < nDynNames; j++) {
     Value *nv = lookupForced(env, dynNames[j]); // forced next: a cell made here is made evaluated
     PosPtr p = dynNames[j]->pos();
@@ -2020,11 +2048,9 @@ void EvalState::evalAttrsDynamic(Node *node, Frame *env, Value &out) {
     if (nv->type == VType::Null) continue;
     auto name = forceStringNoCtx(*nv, p, "while evaluating the name of a dynamic attribute");
     Symbol sym = symbolOfString(name);
-    if (seen.count(sym))
-      throw EvalError("dynamic attribute '" + std::string(name) + "' already defined at " +
-                          showPos(seen[sym] ? seen[sym] : nd::posOfOp(op)),
-                      p);
-    seen[sym] = p;
+    if (PosPtr *defined = seen.find(uint64_t(sym) + 1))
+      throw EvalError("dynamic attribute '" + std::string(name) + "' already defined at " + showPos(*defined ? *defined : nd::posOfOp(op)), p);
+    seen.insert(uint64_t(sym) + 1, p);
     bb.insert(sym, lookup(env, dynValues[j]), p);
   }
   mkAttrs(out, bb.finish());
@@ -2116,7 +2142,7 @@ Value *EvalState::selectField(Value &base, Symbol key, PosPtr pos) {
 
 void EvalState::statEval(Node *n, Frame *env) {
   Operation *op = n->def;
-  auto &e = evalsByKind[op->getName().getAsOpaquePointer()]; e.first = op->getName().getStringRef(); ++e.second;
+  ++countOf(evalsByKind, op->getName()).n[0];
   if (env) {
     ++env->info->nEvals;
     if (!epochEvals.empty()) ++epochEvals.back();
@@ -2354,10 +2380,9 @@ bool EvalState::isDerivation(Value &v) {
   return t->value->type == VType::String && t->value->sv() == "derivation";
 }
 
-std::optional<std::string> EvalState::tryAttrsToString(Value &v, NixStringContext &ctx, bool coerceMore,
-                                                       bool copyToStore) {
+cp::Maybe<std::string> EvalState::tryAttrsToString(Value &v, NixStringContext &ctx, bool coerceMore, bool copyToStore) {
   const Attr *f = v.attrs->get(s.toString);
-  if (!f) return std::nullopt;
+  if (!f) return {};
   Value *r = allocValue();
   callFunction(*f->value, v, *r, nullptr);
   return coerceToString(*r, ctx, coerceMore, copyToStore, nullptr,
@@ -2753,11 +2778,12 @@ nixfe::ParseOptions EvalState::parseOptions() {
 /// The optimization pipeline is data: MLIR pass-pipeline text (EvalSettings::pipeline,
 /// overridden by MLNIX_PIPELINE), so any registered pass can be composed by name.
 static std::unique_ptr<mlir::PassManager> makeOptimizer(mlir::MLIRContext &ctx, const EvalSettings &settings) {
-  static std::once_flag once;
-  std::call_once(once, [] {
+  static const bool registered = [] { // the language runs a local static's initializer once, whichever thread comes first
     mlir::registerTransformsPasses();
     nd::registerNixPasses();
-  });
+    return true;
+  }();
+  (void)registered;
   std::string text = pipelineText(settings);
   auto pm = std::make_unique<mlir::PassManager>(&ctx); // anchored on any op
   pm->enableVerifier(false);
@@ -2788,7 +2814,7 @@ nd::ExprOp EvalState::lowerToMLIR(std::shared_ptr<nixfe::Origin> origin, const c
     for (const std::string &nm : *scopeNames) go.scopeNames.append(nm);
   }
   std::string sym = "expr" + std::to_string(exprCounter++);
-  auto t0 = std::chrono::steady_clock::now();
+  uint64_t t0 = statsEnabled ? nixsys::monotonicNs() : 0;
   nd::ExprOp op = nixfe::genExpr(*module, std::move(origin), po, sym, go);
   // The expression is IsolatedFromAbove and not yet referenced by any frame,
   // so it can be rewritten freely before evaluation starts.
@@ -2797,8 +2823,8 @@ nd::ExprOp EvalState::lowerToMLIR(std::shared_ptr<nixfe::Origin> origin, const c
     if (mlir::failed(optimizer->run(op))) throw EvalError("the optimization pipeline failed");
   }
   if (statsEnabled) {
-    op->walk([&](mlir::Operation *o) { ++opStats[o->getName().getStringRef()]; });
-    nsLower += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+    op->walk([&](mlir::Operation *o) { ++countOf(opStats, o->getName()).n[0]; });
+    nsLower += nixsys::monotonicNs() - t0;
   }
   return op;
 }
@@ -2815,7 +2841,7 @@ void EvalState::startPrelower() {
   if (pre || !settings.deferBodies || (!list && !replayed)) return;
   if (replayed) nixstore::startPrehash(); // the source trees the recorded run hashed, hashed again off this thread
   pre = std::make_unique<PrelowerState>();
-  for (auto &e : baseEnv) pre->baseNames.insert(e.getKey().str());
+  for (auto &e : baseEnv) pre->baseNames.set(e.p, e.n, 1, [&] { return e.p; }); // the names' bytes are baseEnvNames', which never move
   pre->po = parseOptions();
   pre->po.lintAbsolutePaths = pre->po.lintShortPaths = pre->po.lintUrls = nixfe::Lint::Ignore;
   pre->po.onWarning = nullptr;
@@ -2832,7 +2858,7 @@ void EvalState::startPrelower() {
     for (const std::string &f : nixprefetch::replayFiles) pre->queue.append(f);
   }
   unsigned n = 1;
-  if (const char *t = getenv("MLNIX_PRELOWER_THREADS")) n = std::max(1ul, std::min(8ul, strtoul(t, nullptr, 10)));
+  if (const char *t = getenv("MLNIX_PRELOWER_THREADS")) n = unsigned(cp::max(1ul, cp::min(8ul, strtoul(t, nullptr, 10))));
   for (unsigned i = 0; i < n; i++) pre->workers.emplace([this] { prelowerLoop(); });
 }
 
@@ -2856,7 +2882,7 @@ void EvalState::prelowerLoop() {
       origin->text = nixfe::Source::mapFile(path);
       if (origin->text) {
         nixfe::GenOptions go;
-        go.isBaseName = [this](llvm::StringRef n) { return pre->baseNames.count(n.str()) != 0; };
+        go.isBaseName = [this](llvm::StringRef n) { return pre->baseNames.find(n.data(), uint32_t(n.size())) != nullptr; };
         go.deferBodies = true;
         pl->pool = std::make_unique<nixfe::FilePool>(nextPoolId.fetch_add(1), origin, pre->po);
         go.pool = pl->pool.get();
@@ -3261,12 +3287,12 @@ std::string formatParseError(const nixfe::ParseError &e, const char *kind) {
   return res;
 }
 
-int runWithLargeStack(std::function<int()> fn) {
+int runWithLargeStack(cp::Fn<int()> fn) {
   struct Ctx {
-    std::function<int()> fn;
+    cp::Fn<int()> fn; // lent: the thread that calls it is joined before this returns
     int rc = 0;
     std::exception_ptr ex;
-  } c{std::move(fn)};
+  } c{fn};
   pthread_attr_t attr;
   pthread_attr_init(&attr);
   pthread_attr_setstacksize(&attr, size_t(1) << 30); // 1 GiB (virtual)

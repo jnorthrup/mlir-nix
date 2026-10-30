@@ -158,16 +158,21 @@ template <class V> struct TextTable {
     V v;
   };
   uint32_t size() const { return rows.size(); }
+  bool empty() const { return rows.empty(); }
   const Row &row(uint32_t i) const { return rows[i]; }
+  /// The rows in the order they were made: `for (auto &r : table)` reads r.p, r.n and r.v.
+  Row *begin() { return rows.data(); }
+  Row *end() { return rows.data() + rows.size(); }
+  const Row *begin() const { return rows.data(); }
+  const Row *end() const { return rows.data() + rows.size(); }
   /// The value stored for the bytes, or null.  Its address holds until the next set.
   V *find(const char *p, uint32_t n) {
-    uint64_t h = key(p, n);
-    if (uint32_t *i = byHash.find(h)) {
-      if (same(rows[*i], p, n)) return &rows[*i].v;
-      for (uint32_t j : spill)
-        if (same(rows[j], p, n)) return &rows[j].v;
-    }
-    return nullptr;
+    uint32_t i = indexOf(p, n);
+    return i == kNone ? nullptr : &rows[i].v;
+  }
+  const V *find(const char *p, uint32_t n) const {
+    uint32_t i = indexOf(p, n);
+    return i == kNone ? nullptr : &rows[i].v;
   }
   /// The bytes now stand for v; `copy()` makes the bytes where they outlive the table, called only for bytes not stored yet.
   template <class Copy> V *set(const char *p, uint32_t n, V v, Copy copy) {
@@ -175,12 +180,29 @@ template <class V> struct TextTable {
       *old = v;
       return old;
     }
-    uint32_t i = rows.append(Row{copy(), n, v});
-    if (!byHash.insert(key(p, n), i)) spill.append(i);
-    return &rows[i].v;
+    return &rows[make(p, n, v, copy)].v;
+  }
+  /// The value stored for the bytes, made V() first when there is none (a count to add to).
+  template <class Copy> V &at(const char *p, uint32_t n, Copy copy) {
+    if (V *old = find(p, n)) return *old;
+    return rows[make(p, n, V(), copy)].v;
   }
 
 private:
+  static constexpr uint32_t kNone = ~0u;
+  uint32_t indexOf(const char *p, uint32_t n) const {
+    if (const uint32_t *i = byHash.find(key(p, n))) {
+      if (same(rows[*i], p, n)) return *i;
+      for (uint32_t j : spill)
+        if (same(rows[j], p, n)) return j;
+    }
+    return kNone;
+  }
+  template <class Copy> uint32_t make(const char *p, uint32_t n, V v, Copy copy) {
+    uint32_t i = rows.append(Row{copy(), n, v});
+    if (!byHash.insert(key(p, n), i)) spill.append(i);
+    return i;
+  }
   static uint64_t key(const char *p, uint32_t n) {
     uint64_t h = hashBytes(p, n);
     return h ? h : 1;

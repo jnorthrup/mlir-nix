@@ -229,21 +229,22 @@ void finishOptions(Options &o) {
   o.store.system = o.eval.currentSystem;
 }
 
-std::map<std::string, Value *> buildAutoArgs(EvalState &st, const Options &o) {
-  std::map<std::string, Value *> res;
+AutoArgs buildAutoArgs(EvalState &st, const Options &o) {
+  AutoArgs res; // a name given twice stands for its last value
   char buf[PATH_MAX];
   std::string cwd = getcwd(buf, sizeof buf) ? buf : "/";
-  for (auto &[n, e] : o.argExprs) res[n] = st.evalString(e, cwd, "«string»");
+  auto set = [&](const std::string &n, Value *v) { res.set(n.data(), uint32_t(n.size()), v, [&] { return st.copyString(n); }); };
+  for (auto &[n, e] : o.argExprs) set(n, st.evalString(e, cwd, "«string»"));
   for (auto &[n, s] : o.argStrs) {
     Value *v = st.allocValue();
     st.mkString(*v, s);
-    res[n] = v;
+    set(n, v);
   }
   return res;
 }
 
 /// findAlongAttrPath
-Value *findAlongAttrPath(EvalState &st, const std::string &path, const std::map<std::string, Value *> &autoArgs,
+Value *findAlongAttrPath(EvalState &st, const std::string &path, const AutoArgs &autoArgs,
                          Value &root) {
   composite::MutableSeries<std::string> comps;
   {
@@ -306,7 +307,7 @@ bool getDerivation(EvalState &st, Value &v, const std::string &attrPath, composi
   return false;
 }
 
-void getDerivations(EvalState &st, Value &vIn, const std::string &prefix, const std::map<std::string, Value *> &autoArgs,
+void getDerivations(EvalState &st, Value &vIn, const std::string &prefix, const AutoArgs &autoArgs,
                     composite::MutableSeries<DrvInfo> &drvs, std::set<const void *> &done) {
   Value v;
   st.autoCallFunction(autoArgs, vIn, v);
@@ -826,14 +827,14 @@ int realMain(int argc, char **argv) {
     o.store.readOnly = true;
     auto store = std::make_shared<nixstore::Store>(o.store);
     EvalState st(std::move(o.eval), store);
-    using Entry = composite::bare_t<decltype(*st.baseEnv.begin())>;
+    using Entry = composite::TextTable<Value *>::Row;
     composite::MutableSeries<const Entry *> v; // the entries where they lie, ordered by name
     for (auto &e : st.baseEnv)
-      if (e.getValue()->type == VType::PrimOp) v.append(&e);
+      if (e.v->type == VType::PrimOp) v.append(&e);
     composite::sortRows(v.data(), v.size(), [](const Entry *a, const Entry *b) {
-      return composite::lessChars(composite::series(a->getKey().data(), uint32_t(a->getKey().size())), composite::series(b->getKey().data(), uint32_t(b->getKey().size())));
+      return composite::lessChars(composite::series(a->p, a->n), composite::series(b->p, b->n));
     });
-    for (const Entry *e : v) std::cout << e->getKey().str() << " " << e->getValue()->primOp->arity << "\n";
+    for (const Entry *e : v) std::cout << std::string_view(e->p, e->n) << " " << e->v->primOp->arity << "\n";
     return 0;
   }
   if (cmd == "store") return cmdStore(argc, argv, 2);
