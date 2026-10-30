@@ -14,6 +14,7 @@
 #define NIX_EVAL_H
 
 #include "Composite/Patricia.h"
+#include "Composite/Table.h"
 #include "Composite/Pool.h"
 #include "Composite/Rows.h"
 #include "Composite/Views.h"
@@ -56,11 +57,11 @@ using Symbol = uint32_t;
 struct SymbolTable {
   Symbol create(llvm::StringRef s) {
     ++creates; // (counted always: one add; MLNIX_STATS prints it)
-    auto it = map.find(s);
-    if (it != map.end()) return it->second;
+    if (Symbol *found = map.find(s.data(), uint32_t(s.size()))) return *found;
     Symbol id = names.size();
-    auto r = map.try_emplace(s, id);
-    names.append(r.first->getKey());
+    const char *bytes = text.copy(s.data(), uint32_t(s.size())); // the name's bytes, where they never move
+    map.set(bytes, uint32_t(s.size()), id, [bytes] { return bytes; });
+    names.append(llvm::StringRef(bytes, s.size()));
     uint64_t p = 0; // the first eight bytes, big-endian, zero-padded: comparing two of these orders the names as their bytes do
     for (size_t i = 0; i < 8; i++) p = p << 8 | (i < s.size() ? uint8_t(s[i]) : 0);
     prefix.append(p);
@@ -76,7 +77,8 @@ struct SymbolTable {
   }
   size_t size() const { return names.size(); }
 
-  llvm::StringMap<Symbol> map;
+  composite::TextTable<Symbol> map; // a name's symbol (Composite/Table.h): its bytes' hash, one probe, one compare
+  composite::Bump text;             // the names' bytes
   composite::MutableSeries<llvm::StringRef> names;
   composite::MutableSeries<uint64_t> prefix; // per symbol: its first eight bytes as one word (less)
   uint64_t creates = 0;
@@ -288,7 +290,7 @@ struct RegionInfo {
   /// N times counts N times); everRan the distinct ops that ran, one bit an op, opIdx the op -> bit.
   uint32_t nOps = 0, nThunks = 0;
   uint64_t nEvals = 0;
-  llvm::DenseMap<mlir::Operation *, uint32_t> opIdx{};
+  composite::WordTable<uint32_t> opIdx; // by the op's address
   composite::MutableSeries<uint64_t> everRan{};
   composite::MutableSeries<uint32_t> opEvals{}; // MLNIX_STATS_USES: evalOp calls per op (indexed like everRan's bits)
 };
@@ -488,8 +490,8 @@ struct EvalState {
   PosIdx positionBase(mlir::nix::AttrsOp op);
   const AttrsShape *attrsShapeOf(mlir::nix::AttrsOp op);
   cp::MutableSeries<PosPtr> attributePositions{nullptr};
-  std::unordered_map<PosPtr, PosIdx> dynamicPositions;
-  llvm::DenseMap<mlir::Operation *, PosIdx> attrPositionBases;
+  composite::WordTable<PosIdx> dynamicPositions; // by the position word's address (Composite/Table.h)
+  composite::WordTable<PosIdx> attrPositionBases; // by the op's address
 
   // -- Value construction ------------------------------------------------
   void mkInt(Value &v, int64_t n) { if (statsEnabled) ++nVT[unsigned(VType::Int)];  v.type = VType::Int; v.integer = n; }
@@ -693,7 +695,7 @@ struct EvalState {
   const PrimOp *primOpByKey(llvm::StringRef key);
   /// The primop an IRDL-defined continent op stands for (cached per op name).
   const PrimOp *primFor(mlir::Operation *op);
-  llvm::DenseMap<const void *, const PrimOp *> primForOp;
+  composite::WordTable<const PrimOp *> primForOp; // by the op name's address
   /// MLNIX_STATS=1: op histogram of every module lowered, printed at exit.
   llvm::StringMap<size_t> opStats;
   bool statsEnabled = false;
@@ -724,11 +726,13 @@ struct EvalState {
   /// The same for a name MLIR has interned as a StringAttr (the formals and names of lambdas).  Keyed by the
   /// attribute's address, so no string is hashed or compared (the uniquer did that once, at lowering).
   Symbol symbolOf(mlir::StringAttr a) {
-    auto [it, inserted] = attrSymbols.try_emplace(a.getAsOpaquePointer(), Symbol());
-    if (inserted) it->second = symbols.create(a.getValue());
-    return it->second;
+    uint64_t k = uint64_t(uintptr_t(a.getAsOpaquePointer()));
+    if (Symbol *s = attrSymbols.find(k)) return *s;
+    Symbol s = symbols.create(a.getValue());
+    attrSymbols.insert(k, s);
+    return s;
   }
-  llvm::DenseMap<const void *, Symbol> attrSymbols;
+  composite::WordTable<Symbol> attrSymbols; // by the attribute's address
   /// The symbol of a string value's bytes.  A string value's bytes never change and never move (an arena, a mapped source, an op's
   /// property, the symbol table's own entries), so their address and length name them for the whole run: a string met before (the literal
   /// list of a removeAttrs called a hundred thousand times, a name attrNames handed out) is answered by its address, not hashed and probed.
@@ -826,7 +830,7 @@ struct EvalState {
   // The record of each SSA value, by the value's address: the evaluator reads the records an op's record points at and never asks; the JITs,
   // the primop model and the cold paths ask here, through a direct-mapped cache in front of the hash map.  A value's address indexed again
   // (an op erased by a pass and its storage reused) gets a new record, and the map and the cache are rewritten, so neither holds a stale one.
-  llvm::DenseMap<void *, Node *> nodeMap;
+  composite::WordTable<Node *> nodeMap; // by the value's address
   struct NodeCacheEntry { void *key = nullptr; Node *node = nullptr; };
   static constexpr size_t kNodeCache = 8192;
   NodeCacheEntry nodeCache[kNodeCache];
@@ -834,9 +838,9 @@ struct EvalState {
     NodeCacheEntry &e = nodeCache[(reinterpret_cast<uintptr_t>(key) >> 4) & (kNodeCache - 1)];
     if (e.key == key) return e.node;
     if (statsEnabled) [[unlikely]] ++nSlotMisses;
-    auto it = nodeMap.find(key);
-    if (it == nodeMap.end()) return nullptr;
-    e = {key, it->second};
+    Node **found = nodeMap.find(uint64_t(uintptr_t(key)));
+    if (!found) return nullptr;
+    e = {key, *found};
     return e.node;
   }
   /// Indexing a body: its RegionInfo and a node for each of its values.  The evaluator's indexer allocates in the evaluator's arena and
@@ -848,7 +852,7 @@ struct EvalState {
     llvm::BumpPtrAllocator arena;                 // a helper's: the nodes live as long as the evaluator keeps this indexer
     /// The records of the values of the blocks being indexed: an operand in its own block (or in a block around it, indexed in the same
     /// recursion) is found here, in a map the size of those blocks; emptied when the outermost body is done.
-    llvm::DenseMap<void *, Node *> blockNodes;
+    composite::WordTable<Node *> blockNodes; // by the value's address: the values of the blocks being indexed
     unsigned depth = 0;
     composite::MutableSeries<std::pair<void *, Node *>> captures;           // a helper's: for the evaluator's map of every value
     composite::MutableSeries<std::pair<mlir::Region *, RegionInfo *>> regions; // a helper's: for regionInfos
@@ -859,7 +863,7 @@ struct EvalState {
   Indexer indexer{*this, false};
   composite::MutableSeries<std::unique_ptr<Indexer>> helperIndexers; // adopted with their files: their arenas hold those files' nodes
   void setNode(void *key, Node *n) {
-    nodeMap[key] = n;
+    nodeMap.at(uint64_t(uintptr_t(key))) = n;
     NodeCacheEntry &e = nodeCache[(reinterpret_cast<uintptr_t>(key) >> 4) & (kNodeCache - 1)];
     if (e.key == key) e.node = n;
   }
@@ -988,7 +992,7 @@ struct EvalState {
   uint64_t nSlotsTouched = 0; // MLNIX_STATS: frame slots that were ever read (a cell made on first touch), of nFrameSlots allocated
   uint64_t nSlotsAssigned = 0, nSlotsNoRead = 0; // MLNIX_STATS: frame cells assigned, and those given to a value with no use at all
   uint64_t nsLower = 0, nsMint = 0; // MLNIX_STATS: time lowering files (analysis of deferred lambdas included) / minting bodies on demand
-  llvm::DenseMap<mlir::Region *, RegionInfo *> regionInfos;
+  composite::WordTable<RegionInfo *> regionInfos; // by the region's address
   void indexRegion(mlir::Region &r);
   void evalConcatStrings(Node *n, Frame *env, Value &out);
   void evalAttrsDynamic(Node *n, Frame *env, Value &out);

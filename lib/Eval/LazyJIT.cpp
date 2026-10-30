@@ -330,9 +330,9 @@ struct LazyJITPlan::Impl {
     if (l.key != kNoArgument) {
       Value *key = peek(st, envs, active, args, cells, l.key, result);
       if (!key || key->type != VType::String || key->str.ctx) return miss();
-      auto found = st.symbols.map.find(llvm::StringRef(key->str.s, key->aux));
-      if (found == st.symbols.map.end()) return miss();
-      symbol = found->second;
+      Symbol *found = st.symbols.map.find(key->str.s, key->aux); // a name never interned is in no set: a miss, no symbol made
+      if (!found) return miss();
+      symbol = *found;
     }
     Value *current = peek(st, envs, active, args, cells, l.base, result);
     for (unsigned i = 0; i < l.pathSize; ++i) {
@@ -447,12 +447,12 @@ struct LazyJITPlan::Impl {
             }
             for (auto *r : child.regions)
               if (r == &stage.getBody()) eligible = false;
-            auto body = state.regionInfos.find(&stage.getBody());
-            if (!eligible || body == state.regionInfos.end() || !body->second->result) { eligible = false; break; }
+            RegionInfo **body = state.regionInfos.find(uint64_t(uintptr_t(&stage.getBody())));
+            if (!eligible || !body || !(*body)->result) { eligible = false; break; }
             child.region = &stage.getBody();
             child.regions.push_back(child.region);
             child.formals.push_back(child.region->front().getArgument(0));
-            bodyResult = body->second->result;
+            bodyResult = (*body)->result;
             if (i + 1 < call.getArgs().size()) {
               stage = bodyResult.getDefiningOp<nd::LambdaOp>();
               if (!stage || stage->getParentRegion() != child.region) { eligible = false; break; }
@@ -626,11 +626,11 @@ std::unique_ptr<LazyJITPlan> LazyJITPlan::createSaturated(EvalState &st, mlir::O
         lambda.getBody().front().getNumArguments() != 1) return {};
     auto *region = &lambda.getBody();
     for (auto *previous : regions) if (previous == region) return {};
-    auto body = st.regionInfos.find(region);
-    if (body == st.regionInfos.end() || !body->second->result) return {};
+    RegionInfo **body = st.regionInfos.find(uint64_t(uintptr_t(region)));
+    if (!body || !(*body)->result) return {};
     regions.push_back(region);
     arguments.push_back(region->front().getArgument(0));
-    result = body->second->result;
+    result = (*body)->result;
     if (i + 1 < nargs) {
       lambda = result.getDefiningOp<nd::LambdaOp>();
       if (!lambda || lambda->getParentRegion() != region) return {};

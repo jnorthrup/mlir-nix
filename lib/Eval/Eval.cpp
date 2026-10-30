@@ -368,7 +368,7 @@ void EvalState::printStats() {
                                  (unsigned long long)nChainOuter, 100.0 * nChainOuter / nFrames, 100.0 * nChainOuterSlots / nFrameSlots);
   if (nFrames) {
     composite::MutableSeries<RegionInfo *> top;
-    for (auto &kv : regionInfos) if (kv.second->calls) top.append(kv.second);
+    for (auto &kv : regionInfos) if (kv.v->calls) top.append(kv.v);
     cp::sortRows(top.data(), top.size(), [](RegionInfo *a, RegionInfo *b) { return a->calls > b->calls; });
     size_t keep = 40;
     if (const char *t = getenv("MLNIX_STATS_TOP")) keep = std::max<size_t>(1, strtoul(t, nullptr, 10));
@@ -384,7 +384,7 @@ void EvalState::printStats() {
     struct Group { uint64_t frames = 0, lambdas = 0; std::string example, shape; };
     std::map<std::string, Group> byShape;
     for (auto &kv : regionInfos) {
-      RegionInfo *ri = kv.second;
+      RegionInfo *ri = kv.v;
       if (!ri->calls || !ri->region->getParentOp()) continue;
       if (!isa<nd::LambdaOp>(ri->region->getParentOp())) continue;
       std::string sh = shapeOf(ri);
@@ -411,7 +411,7 @@ void EvalState::printStats() {
   if (nFrames) {
     uint64_t bytes[6] = {}, frames[6] = {}, slotsBy[6] = {};   // 1, 2-3, 4-8, 9-16, 17-64, 65+ slots
     for (auto &kv : regionInfos) {
-      RegionInfo *ri = kv.second;
+      RegionInfo *ri = kv.v;
       unsigned b = ri->numSlots <= 1 ? 0 : ri->numSlots <= 3 ? 1 : ri->numSlots <= 8 ? 2 : ri->numSlots <= 16 ? 3 : ri->numSlots <= 64 ? 4 : 5;
       frames[b] += ri->calls; bytes[b] += ri->calls * (sizeof(Frame) + ri->numSlots * sizeof(Value *)); slotsBy[b] += ri->calls * ri->numSlots;
     }
@@ -578,7 +578,7 @@ void EvalState::printStats() {
     uint64_t fOps = 0, fRan = 0, fEvals = 0, fTh = 0, mOps = 0, mRan = 0, mEvals = 0, mTh = 0;
     unsigned fR = 0, mR = 0;
     for (auto &kv : regionInfos) {
-      RegionInfo *ri = kv.second;
+      RegionInfo *ri = kv.v;
       uint64_t ran = 0;
       for (uint64_t w : ri->everRan) ran += std::popcount(w);
       if (minted.count(ri)) { mR++; mOps += ri->nOps; mRan += ran; mEvals += ri->nEvals; mTh += ri->nThunks; }
@@ -671,9 +671,9 @@ void EvalState::printStats() {
     cp::MutableSeries<Hot> hot;
     uint64_t evals = 0, irBytes = 0;
     for (auto &kv : regionInfos)
-      for (auto &o : kv.second->opIdx) {
-        uint32_t e = o.second < kv.second->opEvals.size() ? kv.second->opEvals[o.second] : 0;
-        mlir::Operation *op = o.first;
+      for (auto &o : kv.v->opIdx) {
+        uint32_t e = o.v < kv.v->opEvals.size() ? kv.v->opEvals[o.v] : 0;
+        mlir::Operation *op = reinterpret_cast<mlir::Operation *>(uintptr_t(o.k));
         // an Operation's header, its operands, results and properties: what a read of the op may touch
         uint32_t b = uint32_t(sizeof(mlir::Operation) + op->getNumOperands() * sizeof(mlir::OpOperand) + op->getNumResults() * 16 +
                               op->getPropertiesStorageSize());
@@ -696,25 +696,25 @@ void EvalState::printStats() {
     struct U { uint64_t ops = 0, zero = 0, one = 0, many = 0, ranOne = 0; };
     llvm::StringMap<U> byKind;
     for (auto &kv : regionInfos) {
-      RegionInfo *ri = kv.second;
+      RegionInfo *ri = kv.v;
       for (auto &o : ri->opIdx) {
-        mlir::Operation *op = o.first;
+        mlir::Operation *op = reinterpret_cast<mlir::Operation *>(uintptr_t(o.k));
         if (op->getNumResults() != 1) continue;
         U &u = byKind[op->getName().getStringRef()];
         u.ops++;
         unsigned n = std::distance(op->getResult(0).use_begin(), op->getResult(0).use_end());
         (n == 0 ? u.zero : n == 1 ? u.one : u.many)++;
-        if (n == 1 && (ri->everRan[o.second >> 6] >> (o.second & 63) & 1)) u.ranOne++;
+        if (n == 1 && (ri->everRan[o.v >> 6] >> (o.v & 63) & 1)) u.ranOne++;
       }
     }
     { // who reads a single-use string, attrs or concatenation: the consumer's kind, and whether it sits in another region (read once per call of that region, not once)
       llvm::StringMap<std::array<uint64_t, 3>> by; // [same region, nested region, producer evals]
       for (auto &kv : regionInfos)
-        for (auto &o : kv.second->opIdx) {
-          mlir::Operation *op = o.first;
+        for (auto &o : kv.v->opIdx) {
+          mlir::Operation *op = reinterpret_cast<mlir::Operation *>(uintptr_t(o.k));
           if (op->getNumResults() != 1 || !op->hasOneUse()) continue;
           mlir::Operation *c = *op->getUsers().begin();
-          { auto &row = by[(op->getName().getStringRef() + " -> " + c->getName().getStringRef()).str()]; row[c->getParentRegion() == op->getParentRegion() ? 0 : 1]++; row[2] += kv.second->opEvals[o.second]; }
+          { auto &row = by[(op->getName().getStringRef() + " -> " + c->getName().getStringRef()).str()]; row[c->getParentRegion() == op->getParentRegion() ? 0 : 1]++; row[2] += kv.v->opEvals[o.v]; }
         }
       auto r2 = ranked(by, [](auto &e) { return e.getValue()[2]; });
       llvm::errs() << "== single-use string/attrs/concat producers -> consumer: same region, nested region, producer evals (ranked by evals)\n";
@@ -950,7 +950,7 @@ void EvalState::Indexer::index(Region &r) {
   bool everyValue = st.scalarJIT != nullptr;
   auto publish = [&](mlir::Value v, Node *n) {
     void *key = v.getAsOpaquePointer();
-    blockNodes[key] = n;
+    blockNodes.at(uint64_t(uintptr_t(key))) = n;
     if (everyValue) st.setNode(key, n);
   };
   for (BlockArgument a : blk.getArguments()) {
@@ -1006,8 +1006,8 @@ void EvalState::Indexer::index(Region &r) {
   // A helper indexes a whole file, which reads nothing from outside it: what is not in blockNodes is nowhere.
   auto recordOf = [&](mlir::Value v) -> Node * {
     void *key = v.getAsOpaquePointer();
-    auto it = blockNodes.find(key);
-    return it != blockNodes.end() ? it->second : helper ? nullptr : st.nodeOf(key);
+    Node **found = blockNodes.find(uint64_t(uintptr_t(key)));
+    return found ? *found : helper ? nullptr : st.nodeOf(key);
   };
   for (Operation &op : blk) {
     unsigned k = op.getNumOperands();
@@ -1034,17 +1034,16 @@ void EvalState::Indexer::index(Region &r) {
     ri->everRan.assign((ri->nOps + 63) / 64, 0);
     ri->opEvals.assign(ri->nOps, 0);
     uint32_t oi = 0;
-    for (Operation &op : blk) ri->opIdx[&op] = oi++;
+    for (Operation &op : blk) ri->opIdx.at(uint64_t(uintptr_t(&op))) = oi++;
   }
   if (helper) regions.append({&r, ri});
-  else st.regionInfos[&r] = ri;
+  else st.regionInfos.at(uint64_t(uintptr_t(&r))) = ri;
 }
 
 RegionInfo *EvalState::regionInfo(Region *r) {
-  auto it = regionInfos.find(r);
-  if (it != regionInfos.end()) return it->second;
+  if (RegionInfo **found = regionInfos.find(uint64_t(uintptr_t(r)))) return *found;
   indexRegion(*r);
-  return regionInfos[r];
+  return regionInfos.at(uint64_t(uintptr_t(r)));
 }
 
 unsigned EvalState::srcClassOf(RegionInfo *ri) {
@@ -1925,12 +1924,11 @@ void EvalState::autoCallFunction(const std::map<std::string, Value *> &autoArgs,
 
 PosIdx EvalState::positionIndex(PosPtr pos) {
   if (!pos) return 0;
-  auto it = dynamicPositions.find(pos);
-  if (it != dynamicPositions.end()) return it->second;
+  if (PosIdx *found = dynamicPositions.find(uint64_t(uintptr_t(pos)))) return *found;
   if (attributePositions.size() >= std::numeric_limits<PosIdx>::max())
     throw EvalError("attribute position table exhausted");
   PosIdx index = attributePositions.append(pos);
-  dynamicPositions.emplace(pos, index);
+  dynamicPositions.insert(uint64_t(uintptr_t(pos)), index);
   return index;
 }
 
@@ -1938,14 +1936,13 @@ PosIdx EvalState::positionBase(nd::AttrsOp op) {
   auto positions = op.getPositions();
   size_t count = std::min(positions.size(), op.getNames().size());
   if (!count) return 0;
-  auto it = attrPositionBases.find(op.getOperation());
-  if (it != attrPositionBases.end()) return it->second;
+  if (PosIdx *found = attrPositionBases.find(uint64_t(uintptr_t(op.getOperation())))) return *found;
   if (count > std::numeric_limits<PosIdx>::max() - attributePositions.size())
     throw EvalError("attribute position table exhausted");
   PosIdx base = attributePositions.size();
   for (size_t i = 0; i < count; ++i)
     attributePositions.append(nd::posOfWord(uint64_t(positions[i])));
-  attrPositionBases.try_emplace(op.getOperation(), base);
+  attrPositionBases.insert(uint64_t(uintptr_t(op.getOperation())), base);
   return base;
 }
 
@@ -2123,8 +2120,7 @@ void EvalState::statEval(Node *n, Frame *env) {
   if (env) {
     ++env->info->nEvals;
     if (!epochEvals.empty()) ++epochEvals.back();
-    auto it = env->info->opIdx.find(op);
-    if (it != env->info->opIdx.end()) { env->info->everRan[it->second >> 6] |= 1ull << (it->second & 63); ++env->info->opEvals[it->second]; }
+    if (uint32_t *found = env->info->opIdx.find(uint64_t(uintptr_t(op)))) { env->info->everRan[*found >> 6] |= 1ull << (*found & 63); ++env->info->opEvals[*found]; }
   }
 }
 
@@ -2928,7 +2924,7 @@ nd::ExprOp EvalState::takePrelowered(const std::string &resolved) {
     if (mlir::failed(optimizer->run(op))) throw EvalError("the optimization pipeline failed");
   }
   if (pl->index) { // indexed by the helper: its regions and the captures of the bodies minted later become the evaluator's
-    for (auto &[r, ri] : pl->index->regions) regionInfos[r] = ri;
+    for (auto &[r, ri] : pl->index->regions) regionInfos.at(uint64_t(uintptr_t(r))) = ri;
     for (auto &[key, n] : pl->index->captures) setNode(key, n);
     helperIndexers.append(std::move(pl->index));
   }

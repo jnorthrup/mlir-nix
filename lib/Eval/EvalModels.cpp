@@ -33,14 +33,13 @@ struct PrimEvalModel : public nd::NixEvalOpInterface::FallbackModel<PrimEvalMode
 
 const PrimOp *EvalState::primFor(Operation *op) {
   const void *k = op->getName().getAsOpaquePointer();
-  auto it = primForOp.find(k);
-  if (it != primForOp.end()) return it->second;
+  if (const PrimOp **found = primForOp.find(uint64_t(uintptr_t(k)))) return *found;
   const auto *info = ctx.getLoadedDialect<nd::NixDialect>()->primOf(op);
   const PrimOp *p = primOpByKey(info->key);
   if (!p)
     throw EvalError("primop '" + info->key.str() + "' is declared in the IRDL but has no implementation",
                     nd::posOfOp(op));
-  primForOp[k] = p;
+  primForOp.insert(uint64_t(uintptr_t(k)), p);
   return p;
 }
 

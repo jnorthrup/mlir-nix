@@ -11,7 +11,8 @@
 #ifndef COMPOSITE_TABLE_H
 #define COMPOSITE_TABLE_H
 
-#include "Composite/Core.h"
+#include "Composite/Funnel.h"
+#include "Composite/Mutable.h"
 
 namespace composite {
 
@@ -46,6 +47,34 @@ template <class V> struct WordTable {
     if (find(k)) return false;
     place(k, v);
     return true;
+  }
+  /// Every cell empty again; the cells stay (a scratch table cleared for each block it indexes).
+  void clear() {
+    for (uint64_t i = 0; cells && i <= mask; i++) cells[i].k = 0;
+    n = 0;
+  }
+  /// The filled cells, in no order: `for (auto &c : table)` reads c.k and c.v.
+  struct Iter {
+    Cell *c, *e;
+    void skip() {
+      while (c != e && !c->k) ++c;
+    }
+    Cell &operator*() const { return *c; }
+    Iter &operator++() {
+      ++c;
+      skip();
+      return *this;
+    }
+    bool operator!=(const Iter &o) const { return c != o.c; }
+  };
+  Iter begin() const {
+    Iter i{cells, cells ? cells + mask + 1 : cells};
+    i.skip();
+    return i;
+  }
+  Iter end() const {
+    Cell *e = cells ? cells + mask + 1 : cells;
+    return {e, e};
   }
   /// Each (key, value), in no order.
   template <class F> void each(F f) const {
@@ -87,6 +116,79 @@ private:
   Cell *cells = nullptr;
   uint64_t mask = 0;
   uint32_t n = 0;
+};
+
+/// Bytes copied where they never move: blocks from the language's operator new, filled from the front, never freed while the Bump lives
+/// (the names of a symbol table, the keys of a table by bytes).  A copy is NUL-terminated.
+struct Bump {
+  Bump() = default;
+  Bump(const Bump &) = delete;
+  Bump &operator=(const Bump &) = delete;
+  ~Bump() {
+    for (char *b : blocks) ::operator delete(b);
+  }
+  const char *copy(const char *p, uint32_t n) {
+    if (uint64_t(end - cur) < uint64_t(n) + 1) {
+      uint64_t size = n + 1 > kBlock / 4 ? uint64_t(n) + 1 : kBlock; // a long string gets a block of its own
+      char *b = static_cast<char *>(::operator new(size));
+      blocks.append(b);
+      if (size == kBlock) cur = b, end = b + size;
+      else { __builtin_memcpy(b, p, n); b[n] = 0; return b; }
+    }
+    char *r = cur;
+    __builtin_memcpy(r, p, n);
+    r[n] = 0;
+    cur += n + 1;
+    return r;
+  }
+
+private:
+  static constexpr uint64_t kBlock = 64 * 1024;
+  MutableSeries<char *> blocks;
+  char *cur = nullptr, *end = nullptr;
+};
+
+/// Values found by bytes, fast (a name, a pattern and its input): a WordTable by the bytes' hash, the bytes kept with the value where they
+/// outlive the table so a hit is checked against them, one probe and one compare.  Two byte strings of one hash (none yet seen) share a
+/// spill.  Patricia keys by bytes too, in order and by prefix; this one is for a hot lookup, where order is not asked.
+template <class V> struct TextTable {
+  struct Row {
+    const char *p;
+    uint32_t n;
+    V v;
+  };
+  uint32_t size() const { return rows.size(); }
+  const Row &row(uint32_t i) const { return rows[i]; }
+  /// The value stored for the bytes, or null.  Its address holds until the next set.
+  V *find(const char *p, uint32_t n) {
+    uint64_t h = key(p, n);
+    if (uint32_t *i = byHash.find(h)) {
+      if (same(rows[*i], p, n)) return &rows[*i].v;
+      for (uint32_t j : spill)
+        if (same(rows[j], p, n)) return &rows[j].v;
+    }
+    return nullptr;
+  }
+  /// The bytes now stand for v; `copy()` makes the bytes where they outlive the table, called only for bytes not stored yet.
+  template <class Copy> V *set(const char *p, uint32_t n, V v, Copy copy) {
+    if (V *old = find(p, n)) {
+      *old = v;
+      return old;
+    }
+    uint32_t i = rows.append(Row{copy(), n, v});
+    if (!byHash.insert(key(p, n), i)) spill.append(i);
+    return &rows[i].v;
+  }
+
+private:
+  static uint64_t key(const char *p, uint32_t n) {
+    uint64_t h = hashBytes(p, n);
+    return h ? h : 1;
+  }
+  static bool same(const Row &r, const char *p, uint32_t n) { return r.n == n && (!n || __builtin_memcmp(r.p, p, n) == 0); }
+  WordTable<uint32_t> byHash;
+  MutableSeries<Row> rows;
+  MutableSeries<uint32_t> spill;
 };
 
 } // namespace composite

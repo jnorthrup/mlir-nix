@@ -95,5 +95,26 @@ int main() {
   uint64_t visited = 0;
   w.each([&](uint64_t, uint64_t) { visited++; });
   require(visited == w.size(), "each visits every cell once");
-  std::printf("vocabulary: Fn, Maybe, Text (100000 numbers), Spill (2000 rounds of moves), WordTable (%u keys) PASS\n", w.size());
+  w.clear();
+  require(w.size() == 0 && !w.find(123456789), "clear empties the table");
+  require(w.insert(77, 1) && *w.find(77) == 1, "a cleared table takes keys again");
+
+  // TextTable and Bump against unordered_map<string>: names of every length, values replaced, misses.
+  Bump bump;
+  TextTable<uint32_t> tt;
+  std::unordered_map<std::string, uint32_t> tr;
+  for (int i = 0; i < 100000; i++) {
+    std::string k = "name" + std::to_string(rng() % 30000) + std::string(rng() % 3 ? 0 : rng() % 200000, 'q');
+    uint32_t v = uint32_t(rng());
+    tt.set(k.data(), uint32_t(k.size()), v, [&] { return bump.copy(k.data(), uint32_t(k.size())); });
+    tr[k] = v;
+  }
+  require(tt.size() == tr.size(), "one row a byte string");
+  for (auto &[k, v] : tr) require(tt.find(k.data(), uint32_t(k.size())) && *tt.find(k.data(), uint32_t(k.size())) == v, "found with its last value");
+  for (int i = 0; i < 50000; i++) {
+    std::string k = "other" + std::to_string(rng());
+    require(!tt.find(k.data(), uint32_t(k.size())), "bytes never stored miss");
+  }
+  require(tt.find("", 0) == nullptr && *tt.set("", 0, 9, [&] { return bump.copy("", 0); }) == 9 && *tt.find("", 0) == 9, "the empty string is a key");
+  std::printf("vocabulary: Fn, Maybe, Text (100000 numbers), Spill (2000 rounds of moves), WordTable, TextTable (%u names) PASS\n", tt.size());
 }
