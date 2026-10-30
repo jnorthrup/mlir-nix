@@ -48,9 +48,21 @@ template <class V> struct WordTable {
     place(k, v);
     return true;
   }
-  /// Every cell empty again; the cells stay (a scratch table cleared for each block it indexes).
+  /// Every cell empty again.  A table mostly empty is made small first, as llvm::DenseMap's clear does: a scratch table cleared after each
+  /// block it indexes would otherwise walk, at every clear, all the cells its largest block needed (a file's top level, then thousands of
+  /// small bodies).
   void clear() {
-    for (uint64_t i = 0; cells && i <= mask; i++) cells[i].k = 0;
+    if (n == 0) return;
+    uint64_t cap = mask + 1;
+    if (uint64_t(n) * 4 < cap && cap > 64) {
+      uint64_t nc = 64;
+      while (nc < 2 * uint64_t(n)) nc *= 2;
+      ::operator delete(cells);
+      cells = emptyCells(nc);
+      mask = nc - 1;
+    } else {
+      for (uint64_t i = 0; i <= mask; i++) cells[i].k = 0;
+    }
     n = 0;
   }
   /// The filled cells, in no order: `for (auto &c : table)` reads c.k and c.v.
@@ -99,10 +111,14 @@ private:
     return cells[i].v;
   }
   uint64_t capacity() const { return cells ? mask + 1 : 0; }
-  void grow() {
-    uint64_t nc = cells ? 2 * (mask + 1) : 16;
+  static Cell *emptyCells(uint64_t nc) {
     Cell *q = static_cast<Cell *>(::operator new(nc * sizeof(Cell)));
     for (uint64_t i = 0; i < nc; i++) q[i].k = 0;
+    return q;
+  }
+  void grow() {
+    uint64_t nc = cells ? 2 * (mask + 1) : 16;
+    Cell *q = emptyCells(nc);
     for (uint64_t i = 0; cells && i <= mask; i++)
       if (cells[i].k) {
         uint64_t j = mix(cells[i].k) & (nc - 1);
