@@ -90,8 +90,26 @@ static void generic() {
   std::printf("generic KV row: stored=%u PASS\n", stored);
 }
 
+// The funnel that grows: from no buckets to 50,000 rows, every row found, a repeated key refused, an absent one missed.
+static void growing() {
+  GrowFunnel<KV, 15, 8, 5, KVHash> t;
+  std::set<uint64_t> ref;
+  for (uint32_t i = 0; i < 50000; ++i) {
+    KV r{rng(), i};
+    bool fresh = ref.insert(r.k).second;
+    require(t.put(r) == fresh, "grow: a fresh key is stored, a repeated one refused");
+  }
+  require(t.size() == ref.size(), "grow: every row kept across the growths");
+  for (uint64_t k : ref) { const KV *f = t.get({k, 0}); require(f && f->k == k, "grow: key found"); }
+  for (uint32_t i = 0; i < 10000; ++i) { KV r{rng(), 0}; if (!ref.count(r.k)) require(!t.get(r), "grow: absent key misses"); }
+  require(hashBytes("/nix/store/a", 12) == hashBytes("/nix/store/a", 12) && hashBytes("/nix/store/a", 12) != hashBytes("/nix/store/b", 12) &&
+              hashBytes("ab", 2) != hashBytes("ab", 1), "hashBytes: a function of every byte and the length");
+  std::printf("growing funnel: %u rows PASS\n", t.size());
+}
+
 int main() {
   generic();
+  growing();
   for (double load : {0.5, 0.8, 0.9, 0.95, 0.99}) run(load);
   std::puts("PASS");
 }

@@ -77,4 +77,75 @@ struct Funnel {
   }
 };
 
+/// A Funnel that owns its buckets and grows: they come from the language's operator new, and when every level's bucket of a row is full
+/// the rows drain out (each bucket in key order) into a funnel of twice the buckets.  For a table whose size is not known ahead: the
+/// evaluator's caches by path, the store's derivations by content.
+template <class Row, unsigned N, unsigned P, unsigned Levels, class Hash = WordHash>
+struct GrowFunnel {
+  using F = Funnel<Row, N, P, Levels, Hash>;
+  using Bucket = typename F::Bucket;
+
+  GrowFunnel() = default;
+  GrowFunnel(const GrowFunnel &) = delete;
+  GrowFunnel &operator=(const GrowFunnel &) = delete;
+  ~GrowFunnel() { release(f.cells, f.top); }
+
+  uint32_t size() const { return f.rows; }
+  /// The stored row whose key is r's, or null.
+  const Row *get(const Row &r) const { return f.cells ? f.get(r) : nullptr; }
+  /// Stores r unless its key is: false when it was.
+  bool put(const Row &r) {
+    if (!f.cells) f = make(1u << (Levels - 1));
+    for (;;) {
+      uint32_t p = f.put(r);
+      if (p != 0xFE) return p != 0xFF;
+      grow();
+    }
+  }
+
+private:
+  static F make(uint32_t top) {
+    uint32_t n = F::cellsFor(top);
+    Bucket *q = static_cast<Bucket *>(::operator new(size_t(n) * sizeof(Bucket)));
+    for (uint32_t i = 0; i < n; i++) ::new (At{q + i}) Bucket();
+    return F(q, top);
+  }
+  static void release(Bucket *cells, uint32_t top) {
+    if (!cells) return;
+    for (uint32_t i = 0, n = F::cellsFor(top); i < n; i++) cells[i].~Bucket();
+    ::operator delete(cells);
+  }
+  /// Every row drained into a funnel twice as wide; one that still refuses a row is doubled again, from the rows kept aside.
+  void grow() {
+    MutableSeries<Row> rows;
+    for (uint32_t i = 0, n = F::cellsFor(f.top); i < n; i++) f.cells[i].drain([&](const Row &x) { rows.append(x); });
+    uint32_t top = f.top;
+    release(f.cells, f.top);
+    for (;;) {
+      top *= 2;
+      F g = make(top);
+      uint32_t i = 0;
+      while (i < rows.size() && g.put(rows[i]) != 0xFE) i++;
+      if (i == rows.size()) { f = g; return; }
+      release(g.cells, g.top);
+    }
+  }
+  F f{nullptr, 0};
+};
+
+/// A hash of n bytes, a word at a time: the key of a row found by its text (a path), in a funnel.  Not for an adversary: a collision only
+/// costs the caller its compare of the text.
+inline uint64_t hashBytes(const char *p, uint64_t n) {
+  uint64_t h = 0x9E3779B97F4A7C15ull ^ n, w;
+  for (; n >= 8; p += 8, n -= 8) {
+    __builtin_memcpy(&w, p, 8);
+    h = (h ^ w) * 0xBF58476D1CE4E5B9ull;
+    h ^= h >> 29;
+  }
+  w = 0;
+  __builtin_memcpy(&w, p, n);
+  h = (h ^ w) * 0x94D049BB133111EBull;
+  return h ^ (h >> 31);
+}
+
 }  // namespace composite
