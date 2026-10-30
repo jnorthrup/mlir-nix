@@ -60,38 +60,74 @@ struct CallDepth {
 };
 } // namespace
 
-void EvalState::printValueAsJSON(std::ostream &out, Value &v, bool strict, NixStringContext &ctx, bool copyToStore,
+void JsonOut::putInt(int64_t x) {
+  char buf[24], *e = buf + sizeof buf, *p = e;
+  uint64_t u = x < 0 ? 0 - uint64_t(x) : uint64_t(x); // INT64_MIN too
+  do *--p = char('0' + u % 10); while (u /= 10);
+  if (x < 0) *--p = '-';
+  put(std::string_view(p, size_t(e - p)));
+}
+
+void JsonOut::putString(std::string_view s) {
+  static const char hex[] = "0123456789abcdef";
+  put('"');
+  size_t run = 0; // the bytes since the last escape go in as one piece
+  for (size_t i = 0; i < s.size(); i++) {
+    unsigned char c = (unsigned char)s[i];
+    if (c >= 0x20 && c != '"' && c != '\\') continue;
+    put(s.substr(run, i - run));
+    switch (c) {
+    case '"': put("\\\""); break;
+    case '\\': put("\\\\"); break;
+    case '\b': put("\\b"); break;
+    case '\f': put("\\f"); break;
+    case '\n': put("\\n"); break;
+    case '\r': put("\\r"); break;
+    case '\t': put("\\t"); break;
+    default: {
+      char u[6] = {'\\', 'u', '0', '0', hex[c >> 4], hex[c & 15]};
+      put(std::string_view(u, 6));
+    }
+    }
+    run = i + 1;
+  }
+  put(s.substr(run));
+  put('"');
+}
+
+void EvalState::printValueAsJSON(JsonOut &out, Value &v, bool strict, NixStringContext &ctx, bool copyToStore,
                                  PosPtr pos) {
   CallDepth guard(*this, pos);
   if (strict) forceValue(v, pos);
   switch (v.type) {
-  case VType::Int: out << v.integer; break;
-  case VType::Bool: out << (v.boolean ? "true" : "false"); break;
+  case VType::Int: out.putInt(v.integer); break;
+  case VType::Bool: out.put(v.boolean ? "true" : "false"); break;
   case VType::String:
     copyContext(v, ctx);
     checkUTF8(v.sv());
-    out << nixstore::jsonEscape(v.sv());
+    out.putString(v.sv());
     break;
   case VType::Path:
-    if (copyToStore) out << nixstore::jsonEscape(copyPathToStore(ctx, std::string(v.pathView())));
-    else out << nixstore::jsonEscape(v.pathView());
+    if (copyToStore) out.putString(copyPathToStore(ctx, std::string(v.pathView())));
+    else out.putString(v.pathView());
     break;
-  case VType::Null: out << "null"; break;
+  case VType::Null: out.put("null"); break;
   case VType::Attrs: {
     if (auto s2 = tryAttrsToString(v, ctx, false, false)) {
-      out << nixstore::jsonEscape(*s2);
+      out.putString(*s2);
       break;
     }
     if (const Attr *o = v.attrs->get(s.outPath)) {
       printValueAsJSON(out, *o->value, strict, ctx, copyToStore, positionOf(*o));
       break;
     }
-    out << "{";
+    out.put('{');
     bool first = true;
     for (const Attr *a : v.attrs->lexicographicOrder(symbols)) {
-      if (!first) out << ",";
+      if (!first) out.put(',');
       first = false;
-      out << nixstore::jsonEscape(symbols[a->name]) << ":";
+      out.putString(symbols[a->name]);
+      out.put(':');
       try {
         printValueAsJSON(out, *a->value, strict, ctx, copyToStore, positionOf(*a));
       } catch (EvalError &e) {
@@ -99,13 +135,13 @@ void EvalState::printValueAsJSON(std::ostream &out, Value &v, bool strict, NixSt
         throw;
       }
     }
-    out << "}";
+    out.put('}');
     break;
   }
   case VType::List:
-    out << "[";
+    out.put('[');
     for (size_t i = 0; i < v.listSize(); i++) {
-      if (i) out << ",";
+      if (i) out.put(',');
       if (callDepth <= 2) beginEpoch(); // MLNIX_STATS: an element of the top-level list is an epoch
       try {
         printValueAsJSON(out, *v.list.elems[i], strict, ctx, copyToStore, pos);
@@ -114,11 +150,11 @@ void EvalState::printValueAsJSON(std::ostream &out, Value &v, bool strict, NixSt
         throw;
       }
     }
-    out << "]";
+    out.put(']');
     break;
-  case VType::Float: out << nixstore::jsonFloat(v.fpoint); break;
+  case VType::Float: out.put(nixstore::jsonFloat(v.fpoint)); break;
   case VType::Thunk: case VType::App: case VType::Failed: case VType::Blackhole:
-    out << "null";
+    out.put("null");
     break;
   default:
     throw EvalError(std::string("cannot convert ") + showType(v) + " to JSON", pos);
@@ -1124,10 +1160,10 @@ void registerFormatBuiltins(EvalState &state) {
     flakeRefToString(st, *args[0], v, pos);
   });
   S.addPrimOp("__toJSON", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
-    std::ostringstream os;
+    JsonOut os;
     NixStringContext ctx;
     st.printValueAsJSON(os, *args[0], true, ctx, true, pos);
-    st.mkString(v, os.str(), ctx);
+    st.mkString(v, os.view(), ctx);
   });
   S.addPrimOp("__fromJSON", 1, [](EvalState &st, A args, Value &v, PosPtr pos) {
     auto s = st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.fromJSON");

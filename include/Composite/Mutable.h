@@ -259,6 +259,13 @@ template <class T, class Body = Growable<T>> struct MutableSeries : Body {
     this->put(mv(v));
     return size() - 1;
   }
+  /// Accumulate m cells of plain data at once, copied from q: one capacity check for the run, not one a cell (text written in pieces).
+  void appendAll(const T *q, uint32_t m) requires Body::growable && Body::contiguous && plainData<T> {
+    this->reserveCells(size_t(size()) + m);
+    T *d = this->base() + size();
+    for (uint32_t i = 0; i < m; i++) d[i] = q[i];
+    this->n += m;
+  }
   /// Accumulate a cell built in place.
   template <class... A> constexpr uint32_t emplace(A &&...a) { return append(T(fw<A>(a)...)); }
   constexpr void pop() { this->dropLast(); }

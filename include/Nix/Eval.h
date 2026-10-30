@@ -178,6 +178,17 @@ struct PieceContexts {
 
 struct PrimOp;
 
+/// JSON being written: one growing run of bytes (a MutableSeries), strings escaped into it a run at a time, no stream and no string a value.
+struct JsonOut {
+  composite::MutableSeries<char> bytes;
+  void put(std::string_view s) { bytes.appendAll(s.data(), uint32_t(s.size())); }
+  void put(char c) { bytes.append(c); }
+  void putInt(int64_t x);
+  /// `s` as a JSON string: quoted, and escaped as Nix escapes (\" \\ \b \f \n \r \t, \u00xx for the other control bytes).
+  void putString(std::string_view s);
+  std::string_view view() const { return {bytes.data(), bytes.size()}; }
+};
+
 
 /// Failed: a thunk whose evaluation threw an evaluation error.  Forcing it again throws a fresh copy of that error as it stands then (the
 /// first throw may still be gathering traces on its way out), not the evaluation again: Nix 2.34's memoised errors.  The tags up to
@@ -601,7 +612,7 @@ struct EvalState {
   // -- Printing ---------------------------------------------------------------
   void printValue(std::ostream &os, Value &v, std::set<const void *> *seen, size_t depth = 0);
   std::string printValueForTrace(Value &v);
-  void printValueAsJSON(std::ostream &os, Value &v, bool strict, NixStringContext &ctx,
+  void printValueAsJSON(JsonOut &out, Value &v, bool strict, NixStringContext &ctx,
                         bool copyToStore = true, PosPtr pos = nullptr);
   void printValueAsXML(std::ostream &os, Value &v, bool strict, bool location, NixStringContext &ctx);
 

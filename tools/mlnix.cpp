@@ -465,7 +465,9 @@ int runEvalCommandIn(Options &o, bool build, EvalState &st, std::shared_ptr<nixs
         } else if (o.xml) {
           st.printValueAsXML(std::cout, vRes, o.strict, o.location, ctx);
         } else if (o.json) {
-          st.printValueAsJSON(std::cout, vRes, o.strict, ctx, true);
+          JsonOut js;
+          st.printValueAsJSON(js, vRes, o.strict, ctx, true);
+          std::cout.write(js.view().data(), std::streamsize(js.view().size()));
           std::cout << std::endl;
         } else {
           if (o.strict) st.forceValueDeep(vRes);

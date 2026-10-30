@@ -13,6 +13,7 @@
 
 #include "Composite/Funnel.h"
 #include "Composite/Mutable.h"
+#include "Composite/Patricia.h"
 #include <functional>
 #include <map>
 #include <memory>
@@ -362,13 +363,24 @@ struct Store {
     std::map<std::string, Hash> hashes;
     std::string hex;
   };
-  std::map<std::string, DrvModulo> drvHashes;
-  std::map<std::string, Derivation> drvCache;
-  /// A content fingerprint's first derivation, the key of its drvCache entry, in Krapivin's table (Composite/Funnel.h): the keys are
+  /// A derivation the store made or read, by its path: the derivation, and its modulo hashes once a dependent's hash asked for them.  A
+  /// record never moves and lives as long as the store (the hasher reads its derivation where it lies); its path is its key in `drvs`, a
+  /// crit-bit trie (Composite/Patricia.h): the paths share their store directory and a dependent looks its inputs up by path.
+  struct DrvRecord {
+    std::string path;
+    Derivation drv;
+    bool hasModulo = false;
+    DrvModulo modulo;
+  };
+  composite::Patricia<DrvRecord *> drvs;
+  DrvRecord *drvAt(const std::string &path);
+  /// The record of `path`, made with `drv`; one there already keeps its derivation unless `replace`.
+  DrvRecord &keepDerivation(const std::string &path, Derivation &&drv, bool replace);
+  /// A content fingerprint's first derivation, its record, in Krapivin's table (Composite/Funnel.h): the keys are
   /// already 64-bit hashes.
   struct ContentRow {
     uint64_t k;
-    const std::string *path;
+    const DrvRecord *rec;
     friend constexpr bool operator<(const ContentRow &a, const ContentRow &b) { return a.k < b.k; }
     friend constexpr bool operator==(const ContentRow &a, const ContentRow &b) { return a.k == b.k; }
   };

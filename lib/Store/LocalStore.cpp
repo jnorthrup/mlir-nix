@@ -61,8 +61,23 @@ std::string Store::infoFile(const std::string &path) const {
   return settings.stateDir + "/info/" + baseNameOf(path);
 }
 
+Store::DrvRecord *Store::drvAt(const std::string &path) {
+  DrvRecord **r = drvs.find(path.data(), uint32_t(path.size()));
+  return r ? *r : nullptr;
+}
+
+Store::DrvRecord &Store::keepDerivation(const std::string &path, Derivation &&drv, bool replace) {
+  if (DrvRecord *r = drvAt(path)) {
+    if (replace) r->drv = std::move(drv);
+    return *r;
+  }
+  auto *r = new DrvRecord{path, std::move(drv)};
+  drvs.set(r->path.data(), uint32_t(r->path.size()), r, [r] { return r->path.c_str(); }); // the key is the record's own path
+  return *r;
+}
+
 bool Store::isValidPath(const std::string &path) {
-  if (drvCache.count(path)) return true;
+  if (drvAt(path)) return true;
   return pathExists(infoFile(path)) && pathExists(toReal(path));
 }
 
@@ -264,7 +279,7 @@ std::string Store::computeDerivationPath(const Derivation &drv) const {
 }
 
 void Store::cacheDerivation(const std::string &drvPath, const Derivation &drv) {
-  drvCache[drvPath] = drv;
+  keepDerivation(drvPath, Derivation(drv), true);
 }
 
 std::string Store::writeDerivation(Derivation &&drv) {
@@ -285,7 +300,7 @@ std::string Store::writeDerivation(Derivation &&drv) {
   }
   std::string path = makeStorePath(settings.storeDir, type, settings.readOnly ? drv.hashUnparsed(false) : hashString(HashAlgo::SHA256, text),
                                    drv.name + ".drv");
-  const Derivation &kept = drvCache.try_emplace(path, std::move(drv)).first->second; // a path names its text: the first is kept, never rewritten
+  const Derivation &kept = keepDerivation(path, std::move(drv), false).drv; // a path names its text: the first is kept, never rewritten
   if (!settings.readOnly) addTextToStore(kept.name + ".drv", text, drvReferences(kept));
   return path;
 }
@@ -354,24 +369,21 @@ const std::string *Store::sameDerivation(const Derivation &drv, uint64_t &finger
   fingerprint = contentFingerprint(drv);
   const ContentRow *r = drvByContent.get(ContentRow{fingerprint, nullptr});
   if (!r) return nullptr;
-  auto d = drvCache.find(*r->path);
-  return d != drvCache.end() && sameContent(drv, d->second) ? r->path : nullptr;
+  return sameContent(drv, r->rec->drv) ? &r->rec->path : nullptr;
 }
 
 void Store::rememberDerivation(uint64_t fingerprint, const std::string &drvPath) {
-  auto d = drvCache.find(drvPath);
-  if (d != drvCache.end()) drvByContent.put(ContentRow{fingerprint, &d->first}); // a fingerprint's first derivation stays
+  if (DrvRecord *rec = drvAt(drvPath)) drvByContent.put(ContentRow{fingerprint, rec}); // a fingerprint's first derivation stays
 }
 
 const Derivation &Store::readDerivation(const std::string &drvPath) {
-  auto it = drvCache.find(drvPath);
-  if (it != drvCache.end()) return it->second;
+  if (DrvRecord *rec = drvAt(drvPath)) return rec->drv;
   std::string name = storePathName(drvPath);
   if (name.size() < 4 || name.substr(name.size() - 4) != ".drv")
     throw Error("store path '" + baseNameOf(drvPath) + "' is not a valid derivation path");
   std::string real = toReal(drvPath);
   if (!pathExists(real)) throw Error("path '" + drvPath + "' is not valid");
-  return drvCache.insert_or_assign(drvPath, parseDerivation(readFile(real), name.substr(0, name.size() - 4))).first->second;
+  return keepDerivation(drvPath, parseDerivation(readFile(real), name.substr(0, name.size() - 4)), true).drv;
 }
 
 struct Store::LaterHashes {
@@ -385,13 +397,15 @@ struct Store::LaterHashes {
 };
 
 Store::~Store() {
-  if (!later) return;
-  std::unique_lock<std::mutex> lk(later->m);
-  later->cv.wait(lk, [&] { return later->pending == 0; });
+  if (later) {
+    std::unique_lock<std::mutex> lk(later->m);
+    later->cv.wait(lk, [&] { return later->pending == 0; });
+  }
+  drvs.prefix("", 0, [](const composite::Patricia<DrvRecord *>::Row &r) { delete r.v; }); // no job of the hasher reads one now
 }
 
 void Store::hashLater(const std::string &drvPath, DrvInputs &&inputs) {
-  if (drvHashes.count(drvPath)) return;
+  if (DrvRecord *rec = drvAt(drvPath); rec && rec->hasModulo) return;
   if (!later) {
     later = std::make_shared<LaterHashes>();
     std::thread([L = later] {
@@ -419,7 +433,7 @@ void Store::hashLater(const std::string &drvPath, DrvInputs &&inputs) {
       }
     }).detach();
   }
-  const Derivation &kept = drvCache.at(drvPath);
+  const Derivation &kept = drvAt(drvPath)->drv; // written just before
   {
     std::lock_guard<std::mutex> lk(later->m);
     if (!later->answers.try_emplace(drvPath).second) return; // queued already
@@ -444,14 +458,16 @@ std::map<std::string, Hash> Store::hashDerivationModulo(const Derivation &drv, b
       throw Error("content-addressed and impure derivations are not supported (derivation '" + drv.name + "')");
   DrvInputs inputs2;
   for (auto &[drvPath, outs] : drv.inputDrvs) {
-    auto it = drvHashes.find(drvPath);
-    if (it == drvHashes.end()) { // an input's modulo hash: the hasher's, or made here; kept, with its base 16, for every later dependent
+    DrvRecord *rec = drvAt(drvPath);
+    if (!rec || !rec->hasModulo) { // an input's modulo hash: the hasher's, or made here; kept, with its base 16, for every later dependent
       DrvModulo m;
       if (!takeLater(drvPath, m.hashes)) m.hashes = hashDerivationModulo(readDerivation(drvPath), false);
       if (auto e = m.hashes.find(""); e != m.hashes.end()) m.hex = e->second.to_string(HashFormat::Base16, false);
-      it = drvHashes.emplace(drvPath, std::move(m)).first;
+      rec = drvAt(drvPath); // the record of a derivation written here, or the one read just above
+      rec->modulo = std::move(m);
+      rec->hasModulo = true;
     }
-    const DrvModulo &m = it->second;
+    const DrvModulo &m = rec->modulo;
     if (!m.hex.empty()) {
       inputs2[m.hex].insert(outs.begin(), outs.end());
     } else {
@@ -507,8 +523,8 @@ std::set<std::string> Store::computeFSClosure(const std::set<std::string> &paths
     if (!res.insert(p).second) continue;
     if (auto info = queryPathInfo(p)) {
       for (auto &r : info->references) todo.append(r);
-    } else if (drvCache.count(p)) {
-      auto &d = drvCache[p];
+    } else if (DrvRecord *rec = drvAt(p)) {
+      auto &d = rec->drv;
       for (auto &r : drvReferences(d)) todo.append(r);
     }
     if (includeOutputs && p.size() > 4 && p.substr(p.size() - 4) == ".drv") {

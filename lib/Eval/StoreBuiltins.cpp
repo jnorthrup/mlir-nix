@@ -66,7 +66,8 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
     std::optional<std::string> outputHash;
     std::optional<nixstore::HashAlgo> outputHashAlgo;
     std::optional<nixstore::FileIngestionMethod> ingestionMethod;
-    std::set<std::string> outputs{"out"};
+    nixstore::SortedSet outputs; // the output names: rows kept sorted, in the order the derivation lists them
+    outputs.insert("out");
     std::string jsonObj = "{";
     bool jsonFirst = true;
 
@@ -80,7 +81,7 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
       else throw EvalError("invalid value '" + str(s) + "' for 'outputHashMode' attribute", pos);
     };
     auto handleOutputs = [&](const auto &ss) {
-      outputs.clear();
+      outputs = nixstore::SortedSet();
       for (auto &j : ss) {
         if (outputs.count(j)) throw EvalError("duplicate derivation output '" + j + "'", pos);
         if (j == "drvPath") throw EvalError("invalid derivation output name 'drvPath'", pos);
@@ -120,9 +121,12 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
                                                  "while evaluating an element of the argument list"));
         } else if (structured) {
           if (i->name == st.s.structuredAttrs) continue;
-          std::ostringstream js;
+          JsonOut js;
+          js.put(jsonFirst ? "" : ",");
+          js.putString(key);
+          js.put(':');
           st.printValueAsJSON(js, *i->value, true, context, true, pos);
-          jsonObj += (jsonFirst ? "" : ",") + nixstore::jsonEscape(key) + ":" + js.str();
+          jsonObj += js.view();
           jsonFirst = false;
           if (i->name == st.s.builder) drv.builder = str(st.forceString(*i->value, context, pos));
           else if (i->name == st.s.system) drv.platform = str(st.forceStringNoCtx(*i->value, pos));
@@ -157,9 +161,14 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
             else if (i->name == st.s.outputHashMode) handleHashMode(s);
             else if (i->name == st.s.outputs) {
               composite::MutableSeries<std::string> ss;
-              std::istringstream is(s);
-              std::string w;
-              while (is >> w) ss.append(w);
+              // The names are the words of the string, split at whitespace as a stream's >> splits them.
+              auto space = [](char c) { return c == ' ' || (c >= '\t' && c <= '\r'); };
+              for (size_t k = 0, n = s.size(); k < n;) {
+                while (k < n && space(s[k])) k++;
+                size_t b = k;
+                while (k < n && !space(s[k])) k++;
+                if (k > b) ss.append(s.substr(b, k - b));
+              }
               handleOutputs(ss);
             }
             // Last, once nothing above can throw: the attributes come in name order, the map's own, so the key and the value move in at the
