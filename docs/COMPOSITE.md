@@ -21,7 +21,7 @@ nothing uses is a placeholder. This is what exists, what consumes it, and what d
 | `↺`, left identity / constant anchor | `composite::anchor`: the first force of a cell mints it, every read after is the constant it produced | built | `EvalState::bodyOf`, the body of a deferred lambda |
 | a list that is mutated says so in its type | `composite::MutableSeries`: `append`, `drain`, `view` | built (the accumulate half) | the columns of `nixfe::FilePool`: rows accumulate as lowering defers lambdas, drain as evaluation mints them |
 | `Cursor`, `RowVec`, `ColumnMeta` | `composite::Cursor<T...>`: a MutableSeries per column; the ColumnMeta and the column indices are the cases of an enum generated from `TrikeShed.td` (`BandCol`, `PoolCol`, `BindCol`), so `col<PoolCol::Op>()` and `MLNIX_STATS`'s column names come from the declaration | columns built, and `row(i)`, a row copied out as a tuple (a mint reads its pool row so, where `Row` and `read()` were 17 lines); `append`, `clear` and `reserve` fold over the columns; the `Series<RowVec>` face is `rows()`, the same columns as one Series of row tuples, pinned by `rowSeriesHolds` -- a use that reads one member dissolves the copies of the rest as dead code, so no lazy projection beside it | `confix::Bands`, `nixfe::FilePool`, the parser's bindings (a scope is a run of rows, first j count) |
-| Confix index, JSON as a tree of cursors | none; `fromJSON` still builds the whole value | **not built** | a lazy `fromJSON` needs a lazy value; no benchmark workload spends measurable time in it |
+| Confix index, JSON as a tree of cursors | `composite::confix::scan` (`include/Composite/Confix.h`, the layout of TrikeShed's `ConfixIndex`): one pass over the text builds a `Cursor` with a row per element, in the order they open, and the columns span (`open` `j` `close`), tag and kids (a first row `j` a count into an array of children, an object's alternating keys and values); the index holds no text, a string is decoded and a number read only when a caller asks (`decode`, `readLong`), and a document nested a million deep needs no stack | built, consumed | `fromJSON` reads the index back into a value in one walk; its faults, their offsets and their words are those of the reader it replaced, which `scripts/confix-check.cc` keeps as its oracle (see "The JSON reader is a Confix index" below); a lazy `fromJSON` still needs a lazy value, so nothing is deferred yet |
 | the Confix index of a Nix source | `confix::scan` (`include/Nix/Confix.h`, `lib/Frontend/Confix.cpp`): the lexer's state machine without its tokens, every rule shared with the lexer in `include/Nix/LexRules.h`; the bands (`{ }`, `[ ]`, `( )`, strings, `${ }`, `let ... in`) as a `Cursor<TwInt, kind, TwInt>` in the order they open, and per band its qualified semicolons and commas (layers 0 and 1 of `NixSyntax.td`) | built, consumed | the parser: the heads of a `let`, a `rec` set and a formals list (layer 2), and a check of every statement end it meets; `mlnix-parse -b` derives the same table from the real lexer's tokens: 39,646 files and 15,984 mutants, 0 disagreements; the scan runs at 1.86x the lexer's speed |
 | userspace uring, mapped memory kept apart from I/O | `nixprefetch`: record the files an evaluation touches, replay them through one ring; imports are mapped read-only | built (not CCEK) | cold start -19.5% / -16.8% on Linux, `docs/IO.md` |
 
@@ -106,6 +106,45 @@ One `HEAD` bug came out of it: `structuredAttrsFiles` read past the end of a `\u
 the earlier slice). Left alone, because the bytes must not change: the same function casts a JSON number to `int` without a range check.
 What the streams did that a buffer must keep doing: `--xml`, the default print and `derivation show` write what they have produced
 before an error stops them, so those paths print the buffer from a `catch` before rethrowing.
+
+## The JSON reader is a Confix index (2026-10-30)
+
+`builtins.fromJSON` no longer parses and builds in one recursive pass. `include/Composite/Confix.h` scans the text once into an index, a
+`Cursor` with a row for each element, in the order the elements open, and the columns of TrikeShed's `ConfixIndex`: the span (`open` `j`
+`close`, the first and the last byte), the tag, and the kids (`first` `j` `count` into an array of the rows of the children; an object's
+are its keys and its values alternating). The index holds no text: a string is decoded and a number read only when a caller asks
+(`decode`, `readLong`), and `Formats.cpp` walks the index once to make the `Value`s. The scan keeps its open containers on a stack of rows, so
+a document nested a million deep is scanned in the space of its index. Where TrikeShed's scan is lenient (a stray `]` pops nothing, `-+-` is
+a number) this one checks, because an index is worth having only of a text that is one; its faults, their offsets and their words are those
+of the reader it replaced, so every error message is the same. `Formats.cpp` lost 91 lines (+78, -169); `Confix.h` is 359.
+
+- **What holds it to the old reader.** `scripts/confix-check.cc` keeps the old reader as its oracle (numbers by `strtoll`, `strtoull` and
+  `strtod`) and runs both on every string of up to 6 bytes over 12, every sequence of up to 5 of 26 tokens, every `\uXXXX` in both cases and
+  every low half after five high surrogates, every byte and every two bytes where they can matter, numbers of 1 to 25 digits at several
+  offsets and at the end of the text, 200,000 random documents and two mutations of each, and the 1,389 `.json` files of three trees:
+  17,023,158 cases, 0 mismatches, under ASan and UBSan with undefined behaviour fatal. The text is scanned from a buffer of exactly its
+  size, so that a read of the byte after the end is a fault and not a read of the NUL a `std::string` keeps there. The index is held to its
+  own laws as well: rows in the order they open, every child after its parent and inside it, an object's children in pairs whose first is a
+  string, and each row's span holding what its tag says. A scan of a million `[` must not use the stack.
+- **Whether the check can fail.** `scripts/confix-mutate.py` makes a mutant for each site of an operator in `Confix.h` (302: a comparison
+  flipped, a constant moved by one, `&&` with `||`, `+` with `-`, `true` with `false`, a `!` dropped), builds the check with it, and runs it
+  small, then medium, then under the sanitizers, then at full size. 14 do not compile and 274 are killed. 14 survive every stage and
+  are equivalent, each with its reason in the script: the two offsets of a `Scan` with no fault, a threshold that cannot be reached, the
+  18-digit shortcut and the facets giving the same value, the unsigned facet reading a negative number to the same bits. The first version
+  of the check let 44 live. 14 were those, and 30 were the check's own faults: a read one byte past the end that the NUL of a `std::string`
+  hid (18), and what it never put in (12): the hex digits `a`, `A` and `F`, a byte 0x1F in a string, `\ud7ff` just below the surrogates,
+  `\u007f` and `\u0080`, and the spans of `true`, `false` and `null`, which it never compared. The build line now says
+  `-fno-sanitize-recover=undefined`: one mutant (`<= 19` for `<= 18` in `readLong`) was caught only as a signed overflow, which a
+  sanitizer that prints and goes on would have let through.
+- **Against the binary before.** `fromJSON` of 13,387 documents (12,000 that the check writes with `--emit`, 1,387 `.json` files of the
+  tree) gives the same standard output, standard error and exit status in the release build and under ASan, 7,478 of them errors. The
+  language suite on both schedules (487 of 487, every case byte-identical), the parser corpus (40,196 files), the three workloads (answers,
+  prefetch lists, replay with prelowering) and the command line give HEAD's bytes, in the release build and under ASan.
+- **What it costs** (Mac, 7 interleaved runs, minimum). `fromJSON` of a 26 MB array of objects: 0.145 s against 0.169 s; of 23 MB of
+  strings: 0.061 s against 0.068 s; of 11 MB of numbers: 0.049 s against 0.054 s. The memory is the other way: peak RSS 283 MB against 196,
+  151 against 139, and 112 against 91. The index and a `Value *` for each element (about 29 bytes) are held until the value is made,
+  where the recursive reader held only the value. A text of 4 GiB or more is refused (the offsets are 32 bits, as `Text`'s are). No workload
+  parses a document of that size, and the A/B of the workloads on the Mac is within the noise of the run. Kali: not yet measured.
 
 ## Measured and left alone
 

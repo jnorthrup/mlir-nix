@@ -1,6 +1,7 @@
 //===- Formats.cpp - JSON, XML and TOML conversions -----------------------===//
 
 #include "Composite/CharSeries.h"
+#include "Composite/Confix.h"
 #include "Composite/Mutable.h"
 #include "Nix/Eval.h"
 
@@ -176,193 +177,101 @@ void EvalState::printValueAsJSON(JsonOut &out, Value &v, bool strict, NixStringC
 //===----------------------------------------------------------------------===//
 
 namespace {
-struct JSONParser {
-  EvalState &st;
-  std::string_view s;
-  size_t p = 0;
-  [[noreturn]] void fail(std::string_view what) {
-    throw EvalError(composite::cat("[json.exception.parse_error.101] parse error at line 1, column ", p + 1,
-                                   ": syntax error while parsing value - ", what));
-  }
-  void ws() {
-    while (p < s.size() && (s[p] == ' ' || s[p] == '\t' || s[p] == '\n' || s[p] == '\r')) p++;
-  }
-  static void utf8(composite::Text &out, uint32_t cp) {
-    if (cp < 0x80) out += char(cp);
-    else if (cp < 0x800) { out += char(0xC0 | (cp >> 6)); out += char(0x80 | (cp & 0x3F)); }
-    else if (cp < 0x10000) { out += char(0xE0 | (cp >> 12)); out += char(0x80 | ((cp >> 6) & 0x3F)); out += char(0x80 | (cp & 0x3F)); }
-    else { out += char(0xF0 | (cp >> 18)); out += char(0x80 | ((cp >> 12) & 0x3F)); out += char(0x80 | ((cp >> 6) & 0x3F)); out += char(0x80 | (cp & 0x3F)); }
-  }
-  uint32_t hex4() {
-    if (p + 4 > s.size()) fail("invalid string: '\\u' must be followed by 4 hex digits");
-    uint32_t v = 0;
-    for (int i = 0; i < 4; i++) {
-      char c = s[p++];
-      v <<= 4;
-      if (c >= '0' && c <= '9') v |= c - '0';
-      else if (c >= 'a' && c <= 'f') v |= c - 'a' + 10;
-      else if (c >= 'A' && c <= 'F') v |= c - 'A' + 10;
-      else fail("invalid string: '\\u' must be followed by 4 hex digits");
+/// The error of a scan that stopped (Composite/Confix.h), in the words of the reader that took JSON before the index did.
+[[noreturn]] void jsonFault(const composite::confix::Scan &e, std::string_view json) {
+  using composite::confix::Fault;
+  if (e.fault == Fault::Unsigned)
+    throw EvalError(composite::cat("unsigned json number ", json.substr(e.at, e.end - e.at), " outside of Nix integer range"));
+  if (e.fault == Fault::Nul) {
+    composite::Text decoded, shown;
+    composite::confix::decode(json.data(), e.at, e.end - 1, decoded);
+    for (char c : decoded) {
+      if (c == '\0') shown += "\xe2\x90\x80"; // U+2400 SYMBOL FOR NULL, as UTF-8
+      else shown += c;
     }
-    return v;
+    throw EvalError(composite::cat("input string '", shown, "' cannot be represented as Nix string because it contains null bytes"));
   }
-  composite::Text string() {
-    composite::Text r = stringRaw();
-    if (r.find('\0') != composite::npos) {
-      composite::Text shown;
-      for (char c : r) {
-        if (c == '\0') shown += "\u2400";
-        else shown += c;
-      }
-      // U+2400 SYMBOL FOR NULL, as UTF-8.
-      composite::Text out2;
-      for (size_t i = 0; i < shown.size(); i++) {
-        if (shown.substr(i, 6) == "\u2400") { out2 += "\xe2\x90\x80"; i += 5; }
-        else out2 += shown[i];
-      }
-      throw EvalError(composite::cat("input string '", out2, "' cannot be represented as Nix string because it contains null bytes"));
+  throw EvalError(composite::cat("[json.exception.parse_error.101] parse error at line 1, column ", size_t(e.at) + 1,
+                                 ": syntax error while parsing value - ", composite::confix::what(e.fault)));
+}
+
+/// The text of the String row from..to (its quotes): a window of the source when nothing in it is escaped, else decoded into `scratch`.
+std::string_view stringOf(std::string_view json, uint32_t from, uint32_t to, composite::Text &scratch) {
+  const char *body = json.data() + from + 1;
+  if (!memchr(body, '\\', to - from - 1)) return std::string_view(body, to - from - 1);
+  scratch.clear();
+  composite::confix::decode(json.data(), from, to, scratch);
+  return std::string_view(scratch.data(), scratch.size());
+}
+
+/// The values of an index, made now: a Value for each row, a container's filled from the Values of its children, which are made before it is
+/// visited because the row of a child comes after the row of its parent.
+void reifyJSON(EvalState &st, const composite::confix::Index &ix, std::string_view json, Value &root) {
+  using composite::confix::Tag;
+  const char *s = json.data();
+  composite::MutableSeries<Value *> vals(ix.size());
+  vals[0] = &root;
+  composite::Text scratch;
+  composite::MutableSeries<Value *> elems, members;
+  composite::MutableSeries<composite::Text> keys;
+  composite::MutableSeries<uint32_t> order;
+  for (uint32_t i = 0; i < ix.size(); i++) {
+    if (!vals[i]) continue; // a key: it is read when its object is made
+    Value &v = *vals[i];
+    uint32_t from = ix.open(i), to = ix.close(i);
+    switch (ix.tag(i)) {
+    case Tag::Nothing: st.mkNull(v); break;
+    case Tag::Boolean: st.mkBool(v, s[from] == 't'); break;
+    case Tag::Long: st.mkInt(v, composite::confix::readLong(s, from, to)); break;
+    case Tag::Double: {
+      composite::Text num(json.substr(from, to - from + 1)); // strtod wants the NUL after it
+      st.mkFloat(v, strtod(num.c_str(), nullptr));
+      break;
     }
-    return r;
-  }
-  composite::Text stringRaw() {
-    p++; // "
-    composite::Text out;
-    while (true) {
-      if (p >= s.size()) fail("invalid string: missing closing quote");
-      char c = s[p++];
-      if (c == '"') break;
-      if ((unsigned char)c < 0x20) fail("invalid string: control character must be escaped");
-      if (c != '\\') { out += c; continue; }
-      if (p >= s.size()) fail("invalid string");
-      char e = s[p++];
-      switch (e) {
-      case '"': out += '"'; break;
-      case '\\': out += '\\'; break;
-      case '/': out += '/'; break;
-      case 'b': out += '\b'; break;
-      case 'f': out += '\f'; break;
-      case 'n': out += '\n'; break;
-      case 'r': out += '\r'; break;
-      case 't': out += '\t'; break;
-      case 'u': {
-        uint32_t cp = hex4();
-        if (cp >= 0xD800 && cp <= 0xDBFF) {
-          if (p + 2 <= s.size() && s[p] == '\\' && s[p + 1] == 'u') {
-            p += 2;
-            uint32_t lo = hex4();
-            cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-          } else fail("invalid string: surrogate U+D800..U+DBFF must be followed by U+DC00..U+DFFF");
-        }
-        utf8(out, cp);
-        break;
-      }
-      default: fail("invalid string: forbidden character after backslash");
-      }
-    }
-    return out;
-  }
-  void value(Value &v) {
-    ws();
-    if (p >= s.size()) fail("unexpected end of input; expected '[', '{', or a literal");
-    char c = s[p];
-    if (c == '{') {
-      p++;
-      EvalState::BindingsBuilder bb(st);
-      // The members in the order they came, sorted once below: an object of n members costs n log n whatever the order of its keys.
-      composite::MutableSeries<composite::Text> keys;
-      composite::MutableSeries<Value *> vals;
-      ws();
-      if (p < s.size() && s[p] == '}') { p++; st.mkAttrs(v, bb.finish()); return; }
-      while (true) {
-        ws();
-        if (p >= s.size() || s[p] != '"') fail("invalid literal; expected string literal");
-        composite::Text k = string();
-        ws();
-        if (p >= s.size() || s[p] != ':') fail("syntax error; expected ':'");
-        p++;
-        Value *e = st.allocValue();
-        value(*e);
-        keys.append(composite::mv(k));
-        vals.append(e);
-        ws();
-        if (p < s.size() && s[p] == ',') { p++; continue; }
-        if (p < s.size() && s[p] == '}') { p++; break; }
-        fail("syntax error; expected '}'");
-      }
-      // In key order, as the sorted map they were in gave them; sortRows is stable, so of equal keys the last in the text is the last here: it wins.
-      composite::MutableSeries<uint32_t> order;
-      for (uint32_t i = 0; i < keys.size(); i++) order.append(i);
-      composite::sortRows(order.begin(), order.size(), [&](uint32_t a, uint32_t b) { return keys[a] < keys[b]; });
-      for (uint32_t i = 0; i < order.size(); i++) {
-        if (i + 1 < order.size() && keys[order[i]] == keys[order[i + 1]]) continue;
-        bb.insert(keys[order[i]], vals[order[i]]);
-      }
-      st.mkAttrs(v, bb.finish());
-      return;
-    }
-    if (c == '[') {
-      p++;
-      composite::MutableSeries<Value *> elems;
-      ws();
-      if (p < s.size() && s[p] == ']') { p++; st.mkList(v, 0); return; }
-      while (true) {
-        Value *e = st.allocValue();
-        value(*e);
-        elems.append(e);
-        ws();
-        if (p < s.size() && s[p] == ',') { p++; continue; }
-        if (p < s.size() && s[p] == ']') { p++; break; }
-        fail("syntax error; expected ']'");
+    case Tag::String: st.mkString(v, stringOf(json, from, to, scratch)); break;
+    case Tag::Array: {
+      auto kids = ix.kidsOf(i);
+      if (kids.size() == 0) { st.mkList(v, 0); break; }
+      elems.clear();
+      for (uint32_t k = 0; k < kids.size(); k++) {
+        vals[kids[k]] = st.allocValue();
+        elems.append(vals[kids[k]]);
       }
       st.mkList(v, elems);
-      return;
+      break;
     }
-    if (c == '"') { st.mkString(v, string()); return; }
-    if (s.substr(p, 4) == "true") { p += 4; st.mkBool(v, true); return; }
-    if (s.substr(p, 5) == "false") { p += 5; st.mkBool(v, false); return; }
-    if (s.substr(p, 4) == "null") { p += 4; st.mkNull(v); return; }
-    if (c == '-' || (c >= '0' && c <= '9')) {
-      size_t start = p;
-      if (s[p] == '-') p++;
-      bool isFloat = false;
-      while (p < s.size() && composite::isAsciiDigit(s[p])) p++;
-      if (p < s.size() && s[p] == '.') { isFloat = true; p++; while (p < s.size() && composite::isAsciiDigit(s[p])) p++; }
-      if (p < s.size() && (s[p] == 'e' || s[p] == 'E')) {
-        isFloat = true;
-        p++;
-        if (p < s.size() && (s[p] == '+' || s[p] == '-')) p++;
-        while (p < s.size() && composite::isAsciiDigit(s[p])) p++;
+    case Tag::Object: {
+      auto kids = ix.kidsOf(i);
+      EvalState::BindingsBuilder bb(st);
+      // The members in the order they came, sorted once below: an object of n members costs n log n whatever the order of its keys.
+      keys.clear();
+      members.clear();
+      order.clear();
+      for (uint32_t k = 0; k + 1 < kids.size(); k += 2) {
+        keys.append(composite::Text(stringOf(json, ix.open(kids[k]), ix.close(kids[k]), scratch)));
+        members.append(vals[kids[k + 1]] = st.allocValue());
+        order.append(k / 2);
       }
-      composite::Text num(s.substr(start, p - start));
-      if (!isFloat) {
-        // The integer facets (composite::text::Integer), the reading strtoll and strtoull make: overflow is ERANGE.
-        composite::CharSeries digits = composite::chars(num);
-        if (num[0] == '-') {
-          composite::text::Reading r = composite::facet<composite::text::Integer<10, true>>(digits);
-          if (r.overflow) { st.mkFloat(v, strtod(num.c_str(), nullptr)); return; }
-          st.mkInt(v, (int64_t)r.value);
-        } else {
-          composite::text::Reading r = composite::facet<composite::text::Integer<10, false>>(digits);
-          if (r.overflow) { st.mkFloat(v, strtod(num.c_str(), nullptr)); return; }
-          if (r.value > (uint64_t)INT64_MAX)
-            throw EvalError(composite::cat("unsigned json number ", num, " outside of Nix integer range"));
-          st.mkInt(v, (int64_t)r.value);
-        }
-      } else {
-        st.mkFloat(v, strtod(num.c_str(), nullptr));
+      // In key order, as the sorted map they were in gave them; sortRows is stable, so of equal keys the last in the text is the last here: it wins.
+      composite::sortRows(order.begin(), order.size(), [&](uint32_t a, uint32_t b) { return keys[a] < keys[b]; });
+      for (uint32_t k = 0; k < order.size(); k++) {
+        if (k + 1 < order.size() && keys[order[k]] == keys[order[k + 1]]) continue;
+        bb.insert(keys[order[k]], members[order[k]]);
       }
-      return;
+      st.mkAttrs(v, bb.finish());
+      break;
     }
-    fail("invalid literal");
+    }
   }
-};
+}
 } // namespace
 
 void parseJSON(EvalState &state, std::string_view json, Value &v) {
-  JSONParser P{state, json};
-  P.value(v);
-  P.ws();
-  if (P.p != json.size()) P.fail("syntax error while parsing value - unexpected trailing content; expected end of input");
+  if (json.size() >= 0xFFFFFFFFull) throw EvalError("a JSON text of 4 GiB or more is not supported");
+  composite::confix::Index ix;
+  composite::confix::Scan e = composite::confix::scan(composite::chars(json.data(), uint32_t(json.size())), ix);
+  if (e) jsonFault(e, json);
+  reifyJSON(state, ix, json, v);
 }
 
 //===----------------------------------------------------------------------===//
