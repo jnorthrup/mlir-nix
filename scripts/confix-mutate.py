@@ -37,6 +37,7 @@ EQUIVALENT = [
      "c is never 0x20 here: the run of plain bytes above takes every byte from 0x20 up that is not a quote or a backslash"),
     ("digits = p - digits;", ["- -> +"], "`digits` only chooses between the sum of the digits and the facets for a number, and both read the same value"),
     ("if (digits > 18) {", ["> -> >=", "18 -> 17"], "as above: the facets and the sum of 18 digits (which cannot overflow) agree"),
+    ("uint32_t run = p + 1;", ["1 -> 0"], "the byte at p is not a backslash (the test above), so the search for the next one ends in the same place from p as from p + 1"),
     ("if (to + 1 - first <= 18) {", ["- -> +", "1 -> 2", "<= -> <", "18 -> 17"], "as above, in readLong: which way a number is read changes the time, not the value"),
     ("return negative ? int64_t(facet<text::Integer<10, true>>", ["true -> false", "false -> true"],
      "the unsigned facet reads a negative number as strtoull does, modulo 2^64, which is the same bits as the signed one; a positive number that fits is the same in both"),

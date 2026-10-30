@@ -126,25 +126,32 @@ of the reader it replaced, so every error message is the same. `Formats.cpp` los
   size, so that a read of the byte after the end is a fault and not a read of the NUL a `std::string` keeps there. The index is held to its
   own laws as well: rows in the order they open, every child after its parent and inside it, an object's children in pairs whose first is a
   string, and each row's span holding what its tag says. A scan of a million `[` must not use the stack.
-- **Whether the check can fail.** `scripts/confix-mutate.py` makes a mutant for each site of an operator in `Confix.h` (302: a comparison
+- **Whether the check can fail.** `scripts/confix-mutate.py` makes a mutant for each site of an operator in `Confix.h` (312: a comparison
   flipped, a constant moved by one, `&&` with `||`, `+` with `-`, `true` with `false`, a `!` dropped), builds the check with it, and runs it
-  small, then medium, then under the sanitizers, then at full size. 14 do not compile and 274 are killed. 14 survive every stage and
-  are equivalent, each with its reason in the script: the two offsets of a `Scan` with no fault, a threshold that cannot be reached, the
-  18-digit shortcut and the facets giving the same value, the unsigned facet reading a negative number to the same bits. The first version
-  of the check let 44 live. 14 were those, and 30 were the check's own faults: a read one byte past the end that the NUL of a `std::string`
-  hid (18), and what it never put in (12): the hex digits `a`, `A` and `F`, a byte 0x1F in a string, `\ud7ff` just below the surrogates,
-  `\u007f` and `\u0080`, and the spans of `true`, `false` and `null`, which it never compared. The build line now says
-  `-fno-sanitize-recover=undefined`: one mutant (`<= 19` for `<= 18` in `readLong`) was caught only as a signed overflow, which a
-  sanitizer that prints and goes on would have let through.
+  small, then medium, then under the sanitizers, then at full size. 14 do not compile and 283 are killed. 15 survive every stage and are
+  equivalent, each with its reason in the script, which exits 1 for a survivor that is not in its table: the two offsets of a `Scan` with no
+  fault, a threshold that cannot be reached, the 18-digit shortcut and the facets giving the same value, the unsigned facet reading a
+  negative number to the same bits, the search for the next backslash starting one byte early. The first version of the check, on the 302
+  sites there were then, let 44 live. 14 were equivalent, and 30 were the check's own faults: a read one byte past the end that the NUL of a
+  `std::string` hid (18), and what it never put in (12): the hex digits `a`, `A` and `F`, a byte 0x1F in a string, `\ud7ff` just below the
+  surrogates, `\u007f` and `\u0080`, and the spans of `true`, `false` and `null`, which it never compared. The build line now says
+  `-fno-sanitize-recover=undefined`: one mutant (`<= 19` for `<= 18` in `readLong`) was caught only as a signed overflow, which a sanitizer
+  that prints and goes on would have let through.
 - **Against the binary before.** `fromJSON` of 13,387 documents (12,000 that the check writes with `--emit`, 1,387 `.json` files of the
   tree) gives the same standard output, standard error and exit status in the release build and under ASan, 7,478 of them errors. The
   language suite on both schedules (487 of 487, every case byte-identical), the parser corpus (40,196 files), the three workloads (answers,
   prefetch lists, replay with prelowering) and the command line give HEAD's bytes, in the release build and under ASan.
-- **What it costs** (Mac, 7 interleaved runs, minimum). `fromJSON` of a 26 MB array of objects: 0.145 s against 0.169 s; of 23 MB of
-  strings: 0.061 s against 0.068 s; of 11 MB of numbers: 0.049 s against 0.054 s. The memory is the other way: peak RSS 283 MB against 196,
-  151 against 139, and 112 against 91. The index and a `Value *` for each element (about 29 bytes) are held until the value is made,
-  where the recursive reader held only the value. A text of 4 GiB or more is refused (the offsets are 32 bits, as `Text`'s are). No workload
-  parses a document of that size, and the A/B of the workloads on the Mac is within the noise of the run. Kali: not yet measured.
+- **What it costs.** The old reader's time against the new, minimum of interleaved runs. `fromJSON` of a 26 MB array of objects, 23 MB of
+  strings (each with an escape) and 11 MB of numbers: Mac x0.88, x0.85, x0.91 (7 runs); Kali, x86 (9 runs), x1.01, x0.90, x0.91. The first
+  version of the scan was x1.16 on those strings on Kali: `decode` put each byte through `Text::put` (the sampler had it at 37% of the time and
+  `put` at 15%), and it now puts each run between escapes in one piece. The memory goes the other way. Peak RSS of the three documents: Mac
+  284 MB against 196, 152 against 139, 113 against 91; Kali 288 against 206, 152 against 154, 138 against 124. The index and a `Value *` for each
+  element (about 29 bytes) are held until the value is made, where the recursive reader held only the value. A text of 4 GiB or more is
+  refused (the offsets are 32 bits, as `Text`'s are). No workload parses JSON of that size, or at all: no frame of the parser appears in a
+  profile of nixpkgs-73 on Kali. The workloads' A/B on Kali (the build before against this one, 11 interleaved runs, both orders): the demand
+  schedule is within 2.5% in every comparison (six); the plain schedule gave -9% to +7% on nixpkgs-73 over five runs, in both orders, and -1.4% to
+  +6.5% on nixos-toplevel, which is not a reading. The control that sizes that noise (the same binary in both slots) was queued when the host
+  went out of reach.
 
 ## Measured and left alone
 
