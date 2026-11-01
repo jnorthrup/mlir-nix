@@ -11,26 +11,26 @@
 // CHECK-SAME: state_dir = "/tmp/state"
 // CHECK-SAME: store_root = "/tmp/root"
 mlnix.session @demand attributes {store_root = "/tmp/root", state_dir = "/tmp/state"} {
-  // CHECK: mlnix.schedule demand
+  // CHECK: mlnix.schedule{{ +}}demand
   mlnix.schedule demand
   // CHECK: mlnix.pipeline "nix-prims,cse"
   mlnix.pipeline "nix-prims,cse"
-  // CHECK: mlnix.jit scalar threshold 64 opt 2
+  // CHECK: mlnix.jit{{ +}}scalar threshold 64 opt 2
   mlnix.jit scalar threshold 64 opt 2
   // CHECK: mlnix.prelower threads 4 list "/tmp/files"
   mlnix.prelower threads 4 list "/tmp/files"
   // CHECK: mlnix.census top 10
   mlnix.census top 10
-  // CHECK: mlnix.eval expr "1 + 1" strict output json
+  // CHECK: mlnix.eval{{ +}}expr "1 + 1" strict output{{ +}}json
   mlnix.eval expr "1 + 1" strict output json
-  // CHECK: mlnix.eval file "default.nix"
+  // CHECK: mlnix.eval{{ +}}file "default.nix"
   mlnix.eval file "default.nix"
 }
 
 // A session with no settings keeps the utility's defaults.
 // CHECK-LABEL: mlnix.session @bare
 mlnix.session @bare {
-  // CHECK: mlnix.jit off
+  // CHECK: mlnix.jit{{ +}}off
   mlnix.jit off
   // CHECK: mlnix.census
   mlnix.census

@@ -16,6 +16,11 @@ if(NOT MLIR_DIR AND EXISTS /opt/homebrew/opt/llvm/lib/cmake/mlir)
 endif()
 find_package(MLIR REQUIRED CONFIG)
 message(STATUS "Using MLIRConfig.cmake in: ${MLIR_DIR}")
+# A packaged MLIR (nixpkgs) names its tablegen without a directory, which ninja takes for a missing file.
+if(NOT TARGET mlir-tblgen AND NOT IS_ABSOLUTE "${MLIR_TABLEGEN_EXE}")
+  find_program(MLIR_TABLEGEN_PATH mlir-tblgen REQUIRED)
+  set(MLIR_TABLEGEN_EXE ${MLIR_TABLEGEN_PATH})
+endif()
 
 list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}" "${LLVM_CMAKE_DIR}")
 include(TableGen)
