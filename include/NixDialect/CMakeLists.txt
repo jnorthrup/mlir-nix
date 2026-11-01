@@ -17,6 +17,17 @@ set(LLVM_TARGET_DEFINITIONS NixSyntax.td)
 mlir_tablegen(NixSyntaxEnums.h.inc -gen-enum-decls)
 mlir_tablegen(NixSyntaxEnums.cpp.inc -gen-enum-defs)
 
+# The control surface of the mlnix utility (MlnixControl.td): sessions, settings and evaluation requests
+set(LLVM_TARGET_DEFINITIONS MlnixControl.td)
+mlir_tablegen(MlnixControl.h.inc -gen-op-decls)
+mlir_tablegen(MlnixControl.cpp.inc -gen-op-defs)
+mlir_tablegen(MlnixControlDialect.h.inc -gen-dialect-decls -dialect=mlnix)
+mlir_tablegen(MlnixControlDialect.cpp.inc -gen-dialect-defs -dialect=mlnix)
+mlir_tablegen(MlnixControlEnums.h.inc -gen-enum-decls)
+mlir_tablegen(MlnixControlEnums.cpp.inc -gen-enum-defs)
+mlir_tablegen(MlnixControlAttrDefs.h.inc -gen-attrdef-decls -attrdefs-dialect=mlnix)
+mlir_tablegen(MlnixControlAttrDefs.cpp.inc -gen-attrdef-defs -attrdefs-dialect=mlnix)
+
 add_public_tablegen_target(MLIRNixOpsIncGen)
 
 # The continents' IRDL declaration, embedded in the binary as a raw string
