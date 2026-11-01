@@ -19,3 +19,10 @@ llvm_update_compile_flags(mlnix-query)
 add_executable(mlnix-parse mlnix-parse.cpp)
 target_link_libraries(mlnix-parse PRIVATE NixFrontend)
 llvm_update_compile_flags(mlnix-parse)
+
+# The C surface of the dialects (include/mlnix-c/MlnixC.h): what Kotlin/Native's cinterop links (TrikeShed's mlirMain).
+add_library(mlnix-c SHARED mlnix-c.cpp)
+set_target_properties(mlnix-c PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/lib)
+target_link_libraries(mlnix-c PRIVATE MLIRNix MLIRTrikeShed MLIRParser MLIRIR MLIRSupport
+  MLIRArithDialect MLIRAsyncDialect MLIRControlFlowDialect MLIRSCFDialect)
+llvm_update_compile_flags(mlnix-c)
