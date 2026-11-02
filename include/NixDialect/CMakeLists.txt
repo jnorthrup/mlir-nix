@@ -42,6 +42,12 @@ mlir_tablegen(Sumo.cpp.inc -gen-op-defs)
 mlir_tablegen(SumoDialect.h.inc -gen-dialect-decls -dialect=sumo)
 mlir_tablegen(SumoDialect.cpp.inc -gen-dialect-defs -dialect=sumo)
 
+set(LLVM_TARGET_DEFINITIONS Son.td)
+mlir_tablegen(Son.h.inc -gen-op-decls)
+mlir_tablegen(Son.cpp.inc -gen-op-defs)
+mlir_tablegen(SonDialect.h.inc -gen-dialect-decls -dialect=son)
+mlir_tablegen(SonDialect.cpp.inc -gen-dialect-defs -dialect=son)
+
 add_public_tablegen_target(MLIRNixOpsIncGen)
 
 # The continents' IRDL declaration, embedded in the binary as a raw string

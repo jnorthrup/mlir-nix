@@ -1,6 +1,7 @@
 //===- NixDialect.cpp - Nix dialect implementation ------------------------===//
 
 #include "NixDialect/NixDialect.h"
+#include "NixDialect/Son.h"
 #include "NixDialect/Sumo.h"
 
 #include "mlir/IR/Builders.h"
@@ -569,6 +570,7 @@ void mlir::nix::registerNixPasses() {
     PassRegistration<NixPromotionsPass>();
     kif::registerKifPasses();
     sumo::registerSumoPasses();
+    son::registerSonPasses();
     PassPipelineRegistration<>("nix-simplify",
                                "Devirtualize primops, fold constants, remove dead (cyclic) bindings",
                                [](OpPassManager &pm) {

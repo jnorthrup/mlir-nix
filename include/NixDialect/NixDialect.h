@@ -50,6 +50,10 @@ struct NixStoreResource : public SideEffects::Resource::Base<NixStoreResource> {
 
 } // namespace mlir::nix
 
+namespace mlir::son {
+class BodyOp; // a lambda body of the sea of nodes (Son.td): nix.return ends it too
+} // namespace mlir::son
+
 namespace mlir::nix {
 /// Marker trait of the `NixModes` ODS class (NixBase.td): the op class carries
 /// `kStrictMask` / `kTailMask`, which the dialect collects into `operandModes`.

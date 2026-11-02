@@ -46,7 +46,7 @@ def Nix_ExprOp : Nix_Op<"expr", [
 }
 
 def Nix_ReturnOp : Nix_Op<"return", [Terminator, NoMemoryEffect, NixModes<[], [0]>,
-    ParentOneOf<["ExprOp", "LambdaOp"]>]> {
+    ParentOneOf<["ExprOp", "LambdaOp", "::mlir::son::BodyOp"]>]> {
   let summary = "result of the enclosing expression / lambda body";
   let arguments = (ins NixVal:$value);
   let assemblyFormat = "$value attr-dict";
