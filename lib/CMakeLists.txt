@@ -2,6 +2,8 @@ add_mlir_dialect_library(MLIRNix
   Dialect/NixDialect.cpp
   Dialect/NixPrimDialects.cpp
   Dialect/MlnixControlDialect.cpp
+  Dialect/KifDialect.cpp
+  Dialect/SumoDialect.cpp
   PARTIAL_SOURCES_INTENDED
   DEPENDS MLIRNixOpsIncGen
   LINK_LIBS PUBLIC MLIRIR MLIRPass MLIRTransforms MLIRTransformUtils MLIRRewrite MLIRSideEffectInterfaces MLIRIRDL MLIRParser)

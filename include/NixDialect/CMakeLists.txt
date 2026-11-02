@@ -28,6 +28,20 @@ mlir_tablegen(MlnixControlEnums.cpp.inc -gen-enum-defs)
 mlir_tablegen(MlnixControlAttrDefs.h.inc -gen-attrdef-decls -attrdefs-dialect=mlnix)
 mlir_tablegen(MlnixControlAttrDefs.cpp.inc -gen-attrdef-defs -attrdefs-dialect=mlnix)
 
+# The solver's layers above the nix dialect: SUO-KIF terms, facts and rules (Kif.td), and SUMO's relations (Sumo.td)
+set(LLVM_TARGET_DEFINITIONS Kif.td)
+mlir_tablegen(Kif.h.inc -gen-op-decls)
+mlir_tablegen(Kif.cpp.inc -gen-op-defs)
+mlir_tablegen(KifDialect.h.inc -gen-dialect-decls -dialect=kif)
+mlir_tablegen(KifDialect.cpp.inc -gen-dialect-defs -dialect=kif)
+mlir_tablegen(KifTypes.h.inc -gen-typedef-decls -typedefs-dialect=kif)
+mlir_tablegen(KifTypes.cpp.inc -gen-typedef-defs -typedefs-dialect=kif)
+set(LLVM_TARGET_DEFINITIONS Sumo.td)
+mlir_tablegen(Sumo.h.inc -gen-op-decls)
+mlir_tablegen(Sumo.cpp.inc -gen-op-defs)
+mlir_tablegen(SumoDialect.h.inc -gen-dialect-decls -dialect=sumo)
+mlir_tablegen(SumoDialect.cpp.inc -gen-dialect-defs -dialect=sumo)
+
 add_public_tablegen_target(MLIRNixOpsIncGen)
 
 # The continents' IRDL declaration, embedded in the binary as a raw string
