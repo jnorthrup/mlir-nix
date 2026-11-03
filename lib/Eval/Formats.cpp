@@ -229,6 +229,7 @@ void reifyJSON(EvalState &st, const composite::confix::Index &ix, std::string_vi
       break;
     }
     case Tag::String: st.mkString(v, stringOf(json, from, to, scratch)); break;
+    case Tag::Bytes: break; // a CBOR element: this index is of JSON text
     case Tag::Array: {
       auto kids = ix.kidsOf(i);
       if (kids.size() == 0) { st.mkList(v, 0); break; }
