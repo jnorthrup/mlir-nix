@@ -2,6 +2,7 @@
 
 #include "NixDialect/NixDialect.h"
 #include "NixDialect/Son.h"
+#include "NixDialect/Confix.h"
 #include "NixDialect/Sumo.h"
 
 #include "mlir/IR/Builders.h"
@@ -571,6 +572,7 @@ void mlir::nix::registerNixPasses() {
     kif::registerKifPasses();
     sumo::registerSumoPasses();
     son::registerSonPasses();
+    confix::registerConfixPasses();
     PassPipelineRegistration<>("nix-simplify",
                                "Devirtualize primops, fold constants, remove dead (cyclic) bindings",
                                [](OpPassManager &pm) {

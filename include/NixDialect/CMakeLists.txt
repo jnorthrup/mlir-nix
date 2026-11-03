@@ -48,6 +48,15 @@ mlir_tablegen(Son.cpp.inc -gen-op-defs)
 mlir_tablegen(SonDialect.h.inc -gen-dialect-decls -dialect=son)
 mlir_tablegen(SonDialect.cpp.inc -gen-dialect-defs -dialect=son)
 
+# TrikeShed's Confix scanner (Confix.td): the dialect over lib/Confix/confix.ll
+set(LLVM_TARGET_DEFINITIONS Confix.td)
+mlir_tablegen(Confix.h.inc -gen-op-decls)
+mlir_tablegen(Confix.cpp.inc -gen-op-defs)
+mlir_tablegen(ConfixDialect.h.inc -gen-dialect-decls -dialect=confix)
+mlir_tablegen(ConfixDialect.cpp.inc -gen-dialect-defs -dialect=confix)
+mlir_tablegen(ConfixEnums.h.inc -gen-enum-decls)
+mlir_tablegen(ConfixEnums.cpp.inc -gen-enum-defs)
+
 add_public_tablegen_target(MLIRNixOpsIncGen)
 
 # The continents' IRDL declaration, embedded in the binary as a raw string

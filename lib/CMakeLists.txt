@@ -5,9 +5,27 @@ add_mlir_dialect_library(MLIRNix
   Dialect/KifDialect.cpp
   Dialect/SumoDialect.cpp
   Dialect/SonDialect.cpp
+  Dialect/ConfixDialect.cpp
   PARTIAL_SOURCES_INTENDED
   DEPENDS MLIRNixOpsIncGen
-  LINK_LIBS PUBLIC MLIRIR MLIRPass MLIRTransforms MLIRTransformUtils MLIRRewrite MLIRSideEffectInterfaces MLIRIRDL MLIRParser)
+  LINK_LIBS PUBLIC MLIRIR MLIRPass MLIRTransforms MLIRTransformUtils MLIRRewrite MLIRSideEffectInterfaces MLIRIRDL MLIRParser MLIRLLVMDialect)
+
+# The Confix scanner is LLVM IR (Confix/confix.ll, freestanding: it calls nothing).  opt and llc make its object, which MLIRNix carries, so that
+# whatever links the library can call confix_scan_json and confix_scan_cbor, which the confix-to-llvm pass lowers to.
+find_program(MLNIX_OPT opt HINTS ${LLVM_TOOLS_BINARY_DIR})
+find_program(MLNIX_LLC llc HINTS ${LLVM_TOOLS_BINARY_DIR})
+if(NOT MLNIX_OPT OR NOT MLNIX_LLC)
+  message(FATAL_ERROR "opt and llc are needed to build lib/Confix/confix.ll")
+endif()
+set(CONFIX_LL ${CMAKE_CURRENT_SOURCE_DIR}/Confix/confix.ll)
+set(CONFIX_OBJ ${CMAKE_CURRENT_BINARY_DIR}/confix.o)
+add_custom_command(OUTPUT ${CONFIX_OBJ}
+  COMMAND ${MLNIX_OPT} -O3 ${CONFIX_LL} -o ${CMAKE_CURRENT_BINARY_DIR}/confix.bc
+  COMMAND ${MLNIX_LLC} -O3 -filetype=obj -relocation-model=pic ${CMAKE_CURRENT_BINARY_DIR}/confix.bc -o ${CONFIX_OBJ}
+  DEPENDS ${CONFIX_LL}
+  COMMENT "Confix scanner (LLVM IR)")
+set_source_files_properties(${CONFIX_OBJ} PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+target_sources(MLIRNix PRIVATE ${CONFIX_OBJ})
 
 # TrikeShed's kernel as a dialect: Join, MetaSeries, Series, Series2, split, Cursor, α, ↺ and the combinators of
 # borg.trikeshed.lib, generated from include/Composite/TrikeShed.td.

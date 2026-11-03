@@ -23,6 +23,7 @@
 #include "NixDialect/NixDialect.h"
 #include "NixDialect/MlnixControl.h"
 #include "NixDialect/Son.h"
+#include "NixDialect/Confix.h"
 #include "NixDialect/Sumo.h"
 
 #include "mlir/Dialect/IRDL/IR/IRDL.h"
@@ -256,7 +257,8 @@ static void defineContinents(MLIRContext *ctx, NixDialect *core) {
 
 void mlir::nix::registerNixDialects(DialectRegistry &registry) {
   registry.insert<NixDialect>();
-  registry.insert<mlir::mlnix::MlnixDialect, mlir::kif::KifDialect, mlir::sumo::SumoDialect, mlir::son::SonDialect>();
+  registry.insert<mlir::mlnix::MlnixDialect, mlir::kif::KifDialect, mlir::sumo::SumoDialect, mlir::son::SonDialect, mlir::confix::ConfixDialect,
+                  mlir::LLVM::LLVMDialect>();
   registry.addExtension(defineContinents);
 }
 

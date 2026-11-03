@@ -19,7 +19,7 @@ pkgs.stdenv.mkDerivation {
       !(builtins.elem name [ "build" "build-asan" "build-g" "build-pgo-gen" "build-pgo-use" "tasktrees" ".git" "__pycache__" ".DS_Store" ]);
   };
 
-  nativeBuildInputs = [ pkgs.cmake pkgs.ninja llvm.tblgen ]; # mlir-tblgen runs during the build
+  nativeBuildInputs = [ pkgs.cmake pkgs.ninja llvm.tblgen llvm.llvm ]; # mlir-tblgen runs during the build; opt and llc make the Confix scanner's object
   buildInputs = [ llvm.llvm.dev llvm.mlir.dev pkgs.openssl ] ++ lib.optional pkgs.stdenv.isLinux pkgs.liburing;
 
   cmakeFlags = [
