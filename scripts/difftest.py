@@ -41,6 +41,7 @@ CASES = [
     'builtins.hashFile "sha256" ./test/diff/file.txt',
     'builtins.readDir ./test/diff/dir',
     'builtins.readFile (builtins.fetchurl "file://${toString ./test/diff/file.txt}")',
+    'builtins.hashString "sha256" (builtins.readFile ((builtins.fetchGit { url = toString ./.; rev = "1547e4a37ea1393a7cd3e3cfe7a89aff38a36dba"; }) + "/CMakeLists.txt"))',
     # --- string context ------------------------------------------------------
     'let d = derivation { name = "c"; builder = "/bin/sh"; system = "x86_64-linux"; outputs = ["out" "bin"]; }; in builtins.getContext "${d} ${d.bin} ${d.drvPath}"',
     'builtins.getContext (builtins.unsafeDiscardOutputDependency (derivation { name = "c"; builder = "/bin/sh"; system = "x86_64-linux"; }).drvPath)',
@@ -161,6 +162,8 @@ def main():
         print(f"{n}/{len(CASES)} identical to {name}")
     if disagree:
         print(f"{disagree} case(s) where the references disagree with each other (shown above)")
+    # A fetched git tree has read-only objects: make them writable, then remove the root.
+    subprocess.run(["chmod", "-R", "u+w", "/tmp/mlnix-difftest-root"], capture_output=True)
     shutil.rmtree("/tmp/mlnix-difftest-root", ignore_errors=True)
     return 1 if failed else 0
 

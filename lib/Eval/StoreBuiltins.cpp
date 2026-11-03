@@ -497,6 +497,7 @@ static void fetchGit(EvalState &st, A args, Value &v, PosPtr pos) {
   // Export the tree without .git.
   nixstore::deletePathRecursive(composite::cat(dir, "/.git"));
   composite::Text dst;
+  nixstore::Store::FetchWrites writes(*st.store);
   try {
     dst = st.store->addToStore(name, dir);
   } catch (nixstore::Error &e) {
