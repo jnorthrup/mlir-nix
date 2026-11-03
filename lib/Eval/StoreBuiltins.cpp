@@ -405,6 +405,7 @@ static void fetchImpl(EvalState &st, A args, Value &v, PosPtr pos, bool unpack, 
   }
   composite::Text file = downloadToTemp(url, pos);
   composite::Text dst;
+  nixstore::Store::FetchWrites writes(*st.store);
   try {
     if (unpack) {
       char dtmpl[] = "/tmp/mlnix-unpack-XXXXXX";

@@ -171,7 +171,7 @@ bool parseCommon(Options &o, std::string_view arg, int &i, int argc, char **argv
     o.storeDirSet = true;
   } else if (arg == "--store") {
     std::string_view s = next();
-    if (s == "dummy://") o.readOnly = true;
+    if (s == "dummy://") o.readOnly = o.store.dummy = true;
     else if (s.rfind("local?root=", 0) == 0) { o.store.realRoot = absPath(s.substr(11)); o.storeRootSet = true; }
     else if (s != "auto" && s != "local" && s != "daemon") { o.store.realRoot = absPath(s); o.storeRootSet = true; }
   } else if (arg == "--readonly-mode") {
@@ -215,7 +215,7 @@ void finishOptions(Options &o) {
     if (const char *sd = getenv("NIX_STORE_DIR")) o.store.storeDir = sd;
     else if (const char *sd2 = getenv("NIX_STORE")) o.store.storeDir = sd2;
   }
-  if (const char *r = getenv("NIX_REMOTE"); r && std::string_view(r) == "dummy://") o.readOnly = true;
+  if (const char *r = getenv("NIX_REMOTE"); r && std::string_view(r) == "dummy://") o.readOnly = o.store.dummy = true;
   if (!o.storeRootSet) {
     if (const char *r = getenv("MLNIX_STORE_ROOT")) o.store.realRoot = r;
     else {

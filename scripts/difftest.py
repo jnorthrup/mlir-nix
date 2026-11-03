@@ -7,7 +7,7 @@ usage: difftest.py [--mlnix PATH] [-v] [--native --ref NAME=PATH ...]
 With --native the references are nix-instantiate binaries on this machine (the benchmark host has
 Nix 2.35.4 and Lix 2.91.3); the first one decides the exit code, the others are reported.
 """
-import os, subprocess, sys, argparse
+import os, shutil, subprocess, sys, argparse
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIX = os.path.join(ROOT, "test", "diff")
@@ -40,6 +40,7 @@ CASES = [
     'builtins.path { path = ./test/diff/file.txt; recursive = false; }',
     'builtins.hashFile "sha256" ./test/diff/file.txt',
     'builtins.readDir ./test/diff/dir',
+    'builtins.readFile (builtins.fetchurl "file://${toString ./test/diff/file.txt}")',
     # --- string context ------------------------------------------------------
     'let d = derivation { name = "c"; builder = "/bin/sh"; system = "x86_64-linux"; outputs = ["out" "bin"]; }; in builtins.getContext "${d} ${d.bin} ${d.drvPath}"',
     'builtins.getContext (builtins.unsafeDiscardOutputDependency (derivation { name = "c"; builder = "/bin/sh"; system = "x86_64-linux"; }).drvPath)',
@@ -94,9 +95,10 @@ CASES = [
 ]
 
 def run_local(mlnix, expr):
-    env = dict(os.environ, NIX_REMOTE="dummy://", NIX_STORE_DIR="/nix/store")
+    # The reference runs --readonly-mode, not a dummy store: its fetchers still write, so this side does too.
+    env = dict(os.environ, NIX_STORE_DIR="/nix/store")
     env["MLNIX_STORE_ROOT"] = "/tmp/mlnix-difftest-root"
-    p = subprocess.run([mlnix, "instantiate", "--eval", "--strict", "-E", expr], cwd=ROOT,
+    p = subprocess.run([mlnix, "instantiate", "--readonly-mode", "--eval", "--strict", "-E", expr], cwd=ROOT,
                        capture_output=True, env=env, timeout=60)
     return p.returncode, p.stdout.decode(errors="replace").strip()
 
@@ -159,6 +161,7 @@ def main():
         print(f"{n}/{len(CASES)} identical to {name}")
     if disagree:
         print(f"{disagree} case(s) where the references disagree with each other (shown above)")
+    shutil.rmtree("/tmp/mlnix-difftest-root", ignore_errors=True)
     return 1 if failed else 0
 
 if __name__ == "__main__":
