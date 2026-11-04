@@ -1,7 +1,7 @@
 //===- ConfixDialect.cpp - The confix dialect, and confix-to-llvm -----------------------===//
 //
 // The scan is LLVM IR (lib/Confix/confix.ll).  This file registers the dialect and lowers its ops: `confix.scan` to a call of the IR's
-// confix_scan_json or confix_scan_cbor, and the reads of a Flat record (include/NixDialect/Confix.td) to loads from it.
+// confix_scan_json, confix_scan_cbor or confix_scan_yaml, and the reads of a Flat record (include/NixDialect/Confix.td) to loads from it.
 
 #include "NixDialect/Confix.h"
 
@@ -82,7 +82,9 @@ struct ConfixToLLVMPass : PassWrapper<ConfixToLLVMPass, OperationPass<ModuleOp>>
       OpBuilder b(op);
       Lowering l(b, op->getLoc());
       if (auto scan = dyn_cast<ScanOp>(op)) {
-        StringRef callee = scan.getSyntax() == SyntaxKind::Json ? "confix_scan_json" : "confix_scan_cbor";
+        StringRef callee = scan.getSyntax() == SyntaxKind::Json   ? "confix_scan_json"
+                           : scan.getSyntax() == SyntaxKind::Cbor ? "confix_scan_cbor"
+                                                                  : "confix_scan_yaml";
         declare(module, callee, l.ptr, l.i32);
         Value fault = LLVM::CallOp::create(b, op->getLoc(), LLVM::LLVMFunctionType::get(l.i32, {l.ptr, l.ptr}), callee,
                                            ValueRange{scan.getSrc(), scan.getFlat()}).getResult();

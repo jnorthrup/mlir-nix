@@ -1,7 +1,7 @@
 //===- Confix.td - TrikeShed's Confix scanner, as a dialect over LLVM IR -------------*- tablegen -*-===//
 //
 // TrikeShed's parse/confix (src/commonMain/kotlin/borg/trikeshed/parse/confix/Confix.kt) scans a text once into a flat index: Syntax.scan0
-// for JSON, Syntax.scanCbor0 for CBOR, then Syntax.buildTree gives every span its depth and its children.  This dialect is that scan.  The
+// for JSON, Syntax.scanCbor0 for CBOR, Syntax.scanYaml0 for YAML, then Syntax.buildTree gives every span its depth and its children.  This dialect is that scan.  The
 // scan itself is LLVM IR (lib/Confix/confix.ll) taken from the IR Kotlin/Native makes of those functions, and reads a CharSeries
 // (include/Composite/CharSeries.h) and nothing else: no libc, no allocation, no recursion, no strings.
 //
@@ -23,11 +23,18 @@
 //   kid    ptr   out  [room] of u32                       the rows of each element's direct children, in order
 //   work   ptr   --   [3 * room] of u32                   scratch
 //
+// YAML differs in two ways.  Its scan makes the rows as it parses and sorts them (buildTree's sort, which Kotlin does on every syntax and which
+// JSON and CBOR need not do), and it keeps the lines of the text and the open nodes in `work`:
+//   work   [max(9 * (n + 1), 3 * room)] of u32.
+// And no room that follows from n is always enough: Kotlin's parser reads a line again for every blank line before it, so a text of 164 bytes (20
+// blank lines, then thirty nested `- `) has 3233 rows.  The caller picks room, and scans again with more on the fault Room.
+// A YAML text that begins (after white space) with `{` or `[` is scanned as JSON, as Kotlin does, with the sizes of JSON.
+//
 // The rows are in the order the elements open.  An object's children are its keys and its values, alternating.  After a fault only total,
 // fault and at are meant to be read, except after Bounds, which comes after the whole tree is made.
 //
-// Oracle: TrikeShed itself.  test/mlir/inputs/confix-golden.ll holds what the real Syntax.scan0 and Syntax.scanCbor0 gave for 621 texts (and
-// five that Kotlin never answers, whose fault Backward is this port's), and test/mlir/confix.mlir runs the scanner on them.
+// Oracle: TrikeShed itself.  test/mlir/inputs/confix-golden.ll holds what the real Syntax.scan0, Syntax.scanCbor0 and Syntax.scanYaml0 gave for
+// the texts it lists (and those that Kotlin never answers, whose fault Backward is this port's), and test/mlir/confix.mlir runs the scanner on them.
 //
 //===----------------------------------------------------------------------===//
 
@@ -50,7 +57,8 @@ def Confix_Dialect : Dialect {
 
 def Confix_Json : I32EnumAttrCase<"Json", 0, "json">;
 def Confix_Cbor : I32EnumAttrCase<"Cbor", 1, "cbor">;
-def Confix_SyntaxKind : I32EnumAttr<"SyntaxKind", "the syntax a text is scanned as", [Confix_Json, Confix_Cbor]> {
+def Confix_Yaml : I32EnumAttrCase<"Yaml", 2, "yaml">;
+def Confix_SyntaxKind : I32EnumAttr<"SyntaxKind", "the syntax a text is scanned as", [Confix_Json, Confix_Cbor, Confix_Yaml]> {
   let cppNamespace = "::mlir::confix";
 }
 

@@ -1,9 +1,11 @@
-; Checks the Confix scanner (lib/Confix/confix.ll) against what TrikeShed's own scanners gave (confix-golden.ll).  For every case it runs
-; confix_scan_json or confix_scan_cbor and compares the whole Flat record; then twice more for the cases that scan through, once with the arrays
+; Checks the Confix scanner (lib/Confix/confix.ll) against what TrikeShed's own scanners gave (confix-golden.ll, confix-golden-yaml.ll).  For every case
+; it runs confix_scan_json, confix_scan_cbor or confix_scan_yaml and compares the whole Flat record; then twice more for the cases that scan through, once with the arrays
 ; of exactly the row count (a write past one is a fault under AddressSanitizer) and once with one row too few (the fault must be Room).  Exit
 ; status 0 when every case agrees.  A disagreement prints "case what" and a newline: what is 1 the fault, 2 the offset of a Bounds fault, 3
 ; the row count, 4 an open, 5 a close, 6 a tag, 7 a depth, 8 where the children start, 9 how many children, 10 a child, 11 no Room fault, 12 a
-; nonzero offset after a scan without a fault; plus 100 in the second run and 200 in the third.  This is test code: it reports with write(2).
+; nonzero offset after a scan without a fault, or after a YAML scan that stopped with a fault; plus 100 in the second run and 200 in the third.  This is test code: it reports with write(2).
+; A YAML case gets room 3 * its size + 1 + its row count in the first run (the rows of a YAML text are not bounded by its size), and work of
+; max(9 * (size + 1), 3 * room) words.
 
 %confix.chars = type { i32, ptr, i32, i32, i32 }
 %confix.flat = type { i32, i32, i32, i32, ptr, ptr, ptr, ptr, ptr, ptr }
@@ -11,6 +13,7 @@
 declare i64 @write(i32, ptr, i64)
 declare i32 @confix_scan_json(ptr, ptr)
 declare i32 @confix_scan_cbor(ptr, ptr)
+declare i32 @confix_scan_yaml(ptr, ptr)
 
 @ncases = external constant i32
 @in_data = external constant i8
@@ -122,11 +125,24 @@ setup:
   %mode1 = icmp eq i32 %mode, 1
   %wtm1 = sub i32 %wt0, 1
   %r12 = select i1 %mode1, i32 %wt0, i32 %wtm1
-  %roomv = select i1 %mode0, i32 %size, i32 %r12
+  %syn00 = call i32 @ld(ptr @in_syn, i32 %i)
+  %isy0 = icmp eq i32 %syn00, 2
+  %sz3 = mul i32 %size, 3
+  %szy0 = add i32 %sz3, 1
+  %szy = add i32 %szy0, %wt0
+  %size_r = select i1 %isy0, i32 %szy, i32 %size
+  %roomv = select i1 %mode0, i32 %size_r, i32 %r12
   %m = call i32 @max1(i32 %roomv)
   %tm = call i32 @max1(i32 %size)
   %m2 = shl i32 %m, 1
-  %m3 = mul i32 %m, 3
+  %m3a = mul i32 %m, 3
+  %syn0 = call i32 @ld(ptr @in_syn, i32 %i)
+  %isy = icmp eq i32 %syn0, 2
+  %sz1 = add i32 %size, 1
+  %yw = mul i32 %sz1, 9
+  %ywz = select i1 %isy, i32 %yw, i32 0
+  %bigger = icmp ugt i32 %ywz, %m3a
+  %m3 = select i1 %bigger, i32 %ywz, i32 %m3a
   %m1 = add i32 %m, 1
   %txt = alloca i8, i32 %tm, align 16
   %spanb = alloca i32, i32 %m2, align 16
@@ -174,16 +190,21 @@ ready:
   %f9 = getelementptr inbounds %confix.flat, ptr %flat, i32 0, i32 9
   store ptr %workb, ptr %f9, align 8
   %syn = call i32 @ld(ptr @in_syn, i32 %i)
-  %iscbor = icmp ne i32 %syn, 0
-  br i1 %iscbor, label %cbor, label %json
+  switch i32 %syn, label %cbor [
+    i32 0, label %json
+    i32 2, label %yaml
+  ]
 json:
   %rj = call i32 @confix_scan_json(ptr %cs, ptr %flat)
   br label %scanned
 cbor:
   %rc = call i32 @confix_scan_cbor(ptr %cs, ptr %flat)
   br label %scanned
+yaml:
+  %ry = call i32 @confix_scan_yaml(ptr %cs, ptr %flat)
+  br label %scanned
 scanned:
-  %got = phi i32 [ %rj, %json ], [ %rc, %cbor ]
+  %got = phi i32 [ %rj, %json ], [ %rc, %cbor ], [ %ry, %yaml ]
   %short = icmp eq i32 %mode, 2
   br i1 %short, label %shortcheck, label %fullcheck
 shortcheck:
@@ -200,7 +221,17 @@ f_ok:
   %wint = icmp eq i32 %want, 3
   %wnone = icmp eq i32 %want, 0
   %full = or i1 %wint, %wnone
-  br i1 %full, label %cmp_at, label %pass
+  br i1 %full, label %cmp_at, label %chk_fault
+chk_fault:
+  ; a YAML scan that stops with a fault reports no offset
+  %synf = call i32 @ld(ptr @in_syn, i32 %i)
+  %isyf = icmp eq i32 %synf, 2
+  br i1 %isyf, label %cmp_atf, label %pass
+cmp_atf:
+  %fa1 = getelementptr inbounds %confix.flat, ptr %flat, i32 0, i32 2
+  %gat1 = load i32, ptr %fa1, align 4
+  %a1ok = icmp eq i32 %gat1, 0
+  br i1 %a1ok, label %pass, label %bad12
 cmp_at:
   br i1 %wint, label %cmp_at2, label %cmp_at0
 cmp_at0:

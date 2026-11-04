@@ -23,7 +23,7 @@
 #include "NixDialect/Confix.h.inc"
 
 namespace mlir::confix {
-/// `confix-to-llvm`: the ops become calls of the IR scanner (confix_scan_json, confix_scan_cbor) and loads of the Flat record.
+/// `confix-to-llvm`: the ops become calls of the IR scanner (confix_scan_json, confix_scan_cbor, confix_scan_yaml) and loads of the Flat record.
 void registerConfixPasses();
 } // namespace mlir::confix
 
