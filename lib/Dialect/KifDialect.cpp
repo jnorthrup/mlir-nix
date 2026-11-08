@@ -19,6 +19,7 @@
 #include "NixDialect/Kif.cpp.inc"
 
 namespace mlir::kif {
+void registerKifChasePass(); // KifChase.cpp
 
 void KifDialect::initialize() {
   addTypes<
@@ -47,8 +48,8 @@ struct Lowering {
   Type value;
   DenseMap<Value, Value> done{};
 
-  Value str(StringRef s) { return nix::StringOp::create(b, loc, value, nixfe::Name::persist(s)); }
-  Value list(ValueRange xs) { return nix::ListOp::create(b, loc, value, xs); }
+  Value str(StringRef s) { return nix::StringOp::create(b, loc, nix::stringType(b.getContext()), nixfe::Name::persist(s)); }
+  Value list(ValueRange xs) { return nix::ListOp::create(b, loc, composite::SeriesType::get(b.getContext(), value), xs); }
 
   Value term(Value t) {
     if (auto it = done.find(t); it != done.end())
@@ -97,7 +98,7 @@ struct KifToNixPass : PassWrapper<KifToNixPass, OperationPass<ModuleOp>> {
           rules.push_back(lower.list({lower.str("=>"), lower.term(rule.getAntecedent()), lower.term(rule.getConsequent())}));
       }
       Value members[] = {lower.list(facts), lower.list(rules)};
-      Value result = nix::AttrsOp::create(b, loc, lower.value, {nixfe::Name::persist("facts"), nixfe::Name::persist("rules")},
+      Value result = nix::AttrsOp::create(b, loc, composite::Series2Type::get(b.getContext(), b.getIntegerType(32), lower.value), {nixfe::Name::persist("facts"), nixfe::Name::persist("rules")},
                                           members, ValueRange(), ValueRange(), {0, 0});
       nix::ReturnOp::create(b, loc, result);
       theory.erase();
@@ -109,6 +110,7 @@ struct KifToNixPass : PassWrapper<KifToNixPass, OperationPass<ModuleOp>> {
 void registerKifPasses() {
   static const bool registered = [] {
     PassRegistration<KifToNixPass>();
+    registerKifChasePass();
     return true;
   }();
   (void)registered;

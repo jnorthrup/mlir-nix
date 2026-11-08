@@ -27,18 +27,18 @@ nix.expr @strict_and_tail {
     // CHECK: nix.attrs ["a"](%[[V]]) {nix.inline
     %7 = nix.attrs ["a"](%6)
     // CHECK: nix.update %{{.*}}, %{{.*}} {nix.inline}
-    %8 = nix.update %arg0, %7
+    %8 = nix.update %arg0, %7 : !trikeshed.series2<i32, !nix.value>
     %9 = nix.int 2
     %10 = nix.attrs ["b"](%9)
-    %11 = nix.update %8, %10
+    %11 = nix.update %8 : !trikeshed.series2<i32, !nix.value>, %10 : !trikeshed.series2<i32, !nix.value>
     %12 = nix.not %arg0
     %13 = nix.not %12
     // both branches are tail operands; the if is the lambda's result
     // CHECK: nix.if %{{.*}} then %{{.*}} else %{{.*}} {nix.inline}
-    %14 = nix.if %5 then %11 else %13
+    %14 = nix.if %5 then %11 : !trikeshed.series2<i32, !nix.value> else %13
     nix.return %14
   }
-  nix.return %0
+  nix.return %0 : (!nix.value) -> !nix.value
 }
 
 // CHECK-LABEL: nix.expr @not_in_place
@@ -66,6 +66,6 @@ nix.expr @not_in_place {
   // list elements are lazy, so %e, %l and %lam stay thunks; the list itself is the
   // expression's result: a tail use, marked
   // CHECK: nix.list[{{.*}}] {nix.inline}
-  %res = nix.list [%e, %l, %lam]
-  nix.return %res
+  %res = nix.list [%e, %l : !trikeshed.series<!nix.value>, %lam : (!nix.value) -> !nix.value]
+  nix.return %res : !trikeshed.series<!nix.value>
 }

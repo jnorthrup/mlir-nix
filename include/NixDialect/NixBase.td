@@ -93,8 +93,13 @@ def Nix_Dialect : Dialect {
   let summary = "The Nix expression language";
   let description = [{
     A lazy, purely functional dialect modelling the Nix expression language.
-    Values are untyped (`!nix.value`) lazy thunks; regions are graph regions.
+    Values are lazy thunks; regions are graph regions.  A value is `!nix.value` (its kind known only when it is forced) or, where the
+    op that makes it fixes its kind, the TrikeShed type of that kind (PRELOAD.md): a list is `!trikeshed.series<!nix.value>`, an
+    attribute set `!trikeshed.series2<i32, !nix.value>`, a string `!trikeshed.join<!trikeshed.series<i8>,
+    !trikeshed.series<!trikeshed.series<i8>>>`, a path `!trikeshed.series<i8>`, a function
+    `(!nix.value) -> !nix.value`.
   }];
+  let dependentDialects = ["::composite::TrikeShedDialect"];
   let useDefaultTypePrinterParser = 1;
   let hasConstantMaterializer = 1;
   let extraClassDeclaration = [{
@@ -155,13 +160,15 @@ def Nix_Dialect : Dialect {
       /// observable (`nix.fresh`): equal calls must not be merged.
       bool fresh = false;
       ::llvm::StringRef key; // owned by the map entry
+      /// The kind every result has, where the declaration fixes one (`irdl.is`): a list, a set, a string or a path.  Null: any.
+      ::mlir::Type result;
     };
     ::llvm::StringMap<PrimInfo> prims;
     ::llvm::DenseMap<const void *, const PrimInfo *> primsByOp;
     /// Returns false (and registers nothing) when `key` is already declared.
     bool registerPrim(::llvm::StringRef key, unsigned arity, ::mlir::OperationName name,
                       PrimFx fx = PrimFx::Pure, bool foldable = false, bool fresh = false) {
-      auto [it, inserted] = prims.try_emplace(key, PrimInfo{name, arity, fx, foldable, fresh, {}});
+      auto [it, inserted] = prims.try_emplace(key, PrimInfo{name, arity, fx, foldable, fresh, {}, {}});
       if (inserted) {
         it->second.key = it->first();
         primsByOp[name.getAsOpaquePointer()] = &it->second;
@@ -190,6 +197,43 @@ def Nix_ValueType : Nix_Type<"Value", "value"> {
 }
 
 defvar NixVal = Nix_ValueType;
+
+// The kinds a value's maker fixes, as TrikeShed types (docs/PRELOAD-DIALECTS.md, step 1).  Each is buildable, so a result of one prints
+// no type, as a !nix.value result does; an operand of one prints its type after it (NixValue / NixValues in NixDialect.cpp).
+def NixList : Type<
+    CPred<"::llvm::isa<::composite::SeriesType>($_self) && "
+          "::llvm::isa<::mlir::nix::ValueType>(::llvm::cast<::composite::SeriesType>($_self).getElement())">,
+    "a Nix list: Series<!nix.value>", "::composite::SeriesType">,
+  BuildableType<"::composite::SeriesType::get($_builder.getContext(), ::mlir::nix::ValueType::get($_builder.getContext()))">;
+
+// An attribute set: its rows in name order, the name's symbol and the value (Bindings in the evaluator: Series2<Symbol, Value>).
+def NixAttrs : Type<
+    CPred<"::llvm::isa<::composite::Series2Type>($_self) && "
+          "::llvm::cast<::composite::Series2Type>($_self).getA().isInteger(32) && "
+          "::llvm::isa<::mlir::nix::ValueType>(::llvm::cast<::composite::Series2Type>($_self).getB())">,
+    "a Nix attribute set: Series2<i32, !nix.value>", "::composite::Series2Type">,
+  BuildableType<"::composite::Series2Type::get($_builder.getContext(), $_builder.getIntegerType(32), "
+                "::mlir::nix::ValueType::get($_builder.getContext()))">;
+
+// A string: its characters and its context, the store paths it refers to (Join<CharSeries, Series<CharSeries>>).
+def NixString : Type<
+    CPred<"::mlir::nix::isStringType($_self)">,
+    "a Nix string: Join<Series<i8>, Series<Series<i8>>>", "::composite::JoinType">,
+  BuildableType<"::mlir::nix::stringType($_builder.getContext())">;
+
+// A path: its characters, no context (a CharSeries: Series<i8>).
+def NixPath : Type<
+    CPred<"::llvm::isa<::composite::SeriesType>($_self) && "
+          "::llvm::cast<::composite::SeriesType>($_self).getElement().isInteger(8)">,
+    "a Nix path: Series<i8>", "::composite::SeriesType">,
+  BuildableType<"::composite::SeriesType::get($_builder.getContext(), $_builder.getIntegerType(8))">;
+
+// A function: one value to one value (PRELOAD's `(A) -> B`), the builtin function type.
+def NixFn : Type<CPred<"::mlir::nix::isFnType($_self)">, "a Nix function: (!nix.value) -> !nix.value", "::mlir::FunctionType">,
+  BuildableType<"::mlir::nix::fnType($_builder.getContext())">;
+
+// What an operand takes: a value of any kind.
+def NixAny : AnyTypeOf<[NixVal, NixList, NixAttrs, NixString, NixPath, NixFn], "a Nix value">;
 
 //===----------------------------------------------------------------------===//
 // Interfaces
@@ -229,6 +273,9 @@ defvar NixFxUser = [MemoryEffects<[MemWrite<NixTraceRes>]>];
 // otherwise pure, so it declares an allocation of its result (like
 // memref.alloc): CSE keeps both, an unused one is still dead.
 def NixFreshVal : Res<NixVal, "a fresh value with observable identity", [MemAlloc]>;
+def NixFreshList : Res<NixList, "a fresh list with observable identity", [MemAlloc]>;
+def NixFreshAttrs : Res<NixAttrs, "a fresh attribute set with observable identity", [MemAlloc]>;
+def NixFreshFn : Res<NixFn, "a fresh closure with observable identity", [MemAlloc]>;
 
 //===----------------------------------------------------------------------===//
 // Operand modalities: which operands the evaluator may evaluate in place

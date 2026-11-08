@@ -64,9 +64,9 @@ def Son_DeferOp : Son_Op<"defer", [DeclareOpInterfaceMethods<SymbolUserOpInterfa
     Evaluating a call of the value mints the row's body with the captures bound to the operands. The value has an
     identity of its own (two defers of one row are two functions), so the result is a fresh value.
   }];
-  let arguments = (ins SymbolRefAttr:$row, Variadic<NixVal>:$captures);
-  let results = (outs NixFreshVal:$result);
-  let assemblyFormat = "$row `(` $captures `)` attr-dict";
+  let arguments = (ins SymbolRefAttr:$row, Variadic<NixAny>:$captures);
+  let results = (outs NixFreshFn:$result); // the lambda it stands for
+  let assemblyFormat = "$row `(` custom<NixValues>($captures, type($captures)) `)` attr-dict";
 }
 
 #endif // SON_TD

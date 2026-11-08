@@ -15,7 +15,7 @@ nix.expr @e {
   %x = nixnum.add(%a, %b)
   %y = nixnum.add(%a, %b)
   %r = nix.list [%x, %y]
-  nix.return %r
+  nix.return %r : !trikeshed.series<!nix.value>
 }
 
 // Declared pure (nix.fx = "pure"): the duplicate is merged.

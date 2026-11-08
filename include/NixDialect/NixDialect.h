@@ -14,6 +14,7 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Rewrite/FrozenRewritePatternSet.h"
 #include "Nix/Name.h" // before the generated ops: their properties are Names
+#include "Composite/TrikeShed.h" // the kinds a value can be typed as (a list: !trikeshed.series<!nix.value>)
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/ADT/StringMap.h"
@@ -53,6 +54,21 @@ struct NixStoreResource : public SideEffects::Resource::Base<NixStoreResource> {
 namespace mlir::son {
 class BodyOp; // a lambda body of the sea of nodes (Son.td): nix.return ends it too
 } // namespace mlir::son
+
+namespace mlir::nix {
+/// A string's type: Join<CharSeries, Series<CharSeries>>, its characters and its context (PRELOAD.md).
+Type stringType(MLIRContext *ctx);
+bool isStringType(Type t);
+/// A function's type: (!nix.value) -> !nix.value.
+Type fnType(MLIRContext *ctx);
+bool isFnType(Type t);
+// The operand directives of the nix-family formats (NixDialect.cpp): `%v` for a !nix.value, `%v : type` for a typed one.
+ParseResult parseNixValue(OpAsmParser &p, OpAsmParser::UnresolvedOperand &v, Type &t);
+ParseResult parseNixValue(OpAsmParser &p, std::optional<OpAsmParser::UnresolvedOperand> &v, Type &t);
+void printNixValue(OpAsmPrinter &p, Operation *op, Value v, Type t);
+ParseResult parseNixValues(OpAsmParser &p, SmallVectorImpl<OpAsmParser::UnresolvedOperand> &vs, SmallVectorImpl<Type> &ts);
+void printNixValues(OpAsmPrinter &p, Operation *op, OperandRange vs, TypeRange ts);
+} // namespace mlir::nix
 
 namespace mlir::nix {
 /// Marker trait of the `NixModes` ODS class (NixBase.td): the op class carries

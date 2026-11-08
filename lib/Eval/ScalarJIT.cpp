@@ -151,7 +151,7 @@ struct Plan {
         if (name == "nixnum.add") n.kind = Kind::Add;
         else if (name == "nixnum.sub") n.kind = Kind::Sub;
         else if (name == "nixnum.mul") n.kind = Kind::Mul;
-        else if (auto c = mlir::dyn_cast<nd::ConcatStringsOp>(op); c && !c.getForceString()) n.kind = Kind::Add;
+        else if (mlir::isa<nd::ConcatStringsOp>(op)) n.kind = Kind::Add; // `+`; an interpolation is nix.interpolate
         else return false;
         if (op->getNumOperands() != 2 || !visit(op->getOperand(0), n.lhs, depth + 1) ||
             !visit(op->getOperand(1), n.rhs, depth + 1)) return false;

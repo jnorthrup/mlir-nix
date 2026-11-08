@@ -14,18 +14,18 @@ nix.expr @expr1 {
       %7 = nix.concat_strings %6, %0
       nix.return %7
     }
-    nix.return %5
+    nix.return %5 : (!nix.value) -> !nix.value
   }
   %2 = nix.int 1
   %3 = nix.int 2
-  %4 = nix.apply %1(%2, %3)
+  %4 = nix.apply %1 : (!nix.value) -> !nix.value(%2, %3)
   nix.return %4
 }
 
 // The outer lambda captures k; the inner one captures x and k, then takes y.
 // DEFER: %[[K:.*]] = nix.int 10
 // DEFER: %[[F:.*]] = son.defer @bodies::@row0(%[[K]])
-// DEFER: nix.apply %[[F]](
+// DEFER: nix.apply %[[F]] : !nix_fn(
 // DEFER-NOT: nix.lambda
 // DEFER: son.pool @bodies
 // DEFER: son.body @row0 captures 1 lambda {arg_name = "x", name = "f"

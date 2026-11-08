@@ -30,10 +30,81 @@ using namespace mlir::nix;
 #include "NixDialect/NixTypes.cpp.inc"
 
 namespace mlir::nix {
+Type stringType(MLIRContext *ctx) {
+  Type chars = composite::SeriesType::get(ctx, IntegerType::get(ctx, 8));
+  return composite::JoinType::get(ctx, chars, composite::SeriesType::get(ctx, chars));
+}
+bool isStringType(Type t) { return t == stringType(t.getContext()); }
+Type fnType(MLIRContext *ctx) {
+  Type v = ValueType::get(ctx);
+  return FunctionType::get(ctx, {v}, {v});
+}
+bool isFnType(Type t) { return t == fnType(t.getContext()); }
+
+/// An operand: `%v` for a !nix.value, `%v : type` for a value whose kind its maker fixed (a list: !trikeshed.series<!nix.value>).  The
+/// type is written at the use because a graph region reads values before their definition, where the parser cannot look it up.
+ParseResult parseNixValue(OpAsmParser &p, OpAsmParser::UnresolvedOperand &v, Type &t) {
+  if (p.parseOperand(v))
+    return failure();
+  t = ValueType::get(p.getContext());
+  return success(failed(p.parseOptionalColon()) || succeeded(p.parseType(t)));
+}
+ParseResult parseNixValue(OpAsmParser &p, std::optional<OpAsmParser::UnresolvedOperand> &v, Type &t) {
+  OpAsmParser::UnresolvedOperand one;
+  if (parseNixValue(p, one, t))
+    return failure();
+  v = one;
+  return success();
+}
+void printNixValue(OpAsmPrinter &p, Operation *, Value v, Type t) {
+  if (!v)
+    return;
+  p.printOperand(v);
+  if (!isa<ValueType>(t)) {
+    p << " : ";
+    p.printType(t);
+  }
+}
+/// The type of a string literal: none written for a string, `: !nix.value` for a constant folded from an op of unfixed kind.
+ParseResult parseNixLiteralType(OpAsmParser &p, Type &t) {
+  t = stringType(p.getContext());
+  return success(failed(p.parseOptionalColon()) || succeeded(p.parseType(t)));
+}
+void printNixLiteralType(OpAsmPrinter &p, Operation *, Type t) {
+  if (!isStringType(t)) {
+    p << " : ";
+    p.printType(t);
+  }
+}
+
+/// Operands separated by commas, each as parseNixValue reads it; none at all is the empty list.
+ParseResult parseNixValues(OpAsmParser &p, SmallVectorImpl<OpAsmParser::UnresolvedOperand> &vs, SmallVectorImpl<Type> &ts) {
+  OpAsmParser::UnresolvedOperand v;
+  OptionalParseResult first = p.parseOptionalOperand(v);
+  if (!first.has_value())
+    return success();
+  if (failed(*first))
+    return failure();
+  for (;;) {
+    Type t = ValueType::get(p.getContext());
+    if (succeeded(p.parseOptionalColon()) && p.parseType(t))
+      return failure();
+    vs.push_back(v);
+    ts.push_back(t);
+    if (failed(p.parseOptionalComma()))
+      return success();
+    if (p.parseOperand(v))
+      return failure();
+  }
+}
+void printNixValues(OpAsmPrinter &p, Operation *op, OperandRange vs, TypeRange ts) {
+  llvm::interleaveComma(llvm::zip(vs, ts), p, [&](auto vt) { printNixValue(p, op, std::get<0>(vt), std::get<1>(vt)); });
+}
+
 /// `[ "a", %k, "b" ]`: literal components are names, computed ones are operands (recorded as the null name in
-/// `path`).
+/// `path`), each as parseNixValue reads it.
 static ParseResult parseAttrPath(OpAsmParser &p, SmallVectorImpl<nixfe::Name> &path,
-                                 SmallVectorImpl<OpAsmParser::UnresolvedOperand> &dyn) {
+                                 SmallVectorImpl<OpAsmParser::UnresolvedOperand> &dyn, SmallVectorImpl<Type> &dynTypes) {
   if (p.parseLSquare())
     return failure();
   do {
@@ -52,21 +123,27 @@ static ParseResult parseAttrPath(OpAsmParser &p, SmallVectorImpl<nixfe::Name> &p
         return p.emitError(p.getCurrentLocation(), "expected a string or an operand");
       if (failed(*r))
         return failure();
+      Type t = ValueType::get(p.getContext());
+      if (succeeded(p.parseOptionalColon()) && p.parseType(t))
+        return failure();
       dyn.push_back(operand);
+      dynTypes.push_back(t);
       path.push_back(nixfe::Name());
     }
   } while (succeeded(p.parseOptionalComma()));
   return p.parseRSquare();
 }
 
-static void printAttrPath(OpAsmPrinter &p, Operation *, ArrayRef<nixfe::Name> path, OperandRange dyn) {
+static void printAttrPath(OpAsmPrinter &p, Operation *op, ArrayRef<nixfe::Name> path, OperandRange dyn, TypeRange dynTypes) {
   p << "[";
   unsigned next = 0;
   llvm::interleaveComma(path, p, [&](const nixfe::Name &n) {
-    if (!n.isNull())
+    if (!n.isNull()) {
       p.printString(n.str());
-    else
-      p.printOperand(dyn[next++]);
+    } else {
+      printNixValue(p, op, dyn[next], dynTypes[next]);
+      next++;
+    }
   });
   p << "]";
 }
@@ -93,7 +170,39 @@ template <typename OpT> void collectModes(NixDialect &d, MLIRContext *ctx) {
 template <typename... Ops> void collectAllModes(NixDialect &d, MLIRContext *ctx) { (collectModes<Ops>(d, ctx), ...); }
 } // namespace
 
+namespace {
+/// The kinds of a Nix value are TrikeShed types (PRELOAD.md); the printer names them once at the top of a module and by alias after,
+/// `!nix_list` for `!trikeshed.series<!nix.value>`, `!nix_attrs` for `!trikeshed.series2<i32, !nix.value>`, `!nix_string` for a string's join, `!char_series` for `!trikeshed.series<i8>` (a path; a string's characters).
+struct NixAsmInterface : OpAsmDialectInterface {
+  using OpAsmDialectInterface::OpAsmDialectInterface;
+  AliasResult getAlias(Type type, raw_ostream &os) const override {
+    if (auto s = dyn_cast<composite::SeriesType>(type); s && isa<ValueType>(s.getElement())) {
+      os << "nix_list";
+      return AliasResult::FinalAlias;
+    }
+    if (auto s = dyn_cast<composite::Series2Type>(type); s && s.getA().isInteger(32) && isa<ValueType>(s.getB())) {
+      os << "nix_attrs";
+      return AliasResult::FinalAlias;
+    }
+    if (isStringType(type)) {
+      os << "nix_string";
+      return AliasResult::FinalAlias;
+    }
+    if (isFnType(type)) {
+      os << "nix_fn";
+      return AliasResult::FinalAlias;
+    }
+    if (auto s = dyn_cast<composite::SeriesType>(type); s && s.getElement().isInteger(8)) {
+      os << "char_series"; // PRELOAD's CharSeries: a path, and a string's characters
+      return AliasResult::FinalAlias;
+    }
+    return AliasResult::NoAlias;
+  }
+};
+} // namespace
+
 void NixDialect::initialize() {
+  addInterfaces<NixAsmInterface>();
   addTypes<
 #define GET_TYPEDEF_LIST
 #include "NixDialect/NixTypes.cpp.inc"
@@ -175,7 +284,7 @@ Operation *NixDialect::materializeConstant(OpBuilder &b, Attribute value,
 #define NIX_POSITIONED_OPS                                                                                 \
   LambdaOp, FormalOp, IntOp, FloatOp, StringOp, PathOp, WithVarOp, ListOp, AttrsOp, SelectOp, HasAttrOp, \
       ApplyOp, IfOp, AssertOp, EqOp, NeqOp, AndOp, OrOp, ImplOp, UpdateOp, ConcatListsOp, NotOp,          \
-      ConcatStringsOp
+      ConcatStringsOp, InterpolateOp
 
 uint64_t nix::getPos(Operation *op) {
   return llvm::TypeSwitch<Operation *, uint64_t>(op)
@@ -273,6 +382,18 @@ OpFoldResult StringOp::fold(FoldAdaptor) { return StringAttr::get(getContext(), 
 OpFoldResult BoolOp::fold(FoldAdaptor) { return getValueAttr(); }
 OpFoldResult NullOp::fold(FoldAdaptor) { return UnitAttr::get(getContext()); }
 
+/// Parts that are all string literals, as one: `"a" + "b"`, `"${"a"}b"`.  Null when a part is not known or not a string.
+static StringAttr foldStringParts(MLIRContext *ctx, ArrayRef<Attribute> ops) {
+  if (ops.empty() || !llvm::all_of(ops, [](Attribute a) { return a && isa<StringAttr>(a); }))
+    return {};
+  composite::Text s;
+  for (Attribute a : ops)
+    s += cast<StringAttr>(a).getValue();
+  return StringAttr::get(ctx, llvm::StringRef(s));
+}
+
+OpFoldResult InterpolateOp::fold(FoldAdaptor adaptor) { return foldStringParts(getContext(), adaptor.getParts()); }
+
 OpFoldResult ConcatStringsOp::fold(FoldAdaptor adaptor) {
   auto ops = adaptor.getParts();
   if (ops.empty())
@@ -280,15 +401,8 @@ OpFoldResult ConcatStringsOp::fold(FoldAdaptor adaptor) {
   for (Attribute a : ops)
     if (!a)
       return {};
-  // `"a" + "b"`, `"${"a"}"`: all string literals.
-  if (llvm::all_of(ops, [](Attribute a) { return isa<StringAttr>(a); })) {
-    composite::Text s;
-    for (Attribute a : ops)
-      s += cast<StringAttr>(a).getValue();
-    return StringAttr::get(getContext(), llvm::StringRef(s));
-  }
-  if (getForceString())
-    return {};
+  if (StringAttr s = foldStringParts(getContext(), ops))
+    return s;
   // Integer addition with overflow check (overflow is a runtime error).
   if (llvm::all_of(ops, [](Attribute a) { return isa<IntegerAttr>(a); })) {
     int64_t acc = 0;
@@ -343,7 +457,7 @@ static LogicalResult devirtualizeCall(ApplyOp op, RewriterBase &rw) {
   // here, for the calls that are primops, not for every op.
   OperationState st(locOfWord(op.getContext(), op.getPos()), info->name);
   st.addOperands(op.getArgs().take_front(info->arity));
-  st.addTypes(op.getType());
+  st.addTypes(info->result ? info->result : op.getType()); // the kind the primop's declaration fixes, else the call's
   Value res = rw.create(st)->getResult(0);
   if (op.getArgs().size() > info->arity)
     res = ApplyOp::create(rw, UnknownLoc::get(op.getContext()), op.getType(), res,

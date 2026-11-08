@@ -10,6 +10,11 @@ add_executable(mlnix mlnix.cpp)
 target_link_libraries(mlnix PRIVATE NixEval NixFrontend NixStore MLIRNix MLIRIR MLIRParser MLIRPass MLIRSupport)
 llvm_update_compile_flags(mlnix)
 
+# KIF files into a kif.theory, and the chase (lib/Dialect/KifImport.cpp, KifChase.cpp).
+add_executable(mlnix-kif mlnix-kif.cpp)
+target_link_libraries(mlnix-kif PRIVATE MLIRNix MLIRTrikeShed MLIRIR MLIRParser MLIRPass MLIRSupport)
+llvm_update_compile_flags(mlnix-kif)
+
 # mlir-query (the matcher-combinator language that ships with MLIR) over Nix IR.
 add_executable(mlnix-query mlnix-query.cpp)
 target_link_libraries(mlnix-query PRIVATE MLIRNix MLIRQueryLib MLIRQueryMatcher MLIRIR MLIRParser MLIRSupport)

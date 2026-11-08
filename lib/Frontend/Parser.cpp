@@ -636,7 +636,7 @@ struct Parser {
     Value result;
     eagerAt = cur().offset;
     if (go->scoped) { // scope: <expr>, with the scope's names bound lexically
-      auto lam = nd::LambdaOp::create(b, noLoc(), valTy(), mlir::ArrayAttr(), mlir::DenseBoolArrayAttr(), false,
+      auto lam = nd::LambdaOp::create(b, noLoc(), nd::fnType(b.getContext()), mlir::ArrayAttr(), mlir::DenseBoolArrayAttr(), false,
                                       b.getStringAttr("scope"), mlir::StringAttr(), mlir::DenseI64ArrayAttr(),
                                       mlir::ValueRange{}, mlir::IntegerAttr(), 0);
       mlir::Block *lb = new mlir::Block();
@@ -803,6 +803,10 @@ struct Parser {
   //===--------------------------------------------------------------------===//
 
   mlir::Type valTy() { return nd::ValueType::get(b.getContext()); }
+  /// A list (PRELOAD.md: Series<!nix.value>).
+  mlir::Type listTy() { return composite::SeriesType::get(b.getContext(), valTy()); }
+  /// An attribute set: its rows in name order (Series2<symbol, value>).
+  mlir::Type attrsTy() { return composite::Series2Type::get(b.getContext(), b.getIntegerType(32), valTy()); }
   mlir::Location noLoc() { return mlir::UnknownLoc::get(b.getContext()); }
   /// The position word of `p` (Nix/Pos.h): what an op carries in its `pos` property.
   int64_t at(Pos p) {
@@ -859,7 +863,7 @@ struct Parser {
                              : nd::BoolOp::create(b, noLoc(), valTy(), b.getBoolAttr(name == "true")).getResult();
     return builtinCache[name] = v;
   }
-  Value str(Name n) { return nd::StringOp::create(b, noLoc(), valTy(), n); }
+  Value str(Name n) { return nd::StringOp::create(b, noLoc(), nd::stringType(b.getContext()), n); }
   /// `base.key` with a literal key.
   Value selectLiteral(Pos p, Value base, Name key, Value def = Value()) {
     Name path[1] = {key};
@@ -1080,8 +1084,8 @@ struct Parser {
     case B_AND: v = nd::AndOp::create(b, noLoc(), valTy(), a, c, w); break;
     case B_OR: v = nd::OrOp::create(b, noLoc(), valTy(), a, c, w); break;
     case B_IMPL: v = nd::ImplOp::create(b, noLoc(), valTy(), a, c, w); break;
-    case B_UPDATE: v = nd::UpdateOp::create(b, noLoc(), valTy(), a, c, w); break;
-    case B_CONCAT: v = nd::ConcatListsOp::create(b, noLoc(), valTy(), a, c, w); break;
+    case B_UPDATE: v = nd::UpdateOp::create(b, noLoc(), attrsTy(), a, c, w); break;
+    case B_CONCAT: v = nd::ConcatListsOp::create(b, noLoc(), listTy(), a, c, w); break;
     }
     return mk(K_EXPR, p, v);
   }
@@ -1094,7 +1098,9 @@ struct Parser {
     }
     if (mode == Mode::Skip) return mk(K_EXPR, p);
     auto vs = llvm::to_vector(parts |α| [&](Node &x) { return positioned(val(x), x.pos); });
-    return mk(K_EXPR, p, nd::ConcatStringsOp::create(b, noLoc(), valTy(), vs, forceString, at(p)));
+    if (forceString) // an interpolation: always a string
+      return mk(K_EXPR, p, nd::InterpolateOp::create(b, noLoc(), nd::stringType(b.getContext()), vs, at(p)));
+    return mk(K_EXPR, p, nd::ConcatStringsOp::create(b, noLoc(), valTy(), vs, at(p)));
   }
   Node intLit(int64_t v, Pos p) {
     if (mode == Mode::Show) return text(composite::str(v), K_EXPR, p);
@@ -1481,7 +1487,7 @@ struct Parser {
     }
     Value r;
     if (!s.rec) {
-      r = nd::AttrsOp::create(b, noLoc(), valTy(), names, values, dynNames, dynValues, positions, at(s.pos));
+      r = nd::AttrsOp::create(b, noLoc(), attrsTy(), names, values, dynNames, dynValues, positions, at(s.pos));
     } else {
       llvm::SmallVector<Value> phv;
       llvm::SmallVector<Pos> poses;
@@ -1497,8 +1503,8 @@ struct Parser {
         for (size_t i = 0; i < s.defs.size(); i++)
           if (int(i) != ov) values[i] = selectLiteral(s.defs[i].pos, values[ov], names[i], values[i]);
       auto finals = finalizeGroup(phv, values, poses, {&dynNames, &dynValues});
-      r = nd::AttrsOp::create(b, noLoc(), valTy(), names, finals, dynNames, dynValues, positions, at(s.pos));
-      if (ov >= 0) r = nd::UpdateOp::create(b, noLoc(), valTy(), r, finals[ov], at(s.pos));
+      r = nd::AttrsOp::create(b, noLoc(), attrsTy(), names, finals, dynNames, dynValues, positions, at(s.pos));
+      if (ov >= 0) r = nd::UpdateOp::create(b, noLoc(), attrsTy(), r, finals[ov], at(s.pos));
     }
     release(si);
     return r;
@@ -1860,7 +1866,7 @@ struct Parser {
       hasDef.push_back(f.hasDef);
       locs.push_back(at(f.pos));
     }
-    return nd::LambdaOp::create(b, noLoc(), valTy(), h.formals ? b.getArrayAttr(names) : mlir::ArrayAttr(),
+    return nd::LambdaOp::create(b, noLoc(), nd::fnType(b.getContext()), h.formals ? b.getArrayAttr(names) : mlir::ArrayAttr(),
                                 h.formals ? b.getDenseBoolArrayAttr(hasDef) : mlir::DenseBoolArrayAttr(), h.ellipsis,
                                 h.arg.isNull() ? mlir::StringAttr() : b.getStringAttr(h.arg.str()), mlir::StringAttr(),
                                 h.formals ? b.getDenseI64ArrayAttr(locs) : mlir::DenseI64ArrayAttr(), caps, bodyIndex,
@@ -2214,7 +2220,7 @@ struct Parser {
       llvm::SmallVector<Value> vals{nd::IntOp::create(b, noLoc(), valTy(), b.getI64IntegerAttr(pos.col)),
                                     str(Name::persist(origin->path)),
                                     nd::IntOp::create(b, noLoc(), valTy(), b.getI64IntegerAttr(pos.line))};
-      return mk(K_EXPR, pos, nd::AttrsOp::create(b, noLoc(), valTy(), names, vals, mlir::ValueRange{}, mlir::ValueRange{},
+      return mk(K_EXPR, pos, nd::AttrsOp::create(b, noLoc(), attrsTy(), names, vals, mlir::ValueRange{}, mlir::ValueRange{},
                                                  llvm::ArrayRef<int64_t>{}, at(pos)));
     }
     case T_INT: return intLit(take().i, pos);
@@ -2328,7 +2334,7 @@ struct Parser {
         }
         if (mode == Mode::Skip) return mk(K_EXPR, pos);
         auto vs = llvm::to_vector(elems |α| [&](Node &e) { return val(e); });
-        return mk(K_EXPR, pos, nd::ListOp::create(b, noLoc(), valTy(), vs));
+        return mk(K_EXPR, pos, nd::ListOp::create(b, noLoc(), listTy(), vs));
       }
       unexpected();
     default:
@@ -2378,7 +2384,7 @@ struct Parser {
     }
     if (mode == Mode::Show) return text(path.clone(), K_EXPR, pos);
     if (pathLiterals && mode == Mode::Gen) pathLiterals->insert(path.data(), path.size());
-    return mk(K_EXPR, pos, mode == Mode::Gen ? Value(nd::PathOp::create(b, noLoc(), valTy(), Name::persist(llvm::StringRef(path.data(), path.size())))) : Value());
+    return mk(K_EXPR, pos, mode == Mode::Gen ? Value(nd::PathOp::create(b, noLoc(), composite::SeriesType::get(b.getContext(), b.getIntegerType(8)), Name::persist(llvm::StringRef(path.data(), path.size())))) : Value());
   }
 
   Node stripIndentation(Pos pos, composite::MutableSeries<std::pair<Pos, std::variant<Node, Token>>> &es) {

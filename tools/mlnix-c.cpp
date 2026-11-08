@@ -17,7 +17,7 @@
 
 struct MlnixSession {
   mlir::MLIRContext ctx;
-  std::string error;
+  llvm::SmallString<256> error;
   explicit MlnixSession(const mlir::DialectRegistry &registry) : ctx(registry) {}
 };
 
@@ -34,7 +34,7 @@ void mlnixClose(MlnixSession *session) { delete session; }
 
 char *mlnixRoundTrip(MlnixSession *session, const char *text, size_t length) {
   session->error.clear();
-  llvm::raw_string_ostream diagnostics(session->error);
+  llvm::raw_svector_ostream diagnostics(session->error);
   mlir::ScopedDiagnosticHandler handler(&session->ctx, [&](mlir::Diagnostic &d) {
     diagnostics << d << '\n';
     return mlir::success();
@@ -43,13 +43,13 @@ char *mlnixRoundTrip(MlnixSession *session, const char *text, size_t length) {
       mlir::parseSourceString<mlir::ModuleOp>(llvm::StringRef(text, length), mlir::ParserConfig(&session->ctx));
   if (!module || mlir::failed(mlir::verify(*module)))
     return nullptr;
-  std::string printed;
-  llvm::raw_string_ostream out(printed);
+  llvm::SmallString<256> printed;
+  llvm::raw_svector_ostream out(printed);
   module->print(out);
   out << '\n';
   return strdup(printed.c_str());
 }
 
-const char *mlnixError(const MlnixSession *session) { return session->error.c_str(); }
+const char *mlnixError(MlnixSession *session) { return session->error.c_str(); }
 
 void mlnixFree(char *text) { free(text); }

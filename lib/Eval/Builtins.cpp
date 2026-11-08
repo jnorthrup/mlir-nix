@@ -1,5 +1,6 @@
 //===- Builtins.cpp - The Nix builtins (language-level) -------------------===//
 
+#include "llvm/ADT/StringMap.h"
 #include "Composite/CharSeries.h"
 #include "Composite/Kursive.h"
 #include "Composite/Mutable.h"
@@ -144,18 +145,28 @@ template <class Walk> static ku::Result kursiveRun(const ku::Program &p, std::st
 
 /// A piece of the input of a match or a split: a window on its bytes when they are an arena string's, which stay; a copy when they are the
 /// text a coercion made in `scratch`.
-static Value *pieceOf(EvalState &st, std::string_view s, size_t b, size_t n, const composite::Text &scratch) {
+/// The pieces of one split or match: equal pieces are one cell (a string has no identity Nix can see; kif.nix's tokens of
+/// sumo.full are 1.43 M pieces of 143 k texts).  The table lives for the one call.
+using PieceMemo = llvm::StringMap<Value *>;
+static Value *pieceOf(EvalState &st, std::string_view s, size_t b, size_t n, const composite::Text &scratch, PieceMemo *memo = nullptr) {
   std::string_view piece = s.substr(b, n);
+  if (Value *v = st.sharedShortString(piece)) return v;
+  if (memo) {
+    auto [it, fresh] = memo->try_emplace(llvm::StringRef(piece.data(), piece.size()), nullptr);
+    if (!fresh) return it->second;
+    return it->second = s.data() == scratch.data() ? st.newString(piece) : st.newStringWindow(piece);
+  }
   return s.data() == scratch.data() ? st.newString(piece) : st.newStringWindow(piece);
 }
 
 /// The groups of a walk's answer as Nix gives them: each group's text, or null where it took no part.
-static void kursiveGroups(EvalState &st, Value &v, const ku::Program &p, std::string_view s, const composite::Text &scratch) {
+static void kursiveGroups(EvalState &st, Value &v, const ku::Program &p, std::string_view s, const composite::Text &scratch,
+                          PieceMemo *memo = nullptr) {
   const uint32_t *best = kursiveScratch().best.data();
   st.mkList(v, p.groups |cp::j| [&](uint32_t i) -> Value * {
     uint32_t b = best[2 * (i + 1)], e = best[2 * (i + 1) + 1];
-    if (b == ~0u || e == ~0u) { Value *n = st.allocValue(); st.mkNull(*n); return n; }
-    return pieceOf(st, s, b, e - b, scratch);
+    if (b == ~0u || e == ~0u) return st.sharedNull();
+    return pieceOf(st, s, b, e - b, scratch, memo);
   });
 }
 
@@ -569,6 +580,7 @@ void registerBuiltins(EvalState &state) {
     uint32_t n = uint32_t(s.size()), lastEnd = 0, from = 0;
     bool afterEmpty = false;
     composite::MutableSeries<Value *> out;
+    PieceMemo memo;
     for (;;) {
       ku::Result r = kursiveRun(prog, re, pos, [&](ku::Scratch &k) { return ku::search(prog, s.data(), n, from, afterEmpty, afterEmpty, k); });
       if (r == ku::Result::NoMatch) {
@@ -579,16 +591,16 @@ void registerBuiltins(EvalState &state) {
       }
       const uint32_t *best = kursiveScratch().best.data();
       uint32_t ms = best[0], me = best[1];
-      out.append(pieceOf(st, s, lastEnd, ms - lastEnd, scratch));
+      out.append(pieceOf(st, s, lastEnd, ms - lastEnd, scratch, &memo));
       Value *groups = st.allocValue();
-      kursiveGroups(st, *groups, prog, s, scratch);
+      kursiveGroups(st, *groups, prog, s, scratch, &memo);
       out.append(groups);
       lastEnd = me;
       from = me;
       afterEmpty = ms == me;
       if (afterEmpty && me == n) break;
     }
-    out.append(pieceOf(st, s, lastEnd, n - lastEnd, scratch));
+    out.append(pieceOf(st, s, lastEnd, n - lastEnd, scratch, &memo));
     st.mkList(v, out);
   });
   S.addPrimOp("__compareVersions", [](EvalState &st, A args, Value &v, PosPtr pos) {

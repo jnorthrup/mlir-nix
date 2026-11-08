@@ -119,14 +119,15 @@ struct FoldPrim : public RewritePattern {
 
 ParseResult parsePrim(OpAsmParser &p, OperationState &st) {
   SmallVector<OpAsmParser::UnresolvedOperand> operands;
-  if (p.parseLParen() || p.parseOperandList(operands) || p.parseRParen() ||
+  SmallVector<Type> types; // a typed operand carries its type (parseNixValues), the rest are !nix.value
+  if (p.parseLParen() || parseNixValues(p, operands, types) || p.parseRParen() ||
       p.parseOptionalAttrDict(st.attributes))
     return failure();
   Type v = ValueType::get(p.getContext());
-  SmallVector<Type> types(operands.size(), v);
   if (p.resolveOperands(operands, types, p.getCurrentLocation(), st.operands))
     return failure();
-  st.addTypes(v);
+  const auto *info = p.getContext()->getLoadedDialect<NixDialect>()->primsByOp.lookup(st.name.getAsOpaquePointer());
+  st.addTypes(info && info->result ? info->result : v); // the kind the declaration fixes, which the printer does not write
   return success();
 }
 
@@ -137,7 +138,7 @@ void printPrim(Operation *op, OpAsmPrinter &p, StringRef defaultDialect) {
   if (name.starts_with(defaultDialect) && name.drop_front(defaultDialect.size()).starts_with('.') && name.count('.') == 1)
     name = name.drop_front(defaultDialect.size() + 1);
   p << name << "(";
-  p.printOperands(op->getOperands());
+  printNixValues(p, op, op->getOperands(), op->getOperandTypes());
   p << ")";
   p.printOptionalAttrDict(op->getAttrs());
 }
@@ -173,6 +174,7 @@ LogicalResult mlir::nix::loadPrimDialects(MLIRContext *ctx, NixDialect &core) {
   if (!core.prims.empty()) // already defined (the extension can be applied twice)
     return success();
   ctx->getOrLoadDialect<irdl::IRDLDialect>();
+  ctx->getOrLoadDialect<composite::TrikeShedDialect>(); // `irdl.base "!trikeshed.series"` names its type
 
   // The declaration is data, so it can be swapped without rebuilding:
   // MLNIX_PRIMS_IRDL=other.irdl.mlir (used by the mutation tests in test/mlir).
@@ -231,6 +233,12 @@ LogicalResult mlir::nix::loadPrimDialects(MLIRContext *ctx, NixDialect &core) {
       }
       if (!core.registerPrim(key.getValue(), arity, name, *fx, foldable, fresh))
         return opOp.emitError("duplicate nix.key '") << key.getValue() << "'";
+      // A result constrained by `irdl.is` has that one type: the op is made with it (devirtualizeCall, parsePrim).
+      for (auto results : opOp.getOps<irdl::ResultsOp>())
+        for (Value c : results.getArgs())
+          if (auto is = c.getDefiningOp<irdl::IsOp>())
+            if (auto t = dyn_cast<TypeAttr>(is.getExpected()))
+              core.prims.find(key.getValue())->second.result = t.getValue();
 
       DynamicOpDefinition *def = NameAccess::definition(name);
       def->setParseFn(parsePrim);

@@ -9,10 +9,10 @@ nix.expr @paths {
   %k = nix.str "k"
   %d = nix.int 0
   // CHECK: nix.select %{{.*}}["a"]
-  %0 = nix.select %s ["a"]
+  %0 = nix.select %s : !trikeshed.series2<i32, !nix.value> ["a"]
   // CHECK: nix.select %{{.*}}["a", %{{.*}}, "c"] or %{{.*}}
-  %1 = nix.select %s ["a", %k, "c"] or %d
+  %1 = nix.select %s : !trikeshed.series2<i32, !nix.value> ["a", %k : !trikeshed.join<!trikeshed.series<i8>, !trikeshed.series<!trikeshed.series<i8>>>, "c"] or %d
   // CHECK: nix.has_attr %{{.*}}[%{{.*}}, "b"]
-  %2 = nix.has_attr %s [%k, "b"]
+  %2 = nix.has_attr %s : !trikeshed.series2<i32, !nix.value> [%k : !trikeshed.join<!trikeshed.series<i8>, !trikeshed.series<!trikeshed.series<i8>>>, "b"]
   nix.return %0
 }

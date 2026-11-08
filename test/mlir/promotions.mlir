@@ -40,7 +40,7 @@ nix.expr @promotions {
     // the body's result is its tail operand: in place
     // CHECK: nix.list[%{{.*}}, %{{.*}}, %{{.*}}] {nix.promote = "in_place"}
     %r = nix.list [%e, %s, %e]
-    nix.return %r
+    nix.return %r : !trikeshed.series<!nix.value>
   }
   // a value read from a nested body is captured: a cell in the frame, even with one use
   // CHECK: nix.list[%{{.*}}] {nix.promote = "distinct"}
@@ -49,20 +49,20 @@ nix.expr @promotions {
   %reader = nix.lambda attributes {arg_name = "y"} {
   ^bb0(%y: !nix.value):
     // CHECK: nix.list[%{{.*}}, %{{.*}}] {nix.promote = "in_place"}
-    %l = nix.list [%captured, %y]
-    nix.return %l
+    %l = nix.list [%captured : !trikeshed.series<!nix.value>, %y]
+    nix.return %l : !trikeshed.series<!nix.value>
   }
   // a lambda's operands are the captures of its body, which may not be minted yet (deferred): its only use so far is the capture, and the
   // body's reads, once per call, need the cell in the frame
   // CHECK: nix.list[%{{.*}}] {nix.promote = "distinct"}
   %waiting = nix.list [%one]
   // CHECK: nix.lambda(%{{.*}}) attributes {arg_name = "z", nix.promote = "once"}
-  %deferred = nix.lambda(%waiting) attributes {arg_name = "z"} {
+  %deferred = nix.lambda(%waiting : !trikeshed.series<!nix.value>) attributes {arg_name = "z"} {
   ^bb0(%z: !nix.value):
     nix.return %z
   }
   // the expression's result: a tail use
   // CHECK: nix.list[%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}] {nix.promote = "in_place"}
-  %res = nix.list [%call, %inner, %lam, %call, %inner, %single, %lam, %reader, %deferred]
-  nix.return %res
+  %res = nix.list [%call, %inner : !trikeshed.series<!nix.value>, %lam : (!nix.value) -> !nix.value, %call, %inner : !trikeshed.series<!nix.value>, %single : !trikeshed.series<!nix.value>, %lam : (!nix.value) -> !nix.value, %reader : (!nix.value) -> !nix.value, %deferred : (!nix.value) -> !nix.value]
+  nix.return %res : !trikeshed.series<!nix.value>
 }

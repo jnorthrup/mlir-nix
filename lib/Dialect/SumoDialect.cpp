@@ -6,6 +6,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/Pass/Pass.h"
+#include "llvm/ADT/SmallString.h"
 
 #include "NixDialect/SumoDialect.cpp.inc"
 
@@ -23,13 +24,13 @@ void SumoDialect::initialize() {
 
 namespace {
 /// `(word word ..)` as a fact, just before op.
-void fact(Operation *op, ArrayRef<std::string> words) {
+void fact(Operation *op, ArrayRef<StringRef> words) {
   OpBuilder b(op);
   auto term = b.getType<kif::TermType>();
   SmallVector<Value> atoms;
-  for (const std::string &w : words)
+  for (StringRef w : words)
     atoms.push_back(kif::AtomOp::create(b, op->getLoc(), term, b.getStringAttr(w)));
-  kif::FactOp::create(b, op->getLoc(), kif::ListOp::create(b, op->getLoc(), term, atoms));
+  kif::FactOp::create(b, op->getLoc(), kif::ListOp::create(b, op->getLoc(), term, atoms), IntegerAttr());
 }
 
 struct SumoToKifPass : PassWrapper<SumoToKifPass, OperationPass<ModuleOp>> {
@@ -45,19 +46,20 @@ struct SumoToKifPass : PassWrapper<SumoToKifPass, OperationPass<ModuleOp>> {
         ops.push_back(op);
     });
     for (Operation *op : ops) {
+      SmallString<16> pos; // a position's decimal digits: the one word not already held by the context
       if (auto s = dyn_cast<SubclassOp>(op))
-        fact(op, {"subclass", s.getChild().str(), s.getParent().str()});
+        fact(op, {"subclass", s.getChild(), s.getParent()});
       else if (auto i = dyn_cast<InstanceOp>(op))
-        fact(op, {"instance", i.getThing().str(), i.getClassName().str()});
+        fact(op, {"instance", i.getThing(), i.getClassName()});
       else if (auto d = dyn_cast<DomainOp>(op))
-        fact(op, {"domain", d.getRelation().str(), std::to_string(d.getPosition()), d.getClassName().str()});
+        fact(op, {"domain", d.getRelation(), Twine(d.getPosition()).toStringRef(pos), d.getClassName()});
       else if (auto r = dyn_cast<RangeOp>(op))
-        fact(op, {"range", r.getRelation().str(), std::to_string(r.getPosition()), r.getClassName().str()});
+        fact(op, {"range", r.getRelation(), Twine(r.getPosition()).toStringRef(pos), r.getClassName()});
       else {
         auto h = cast<HoldsOp>(op);
-        SmallVector<std::string> words{h.getRelation().str()};
+        SmallVector<StringRef> words{h.getRelation()}; // views on the context's uniqued attributes
         for (Attribute a : h.getArgs())
-          words.push_back(cast<StringAttr>(a).getValue().str());
+          words.push_back(cast<StringAttr>(a).getValue());
         fact(op, words);
       }
       op->erase();

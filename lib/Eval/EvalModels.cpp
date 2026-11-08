@@ -26,6 +26,7 @@ struct PrimEvalModel : public nd::NixEvalOpInterface::FallbackModel<PrimEvalMode
     assert(n <= kMaxArity && "primop arity above the evaluator's limit");
     for (unsigned i = 0; i < n; i++) args[i] = st.lookup(env, op->getOperand(i));
     st.callPrimOp(*prim, args, out, nd::posOfOp(op));
+    if (getenv("MLNIX_CHECK_KINDS")) [[unlikely]] st.checkResultKind(op, out); // the slow path: no cached flag needed
   }
 };
 

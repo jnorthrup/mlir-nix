@@ -72,14 +72,20 @@ def Kif_ListOp : Kif_Op<"list", [Pure]> {
 def Kif_TheoryOp : Kif_Op<"theory", [Symbol, SingleBlock, NoTerminator, IsolatedFromAbove,
     DeclareOpInterfaceMethods<RegionKindInterface>]> {
   let summary = "terms, facts and rules";
-  let arguments = (ins SymbolNameAttr:$sym_name);
+  let description = [{
+    `files` names the KIF files the facts and rules were read from (a fact's or rule's `file` is an index into it: mlnix-kif
+    reads a whole bag into one theory, so equal terms of different files are one node).  `ontology` names the theory whose
+    top-level `(subclass Child Parent)` facts say what `(instance X Class)` means in a premise (sumo-nix/sumo.nix's isSubclass):
+    an instance of a subclass of Class is an instance of Class.  Without it, `instance` is a relation like any other.
+  }];
+  let arguments = (ins SymbolNameAttr:$sym_name, OptionalAttr<StrArrayAttr>:$files, OptionalAttr<FlatSymbolRefAttr>:$ontology);
   let regions = (region SizedRegion<1>:$body);
   let assemblyFormat = "$sym_name attr-dict-with-keyword $body";
 }
 
 def Kif_FactOp : Kif_Op<"fact", [HasParent<"TheoryOp">]> {
   let summary = "a term that holds";
-  let arguments = (ins Kif_Term:$term);
+  let arguments = (ins Kif_Term:$term, OptionalAttr<I32Attr>:$file);
   let assemblyFormat = "$term attr-dict";
 }
 
@@ -89,8 +95,20 @@ def Kif_RuleOp : Kif_Op<"rule", [HasParent<"TheoryOp">]> {
     The `(=> antecedent consequent)` form. The antecedent is an `and` list of premises, or one premise. The solver
     (sumo-nix/datalog.nix) chains rules forward to a fixpoint and keeps the rule and the premises of every fact it derives.
   }];
-  let arguments = (ins Kif_Term:$antecedent, Kif_Term:$consequent);
+  let arguments = (ins Kif_Term:$antecedent, Kif_Term:$consequent, OptionalAttr<I32Attr>:$file);
   let assemblyFormat = "$antecedent `implies` $consequent attr-dict";
+}
+
+def Kif_DerivedOp : Kif_Op<"derived", [HasParent<"TheoryOp">]> {
+  let summary = "a fact the rules give, with its proof";
+  let description = [{
+    What `kif-chase` adds to a theory: a fact the rules derive from its facts, the rule that gave it first (`rule`: the
+    consequent's relation and the rule's place among the theory's rules, `vulnerable#3`, as sumo-nix/datalog.nix names it),
+    and the facts its premises matched, in the premises' order (`from`: their terms; each is a `kif.fact` or another
+    `kif.derived` of the theory).  `round` is the round of the fixpoint that found it (1: from the asserted facts alone).
+  }];
+  let arguments = (ins Kif_Term:$term, StrAttr:$rule, I32Attr:$round, Variadic<Kif_Term>:$from);
+  let assemblyFormat = "$term `by` $rule `round` $round (`from` `(` $from^ `)`)? attr-dict";
 }
 
 #endif // KIF_TD

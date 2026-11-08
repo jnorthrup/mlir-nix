@@ -75,7 +75,9 @@ const Attr *Bindings::get(Symbol s) const {
 /// The union of two flat sorted sets, `y` winning on equal names, as a new flat set of exactly its size.
 /// One pass: the set is allocated with room for both (a name in both is one row, so a few rows may stay unused) and written by unionInto.
 static Bindings *mergeBindings(Arena &alloc, const Bindings *x, const Bindings *y) {
-  size_t room = size_t(x->size_) + y->size_;
+  // Counted first: the arena never takes back a tail, and an override over a large set shares most of its names (nixpkgs-73: 31 MB of
+  // rows reserved and never written when the room was |x| + |y|).
+  size_t room = cp::unionSize(x->attrs, x->size_, y->attrs, y->size_, attrName);
   void *mem = alloc.Allocate(sizeof(Bindings) + room * sizeof(Attr), alignof(Bindings));
   auto *r = new (mem) Bindings();
   r->size_ = uint32_t(cp::unionInto(x->attrs, x->size_, y->attrs, y->size_, r->attrs, attrName));
@@ -112,6 +114,10 @@ composite::Frozen<const Attr *> Bindings::lexicographicOrder(const SymbolTable &
 /// was measured slower to read than to copy: every lookup walked the chain, a miss a level, and every `//` over a chain walked the base's
 /// rows through it to build its selection (Mac, same outputs: toplevel -2.5%, nixpkgs-73 -7% merged flat; peak memory +5% and +13%).
 Bindings *EvalState::updateAttrs(Bindings *a, Bindings *b) {
+  // An empty side gives the other set itself, as Nix's `//` does: sets are not written after they are built, and the package set is
+  // updated with nothing over a hundred times in a nixpkgs evaluation (each a copy of every row, never freed).
+  if (b->size_ == 0) return a;
+  if (a->size_ == 0) return b;
   if (statsEnabled) { nUpdMerged++; nUpdTop += a->size_ + b->size_; }
   return mergeBindings(alloc, a, b);
 }
@@ -248,6 +254,47 @@ void EvalState::mkList(Value &v, size_t n) {
   v.type = VType::List; if (statsEnabled) ++nVT[unsigned(VType::List)];
   v.aux = static_cast<uint32_t>(n);
   v.list.elems = allocList(n);
+  v.list.ext = nullptr;
+}
+
+void EvalState::concatLists(Value &l, Value &r, Value &out) {
+  size_t nl = l.listSize(), nr = r.listSize(), n = nl + nr;
+  if (n > UINT32_MAX) throw EvalError("list of 4 Gi or more cells");
+  auto put = [&](Value **elems, ListExtent *e) {
+    out.type = VType::List; if (statsEnabled) ++nVT[unsigned(VType::List)];
+    out.aux = uint32_t(n);
+    out.list.elems = elems;
+    out.list.ext = e;
+  };
+  // l into the room below r: r starts at its buffer's claimed edge, and l fits
+  if (ListExtent *e = r.list.ext; e && r.list.elems == e->lo && size_t(e->lo - e->begin) >= nl) {
+    e->lo -= nl;
+    memcpy(e->lo, l.list.elems, nl * sizeof(Value *));
+    if (statsEnabled) nListExtended += nl;
+    return put(e->lo, e);
+  }
+  // r into the room above l
+  if (ListExtent *e = l.list.ext; e && l.list.elems + nl == e->hi && size_t(e->end - e->hi) >= nr) {
+    memcpy(e->hi, r.list.elems, nr * sizeof(Value *));
+    e->hi += nr;
+    if (statsEnabled) nListExtended += nr;
+    return put(l.list.elems, e);
+  }
+  if (n < 8) {
+    mkList(out, l.items() + r.items());
+    return;
+  }
+  // a new buffer with room for as many cells again, on the side the smaller operand came from (where a fold adds)
+  size_t room = n;
+  Value **buf = allocList(n + room);
+  auto *e = static_cast<ListExtent *>(alloc.Allocate(sizeof(ListExtent), alignof(ListExtent)));
+  e->begin = buf;
+  e->lo = nl <= nr ? buf + room : buf;
+  e->hi = e->lo + n;
+  e->end = buf + n + room;
+  memcpy(e->lo, l.list.elems, nl * sizeof(Value *));
+  memcpy(e->lo + nl, r.list.elems, nr * sizeof(Value *));
+  put(e->lo, e);
 }
 
 void PieceContexts::add(const StringContext *c, NixStringContext &spill) {
@@ -441,7 +488,8 @@ void EvalState::printStats() {
                                  mb(handed), rss, mb(values), (unsigned long long)nVT[kAllocated], mb(nFrameBytes), mb(nBindingBytes), mb(nListBytes),
                                  mb(nStringBytes), mb(handed > named ? handed - named + nMaskBytes + nLayerBytes + mergeBytes + nCtxBytes + nFormalBytes : 0));
     llvm::errs() << llvm::format("   \"other\" named: stats census masks %.0f MB (a stats run only), `//` flat merges %.0f, layer headers %.0f, string contexts %.0f, formals %.0f; still unnamed (slab tails, alignment) %.0f MB\n",
-                                 mb(nMaskBytes), mb(mergeBytes), mb(nLayerBytes), mb(nCtxBytes), mb(nFormalBytes), mb(handed > named ? handed - named : 0));
+                                 mb(nMaskBytes), mb(mergeBytes), mb(nLayerBytes), mb(nCtxBytes), mb(nFormalBytes), mb(handed > named ? handed - named : 0));    llvm::errs() << llvm::format("   `++` wrote %llu cells into a buffer's room (ListExtent) instead of copying its other side\n",
+                                 (unsigned long long)nListExtended);
   }
   if (nFrames) llvm::errs() << "   of which only the argument slot (no cells at all): " << nStackableOneSlot << " = " << llvm::format("%.1f%%", 100.0 * nStackableOneSlot / nFrames) << " of frames\n";
   if (nSelects) {
@@ -935,7 +983,8 @@ static void describe(Node *n, Operation *op, const nd::NixDialect *core) {
       .Case<nd::FormalOp>([](auto) { return NodeKind::Formal; })
       .Case<nd::NeqOp>([](auto) { return NodeKind::Neq; })
       .Case<nd::ConcatListsOp>([](auto) { return NodeKind::ConcatLists; })
-      .Case<nd::ConcatStringsOp>([&](nd::ConcatStringsOp c) { n->flags = c.getForceString() ? Node::kForceString : 0; return NodeKind::ConcatStrings; })
+      .Case<nd::ConcatStringsOp>([&](auto) { n->flags = 0; return NodeKind::ConcatStrings; })
+      .Case<nd::InterpolateOp>([&](auto) { n->flags = Node::kForceString; return NodeKind::ConcatStrings; }) // one evaluation, every part coerced
       .Case<nd::WithVarOp>([](auto) { return NodeKind::WithVar; })
       .Case<nd::AssertOp>([](auto) { return NodeKind::Assert; })
       .Case<nd::ImplOp>([](auto) { return NodeKind::Impl; })
@@ -1678,6 +1727,25 @@ void EvalState::callLambdaIn(Value &fun, RegionInfo *ri, Value *arg, Value &out,
   else interpret();
 }
 
+/// MLNIX_CHECK_KINDS=1: an op whose type fixes a kind (a typed primop: NixPrims.irdl.mlir's `irdl.is`) made a value of that kind.  A
+/// declaration that names a kind the primop does not always make is caught here, on the call that broke it.
+static const bool checkKinds = getenv("MLNIX_CHECK_KINDS") != nullptr;
+void EvalState::checkResultKind(mlir::Operation *op, const Value &out) {
+  mlir::Type t = op->getResult(0).getType();
+  if (mlir::isa<nd::ValueType>(t)) return;
+  bool ok = nd::isFnType(t) ? (out.type == VType::Lambda || out.type == VType::PrimOp || out.type == VType::PrimOpApp)
+          : nd::isStringType(t) ? out.type == VType::String
+          : mlir::isa<composite::Series2Type>(t) ? out.type == VType::Attrs
+          : mlir::isa<composite::SeriesType>(t) ? out.type == (mlir::cast<composite::SeriesType>(t).getElement().isInteger(8) ? VType::Path : VType::List)
+          : false;
+  if (!ok) {
+    llvm::SmallString<96> ty;
+    llvm::raw_svector_ostream(ty) << t;
+    throw EvalError(composite::cat("internal error: ", op->getName().getStringRef(), " is declared to make ", llvm::StringRef(ty),
+                                   " but made a value of tag ", composite::str(int(out.type))), nd::posOfOp(op));
+  }
+}
+
 void EvalState::callPrimOp(const PrimOp &op, Value **args, Value &out, PosPtr pos) {
   try {
     op.call(*this, args, out, pos);
@@ -2299,7 +2367,7 @@ void evalConcatLists(EvalState &st, Node *n, Frame *env, Value &out) {
   st.forceList(*r, pos, "in the right operand of the list concatenation operator");
   if (l->listSize() == 0) { out = *r; return; }
   if (r->listSize() == 0) { out = *l; return; }
-  st.mkList(out, l->items() + r->items());
+  st.concatLists(*l, *r, out);
 }
 
 void evalConcatStringsNode(EvalState &st, Node *n, Frame *env, Value &out) { st.evalConcatStrings(n, env, out); }
@@ -2351,6 +2419,7 @@ void evalPrim(EvalState &st, Node *n, Frame *env, Value &out) { // an op of a co
     }
   }
   st.callPrimOp(*n->prim, args, out, n->pos());
+  if (checkKinds) [[unlikely]] st.checkResultKind(n->def, out);
 }
 
 void evalInt(EvalState &st, Node *n, Frame *, Value &out) { st.mkInt(out, cast<nd::IntOp>(n->def).getValue()); }

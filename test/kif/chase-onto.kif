@@ -1,0 +1,6 @@
+; The ontology of chase-cases.kif: what (instance X Class) means there.
+(subclass Dog Canine)
+(subclass Canine Mammal)
+(subclass Cat Mammal)
+(subclass Mammal Animal)
+(subclass Bird Animal)

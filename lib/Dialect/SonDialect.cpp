@@ -3,12 +3,16 @@
 #include "NixDialect/Son.h"
 
 #include "mlir/IR/Builders.h"
+#include "llvm/ADT/SmallString.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/RegionUtils.h"
 
 #include "NixDialect/SonDialect.cpp.inc"
+
+using mlir::nix::parseNixValues; // son.defer prints its captures as the nix ops print their operands
+using mlir::nix::printNixValues;
 
 #define GET_OP_CLASSES
 #include "NixDialect/Son.cpp.inc"
@@ -80,7 +84,10 @@ struct NixDeferPass : PassWrapper<NixDeferPass, OperationPass<ModuleOp>> {
 
       OpBuilder b = OpBuilder::atBlockEnd(&pool.getRows().front());
       Attribute props = lambda->getPropertiesAsAttribute();
-      std::string name = ("row" + Twine(row++)).str();
+      unsigned thisRow = row++;
+      llvm::SmallString<16> nameBuf;
+      (llvm::Twine("row") + llvm::Twine(thisRow)).toVector(nameBuf);
+      llvm::StringRef name(nameBuf);
       auto bodyOp = BodyOp::create(b, lambda.getLoc(), b.getStringAttr(name), captured.size(), props);
       Type value = nix::ValueType::get(&getContext());
       SmallVector<Type> types(captured.size() + 1, value);
@@ -98,7 +105,7 @@ struct NixDeferPass : PassWrapper<NixDeferPass, OperationPass<ModuleOp>> {
 
       OpBuilder at(lambda);
       auto ref = SymbolRefAttr::get(&getContext(), kPool, {FlatSymbolRefAttr::get(&getContext(), name)});
-      auto defer = DeferOp::create(at, lambda.getLoc(), value, ref, captured.getArrayRef());
+      auto defer = DeferOp::create(at, lambda.getLoc(), lambda.getType(), ref, captured.getArrayRef());
       lambda.getResult().replaceAllUsesWith(defer);
       lambda.erase();
     }
@@ -147,10 +154,131 @@ struct SonMintPass : PassWrapper<SonMintPass, OperationPass<ModuleOp>> {
 };
 } // namespace
 
+namespace {
+/// son-export: the module as JSON on stdout, for an executor outside this process (the Graal arm, docs/PRELOAD-DIALECTS.md step 3: a
+/// Truffle interpreter builds its nodes from it).  Generic: every op is {"op", "res", "ins", "types", "attrs", "regions"}, a region a
+/// list of blocks {"args", "ops"}, a value a number unique in the module (a graph region reads values before their definition, so a
+/// number is given at the first sight, use or definition).  `attrs` are the op's properties and attributes as MLIR converts them,
+/// without the packed source positions; a null name (a computed attribute path component) is null.  Run it after nix-defer, with
+/// `-o /dev/null`: the module text would follow on stdout.
+struct SonExportPass : PassWrapper<SonExportPass, OperationPass<ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SonExportPass)
+  StringRef getArgument() const override { return "son-export"; }
+  StringRef getDescription() const override { return "Write the module as JSON to stdout, for an executor in another runtime"; }
+
+  llvm::DenseMap<Value, unsigned> ids;
+  unsigned id(Value v) { return ids.try_emplace(v, unsigned(ids.size())).first->second; }
+
+  static void string(raw_ostream &os, StringRef s) {
+    os << '"';
+    for (unsigned char c : s) {
+      if (c == '"' || c == '\\') os << '\\' << char(c);
+      else if (c == '\n') os << "\\n";
+      else if (c == '\t') os << "\\t";
+      else if (c == '\r') os << "\\r";
+      else if (c < 0x20) { os << "\\u00"; os.write_hex(c >> 4); os.write_hex(c & 15); }
+      else os << char(c);
+    }
+    os << '"';
+  }
+  static void attr(raw_ostream &os, Attribute a, bool inArray) {
+    if (auto b = dyn_cast<BoolAttr>(a)) os << (b.getValue() ? "true" : "false");
+    else if (auto i = dyn_cast<IntegerAttr>(a)) os << i.getValue().getSExtValue();
+    else if (auto f = dyn_cast<FloatAttr>(a)) { llvm::SmallString<32> s; f.getValue().toString(s, 17, 0); os << s; }
+    else if (auto s = dyn_cast<StringAttr>(a)) string(os, s.getValue());
+    else if (isa<UnitAttr>(a)) os << (inArray ? "null" : "true"); // a null name in a list; a unit flag set
+    else if (auto arr = dyn_cast<ArrayAttr>(a)) { os << '['; llvm::interleaveComma(arr, os, [&](Attribute e) { attr(os, e, true); }); os << ']'; }
+    else if (auto d = dyn_cast<DenseBoolArrayAttr>(a)) { os << '['; llvm::interleaveComma(d.asArrayRef(), os, [&](bool e) { os << (e ? "true" : "false"); }); os << ']'; }
+    else if (auto d = dyn_cast<DenseI64ArrayAttr>(a)) { os << '['; llvm::interleaveComma(d.asArrayRef(), os); os << ']'; }
+    else if (auto d = dyn_cast<DenseI32ArrayAttr>(a)) { os << '['; llvm::interleaveComma(d.asArrayRef(), os); os << ']'; }
+    else if (auto d = dyn_cast<DictionaryAttr>(a)) { // son.body's `lambda`: the properties of the lambda it was
+      os << '{';
+      bool first = true;
+      for (NamedAttribute n : d) {
+        StringRef k = n.getName().getValue();
+        if (k == "pos" || k == "formal_locs") continue;
+        if (!first) os << ',';
+        first = false;
+        string(os, k);
+        os << ':';
+        attr(os, n.getValue(), false);
+      }
+      os << '}';
+    } else if (auto r = dyn_cast<SymbolRefAttr>(a)) {
+      os << '[';
+      string(os, r.getRootReference().getValue());
+      for (FlatSymbolRefAttr n : r.getNestedReferences()) { os << ','; string(os, n.getValue()); }
+      os << ']';
+    } else { llvm::SmallString<64> s; llvm::raw_svector_ostream(s) << a; string(os, s); }
+  }
+  void op(raw_ostream &os, Operation *o) {
+    os << "{\"op\":";
+    string(os, o->getName().getStringRef());
+    os << ",\"res\":[";
+    llvm::interleaveComma(o->getResults(), os, [&](Value v) { os << id(v); });
+    os << "],\"ins\":[";
+    llvm::interleaveComma(o->getOperands(), os, [&](Value v) { os << id(v); });
+    os << "],\"types\":[";
+    llvm::interleaveComma(o->getResultTypes(), os, [&](Type t) { llvm::SmallString<64> s; llvm::raw_svector_ostream(s) << t; string(os, s); });
+    os << "],\"attrs\":{";
+    bool first = true;
+    auto field = [&](StringRef k, Attribute v) {
+      if (k == "pos" || k == "formal_locs" || k == "positions") return; // packed source positions: meaningless outside this process
+      if (!first) os << ',';
+      first = false;
+      string(os, k);
+      os << ':';
+      attr(os, v, false);
+    };
+    if (auto props = dyn_cast_or_null<DictionaryAttr>(o->getPropertiesAsAttribute()))
+      for (NamedAttribute n : props) field(n.getName().getValue(), n.getValue());
+    for (NamedAttribute n : o->getDiscardableAttrs()) field(n.getName().getValue(), n.getValue());
+    if (auto *nixd = o->getContext()->getLoadedDialect<nix::NixDialect>()) // not loaded for a module of other dialects (kif)
+      if (const auto *prim = nixd->primOf(o))                                // a primop: the builtin it runs
+        field("prim_key", StringAttr::get(o->getContext(), prim->key));
+    os << "},\"regions\":[";
+    bool firstRegion = true;
+    for (Region &r : o->getRegions()) {
+      os << (firstRegion ? "[" : ",[");
+      firstRegion = false;
+      bool firstBlock = true;
+      for (Block &b : r) {
+        os << (firstBlock ? "{\"args\":[" : ",{\"args\":[");
+        firstBlock = false;
+        llvm::interleaveComma(b.getArguments(), os, [&](BlockArgument a) { os << id(a); });
+        os << "],\"ops\":[";
+        bool firstOp = true;
+        for (Operation &inner : b) {
+          if (!firstOp) os << ',';
+          firstOp = false;
+          op(os, &inner);
+        }
+        os << "]}";
+      }
+      os << ']';
+    }
+    os << "]}";
+  }
+  void runOnOperation() override {
+    llvm::raw_ostream &os = llvm::outs();
+    os << "{\"module\":[";
+    bool first = true;
+    for (Operation &o : *getOperation().getBody()) {
+      if (!first) os << ',';
+      first = false;
+      op(os, &o);
+    }
+    os << "]}\n";
+    os.flush();
+  }
+};
+} // namespace
+
 void registerSonPasses() {
   static const bool registered = [] {
     PassRegistration<NixDeferPass>();
     PassRegistration<SonMintPass>();
+    PassRegistration<SonExportPass>();
     return true;
   }();
   (void)registered;

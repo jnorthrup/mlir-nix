@@ -1,0 +1,60 @@
+; Cases for kif-chase against datalog.nix (scripts/kif-oracle.py): each picks a proof or a fact a different way.
+; The ontology for (instance X Class) is chase-onto.kif.
+
+; instance through the ontology: rex is a Dog, a Dog is a Mammal is an Animal
+(instance rex Dog)
+(instance tom Cat)
+(instance tweety Bird)
+(=> (instance ?x Animal) (animal ?x))
+(=> (and (instance ?x Mammal) (owns ?o ?x)) (petOwner ?o))
+(owns ann rex)
+(owns bob tweety)
+
+; one fact, several proofs: a reaches d through b and through c (the first solution in the facts' printed order is kept)
+; (listed out of order: the proof of (fof a d) goes through b, the first in printed order, not c, the first in the file)
+(likes c d)
+(likes a c)
+(likes d e)
+(likes b d)
+(likes a b)
+(=> (and (likes ?x ?y) (likes ?y ?z)) (fof ?x ?z))
+
+; two rules give one fact in one round: the first rule names it
+(=> (likes ?x ?y) (knows ?x ?y))
+(=> (fof ?x ?y) (knows ?x ?y))
+(=> (likes ?y ?x) (knows ?x ?y))
+
+; a chain: each round adds one link of the closure
+(next n1 n2)
+(next n2 n3)
+(next n3 n4)
+(next n4 n5)
+(=> (next ?a ?b) (reach ?a ?b))
+(=> (and (reach ?a ?b) (next ?b ?c)) (reach ?a ?c))
+
+; negation as failure, equal, exists
+(person p1)
+(person p2)
+(person p3)
+(banned p2)
+(=> (and (person ?x) (not (banned ?x))) (allowed ?x))
+(pair p1 p1)
+(pair p1 p2)
+(pair p2 p3)
+(=> (and (pair ?a ?b) (equal ?a ?b)) (same ?a))
+(parent p1 p3)
+(=> (exists (?y) (parent ?x ?y)) (hasChild ?x))
+
+; a ground premise, and a premise whose relation is a variable (it reads every fact)
+(flag on)
+(=> (and (flag on) (person ?x)) (flagged ?x))
+(=> (and (?r p1 ?z) (person ?z)) (touches ?r ?z))
+
+; a derived fact that a later round's negation reads: allowed2 waits for round 2's facts
+(=> (and (reach n1 ?x) (not (next ?x n2))) (far ?x))
+
+; a round derives from the facts of the rounds before it: g1 is new in round 1, so the rule after it cannot read it in round 1,
+; and (h x) is first given by the third rule (from (likes a c)); a round that read its own new facts would name the second
+(=> (likes a b) (g1 x))
+(=> (g1 x) (h x))
+(=> (likes a c) (h x))

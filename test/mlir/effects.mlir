@@ -10,7 +10,7 @@ nix.expr @pure {
   %x = nixnum.add(%a, %b)
   %y = nixnum.add(%a, %b)
   %r = nix.list [%x, %y]
-  nix.return %r
+  nix.return %r : !trikeshed.series<!nix.value>
 }
 // CHECK: [[S:%.*]] = nixnum.add(
 // CHECK-NOT: nixnum.add
@@ -20,10 +20,10 @@ nix.expr @pure {
 nix.expr @user_code {
   %f = nix.builtin "toString"
   %l = nix.list []
-  %x = nixlistfn.map(%f, %l)
-  %y = nixlistfn.map(%f, %l)
-  %r = nix.list [%x, %y]
-  nix.return %r
+  %x = nixlistfn.map(%f, %l : !trikeshed.series<!nix.value>)
+  %y = nixlistfn.map(%f, %l : !trikeshed.series<!nix.value>)
+  %r = nix.list [%x : !trikeshed.series<!nix.value>, %y : !trikeshed.series<!nix.value>]
+  nix.return %r : !trikeshed.series<!nix.value>
 }
 // CHECK: nixlistfn.map(
 // CHECK: nixlistfn.map(
@@ -32,10 +32,10 @@ nix.expr @user_code {
 nix.expr @diagnostics {
   %m = nix.str "hi"
   %v = nix.int 1
-  %x = nixtrace.trace(%m, %v)
-  %y = nixtrace.trace(%m, %v)
+  %x = nixtrace.trace(%m : !trikeshed.join<!trikeshed.series<i8>, !trikeshed.series<!trikeshed.series<i8>>>, %v)
+  %y = nixtrace.trace(%m : !trikeshed.join<!trikeshed.series<i8>, !trikeshed.series<!trikeshed.series<i8>>>, %v)
   %r = nix.list [%x, %y]
-  nix.return %r
+  nix.return %r : !trikeshed.series<!nix.value>
 }
 // CHECK: nixtrace.trace(
 // CHECK: nixtrace.trace(

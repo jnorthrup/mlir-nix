@@ -21,8 +21,8 @@ nix.expr @functions {
   ^bb0(%x: !nix.value):
     nix.return %x
   }
-  %r = nix.list [%f, %g]
-  nix.return %r
+  %r = nix.list [%f : (!nix.value) -> !nix.value, %g : (!nix.value) -> !nix.value]
+  nix.return %r : !trikeshed.series<!nix.value>
 }
 // CHECK-COUNT-2: nix.lambda
 // CHECK: nix.list
@@ -34,10 +34,10 @@ nix.expr @containers {
   %l1 = nix.list [%a]
   %l2 = nix.list [%a]
   %s = nix.attrs [](  )
-  %n1 = nixattr.attr_names(%s)
-  %n2 = nixattr.attr_names(%s)
-  %r = nix.list [%l1, %l2, %n1, %n2]
-  nix.return %r
+  %n1 = nixattr.attr_names(%s : !trikeshed.series2<i32, !nix.value>)
+  %n2 = nixattr.attr_names(%s : !trikeshed.series2<i32, !nix.value>)
+  %r = nix.list [%l1 : !trikeshed.series<!nix.value>, %l2 : !trikeshed.series<!nix.value>, %n1 : !trikeshed.series<!nix.value>, %n2 : !trikeshed.series<!nix.value>]
+  nix.return %r : !trikeshed.series<!nix.value>
 }
 // CHECK: nix.list
 // CHECK: nix.list
@@ -49,10 +49,10 @@ nix.expr @containers {
 nix.expr @still_merged {
   %a = nix.int 1
   %l = nix.list [%a]
-  %x = nixlist.length(%l)
-  %y = nixlist.length(%l)
+  %x = nixlist.length(%l : !trikeshed.series<!nix.value>)
+  %y = nixlist.length(%l : !trikeshed.series<!nix.value>)
   %r = nix.list [%x, %y]
-  nix.return %r
+  nix.return %r : !trikeshed.series<!nix.value>
 }
 // CHECK: nixlist.length(
 // CHECK-NOT: nixlist.length(
@@ -60,9 +60,9 @@ nix.expr @still_merged {
 // DEAD-LABEL: nix.expr @dead
 nix.expr @dead {
   %s = nix.attrs [](  )
-  %unused = nixattr.attr_names(%s)
+  %unused = nixattr.attr_names(%s : !trikeshed.series2<i32, !nix.value>)
   %f = nix.builtin "toString"
-  %call = nix.apply %f(%s)
+  %call = nix.apply %f(%s : !trikeshed.series2<i32, !nix.value>)
   %r = nix.int 1
   nix.return %r
 }

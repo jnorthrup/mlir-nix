@@ -4,17 +4,18 @@
 // RUN: mlnix-opt %s -loop-invariant-code-motion | FileCheck %s
 
 // CHECK-LABEL: func.func @speculation
-func.func @speculation(%trip: index, %lazy: !nix.value) -> !nix.value {
+func.func @speculation(%trip: index, %lazy: !nix.value) -> !trikeshed.series<!nix.value> {
   %zero = arith.constant 0 : index
   %step = arith.constant 1 : index
   %yes = nix.bool true
   %no = nix.bool false
   %one = nix.int 1
   %max = nix.int 9223372036854775807
+  %none = nix.list []
   // CHECK: nix.int 7
   // CHECK: nix.path "/tmp/literal"
   // CHECK: scf.for
-  %result = scf.for %i = %zero to %trip step %step iter_args(%acc = %one) -> (!nix.value) {
+  %result = scf.for %i = %zero to %trip step %step iter_args(%acc = %none) -> (!trikeshed.series<!nix.value>) {
     %literal = nix.int 7
     %path = nix.path "/tmp/literal"
     // Each operand is defined outside the loop: lack of speculation permission
@@ -54,11 +55,11 @@ func.func @speculation(%trip: index, %lazy: !nix.value) -> !nix.value {
     // Fresh identity must also survive speculative motion.
     // CHECK: nix.list
     %fresh = nix.list [%one]
-    %all = nix.list [%literal, %path, %assert, %branch, %select, %has, %with,
+    %all = nix.list [%literal, %path : !trikeshed.series<i8>, %assert, %branch, %select, %has, %with,
                     %formal, %builtin, %not, %and, %or, %impl, %eq, %neq,
-                    %overflow, %add, %fresh]
+                    %overflow, %add, %fresh : !trikeshed.series<!nix.value>]
     // CHECK: scf.yield
-    scf.yield %all : !nix.value
+    scf.yield %all : !trikeshed.series<!nix.value>
   }
-  return %result : !nix.value
+  return %result : !trikeshed.series<!nix.value>
 }

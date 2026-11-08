@@ -75,6 +75,13 @@ struct SymbolTable {
 
 struct Value;
 struct Frame;
+/// A list buffer with room on a side, made by `++` (EvalState::concatLists).  [lo, hi) is claimed: every list that reads the buffer
+/// sees cells inside it, and only those cells are ever written.  A `++` whose larger side is a list that starts at lo (or ends at
+/// hi) writes the smaller side into the room below lo (above hi) and widens the claim: `[ x ] ++ acc` and `acc ++ [ x ]` in a fold
+/// cost the new cells, not a copy of acc.  An older list that touched the edge is still a view of cells that never change.
+struct ListExtent {
+  Value **begin, **lo, **hi, **end;
+};
 struct RegionInfo;
 struct Node;
 struct EvalState;
@@ -212,6 +219,7 @@ struct Value {
     Bindings *attrs;
     struct {
       Value **elems;
+      ListExtent *ext; // the buffer's room, when `++` made it with some (null otherwise): see ListExtent
     } list;
     struct {
       Node *node; // Thunk: the record of the op it evaluates; Lambda: the record of the lambda op (which keeps its body, once called)
@@ -326,7 +334,7 @@ struct Node {
   NodeKind kind;
   How how;
   Promotion promo;
-  uint8_t flags = 0;        // Select: kDefault; Attrs: kDynamic; ConcatStrings: kForceString
+  uint8_t flags = 0;        // Select: kDefault; Attrs: kDynamic; ConcatStrings: kForceString (made by nix.interpolate)
   unsigned idx;             // kNoSlot: the value has no frame cell (it is evaluated in place, made by its one use, or fixed)
   uint32_t nOperands = 0;
   uint32_t nDyn = 0;        // Select and HasAttr: the dynamic keys after the base; Attrs: the static values, first
@@ -505,6 +513,9 @@ struct EvalState {
   void mkStringOf(Value &v, llvm::ArrayRef<composite::Chars> pieces, const StringContext *ctx);
   void mkPath(Value &v, std::string_view p);
   void mkList(Value &v, size_t n);
+  /// `l ++ r` into out: into the room of r's or l's buffer when the other side fits there (ListExtent), else a new buffer, with
+  /// room on the smaller side when the result has 8 or more cells.
+  void concatLists(Value &l, Value &r, Value &out);
   /// A list drained from a series of Value * (a Series, a vector, a combine): the one fill loop, the α of the caller inlined.
   template <class S> requires requires(const S &s, Value **o) { s.size(); cp::drain(s, o); }
   void mkList(Value &v, const S &s) {
@@ -527,6 +538,19 @@ struct EvalState {
   Value *newString(std::string_view s, const NixStringContext &ctx = {}) { Value *v = allocValue(); mkString(*v, s, ctx); return v; }
   /// A string on bytes that stay where they are (a name in the symbol table, a piece of an arena string): a window, nothing copied.
   Value *newStringWindow(llvm::StringRef r) { Value *v = allocValue(); mkStringWindow(*v, r); return v; }
+  /// A cell shared by every value that needs it, never written: null, and the strings of no or one byte without context (what
+  /// `split` and `match` make for each piece between tokens and each group that took no part: 20% of the cells of sumo.full's
+  /// kif.nix).  Neither has an identity Nix can see: a string and null print and compare by content (a list and a function do not:
+  /// they keep their own cells).
+  Value *sharedNull() { return &sharedNullCell; }
+  Value *sharedShortString(std::string_view s) {
+    if (s.size() > 1) return nullptr;
+    unsigned i = s.empty() ? 0 : 1 + (unsigned char)s[0];
+    Value &v = sharedShortCells[i];
+    if (i) shortBytes[2 * i] = char(i - 1);
+    if (v.type != VType::String) mkStringWindow(v, llvm::StringRef(&shortBytes[2 * i], s.size()));
+    return &v;
+  }
 
   /// Builder for attribute sets.
   /// A set being built: its rows go where the set will live.  Given the most rows it can get (`room`), the builder writes them into an
@@ -682,6 +706,8 @@ struct EvalState {
   /// Call a primop on already-collected arguments, adding the
   /// "while calling the 'X' builtin" trace like upstream.
   void callPrimOp(const PrimOp &op, Value **args, Value &out, PosPtr pos);
+  /// MLNIX_CHECK_KINDS=1: `out`, made by `op`, has the kind op's result type fixes (an internal error otherwise).
+  void checkResultKind(mlir::Operation *op, const Value &out);
   /// The frame a primop's error gets: "while calling the 'name' builtin" (not for throw, abort and addErrorContext).
   void tracePrimOp(const PrimOp &op, EvalError &e, PosPtr pos);
   const PrimOp *primOpByKey(llvm::StringRef key);
@@ -898,6 +924,7 @@ struct EvalState {
   uint64_t nChainOuter = 0, nChainOuterSlots = 0; // MLNIX_STATS: frames (and their slots) that exist only to capture an argument for an inner lambda
   uint64_t nStackable = 0, nStackableBytes = 0, nStackableOneSlot = 0; // MLNIX_STATS: frames (and their bytes) of bodies that cannot leak their frame
   uint64_t nTouchedBy[6] = {}; // MLNIX_STATS: slots ever read, by the slot count of their frame (1, 2-3, 4-8, 9-16, 17-64, 65+)
+  uint64_t nListExtended = 0; // MLNIX_STATS: cells `++` wrote into a buffer's room (ListExtent) instead of a copy
   uint64_t nBindingBytes = 0, nListBytes = 0, nStringBytes = 0; // MLNIX_STATS: arena bytes by use (values and frames are counted above)
   uint64_t nStackFrames = 0; // MLNIX_STATS: calls run on a stack frame, nothing allocated in the arena
   /// Can a call of this body run on a stack frame?  Decided at its first call (classifyStackFrame) and kept in the region.
@@ -925,6 +952,9 @@ struct EvalState {
   // a recycled frame is almost always still in L1 (docs/FRAME-BYTES.md: 97 to 98% of reuses are within 32 KiB of allocation).
   static constexpr unsigned kRecycleMax = 64;
   Frame *freeFrames[kRecycleMax] = {};
+  Value sharedNullCell;            // type Null from construction (Value())
+  Value sharedShortCells[257];     // "" and each byte, made on first use
+  char shortBytes[2 * 257] = {};   // their bytes: one, then a NUL
   bool recycleOn = false;  // MLNIX_RECYCLE=1 turns it on: it trades a little time for memory (docs/FRAME-BYTES.md)
   void recycleFrame(Frame *f) {
     unsigned n = f->info->numSlots;

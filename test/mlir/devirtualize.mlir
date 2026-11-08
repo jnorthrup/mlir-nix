@@ -16,7 +16,7 @@ nix.expr @spellings {
   %t = nix.builtin "toString"
   %z = nix.apply %t(%one)
   %r = nix.list [%x, %y, %z]
-  nix.return %r
+  nix.return %r : !trikeshed.series<!nix.value>
 }
 // CHECK-NOT: nix.apply
 // CHECK-NOT: nix.builtin "builtins"
@@ -42,7 +42,7 @@ nix.expr @oversaturated {
   %one = nix.int 1
   %l = nix.list [%one]
   %f = nix.int 7
-  %r = nix.apply %h(%l, %f)
+  %r = nix.apply %h(%l : !trikeshed.series<!nix.value>, %f)
   nix.return %r
 }
 // CHECK: [[H:%.*]] = nixlist.head(
@@ -54,7 +54,7 @@ nix.expr @oversaturated {
 nix.expr @not_builtins {
   %user = nix.attrs ["add"](%f)
   %f = nix.builtin "map"
-  %sel = nix.select %user ["add"]
+  %sel = nix.select %user : !trikeshed.series2<i32, !nix.value> ["add"]
   %one = nix.int 1
   %two = nix.int 2
   %r = nix.apply %sel(%one, %two)
@@ -68,7 +68,7 @@ nix.expr @not_builtins {
 nix.expr @dynamic_key {
   %b = nix.builtin "builtins"
   %k = nix.str "add"
-  %sel = nix.select %b [%k]
+  %sel = nix.select %b [%k : !trikeshed.join<!trikeshed.series<i8>, !trikeshed.series<!trikeshed.series<i8>>>]
   %one = nix.int 1
   %two = nix.int 2
   %r = nix.apply %sel(%one, %two)

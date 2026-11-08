@@ -3,12 +3,14 @@ add_mlir_dialect_library(MLIRNix
   Dialect/NixPrimDialects.cpp
   Dialect/MlnixControlDialect.cpp
   Dialect/KifDialect.cpp
+  Dialect/KifImport.cpp
+  Dialect/KifChase.cpp
   Dialect/SumoDialect.cpp
   Dialect/SonDialect.cpp
   Dialect/ConfixDialect.cpp
   PARTIAL_SOURCES_INTENDED
-  DEPENDS MLIRNixOpsIncGen
-  LINK_LIBS PUBLIC MLIRIR MLIRPass MLIRTransforms MLIRTransformUtils MLIRRewrite MLIRSideEffectInterfaces MLIRIRDL MLIRParser MLIRLLVMDialect)
+  DEPENDS MLIRNixOpsIncGen TrikeShedIncGen
+  LINK_LIBS PUBLIC MLIRTrikeShed MLIRIR MLIRPass MLIRTransforms MLIRTransformUtils MLIRRewrite MLIRSideEffectInterfaces MLIRIRDL MLIRParser MLIRLLVMDialect)
 
 # The Confix scanner is LLVM IR (Confix/confix.ll, freestanding: it calls nothing).  opt and llc make its object, which MLIRNix carries, so that
 # whatever links the library can call confix_scan_json and confix_scan_cbor, which the confix-to-llvm pass lowers to.

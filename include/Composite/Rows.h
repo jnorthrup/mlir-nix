@@ -76,8 +76,24 @@ template <class Row, class Key> constexpr size_t uniqueFirst(Row *rows, size_t n
   return m;
 }
 
-/// The union of two runs sorted by key, `y` winning on an equal key: how many rows it has, and then the rows themselves.
+/// The union of two runs sorted by key, `y` winning on an equal key: how many rows it has, and then the rows themselves.  When `y` is much
+/// the smaller (an override over a large set), each of its rows is searched for in `x`, as unionInto does: |y| log |x|, not |x| + |y|.
 template <class Row, class Key> constexpr size_t unionSize(const Row *x, size_t nx, const Row *y, size_t ny, Key key) {
+  if (ny * 16 < nx) {
+    size_t i = 0, shared = 0;
+    for (size_t j = 0; j < ny; j++) {
+      auto b = key(y[j]);
+      size_t lo = i, hi = nx;
+      while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (key(x[mid]) < b) lo = mid + 1;
+        else hi = mid;
+      }
+      i = lo;
+      if (i < nx && key(x[i]) == b) { shared++; i++; }
+    }
+    return nx + ny - shared;
+  }
   size_t i = 0, j = 0, n = 0;
   while (i < nx && j < ny) {
     auto a = key(x[i]), b = key(y[j]);

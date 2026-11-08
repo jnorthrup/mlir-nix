@@ -6,5 +6,5 @@ nix.expr @probe {
   %x = nixnum.add(%a, %b)
   %y = nixnum.add(%a, %b)
   %r = nix.list [%x, %y]
-  nix.return %r
+  nix.return %r : !trikeshed.series<!nix.value>
 }
