@@ -27,9 +27,9 @@
 
 namespace composite::confix {
 
-/// What an element is: IOMemento's IoNothing, IoBoolean, IoLong, IoDouble, IoString, IoObject and IoArray, and IoBytes (a CBOR byte string).  A number written without a
+/// What an element is: IOMemento's IoNothing, IoBoolean, IoLong, IoDouble, IoString, IoObject and IoArray.  A number written without a
 /// fraction or an exponent that fits 64 bits is a Long; any other number is a Double (one past 64 bits too).
-enum class Tag : uint8_t { Nothing, Boolean, Long, Double, String, Object, Array, Bytes };
+enum class Tag : uint8_t { Nothing, Boolean, Long, Double, String, Object, Array };
 
 /// The columns of an Index.
 enum class Col : uint8_t { Span, Tag, Kids };
@@ -53,14 +53,6 @@ enum class Fault : uint8_t {
   Backslash,     // a backslash before a character that is not an escape
   Unsigned,      // an integer from 2^63 to 2^64 - 1: JSON has it, an int64 does not
   Nul,           // a string with a `\u0000`: a text with a NUL in it
-  // The faults of CBOR (ConfixCbor.h) and of a deterministic reading of it:
-  Reserved,      // an additional-information value 28 to 30, an indefinite length where none is allowed, a simple value under 32 in two bytes
-  Break,         // a break (0xFF) where no indefinite item is open, or between a key and its value
-  InvalidUtf8,   // a text string that is not UTF-8
-  Chunk,         // a chunk of an indefinite string that is not a definite string of the same kind
-  NonShortest,   // a head, or a float, that is not in its shortest form (deterministic encoding)
-  Indefinite,    // an indefinite length (deterministic encoding has none)
-  KeyOrder,      // map keys not in bytewise order, or a key twice (deterministic encoding)
 };
 
 /// The words of a fault of the syntax, those of the reader that scanned before this one; null for the others.

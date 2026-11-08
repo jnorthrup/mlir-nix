@@ -1,0 +1,8 @@
+09:02:54 start; mlir-nix ed817cb + vs-nix.py 8f0394d9; asnix 4c6d833, ll a64b79e
+09:02:54 ffmpeg
+09:04:15 ffmpeg rc=0
+09:04:15 nixos-toplevel
+09:07:03 nixos-toplevel rc=0
+09:07:03 nixpkgs-73
+09:08:55 nixpkgs-73 rc=0
+09:08:55 done

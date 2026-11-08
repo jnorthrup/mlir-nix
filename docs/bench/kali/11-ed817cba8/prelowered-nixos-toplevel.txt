@@ -1,0 +1,19 @@
+x86_64 | 8 threads | Intel(R) Core(TM) i7-6820HK CPU @ 2.70GHz
+  Nix 2.35.4: nix-instantiate (Nix) 2.35.4
+  Lix 2.91.3: nix-instantiate (Lix, like Nix) 2.91.3
+  asnix: /home/jim/work/bench-ext/asnix/asnix (commit 4c6d833 2026-10-30)
+  ll: /home/jim/work/bench-ext/ll/ll (commit a64b79e 2026-10-29)
+start-up (--eval -E 1), median of 5: Nix 2.35.4 35 ms, Lix 2.91.3 29 ms, mlnix 36 ms, mlnix demand 35 ms
+
+== nixos-toplevel  (7 interleaved rounds, 133 s of a 200 s budget; output sha256 2057239a9017; identical output from all: yes)
+   Nix 2.35.4     min  4.05s  median  4.71s   peak RSS   595 MB   cpu 4.75s   thunks 7.1M
+   Lix 2.91.3     min  4.66s  median  4.87s   peak RSS   755 MB   cpu 4.68s   thunks 7.1M
+   mlnix          min  2.98s  median  3.03s   peak RSS  1172 MB
+   mlnix demand   min  1.64s  median  1.71s   peak RSS  1121 MB
+   asnix          min  2.81s  median  3.30s   peak RSS  1174 MB   identical to Nix 2.35.4: NO, ca0018c161a5 (not a comparison)
+   ll             min  0.00s  median  0.00s   peak RSS    23 MB   identical to Nix 2.35.4: NO, answered <LAMBDA> (not a comparison)
+   mlnix / Nix 2.35.4   median x0.64
+   mlnix / Lix 2.91.3   median x0.62
+   mlnix demand / Nix 2.35.4   median x0.36
+   mlnix demand / Lix 2.91.3   median x0.35
+

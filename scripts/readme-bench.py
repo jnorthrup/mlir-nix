@@ -28,9 +28,10 @@ LANG = re.compile(r"lang (eager|demand)(?: \(rc=0\))?: TOTAL\s+semantic\s+(\d+/\
 FILECHECK = re.compile(r"mlir tests(?: \(rc=0\))?: mlir tests: (.*)$")
 PRIMOPS = re.compile(r"primops(?: \(rc=0\))?: primops: (\d+) registered, (\d+) declared")
 DIFFTEST = re.compile(r"difftest (eager|demand) \(rc=\d+\): (.*?);?$")
-# asnix (github.com/tomberek/asnix), timed in the same rounds when it answers: its time, or why it has none, and whether it answered as Nix did
-ASNIX = re.compile(r"^\s+asnix\s+(?:min\s+([\d.]+)s\s+median\s+([\d.]+)s\s+peak RSS\s+(\d+) MB\s+)?(.*)$")
-ASNIX_MEDIAN = re.compile(r"^\s+asnix / (Nix|Lix) [\d.]+\s+median x([\d.]+)")
+# asnix and ll (github.com/tomberek), timed in the same rounds when they answer: the time, or why there is none, and whether the answer was Nix's
+OTHERS = {"asnix": ("github.com/tomberek/asnix", "make release"), "ll": ("github.com/tomberek/ll", "make CC=clang-22")}
+OTHER = {n: re.compile(r"^\s+%s\s+(?:min\s+([\d.]+)s\s+median\s+([\d.]+)s\s+peak RSS\s+(\d+) MB\s+)?(.*)$" % n) for n in OTHERS}
+OTHER_MEDIAN = {n: re.compile(r"^\s+%s / (Nix|Lix) [\d.]+\s+median x([\d.]+)" % n) for n in OTHERS}
 
 
 def fail(msg):
@@ -47,6 +48,8 @@ def fetch(sha):
         subprocess.run(["scp", "-q", "kali:/tmp/kb/gen-%s/%s" % (sha, f), dest], check=True)
     for f in OPTIONAL:
         subprocess.run(["scp", "-q", "kali:/tmp/kb/gen-%s/%s.txt" % (sha, f), dest])
+    for f in WORKLOADS + OPTIONAL:
+        subprocess.run(["scp", "-q", "kali:/tmp/kb/gen-%s/prelowered-%s.txt" % (sha, f), dest], stderr=subprocess.DEVNULL)
     if not open(os.path.join(dest, "summary.txt")).read().rstrip().endswith("done"):
         fail("%s: summary.txt does not end in 'done': the generation did not finish" % sha)
     print("fetched", dest)
@@ -66,10 +69,14 @@ def parse_workload(path):
                 w["pinned"].add(m[1])
         elif m := MEDIAN.match(ln):
             w["median"][(m[1], m[2])] = "×" + m[3]  # the host's own, from unrounded medians
-        elif m := ASNIX_MEDIAN.match(ln):
-            w.setdefault("asnix-median", {})[m[1]] = "×" + m[2]
-        elif m := ASNIX.match(ln):
-            w["asnix"] = (float(m[1]), float(m[2]), int(m[3]), m[4]) if m[1] else (None, None, None, m[4])
+        else:
+            for n in OTHERS:
+                if m := OTHER_MEDIAN[n].match(ln):
+                    w.setdefault(n + "-median", {})[m[1]] = "×" + m[2]
+                    break
+                if m := OTHER[n].match(ln):
+                    w[n] = (float(m[1]), float(m[2]), int(m[3]), m[4]) if m[1] else (None, None, None, m[4])
+                    break
     if "name" not in w or len(w["tools"]) != 4:
         fail("%s: not the output of vs-nix.py (%d tool lines)" % (path, len(w["tools"])))
     if len(w["median"]) != 4:
@@ -129,15 +136,21 @@ def table(w):
     m = w["median"]
     out.append("| **demand / Nix** | **%s** | **%s** | %s |" % (ratio(dem[0], nix[0]), m[("mlnix demand", "Nix")], ratio(dem[2], nix[2])))
     out.append("| demand / Lix | %s | %s | %s |" % (ratio(dem[0], lix[0]), m[("mlnix demand", "Lix")], ratio(dem[2], lix[2])))
-    if "asnix" in w:
-        amin, amed, arss, state = w["asnix"]
+    for n in OTHERS:
+        if n not in w:
+            continue
+        amin, amed, arss, state = w[n]
         if amin is None:
-            out.append("| asnix | %s | | |" % state.replace("not timed: ", "").replace("|", "/"))
+            out.append("| %s | %s | | |" % (n, state.replace("not timed: ", "").replace("|", "/")))
         elif state.endswith(": yes"):
-            out.append("| asnix | %.2f s | %.2f s | %d MB |" % (amin, amed, arss))
-            out.append("| asnix / Nix | %s | %s | %s |" % (ratio(amin, nix[0]), w.get("asnix-median", {}).get("Nix", ""), ratio(arss, nix[2])))
+            out.append("| %s | %.2f s | %.2f s | %d MB |" % (n, amin, amed, arss))
+            out.append("| %s / Nix | %s | %s | %s |" % (n, ratio(amin, nix[0]), w.get(n + "-median", {}).get("Nix", ""), ratio(arss, nix[2])))
         else:
-            out.append("| asnix, answer not Nix's (not a comparison) | %.2f s | %.2f s | %d MB |" % (amin, amed, arss))
+            said = re.search(r"NO, answered (.+?) \(not a comparison\)", state)
+            if said:  # a short answer is not a result of the workload, so its time is not shown
+                out.append("| %s, answers `%s`, not Nix's | | | |" % (n, said[1]))
+            else:
+                out.append("| %s, answer not Nix's (not a comparison) | %.2f s | %.2f s | %d MB |" % (n, amin, amed, arss))
     return "\n".join(out)
 
 
@@ -152,9 +165,10 @@ def render(gens):
     L.append("")
     for n in WORKLOADS + [o for o in OPTIONAL if o in g["w"]]:
         L += [table(g["w"][n]), ""]
-    if any("asnix" in w for w in g["w"].values()):
-        L += ["asnix ([github.com/tomberek/asnix](https://github.com/tomberek/asnix), built with `make release`) runs in the same rounds; its time "
-              "counts only where its answer is Nix's.", ""]
+    for n, (url, build) in OTHERS.items():
+        if any(n in w for w in g["w"].values()):
+            L += ["%s ([%s](https://%s), built with `%s`) runs in the same rounds, as its own command line takes the workload; its time "
+                  "counts only where its answer is Nix's." % (n, url, url, build), ""]
     L.append("Start-up (`--eval -E 1`, median of 5): %s." % w0["startup"])
     L.append("")
     same = lambda a, b: a == b

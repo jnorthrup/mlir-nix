@@ -2,7 +2,7 @@
 """mlnix against reference Nix and Lix, interleaved on the same machine.
 
 usage: vs-nix.py [--runs N] [--budget SECONDS] [--workload NAME]... [--demand] [--mlnix PATH]
-                 [--native] [--no-copy] [--gc-heap SIZE] [--ref NAME=PATH ...] [--asnix PATH]
+                 [--native] [--no-copy] [--gc-heap SIZE] [--ref NAME=PATH ...] [--asnix PATH] [--ll PATH]
 
 * Default: the reference evaluators run INSIDE the container "nixref" and are timed there
   (date +%s%N), so `docker exec` start-up is not counted.  nixpkgs is first copied into the
@@ -22,10 +22,12 @@ usage: vs-nix.py [--runs N] [--budget SECONDS] [--workload NAME]... [--demand] [
   actually run are printed.
 * Peak RSS of a reference comes from one extra, untimed run that polls /proc/<pid>/status; its
   CPU time and thunk count from NIX_SHOW_STATS in that same run.
-* --asnix PATH (with --native) times asnix (github.com/tomberek/asnix) in the same rounds.  It is not a
-  reference: its answer is checked against the first reference's (a text one where the workload asks
-  for JSON, which asnix does not print), and one that fails or differs is reported as such, with its
-  time when it has one, and no ratio.  The comparison of the others goes on either way.
+* --asnix PATH and --ll PATH (with --native) time asnix (github.com/tomberek/asnix) and ll (github.com/tomberek/ll,
+  its ahead-of-time port) in the same rounds.  Neither is a reference: its answer is checked against the
+  first reference's (a text one where the workload asks for JSON, which they do not print), and one that
+  fails or differs is reported as such, with its time when it has one, and no ratio.  The comparison of the
+  others goes on either way.  Nothing is fixed up for them: ll takes one file and no --arg and does not call a
+  function it is given, so it gets the file as it is and a workload that needs arguments answers <LAMBDA>.
 """
 import argparse, hashlib, math, os, platform, re, shlex, statistics, subprocess, sys, time
 
@@ -35,6 +37,7 @@ import benchref  # noqa: E402
 
 NP = "/tmp/np-bench"  # nixpkgs inside the container
 NATIVE = False
+EXTRA_LIMIT = 150  # seconds the checked run of asnix or ll may take before it is called a failure
 
 
 def workloads(work, np):
@@ -70,6 +73,12 @@ def asnix_args(w):
             rest.append(args[i])
             i += 1
     return out + rest
+
+
+def ll_args(w):
+    """ll's command line is one file or expression and no --arg.  It is given the workload's file as it is: it does not call a function
+    it is handed, so a workload that needs arguments is answered with <LAMBDA>, and that is reported as an answer that is not Nix's."""
+    return [next(a for a in shlex.split(w["nix"]) if a.endswith(".nix"))]
 
 
 def host(script):
@@ -158,13 +167,14 @@ def main():
     ap.add_argument("--records", default=os.path.join(ROOT, "docs", "bench", "kali"), help="the stored generations: pins and records")
     ap.add_argument("--diag", default="/tmp/vs-nix-diag", help="where the state of a stopped run is kept (scripts/runcap.py)")
     ap.add_argument("--asnix", default="", help="also time asnix (github.com/tomberek/asnix) at this path, checked against the first reference (--native)")
+    ap.add_argument("--ll", default="", help="also time ll (github.com/tomberek/ll) at this path, checked against the first reference (--native)")
     a = ap.parse_args()
     if a.runs <= 0:
         ap.error("--runs must be positive")
     if a.reuse_refs and a.gc_heap:
         ap.error("--gc-heap requires reference execution and cannot be used with --reuse-refs")
-    if a.asnix and (not a.native or a.reuse_refs):
-        ap.error("--asnix needs --native and a live first reference (its answer is checked against that one's)")
+    if (a.asnix or a.ll) and (not a.native or a.reuse_refs):
+        ap.error("--asnix and --ll need --native and a live first reference (their answers are checked against that one's)")
     # MLNIX_DEFER is a presence flag, so even "0" means demand. Control the
     # schedules here instead of silently timing demand twice if inherited.
     os.environ.pop("MLNIX_DEFER", None)
@@ -176,6 +186,7 @@ def main():
         sys.exit("--native needs at least one --ref NAME=/path/to/nix-instantiate")
     arms = [("mlnix", {})] + ([("mlnix demand", {"MLNIX_DEFER": "1"})] if a.demand else []) \
         + ([("mlnix demand jit", {"MLNIX_DEFER": "1", "MLNIX_JIT": "1"})] if a.jit else [])
+    others = [(n, p, f) for n, p, f in (("asnix", a.asnix, asnix_args), ("ll", a.ll, ll_args)) if p]
     if not NATIVE and not a.no_copy and not a.reuse_refs:
         host(f"[ -d {NP} ] || cp -a /work/.cache/nixpkgs {NP}")
     mline = machine()
@@ -198,6 +209,10 @@ def main():
             print(f"  {n}: cached same-host measurements; reference binary not invoked")
         else:
             print(f"  {n}: {host(shlex.quote(binary) + ' --version').splitlines()[0]}")
+    for n, binary, _ in others:
+        rev = subprocess.run(["git", "-C", os.path.dirname(os.path.abspath(binary)), "log", "-1", "--format=%h %ad", "--date=short"],
+                             capture_output=True, text=True).stdout.strip()
+        print(f"  {n}: {binary}" + (f" (commit {rev})" if rev else ""))
     # A failed/incorrect startup is not a startup floor. Validate against the
     # literal's known output, so equal crashes cannot establish an oracle.
     startup_hash = hashlib.sha256(b"1\n").hexdigest()[:12]
@@ -234,23 +249,31 @@ def main():
                 linux = NATIVE and sys.platform.startswith("linux")
                 caps[n] = dict(deadline=min(r[0] for r in rec) * (1 + a.over), diag=a.diag, tag=f"{name}-{n.replace(' ', '-')}",
                                mem=int(min(r[2] for r in rec) * (1 + a.over) * 2**20) if linux else None)
-        # asnix: one checked run first.  A failure is reported and not timed; an answer is compared with the first reference's.
-        as_state, as_hash, as_oracle = None, None, None
-        if a.asnix:
-            p = subprocess.run([a.asnix] + asnix_args(w), cwd=ROOT, capture_output=True)
+        # asnix and ll: one checked run each first.  A failure is reported and not timed; an answer is compared with the first reference's.
+        ex_state, ex_hash, ex_said, ex_oracle = {}, {}, {}, None
+        for n, path, build in others:
+            try:
+                p = subprocess.run([path] + build(w), cwd=ROOT, capture_output=True, timeout=EXTRA_LIMIT)
+            except subprocess.TimeoutExpired:
+                ex_state[n] = f"not timed: no answer in {EXTRA_LIMIT} s"
+                continue
             if p.returncode:
                 last = (p.stderr.decode(errors="replace").strip().splitlines() or ["?"])[-1][:160]
-                as_state = f"not timed: fails rc={p.returncode}: {last}"
-            else:
-                as_hash = hashlib.sha256(p.stdout).hexdigest()[:12]
-                if "nix-text" in w:
-                    _, code_t, as_oracle = nix_once(w["nix-text"], work, binary=refs[0][1])
-                    if code_t:
-                        as_state = "not checked: the text answer of the first reference failed"
-        as_timed = a.asnix and as_state is None
-        who_all = [n for n, _ in timed] + [n for n, _ in arms] + (["asnix"] if as_timed else [])
+                ex_state[n] = f"not timed: fails rc={p.returncode}: {last}"
+                continue
+            ex_hash[n] = hashlib.sha256(p.stdout).hexdigest()[:12]
+            ex_said[n] = p.stdout.decode(errors="replace").strip()
+            if "nix-text" in w:
+                if ex_oracle is None:
+                    _, code_t, h_t = nix_once(w["nix-text"], work, binary=refs[0][1])
+                    ex_oracle = False if code_t else h_t
+                if ex_oracle is False:
+                    ex_state[n] = "not checked: the text answer of the first reference failed"
+        ex_timed = [(n, path, build) for n, path, build in others if n not in ex_state]
+        ex_map = {n: (path, build) for n, path, build in ex_timed}
+        who_all = [n for n, _ in timed] + [n for n, _ in arms] + [n for n, _, _ in ex_timed]
         times = {n: [] for n in who_all}
-        as_peak = 0.0
+        ex_peak = {n: 0.0 for n, _, _ in ex_timed}
         golden = reused[name][1] if a.reuse_refs else store.golden(name) if pinned else None
         if pinned and golden is None:
             print(f"{name}: pinned references have no output oracle; no performance comparison")
@@ -264,11 +287,12 @@ def main():
             r0 = time.monotonic()
             rot = who_all[i % len(who_all):] + who_all[:i % len(who_all)]
             for who in rot:
-                if who == "asnix":
-                    t, r, code, h = run_once(a.asnix, asnix_args(w), {})
+                if who in ex_map:
+                    path, build = ex_map[who]
+                    t, r, code, h = run_once(path, build(w), {})
                     if code == 0:
                         times[who].append(t)
-                        as_peak = max(as_peak, r)
+                        ex_peak[who] = max(ex_peak[who], r)
                     continue
                 if who in dict(arms):
                     t, r, code, h = run_once(a.mlnix, w["mlnix"], dict(arms)[who], cap=caps.get(who))
@@ -324,17 +348,22 @@ def main():
             print(f"   {refs[0][0]} with GC_INITIAL_HEAP_SIZE={a.gc_heap}: min {min(gt):5.2f}s  median {statistics.median(gt):5.2f}s")
         for n, _ in arms:
             print(f"   {n:<14s} min {min(times[n]):5.2f}s  median {statistics.median(times[n]):5.2f}s   peak RSS {peak[n]:5.0f} MB")
-        as_same = False
-        if a.asnix:
-            if as_state is None:
-                as_same = as_hash == (as_oracle or golden)
-                as_state = f"identical to {refs[0][0]}: " + ("yes" if as_same else f"NO, {as_hash} (not a comparison)")
-            if times.get("asnix"):
-                print(f"   {'asnix':<14s} min {min(times['asnix']):5.2f}s  median {statistics.median(times['asnix']):5.2f}s   "
-                      f"peak RSS {as_peak:5.0f} MB   {as_state}")
+        ex_same = set()
+        for n, _, _ in others:
+            state = ex_state.get(n)
+            if state is None:
+                same = ex_hash[n] == (ex_oracle or golden)
+                if same:
+                    ex_same.add(n)
+                said = ex_said[n]
+                shown = f"answered {said}" if 0 < len(said) <= 24 and said.isprintable() else ex_hash[n]
+                state = f"identical to {refs[0][0]}: " + ("yes" if same else f"NO, {shown} (not a comparison)")
+            if times.get(n):
+                print(f"   {n:<14s} min {min(times[n]):5.2f}s  median {statistics.median(times[n]):5.2f}s   "
+                      f"peak RSS {ex_peak[n]:5.0f} MB   {state}")
             else:
-                print(f"   {'asnix':<14s} {as_state}")
-        for n, _ in arms + ([("asnix", {})] if as_same and times.get("asnix") else []):
+                print(f"   {n:<14s} {state}")
+        for n, _ in arms + [(n, {}) for n, _, _ in others if n in ex_same and times.get(n)]:
             for r, _ in refs:
                 base = pinned[r]["median"] if r in pinned else statistics.median(times[r])
                 print(f"   {n} / {r:<12s} median x{statistics.median(times[n]) / base:.2f}")
