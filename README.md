@@ -1,5 +1,7 @@
 # mlir-nix
 
+ai: yes, disclosing
+
 A Nix evaluator on MLIR. `mlnix` reads Nix, lowers it to a `nix` dialect, and evaluates that IR on demand. It is meant to be a drop-in for
 `nix-instantiate` (called as `nix-build` or `nix-store`, it behaves as those), and it is held to that: on every change its output is
 compared with Nix 2.35.4 and Lix 2.91.3.
