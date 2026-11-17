@@ -18,8 +18,14 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/Parser/Parser.h"
 #include "mlir/Pass/PassManager.h"
+<<<<<<< HEAD
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/TypeSwitch.h"
+||||||| 46182e5
+#include "llvm/ADT/TypeSwitch.h"
+=======
+
+>>>>>>> 35fea687ba1ada38fce0ceacb142f01d560d78f4
 #include "llvm/Support/SourceMgr.h"
 
 #include <algorithm>
@@ -2205,12 +2211,188 @@ Symbol EvalState::pathSymbol(const nixfe::Name &comp, Node *const *dyn, unsigned
   return symbolOfString(forceStringNoCtx(*lookupForced(env, dyn[nextDyn++]), pos, "while evaluating an attribute name"));
 }
 
+<<<<<<< HEAD
 Value *EvalState::selectField(Value &base, Symbol key, PosPtr pos, uint32_t &guess) {
   forceValue(base, pos);
   if (base.type != VType::Attrs)
     throwTypeError("a set", base, pos, "while selecting an attribute");
   if (const Attr *attr = base.attrs->getGuess(key, guess)) return attr->value;
   throwAttrMissing(symbols[key], pos);
+||||||| 46182e5
+void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
+  if (statsEnabled && env) {
+    ++env->info->nEvals;
+    auto it = env->info->opIdx.find(op);
+    if (it != env->info->opIdx.end()) env->info->everRan[it->second >> 6] |= 1ull << (it->second & 63);
+  }
+  PosPtr pos = nd::posOfOp(op);
+  auto copyFrom = [&](Value *v) {
+    forceValue(*v, pos);
+    out = *v;
+  };
+  llvm::TypeSwitch<Operation *>(op)
+      .Case<nd::ListOp>([&](nd::ListOp l) {
+        mkList(out, l.getElements() |cp::α| [&](mlir::Value x) { return lookup(env, x); });
+      })
+      .Case<nd::AttrsOp>([&](nd::AttrsOp a) { evalAttrs(a, env, out); })
+      .Case<nd::SelectOp>([&](nd::SelectOp sel) {
+        mlir::OperandRange dyn = sel.getDynKeys();
+        Value tb;
+        Value *cur = dyn.empty() ? &operand(env, sel.getBase(), tb) : lookup(env, sel.getBase());
+        mlir::Value def = sel.getDefaultValue();
+        unsigned nextDyn = 0;
+        for (const nixfe::Name &comp : sel.getPath()) {
+          Symbol sym = pathSymbol(comp, dyn, nextDyn, env, pos);
+          forceValue(*cur, pos);
+          if (def) {
+            if (cur->type != VType::Attrs) return copyFrom(lookup(env, def));
+          } else if (cur->type != VType::Attrs) {
+            throwTypeError("a set", *cur, pos, "while selecting an attribute");
+          }
+          const Attr *a = cur->attrs->get(sym);
+          if (!a) {
+            if (def) return copyFrom(lookup(env, def));
+            throw EvalError("attribute '" + std::string(symbols[sym].str()) + "' missing", pos);
+          }
+          cur = a->value;
+        }
+        copyFrom(cur);
+      })
+      .Case<nd::HasAttrOp>([&](nd::HasAttrOp h) {
+        mlir::OperandRange dyn = h.getDynKeys();
+        Value tb;
+        Value *cur = dyn.empty() ? &operand(env, h.getBase(), tb) : lookup(env, h.getBase());
+        unsigned nextDyn = 0;
+        for (const nixfe::Name &comp : h.getPath()) {
+          forceValue(*cur, pos);
+          Symbol sym = pathSymbol(comp, dyn, nextDyn, env, pos);
+          if (cur->type != VType::Attrs) return mkBool(out, false);
+          const Attr *a = cur->attrs->get(sym);
+          if (!a) return mkBool(out, false);
+          cur = a->value;
+        }
+        mkBool(out, true);
+      })
+      .Case<nd::ApplyOp>([&](nd::ApplyOp ap) {
+        Value *f = lookup(env, ap.getCallee());
+        auto as = ap.getArgs();
+        auto args = llvm::to_vector<4>(llvm::map_range(as, [&](mlir::Value a) { return lookup(env, a); }));
+        callFunction(*f, args.size(), args.data(), out, pos);
+      })
+      .Case<nd::IfOp>([&](nd::IfOp i) {
+        Value tc;
+        bool c = forceBool(operand(env, i.getCond(), tc), pos, "while evaluating a branch condition");
+        evalTail(env, c ? i.getThenValue() : i.getElseValue(), out, pos);
+      })
+      .Case<nd::AssertOp>([&](nd::AssertOp a) {
+        Value tc;
+        bool c = forceBool(operand(env, a.getCond(), tc), pos, "in the condition of the assert statement");
+        if (!c) {
+          std::string txt = a.getText() ? a.getText()->str() : "?";
+          throw AssertionError("assertion '" + txt + "' failed", pos);
+        }
+        evalTail(env, a.getBody(), out, pos);
+      })
+      .Case<nd::NotOp>([&](nd::NotOp n) {
+        Value t;
+        mkBool(out, !forceBool(operand(env, n.getOperand(), t), pos, "in the argument of the not operator"));
+      })
+      .Case<nd::AndOp>([&](nd::AndOp a) {
+        Value t1, t2;
+        if (!forceBool(operand(env, a.getLhs(), t1), pos, "in the left operand of the AND (&&) operator"))
+          return mkBool(out, false);
+        mkBool(out, forceBool(operand(env, a.getRhs(), t2), pos, "in the right operand of the AND (&&) operator"));
+      })
+      .Case<nd::OrOp>([&](nd::OrOp o) {
+        Value t1, t2;
+        if (forceBool(operand(env, o.getLhs(), t1), pos, "in the left operand of the OR (||) operator"))
+          return mkBool(out, true);
+        mkBool(out, forceBool(operand(env, o.getRhs(), t2), pos, "in the right operand of the OR (||) operator"));
+      })
+      .Case<nd::ImplOp>([&](nd::ImplOp o) {
+        Value t1, t2;
+        if (!forceBool(operand(env, o.getLhs(), t1), pos, "in the left operand of the IMPL (->) operator"))
+          return mkBool(out, true);
+        mkBool(out, forceBool(operand(env, o.getRhs(), t2), pos, "in the right operand of the IMPL (->) operator"));
+      })
+      .Case<nd::EqOp>([&](nd::EqOp e) {
+        Value ta, tb;
+        Value &ra = operand(env, e.getLhs(), ta);
+        forceValue(ra, pos);
+        Value &rb = operand(env, e.getRhs(), tb);
+        forceValue(rb, pos);
+        Value a = ra, b = rb;
+        mkBool(out, eqValues(a, b, pos));
+      })
+      .Case<nd::NeqOp>([&](nd::NeqOp e) {
+        Value ta, tb;
+        Value &ra = operand(env, e.getLhs(), ta);
+        forceValue(ra, pos);
+        Value &rb = operand(env, e.getRhs(), tb);
+        forceValue(rb, pos);
+        Value a = ra, b = rb;
+        mkBool(out, !eqValues(a, b, pos));
+      })
+      .Case<nd::UpdateOp>([&](nd::UpdateOp u) {
+        Value tl, tr;
+        Value *l = &operand(env, u.getLhs(), tl);
+        forceAttrs(*l, pos, "in the left operand of the update (//) operator");
+        Value *r = &operand(env, u.getRhs(), tr);
+        forceAttrs(*r, pos, "in the right operand of the update (//) operator");
+        if (l->attrs->empty()) { out = *r; return; }
+        if (r->attrs->empty()) { out = *l; return; }
+        mkAttrs(out, updateAttrs(l->attrs, r->attrs));
+      })
+      .Case<nd::ConcatListsOp>([&](nd::ConcatListsOp c) {
+        Value tl, tr;
+        Value *l = &operand(env, c.getLhs(), tl);
+        forceList(*l, pos, "in the left operand of the list concatenation operator");
+        Value *r = &operand(env, c.getRhs(), tr);
+        forceList(*r, pos, "in the right operand of the list concatenation operator");
+        if (l->listSize() == 0) { out = *r; return; }
+        if (r->listSize() == 0) { out = *l; return; }
+        mkList(out, l->items() + r->items());
+      })
+      .Case<nd::ConcatStringsOp>([&](nd::ConcatStringsOp c) { evalConcatStrings(c, env, out); })
+      .Case<nd::WithVarOp>([&](nd::WithVarOp w) {
+        Symbol sym = symbolOf(w.getName());
+        for (mlir::Value sc : w.getScopes()) {
+          Value *sv = lookup(env, sc);
+          forceAttrs(*sv, nd::posOfValue(sc), "while evaluating the first subexpression of a with expression");
+          if (const Attr *a = sv->attrs->get(sym)) return copyFrom(a->value);
+        }
+        throw EvalError("undefined variable '" + w.getName().toString() + "'", pos);
+      })
+      .Case<nd::FormalOp>([&](nd::FormalOp f) {
+        Value *arg = lookup(env, f.getArg());
+        forceAttrs(*arg, pos);
+        if (const Attr *a = arg->attrs->get(symbolOf(f.getName()))) return copyFrom(a->value);
+        if (!f.getDefaultValue()) throw EvalError("missing formal argument '" + f.getName().toString() + "'", pos);
+        copyFrom(lookup(env, f.getDefaultValue()));
+      })
+      .Case<nd::IntOp>([&](nd::IntOp i) { mkInt(out, i.getValue()); })
+      .Case<nd::BoolOp>([&](nd::BoolOp b) { mkBool(out, b.getValue()); })
+      .Case<nd::NullOp>([&](nd::NullOp) { mkNull(out); })
+      .Case<nd::FloatOp>([&](nd::FloatOp fl) { mkFloat(out, fl.getValue().convertToDouble()); })
+      .Case<nd::StringOp>([&](nd::StringOp s) { mkString(out, s.getValue().str()); })
+      .Case<nd::PathOp>([&](nd::PathOp p) { mkPath(out, p.getValue().str()); })
+      .Case<nd::BuiltinOp>([&](nd::BuiltinOp b) { copyFrom(baseEnvValue(b.getName().str())); })
+      .Default([&](Operation *o) {
+        // Everything else (all primop ops of the continent dialects) runs
+        // through the externally attached NixEvalOpInterface model.
+        if (auto e = dyn_cast<nd::NixEvalOpInterface>(o)) return e.eval(*this, env, out);
+        throw EvalError("internal error: cannot evaluate operation '" + o->getName().getStringRef().str() + "'", pos);
+      });
+=======
+void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
+  if (statsEnabled && env) {
+    ++env->info->nEvals;
+    auto it = env->info->opIdx.find(op);
+    if (it != env->info->opIdx.end()) env->info->everRan[it->second >> 6] |= 1ull << (it->second & 63);
+  }
+  if (auto e = dyn_cast<nd::NixEvalOpInterface>(op)) return e.eval(*this, env, out);
+  throw EvalError("internal error: cannot evaluate operation '" + op->getName().getStringRef().str() + "'", nd::posOfOp(op));
+>>>>>>> 35fea687ba1ada38fce0ceacb142f01d560d78f4
 }
 
 Value *EvalState::selectField(Value &base, Symbol key, PosPtr pos) {

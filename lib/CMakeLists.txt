@@ -33,12 +33,26 @@ target_sources(MLIRNix PRIVATE ${CONFIX_OBJ})
 # borg.trikeshed.lib, generated from include/Composite/TrikeShed.td.
 add_mlir_dialect_library(MLIRTrikeShed
   Composite/TrikeShedDialect.cpp
+<<<<<<< HEAD
   Composite/ClusterLowering.cpp
   Composite/CursorLowering.cpp
+||||||| 46182e5
+=======
+  Composite/ClusterLowering.cpp
+>>>>>>> 35fea687ba1ada38fce0ceacb142f01d560d78f4
   PARTIAL_SOURCES_INTENDED
   DEPENDS TrikeShedIncGen
+<<<<<<< HEAD
   LINK_LIBS PUBLIC MLIRIR MLIRSideEffectInterfaces MLIRFuncDialect MLIRMemRefDialect MLIRPass
                    MLIRArithDialect MLIRSCFDialect MLIRFuncTransforms MLIRTransformUtils)
+||||||| 46182e5
+  LINK_LIBS PUBLIC MLIRIR MLIRSideEffectInterfaces)
+=======
+  LINK_LIBS PUBLIC MLIRIR MLIRSideEffectInterfaces MLIRFuncDialect MLIRMemRefDialect MLIRPass)
+
+add_library(TrikeShedRuntime SHARED Composite/ClusterRuntime.cpp)
+set_target_properties(TrikeShedRuntime PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/lib)
+>>>>>>> 35fea687ba1ada38fce0ceacb142f01d560d78f4
 
 add_library(TrikeShedRuntime SHARED Composite/ClusterRuntime.cpp)
 set_target_properties(TrikeShedRuntime PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/lib)
