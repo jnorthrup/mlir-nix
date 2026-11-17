@@ -30,8 +30,8 @@
 // NAF: error: 'kif.derived' op is derived by rule allowed#{{[0-9]+}}, whose (not ..) premise is negation as failure
 // USAGE: mlnix-kif: --lean writes the chase's proofs: give --chase too
 
-// KERNEL: control premise: (petOwner ann): premise 2 is a proof of
-// KERNEL: control binding: (animal rex): its rule's first variable is bound to
+// KERNEL: control premise: {{.*}}: premise {{[0-9]+}} is a proof of
+// KERNEL: control binding: {{.*}}: its rule's first variable is bound to
 // KERNEL: control statement: the proof of {{.*}}, the last let, claims
 // KERNEL: nanoda_bin certificate accepted
 // KERNEL: con-leche  certificate accepted

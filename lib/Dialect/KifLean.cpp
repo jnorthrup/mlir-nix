@@ -21,9 +21,15 @@
 // proved by `fun .. => let d.1 : Holds d1 := r.k terms proofs; ..; let d.n : Holds dn := ..; done`: each derived fact a let,
 // its rule applied to the bindings and to the proofs of the facts its premises matched (`from`: asserted facts, or lets before
 // it).  The lets are the claims: a kernel checks every let's value against its type, used or not, so the theorem type-checks
-// only if each derived fact follows from the hypotheses.  The conclusion is the trivial Done, not the derived facts' conjunction:
-// a body that names every let (pack d.1 .. d.n, or a tree of And) made nanoda_bin, con-leche and con-ron superlinear in the
-// lets (6,000 lets: 10-23 s, against 0.4 s for a body that names one), while the lets alone check in linear time.
+// only if each derived fact follows from the hypotheses (a control that breaks the last let, which nothing uses, is rejected).
+// Two choices keep the kernels' time near linear (Kali, paperclip's stratum 1, 1,964 lets: nanoda_bin 0.18 s, con-leche
+// 0.33 s, con-ron 0.42 s):
+//   - the conclusion is the trivial Done, not the derived facts' conjunction: with `pack d.1 .. d.n` the same certificate took
+//     1.3-1.9 s, and 6,000 lets 10-23 s;
+//   - the lets go depth first from the facts derived last (localize), each near the lets it rests on: in the chase's order,
+//     12,000 lets of a chain p -> q -> r -> s took 10-23 s, depth first 0.2-0.4 s.
+// The certificate is one deep term: nanoda_bin reads a de Bruijn index as a u16, so hypotheses and lets together must stay
+// under 65,536, and con-leche did not finish 80,000 in 120 s.  A theory past that needs the certificate in pieces.
 //
 // The bindings are not recorded in a kif.derived: they are found again by matching the rule's premises against `from` in
 // order, as the chase matched them.  A rule with a (not ..) premise is negation as failure, the closed world of a stratum,
@@ -438,8 +444,7 @@ struct Certificate {
   }
 
   /// The lets in an order that keeps each close to the lets it rests on: depth first from the facts derived last, a let's
-  /// derived premises before it.  How long the kernels take grows with how far back a let's premises are, not with how many
-  /// lets there are (on Kali: 6,000 lets each 200 back take nanoda_bin and con-leche 0.4 s).
+  /// derived premises before it (see the head of this file for what the order saves the kernels).
   void localize() {
     SmallVector<uint32_t, 0> order;
     SmallVector<uint8_t, 0> seen(proofs.size(), 0);
