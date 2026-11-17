@@ -31,6 +31,14 @@ target_sources(MLIRNix PRIVATE ${CONFIX_OBJ})
 
 # TrikeShed's kernel as a dialect: Join, MetaSeries, Series, Series2, split, Cursor, α, ↺ and the combinators of
 # borg.trikeshed.lib, generated from include/Composite/TrikeShed.td.
+# The life dialect (docs/LIFE.md): a library of its own, linked by the tools that read it and not by the evaluator,
+# which never meets a life op.
+add_mlir_dialect_library(MLIRLife
+  Dialect/LifeDialect.cpp
+  PARTIAL_SOURCES_INTENDED
+  DEPENDS MLIRNixOpsIncGen
+  LINK_LIBS PUBLIC MLIRIR)
+
 add_mlir_dialect_library(MLIRTrikeShed
   Composite/TrikeShedDialect.cpp
 <<<<<<< HEAD
