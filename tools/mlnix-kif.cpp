@@ -1,14 +1,16 @@
 //===- mlnix-kif.cpp - KIF files into kif theories, and the chase -----------===//
 //
-//   mlnix-kif [--ontology F.kif]... [--chase] [--dump] [--lean OUT.ndjson [--lean-piece N]] [--stats] [-o OUT.mlir] F.kif...
+//   mlnix-kif [--ontology F.kif]... [--chase] [--dump] [--lean OUT.ndjson [--lean-piece N]] [--tptp OUT.p] [--stats]
+//             [-o OUT.mlir] F.kif...
 //
 // The files after the options are one theory, @kb (a bag: equal terms of all of them are one node); --ontology files are a
 // second, @ontology, which @kb names (what `(instance X Class)` means in a premise).  --chase runs kif-chase; --dump prints
 // the closure (KifChase.cpp's dumpClosure: the line format scripts/kif-oracle.py compares); --lean writes the closure's
 // proofs as one Lean theorem in lean4export's format (KifLean.cpp; `-` is stdout), for a Lean kernel to check, or as
-// theorems of at most N lets each with --lean-piece N (a kernel's depth bounds one theorem); --stats
-// prints counts, time and peak RSS to stderr; -o writes the module (default: nothing when --dump, --lean or --stats is
-// given, else stdout).
+// theorems of at most N lets each with --lean-piece N (a kernel's depth bounds one theorem); --tptp writes @kb as a TPTP
+// problem in FOF, as SigmaKEE translates a KB (KifTptp.cpp; a test's (query F) is the conjecture); --stats
+// prints counts, time and peak RSS to stderr; -o writes the module (default: nothing when --dump, --lean, --tptp or --stats
+// is given, else stdout).
 //
 //===----------------------------------------------------------------------===//
 
@@ -51,12 +53,13 @@ static double peakMB() {
 int main(int argc, char **argv) {
   llvm::SmallVector<llvm::StringRef> kb, onto;
   bool chase = false, dump = false, stats = false;
-  llvm::StringRef out, lean;
+  llvm::StringRef out, lean, tptp;
   unsigned piece = 0;
   for (int i = 1; i < argc; i++) {
     llvm::StringRef a = argv[i];
     if (a == "--ontology" && i + 1 < argc) onto.push_back(argv[++i]);
     else if (a == "--lean" && i + 1 < argc) lean = argv[++i];
+    else if (a == "--tptp" && i + 1 < argc) tptp = argv[++i];
     else if (a == "--lean-piece" && i + 1 < argc) {
       if (llvm::StringRef(argv[++i]).getAsInteger(10, piece) || !piece) {
         llvm::errs() << "mlnix-kif: --lean-piece takes a number of lets, more than 0\n";
@@ -133,7 +136,18 @@ int main(int argc, char **argv) {
     f.keep();
     if (stats) llvm::errs() << llvm::format("lean: %.2f s, peak RSS %.0f MB\n", seconds() - t2, peakMB());
   }
-  if (!out.empty() || (!dump && !stats && lean.empty())) {
+  if (!tptp.empty()) {
+    double t3 = seconds();
+    std::error_code ec;
+    llvm::ToolOutputFile f(tptp, ec, llvm::sys::fs::OF_None);
+    if (ec) { llvm::errs() << "mlnix-kif: " << tptp << ": " << ec.message() << "\n"; return 1; }
+    kif::TheoryOp kbTheory;
+    module->walk([&](kif::TheoryOp t) { if (t.getSymName() == "kb") kbTheory = t; });
+    if (!kbTheory || failed(kif::exportTptp(kbTheory, f.os()))) return 1;
+    f.keep();
+    if (stats) llvm::errs() << llvm::format("tptp: %.2f s, peak RSS %.0f MB\n", seconds() - t3, peakMB());
+  }
+  if (!out.empty() || (!dump && !stats && lean.empty() && tptp.empty())) {
     std::error_code ec;
     llvm::ToolOutputFile f(out.empty() ? "-" : out, ec, llvm::sys::fs::OF_None);
     if (ec) { llvm::errs() << "mlnix-kif: " << out << ": " << ec.message() << "\n"; return 1; }

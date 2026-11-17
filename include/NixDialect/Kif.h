@@ -53,6 +53,12 @@ void dumpClosure(TheoryOp theory, raw_ostream &os);
 /// With `pieceLets`, theorems of at most that many lets, each with only the hypotheses its lets use, and the facts that
 /// lets of earlier theorems prove as hypotheses of its own (one theorem is bounded by the kernels' depth).
 LogicalResult exportLean(TheoryOp theory, raw_ostream &os, unsigned pieceLets = 0);
+
+/// The theory as a TPTP problem in FOF, as SigmaKEE translates a KB (lib/Dialect/KifTptp.cpp): its cache (the subclass,
+/// subrelation and instance closure), each fact and rule type-restricted from the relations' signatures, a test's
+/// (query F) as the conjecture; what SigmaKEE leaves out or that is not done yet (row and predicate variables) as comments.
+/// Each formula follows a `% f: ` line with the form, the key scripts/kif-tptp-compare.py matches SigmaKEE's output by.
+LogicalResult exportTptp(TheoryOp theory, raw_ostream &os);
 } // namespace mlir::kif
 
 #endif // NIXDIALECT_KIF_H
