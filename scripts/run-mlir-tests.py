@@ -26,11 +26,14 @@ def probe_features(env):
 
     lean-checkers: the kernels that read lean4export's format are on PATH (nanoda_bin, con-leche and con-ron: elan's Lean
     4.36 toolchain bin), so a certificate can be checked, not only decoded.
+
+    vampire: Vampire is on PATH, so a TPTP problem mlnix-kif writes can be proved, not only read.
     """
     probe = os.path.join(ROOT, "test", "mlir", "inputs", "probe-cse.mlir")
     p = subprocess.run(["bash", "-c", f"mlnix-opt {probe} -cse"], env=env, cwd=ROOT, capture_output=True, text=True)
     return {"cse-dynamic-ops": p.returncode == 0 and p.stdout.count("nixnum.add") == 1,
-            "lean-checkers": all(shutil.which(x, path=env["PATH"]) for x in ("nanoda_bin", "con-leche", "con-ron"))}
+            "lean-checkers": all(shutil.which(x, path=env["PATH"]) for x in ("nanoda_bin", "con-leche", "con-ron")),
+            "vampire": shutil.which("vampire", path=env["PATH"]) is not None}
 
 
 def main():
