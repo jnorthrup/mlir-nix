@@ -20,8 +20,10 @@ def run(cmd):
     out = p.stdout.read().decode("utf-8", "replace")
     _, status, ru = os.wait4(p.pid, 0)
     p.returncode = os.waitstatus_to_exitcode(status)
-    lines = [l for l in out.splitlines() if l.strip()]
-    return p.returncode, time.time() - t, ru.ru_maxrss / 1024.0, (lines[-1] if lines else "")[:160]
+    lines = [l.strip() for l in out.splitlines() if l.strip()]
+    # the checker's verdict: nanoda_bin's "Checked .." or its error, con-leche's and con-ron's last line
+    said = [l for l in lines if l.startswith(("Checked", "Error", "error", "con-leche:", "con-ron:"))] or lines
+    return p.returncode, time.time() - t, ru.ru_maxrss / 1024.0, (said[-1] if said else "")[:160]
 
 
 def kernels(export, dump, tmp):

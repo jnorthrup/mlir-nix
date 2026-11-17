@@ -211,7 +211,9 @@ struct Writer {
   enum Kind : uint8_t { Sort, BVar, App, Pi, Lam, Let };
 
   explicit Writer(raw_ostream &os) : os(os) {
-    os << R"({"meta":{"exporter":{"name":"mlnix-kif","version":"1"},"format":{"version":"3.1.0"}}})" << '\n';
+    // nanoda_bin requires the `lean` field; no Lean environment is exported here (the theorem needs no prelude), so it is empty
+    os << R"({"meta":{"exporter":{"name":"mlnix-kif","version":"1"},"format":{"version":"3.1.0"},)"
+       << R"("lean":{"githash":"","version":""}}})" << '\n';
     os << R"({"il":1,"succ":0})" << '\n'; // level 1; level 0 is zero
   }
   void string(StringRef s) {
