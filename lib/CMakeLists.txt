@@ -6,6 +6,7 @@ add_mlir_dialect_library(MLIRNix
   Dialect/KifImport.cpp
   Dialect/KifChase.cpp
   Dialect/SumoDialect.cpp
+  Dialect/LifeDialect.cpp
   Dialect/SonDialect.cpp
   Dialect/ConfixDialect.cpp
   PARTIAL_SOURCES_INTENDED
