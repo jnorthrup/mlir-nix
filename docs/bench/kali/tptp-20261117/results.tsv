@@ -1,0 +1,43 @@
+NUM1	expect=yes	conjectures=1	ours=Timeout	60.00s	SigmaKEE=NoSZS	
+NUM2	expect=yes	conjectures=1	ours=Timeout	59.95s	SigmaKEE=NoSZS	
+partitionTest1	expect=yes	conjectures=1	ours=Theorem	0.21s	SigmaKEE=Theorem	axiom: same 13092+0, SigmaKEE only 2, ours only 8; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+partitionTest2	expect=yes	conjectures=1	ours=Theorem	0.53s	SigmaKEE=Theorem	axiom: same 13095+0, SigmaKEE only 1, ours only 0; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+rowVarTest1	expect=yes	conjectures=1	ours=Theorem	0.21s	SigmaKEE=Theorem	axiom: same 13099+0, SigmaKEE only 5, ours only 22; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+SP04	expect=?	conjectures=1	ours=Timeout	59.97s	SigmaKEE=NoSZS	axiom: same 13110+0, SigmaKEE only 7, ours only 14; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQC1	expect=yes	conjectures=0 (not written: higher order)	ours=no-conjecture	0.00s	SigmaKEE=Timeout	
+TQC2	expect=yes	conjectures=0 (not written: higher order)	ours=no-conjecture	0.00s	SigmaKEE=Theorem	
+TQC2b	expect=yes	conjectures=0 (not written: higher order)	ours=no-conjecture	0.00s	SigmaKEE=NoSZS	
+TQC2b2	expect=yes	conjectures=0 (not written: higher order)	ours=no-conjecture	0.00s	SigmaKEE=NoSZS	
+TQC3	expect=yes	conjectures=0 (not written: higher order)	ours=no-conjecture	0.00s	SigmaKEE=NoSZS	
+TQG10	expect=yes	conjectures=1	ours=Theorem	0.37s	SigmaKEE=Theorem	axiom: same 13094+0, SigmaKEE only 1, ours only 1; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQG11	expect=yes	conjectures=1	ours=Timeout	59.97s	SigmaKEE=NoSZS	
+TQG19	expect=yes	conjectures=1	ours=Timeout	59.97s	SigmaKEE=NoSZS	
+TQG20	expect=yes	conjectures=1	ours=Timeout	59.96s	SigmaKEE=NoSZS	
+TQG21	expect=yes	conjectures=1	ours=Timeout	59.99s	SigmaKEE=NoSZS	
+TQG26	expect=yes	conjectures=1	ours=Theorem	0.22s	SigmaKEE=Theorem	axiom: same 13095+0, SigmaKEE only 3, ours only 5; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQG27	expect=yes	conjectures=1	ours=Timeout	59.96s	SigmaKEE=NoSZS	
+TQG28	expect=yes	conjectures=1	ours=Theorem	0.55s	SigmaKEE=Theorem	axiom: same 13104+0, SigmaKEE only 4, ours only 8; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQG3_a	expect=yes	conjectures=1	ours=Theorem	0.23s	SigmaKEE=Theorem	axiom: same 13090+0, SigmaKEE only 1, ours only 1; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQG3_c	expect=yes	conjectures=1	ours=Timeout	59.97s	SigmaKEE=NoSZS	axiom: same 13091+0, SigmaKEE only 2, ours only 1; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQG3_d	expect=yes	conjectures=1	ours=Theorem	0.54s	SigmaKEE=Theorem	axiom: same 13093+0, SigmaKEE only 1, ours only 1; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQG3_e	expect=yes	conjectures=1	ours=Theorem	0.22s	SigmaKEE=Theorem	axiom: same 13080+0, SigmaKEE only 3, ours only 20; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQG32	expect=yes	conjectures=1	ours=Theorem	0.21s	SigmaKEE=Theorem	axiom: same 13098+0, SigmaKEE only 7, ours only 33; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQG33	expect=yes	conjectures=1	ours=Timeout	59.96s	SigmaKEE=NoSZS	
+TQG34	expect=yes	conjectures=1	ours=Theorem	0.20s	SigmaKEE=NoSZS	axiom: same 13083+0, SigmaKEE only 0, ours only 2; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQG4	expect=yes	conjectures=0 (not written: higher order)	ours=no-conjecture	0.00s	SigmaKEE=NoSZS	
+TQG44	expect=yes	conjectures=1	ours=Timeout	65.47s	SigmaKEE=NoSZS	axiom: same 13100+0, SigmaKEE only 12, ours only 4; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQG46	expect=yes	conjectures=1	ours=Theorem	0.22s	SigmaKEE=Theorem	axiom: same 13093+0, SigmaKEE only 3, ours only 4; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQG47	expect=yes	conjectures=1	ours=Theorem	0.20s	SigmaKEE=Theorem	axiom: same 13093+0, SigmaKEE only 3, ours only 4; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQG48	expect=yes	conjectures=1	ours=Theorem	0.22s	SigmaKEE=Theorem	axiom: same 13096+0, SigmaKEE only 5, ours only 4; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQG49	expect=yes	conjectures=1	ours=Theorem	0.21s	SigmaKEE=Theorem	axiom: same 13096+0, SigmaKEE only 5, ours only 4; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQG50	expect=yes	conjectures=1	ours=Timeout	64.58s	SigmaKEE=NoSZS	axiom: same 13093+0, SigmaKEE only 1, ours only 1; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQG51	expect=?	conjectures=1	ours=Timeout	62.88s	SigmaKEE=NoSZS	
+TQG51b	expect=no	conjectures=1	ours=Timeout	66.62s	SigmaKEE=InputError	
+TQG52	expect=no	conjectures=1	ours=Timeout	65.13s	SigmaKEE=InputError	
+TQM10	expect=yes	conjectures=1	ours=Timeout	65.33s	SigmaKEE=NoSZS	
+TQM3	expect=yes	conjectures=0 (not written: higher order)	ours=no-conjecture	0.00s	SigmaKEE=Timeout	
+TQROW_fixedArity	expect=yes	conjectures=1	ours=Theorem	0.19s	SigmaKEE=Theorem	axiom: same 13092+0, SigmaKEE only 4, ours only 4; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQROW_listFn	expect=yes	conjectures=1	ours=Theorem	0.19s	SigmaKEE=Theorem	axiom: same 13099+0, SigmaKEE only 5, ours only 22; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQROW_noDomain	expect=yes	conjectures=1	ours=Theorem	0.19s	SigmaKEE=Theorem	axiom: same 13099+0, SigmaKEE only 5, ours only 22; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQROW_withDomain	expect=yes	conjectures=1	ours=Theorem	0.20s	SigmaKEE=Theorem	axiom: same 13099+0, SigmaKEE only 5, ours only 22; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQROW-BUILTIN	expect=yes	conjectures=0 (not written: higher order)	ours=no-conjecture	0.00s	SigmaKEE=Theorem	axiom: same 13084+0, SigmaKEE only 0, ours only 0; conjecture: same 0+0, SigmaKEE only 1, ours only 0

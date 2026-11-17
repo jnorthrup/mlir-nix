@@ -1,0 +1,74 @@
+NUM1              ours Timeout         60.00s  conj 1                                         test 2: sigma:InputError tfffix-sigma:Theorem
+NUM2              ours Timeout         59.95s  conj 1                                         test 2: sigma:InputError tfffix-sigma:Timeout tfffix-sigma-t300:Theorem
+partitionTest1    ours Theorem          0.21s  conj 1                                         test 2: sigma:Theorem
+                  vs SigmaKEE's problem: axiom: same 13092+0, SigmaKEE only 2, ours only 8; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+partitionTest2    ours Theorem          0.53s  conj 1                                         test 2: sigma:Theorem
+                  vs SigmaKEE's problem: axiom: same 13095+0, SigmaKEE only 1, ours only 0; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+rowVarTest1       ours Theorem          0.21s  conj 1                                         test 2: sigma:Theorem
+                  vs SigmaKEE's problem: axiom: same 13099+0, SigmaKEE only 5, ours only 22; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+SP04              ours Timeout         59.97s  conj 1                                         test 2: sigma:NoSZS sigma-t300:Timeout tqsp:NoSZS tqsp-t300:Timeout
+                  vs SigmaKEE's problem: axiom: same 13110+0, SigmaKEE only 7, ours only 14; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQC1              ours no-conjecture    0.00s  conj 0 (not written: higher order)             test 2: sigma:Timeout sigma-t300:Timeout sigma1:Timeout
+TQC2              ours no-conjecture    0.00s  conj 0 (not written: higher order)             test 2: sigma:Theorem sigma1:Theorem
+TQC2b             ours no-conjecture    0.00s  conj 0 (not written: higher order)             test 2: sigma:NoSZS sigma-t300:Timeout sigma1:Timeout
+TQC2b2            ours no-conjecture    0.00s  conj 0 (not written: higher order)             test 2: sigma:NoSZS sigma-t300:Timeout sigma1:Timeout
+TQC3              ours no-conjecture    0.00s  conj 0 (not written: higher order)             test 2: sigma:NoSZS sigma-t300:Timeout sigma1:Timeout
+TQG10             ours Theorem          0.37s  conj 1                                         test 2: sigma:Theorem sigma-t300:Theorem tqsp:NoSZS tqsp-t300:Timeout
+                  vs SigmaKEE's problem: axiom: same 13094+0, SigmaKEE only 1, ours only 1; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQG11             ours Timeout         59.97s  conj 1                                         test 2: sigma:NoSZS tfffix-sigma:Theorem tfffix-tqsp:Theorem tqsp:NoSZS
+TQG19             ours Timeout         59.97s  conj 1                                         test 2: sigma:NoSZS tfffix-sigma:Theorem tfffix-tqsp:Theorem tqsp:NoSZS
+TQG20             ours Timeout         59.96s  conj 1                                         test 2: sigma:NoSZS sigma1:InputError tfffix-sigma:Timeout tfffix-sigma1:Timeout tfffix-tqsp:Theorem tqsp:NoSZS
+TQG21             ours Timeout         59.99s  conj 1                                         test 2: sigma:NoSZS sigma1:InputError tfffix-sigma:Timeout tfffix-sigma1:Timeout tfffix-tqsp:Theorem tqsp:NoSZS
+TQG26             ours Theorem          0.22s  conj 1                                         test 2: sigma:Theorem tqsp:Theorem
+                  vs SigmaKEE's problem: axiom: same 13095+0, SigmaKEE only 3, ours only 5; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQG27             ours Timeout         59.96s  conj 1                                         test 2: sigma:NoSZS sigma-t300:Timeout sigma1:Timeout
+TQG28             ours Theorem          0.55s  conj 1                                         test 2: sigma:Theorem
+                  vs SigmaKEE's problem: axiom: same 13104+0, SigmaKEE only 4, ours only 8; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQG3_a            ours Theorem          0.23s  conj 1                                         test 2: sigma:Theorem
+                  vs SigmaKEE's problem: axiom: same 13090+0, SigmaKEE only 1, ours only 1; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQG3_c            ours Timeout         59.97s  conj 1                                         test 2: sigma:NoSZS sigma-t300:Timeout
+                  vs SigmaKEE's problem: axiom: same 13091+0, SigmaKEE only 2, ours only 1; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQG3_d            ours Theorem          0.54s  conj 1                                         test 2: sigma:Theorem
+                  vs SigmaKEE's problem: axiom: same 13093+0, SigmaKEE only 1, ours only 1; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQG3_e            ours Theorem          0.22s  conj 1                                         test 2: sigma:Theorem
+                  vs SigmaKEE's problem: axiom: same 13080+0, SigmaKEE only 3, ours only 20; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQG32             ours Theorem          0.21s  conj 1                                         test 2: sigma:Theorem tqsp:Theorem
+                  vs SigmaKEE's problem: axiom: same 13098+0, SigmaKEE only 7, ours only 33; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQG33             ours Timeout         59.96s  conj 1                                         test 2: sigma:NoSZS sigma1:InputError tfffix-sigma:Timeout tfffix-sigma-t300:Timeout tfffix-sigma1:Timeout tfffix-tqsp:Timeout tfffix-tqsp-t300:Timeout tqsp:NoSZS
+TQG34             ours Theorem          0.20s  conj 1                                         test 2: sigma:NoSZS sigma-t300:Timeout sigma1:Theorem tqsp:Theorem tqsp-t300:Theorem
+                  vs SigmaKEE's problem: axiom: same 13083+0, SigmaKEE only 0, ours only 2; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQG4              ours no-conjecture    0.00s  conj 0 (not written: higher order)             test 2: sigma:NoSZS sigma-t300:Timeout sigma1:Timeout
+TQG44             ours Timeout         65.47s  conj 1                                         test 2: sigma:NoSZS sigma-t300:Timeout
+                  vs SigmaKEE's problem: axiom: same 13100+0, SigmaKEE only 12, ours only 4; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQG46             ours Theorem          0.22s  conj 1                                         test 2: sigma:Theorem
+                  vs SigmaKEE's problem: axiom: same 13093+0, SigmaKEE only 3, ours only 4; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQG47             ours Theorem          0.20s  conj 1                                         test 2: sigma:Theorem tqsp:Theorem
+                  vs SigmaKEE's problem: axiom: same 13093+0, SigmaKEE only 3, ours only 4; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQG48             ours Theorem          0.22s  conj 1                                         test 2: sigma:Theorem tqsp:Theorem
+                  vs SigmaKEE's problem: axiom: same 13096+0, SigmaKEE only 5, ours only 4; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQG49             ours Theorem          0.21s  conj 1                                         test 2: sigma:Theorem tqsp:Theorem
+                  vs SigmaKEE's problem: axiom: same 13096+0, SigmaKEE only 5, ours only 4; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQG50             ours Timeout         64.58s  conj 1                                         test 2: sigma:NoSZS sigma-t300:Timeout tqsp:NoSZS tqsp-t300:Timeout
+                  vs SigmaKEE's problem: axiom: same 13093+0, SigmaKEE only 1, ours only 1; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQG51             ours Timeout         62.88s  conj 1                                         test 2: sigma:NoSZS sigma1:InputError tfffix-sigma:Timeout tfffix-sigma1:Timeout
+TQG51b            ours Timeout         66.62s  conj 1                                         test 2: sigma:InputError sigma1:InputError tfffix-sigma:Timeout tfffix-sigma1:Timeout
+TQG52             ours Timeout         65.13s  conj 1                                         test 2: sigma:InputError tfffix-sigma:Timeout
+TQM10             ours Timeout         65.33s  conj 1                                         test 2: sigma:NoSZS sigma-t300:Timeout sigma1:Timeout
+TQM3              ours no-conjecture    0.00s  conj 0 (not written: higher order)             test 2: sigma:Timeout sigma-t300:Timeout sigma1:Timeout
+TQROW_fixedArity  ours Theorem          0.19s  conj 1                                         test 2: sigma:Theorem
+                  vs SigmaKEE's problem: axiom: same 13092+0, SigmaKEE only 4, ours only 4; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQROW_listFn      ours Theorem          0.19s  conj 1                                         test 2: sigma:Theorem
+                  vs SigmaKEE's problem: axiom: same 13099+0, SigmaKEE only 5, ours only 22; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQROW_noDomain    ours Theorem          0.19s  conj 1                                         test 2: sigma:Theorem
+                  vs SigmaKEE's problem: axiom: same 13099+0, SigmaKEE only 5, ours only 22; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQROW_withDomain  ours Theorem          0.20s  conj 1                                         test 2: sigma:Theorem
+                  vs SigmaKEE's problem: axiom: same 13099+0, SigmaKEE only 5, ours only 22; conjecture: same 1+0, SigmaKEE only 0, ours only 0
+TQROW-BUILTIN     ours no-conjecture    0.00s  conj 0 (not written: higher order)             test 2: sigma:Theorem
+                  vs SigmaKEE's problem: axiom: same 13084+0, SigmaKEE only 0, ours only 0; conjecture: same 0+0, SigmaKEE only 1, ours only 0
+
+ours vs test 2's best (any set):
+  ours Theorem        test 2 Theorem  19
+  ours Timeout        test 2 Timeout  10
+  ours Timeout        test 2 Theorem  6
+  ours no-conjecture  test 2 Timeout  6
+  ours no-conjecture  test 2 Theorem  2
