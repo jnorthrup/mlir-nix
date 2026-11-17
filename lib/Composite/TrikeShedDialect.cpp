@@ -38,6 +38,23 @@ mlir::LogicalResult ClusterOrderOp::verify() {
   return mlir::success();
 }
 
+mlir::LogicalResult ClosureOp::verify() {
+  auto pairs = [](mlir::Type t) {
+    auto s = llvm::dyn_cast<SeriesType>(t);
+    auto p = s ? llvm::dyn_cast<TwinPackedType>(s.getElement()) : TwinPackedType();
+    return p && p.getElement().isSignlessInteger(32);
+  };
+  auto nodes = [](mlir::Type t) {
+    auto s = llvm::dyn_cast<SeriesType>(t);
+    return s && s.getElement().isSignlessInteger(32);
+  };
+  if (!pairs(getParents().getType()) || !pairs(getAncestors().getType()))
+    return emitOpError("takes and gives each node's (first, count) as a !trikeshed.series<!trikeshed.twinpacked<i32>>");
+  if (!nodes(getAbove().getType()) || !nodes(getMembers().getType()))
+    return emitOpError("takes and gives the nodes they count as a !trikeshed.series<i32>");
+  return mlir::success();
+}
+
 void TrikeShedDialect::initialize() {
   addTypes<
 #define GET_TYPEDEF_LIST

@@ -111,6 +111,7 @@ void registerKifPasses() {
   static const bool registered = [] {
     PassRegistration<KifToNixPass>();
     registerKifChasePass();
+    registerKifToTrikeShedPass();
     return true;
   }();
   (void)registered;

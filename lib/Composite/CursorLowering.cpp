@@ -24,6 +24,7 @@
 //   j, first, second                shifts of the i64 that a pair of i32 halves is
 //   facet(c, k) {col -> r}          the region with col = column(c, k)
 //   drain(xs, into)                 a loop storing xs into `into`; the result is size(xs)
+//   closure(parents, above)         ClosureIndex: two walks from each node over its parents (count, then write)
 //
 // Buffers are allocated and never freed here: run --ownership-based-buffer-deallocation after this pass.  A slice's offset
 // is an affine.apply once --expand-strided-metadata has run: run --lower-affine before --finalize-memref-to-llvm.  Casts the
@@ -499,6 +500,94 @@ template <class Op, bool High> struct HalfLowering : Lowering<Op> {
   }
 };
 
+/// closure(parents, above): ClosureIndex.build as two walks from every node k over its parents, with a mark per node (the
+/// stamp of the walk that met it last) and a stack a node is pushed on when it is first met, so it never holds more than
+/// size(parents) nodes.  The first walk from k counts its ancestors, which gives each node's (first, count); the second
+/// writes them, in the order they are met.  k is marked before its walk, so it is never its own ancestor.
+struct ClosureLowering : Lowering<ClosureOp> {
+  using Lowering::Lowering;
+  LogicalResult matchAndRewrite(ClosureOp op, OpAdaptor a, ConversionPatternRewriter &rw) const override {
+    Location loc = op.getLoc();
+    Type i32 = rw.getI32Type(), i64 = rw.getI64Type(), idx = rw.getIndexType();
+    Value parents = a.getParents(), above = a.getAbove();
+    Value n = length(rw, loc, parents);
+    Value zero = cIndex(rw, loc, 0), one = cIndex(rw, loc, 1);
+    auto scratch = [&](Value count) -> Value {
+      return memref::AllocOp::create(rw, loc, MemRefType::get({ShapedType::kDynamic}, i32), ValueRange{count});
+    };
+    Value mark = scratch(n), stack = scratch(n);
+    {
+      auto fill = scf::ForOp::create(rw, loc, zero, n, one);
+      rw.setInsertionPoint(fill.getBody()->getTerminator());
+      store(rw, loc, cInt(rw, loc, i32, -1), mark, fill.getInductionVar());
+      rw.setInsertionPointAfter(fill);
+    }
+    Value c32 = cInt(rw, loc, i64, 32), mask = cInt(rw, loc, i64, 0xffffffff);
+    // the walk from node k with this stamp: how many nodes it meets; with `out`, they are written at out[at ...]
+    auto walk = [&](Value k, Value stamp, Value out, Value at) -> Value {
+      store(rw, loc, stamp, mark, k);
+      store(rw, loc, arith::IndexCastOp::create(rw, loc, i32, k).getResult(), stack, zero);
+      auto w = scf::WhileOp::create(rw, loc, TypeRange{idx, idx}, ValueRange{one, zero});
+      Block *before = rw.createBlock(&w.getBefore(), w.getBefore().end(), TypeRange{idx, idx}, {loc, loc});
+      Value more = arith::CmpIOp::create(rw, loc, arith::CmpIPredicate::ugt, before->getArgument(0), zero);
+      scf::ConditionOp::create(rw, loc, more, before->getArguments());
+      Block *after = rw.createBlock(&w.getAfter(), w.getAfter().end(), TypeRange{idx, idx}, {loc, loc});
+      Value top = arith::SubIOp::create(rw, loc, after->getArgument(0), one);
+      Value v = load(rw, loc, stack, top);
+      Value fc = load(rw, loc, parents, v);
+      Value first = arith::IndexCastUIOp::create(rw, loc, idx, arith::ShRUIOp::create(rw, loc, fc, c32));
+      Value count = arith::IndexCastUIOp::create(rw, loc, idx, arith::AndIOp::create(rw, loc, fc, mask));
+      Value end = arith::AddIOp::create(rw, loc, first, count);
+      auto edges = scf::ForOp::create(rw, loc, first, end, one, ValueRange{top, after->getArgument(1)});
+      rw.setInsertionPointToEnd(edges.getBody());
+      Value tp = edges.getRegionIterArgs()[0], met = edges.getRegionIterArgs()[1];
+      Value p = load(rw, loc, above, edges.getInductionVar());
+      Value fresh = arith::CmpIOp::create(rw, loc, arith::CmpIPredicate::ne, load(rw, loc, mark, p), stamp);
+      auto meet = scf::IfOp::create(rw, loc, TypeRange{idx, idx}, fresh, /*withElseRegion=*/true);
+      rw.setInsertionPointToStart(meet.thenBlock());
+      store(rw, loc, stamp, mark, p);
+      store(rw, loc, p, stack, tp);
+      if (out) store(rw, loc, p, out, arith::AddIOp::create(rw, loc, at, met));
+      scf::YieldOp::create(rw, loc, ValueRange{arith::AddIOp::create(rw, loc, tp, one).getResult(),
+                                               arith::AddIOp::create(rw, loc, met, one).getResult()});
+      rw.setInsertionPointToStart(meet.elseBlock());
+      scf::YieldOp::create(rw, loc, ValueRange{tp, met});
+      rw.setInsertionPointAfter(meet);
+      scf::YieldOp::create(rw, loc, meet.getResults());
+      rw.setInsertionPointToEnd(after);
+      scf::YieldOp::create(rw, loc, edges.getResults());
+      rw.setInsertionPointAfter(w);
+      return w.getResult(1);
+    };
+    // the counts, and each node's (first, count)
+    Value ancestors = newSeriesBuffer(rw, loc, i64, n);
+    auto counting = scf::ForOp::create(rw, loc, zero, n, one, ValueRange{zero});
+    rw.setInsertionPointToEnd(counting.getBody());
+    {
+      Value k = counting.getInductionVar(), total = counting.getRegionIterArgs()[0];
+      Value met = walk(k, arith::IndexCastOp::create(rw, loc, i32, k), Value(), Value());
+      Value hi = arith::ShLIOp::create(rw, loc, arith::IndexCastUIOp::create(rw, loc, i64, total), c32);
+      Value packed = arith::OrIOp::create(rw, loc, hi, arith::IndexCastUIOp::create(rw, loc, i64, met));
+      store(rw, loc, packed, ancestors, k);
+      scf::YieldOp::create(rw, loc, ValueRange{arith::AddIOp::create(rw, loc, total, met).getResult()});
+    }
+    rw.setInsertionPointAfter(counting);
+    Value members = newSeriesBuffer(rw, loc, i32, counting.getResult(0));
+    Value n32 = arith::IndexCastOp::create(rw, loc, i32, n);
+    auto writing = scf::ForOp::create(rw, loc, zero, n, one);
+    rw.setInsertionPoint(writing.getBody()->getTerminator());
+    {
+      Value k = writing.getInductionVar();
+      Value stamp = arith::AddIOp::create(rw, loc, arith::IndexCastOp::create(rw, loc, i32, k), n32);
+      Value at = arith::IndexCastUIOp::create(rw, loc, idx, arith::ShRUIOp::create(rw, loc, load(rw, loc, ancestors, k), c32));
+      walk(k, stamp, members, at);
+    }
+    rw.setInsertionPointAfter(writing);
+    rw.replaceOp(op, ValueRange{ancestors, members});
+    return success();
+  }
+};
+
 struct DrainLowering : Lowering<DrainOp> {
   using Lowering::Lowering;
   LogicalResult matchAndRewrite(DrainOp op, OpAdaptor a, ConversionPatternRewriter &rw) const override {
@@ -537,7 +626,7 @@ struct LowerCursors : PassWrapper<LowerCursors, OperationPass<ModuleOp>> {
     RewritePatternSet patterns(ctx);
     patterns.add<ColumnLowering, FacetLowering, SizeLowering, AtLowering, SeriesLowering, AlphaLowering, WhereLowering,
                  ProjectLowering, SliceLowering, FoldLowering, CompareLowering, SortedLowering, BisectLowering, JLowering,
-                 HalfLowering<FirstOp, true>, HalfLowering<SecondOp, false>, DrainLowering>(types, ctx);
+                 HalfLowering<FirstOp, true>, HalfLowering<SecondOp, false>, DrainLowering, ClosureLowering>(types, ctx);
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, types);
     populateReturnOpTypeConversionPattern(patterns, types);
     populateCallOpTypeConversionPattern(patterns, types);

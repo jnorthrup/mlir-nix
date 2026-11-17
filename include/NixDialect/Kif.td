@@ -111,4 +111,50 @@ def Kif_DerivedOp : Kif_Op<"derived", [HasParent<"TheoryOp">]> {
   let assemblyFormat = "$term `by` $rule `round` $round (`from` `(` $from^ `)`)? attr-dict";
 }
 
+// ---- a theory as TrikeShed's series and cursors (PRELOAD-DIALECTS step 6): what `kif-to-trikeshed` lowers to buffers
+
+def Kif_TermsOp : Kif_Op<"terms", [Pure, DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "a theory's terms: a cursor of rows, the series of their children, the text of their names";
+  let description = [{
+    The terms of the theory, one row each, in the order the theory holds them (a term's row is its number):
+    `!trikeshed.cursor<"KifTerm", [i8, !trikeshed.twinpacked<i32>, !trikeshed.twinpacked<i32>]>`, the shape of Confix's index:
+
+      0 tag    i8                           0 an atom, 1 a variable, 2 a list
+      1 name   !trikeshed.twinpacked<i32>   (start, length) of an atom's or a variable's text in `names` (a string literal
+                                            keeps its quotes, as sumo-nix/kif.nix reads it); (0, 0) for a list
+      2 kids   !trikeshed.twinpacked<i32>   (first, count) into `kids`: a list's elements, in order; (0, 0) for the others
+
+    `kids` is a `!trikeshed.series<i32>` of term rows, `names` the `!trikeshed.series<i8>` the names are pieces of.  Equal
+    terms are one row (the theory holds each once), so two terms are the same term when their rows are equal.
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$theory);
+  let results = (outs AnyType:$terms, AnyType:$kids, AnyType:$names);
+  let assemblyFormat = "$theory attr-dict `:` type($terms) `,` type($kids) `,` type($names)";
+  let hasVerifier = 1;
+}
+
+def Kif_FactsOp : Kif_Op<"facts", [Pure, DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "a theory's facts: a cursor of (term, file)";
+  let description = [{
+    `!trikeshed.cursor<"KifFact", [i32, i32]>`: each `kif.fact` of the theory in its order, its term's row (kif.terms) and
+    the index of its file in the theory's `files` (-1 when it has none).  A fact asserted twice is two rows.
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$theory);
+  let results = (outs AnyType:$facts);
+  let assemblyFormat = "$theory attr-dict `:` type($facts)";
+  let hasVerifier = 1;
+}
+
+def Kif_RulesOp : Kif_Op<"rules", [Pure, DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "a theory's rules: a cursor of (antecedent, consequent, file)";
+  let description = [{
+    `!trikeshed.cursor<"KifRule", [i32, i32, i32]>`: each `kif.rule` of the theory in its order, the rows of its antecedent
+    and its consequent (kif.terms), and its file's index (-1 when it has none).
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$theory);
+  let results = (outs AnyType:$rules);
+  let assemblyFormat = "$theory attr-dict `:` type($rules)";
+  let hasVerifier = 1;
+}
+
 #endif // KIF_TD

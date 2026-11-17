@@ -458,6 +458,25 @@ def TS_SortedOp : TS_Op<"sorted", [Pure]> {
   }];
 }
 
+def TS_ClosureOp : TS_Op<"closure", [Pure]> {
+  let summary = "every node above each node of a graph of parents: ClosureIndex";
+  let arguments = (ins TS_SeriesType:$parents, TS_SeriesType:$above);
+  let results = (outs TS_SeriesType:$ancestors, TS_SeriesType:$members);
+  let assemblyFormat = [{
+    $parents `,` $above attr-dict `:` type($parents) `,` type($above) `->` type($ancestors) `,` type($members)
+  }];
+  let hasVerifier = 1;
+  let description = [{
+    collections/bits/ClosureIndex.kt's build, over nodes 0 ..< size(parents): node k's parents are
+    above[first(k) ..< first(k) + count(k)], where parents[k] is the TwinPacked (first, count), the shape Confix's
+    DirectChildren has.  The result has the same shape: ancestors[k] is (first, count) into members, the nodes k reaches by
+    one or more parent edges, k itself not among them, each once, in the order the walk first meets them (k's parents,
+    then theirs).  A node met again is not walked again, so a cycle is cut where it is met.
+    Laws: on a graph without cycles a is among k's ancestors iff a path k -> ... -> a of parent edges exists (sumo-nix's
+    sumo.nix `ancestors`); the ancestors of k are those of its parents and the parents themselves.
+  }];
+}
+
 def TS_ClusterOrderOp : TS_Op<"cluster_order"> {
   let summary = "order one cache-local cluster, keeping payloads at their original rows";
   let arguments = (ins Arg<AnyMemRef, "signed i64 keys", [MemRead]>:$keys,

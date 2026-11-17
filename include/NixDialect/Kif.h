@@ -26,7 +26,10 @@
 namespace mlir::kif {
 /// `kif-to-nix`: a theory becomes a `nix.expr` of { facts = [..]; rules = [..]; } built from `nix.list` and `nix.str`.
 /// `kif-chase`: every theory with rules gets a `kif.derived` for each fact its rules give (lib/Dialect/KifChase.cpp).
+/// `kif-to-trikeshed`: each `kif.terms`, `kif.facts` and `kif.rules` becomes the theory's tables as constant buffers seen as
+/// TrikeShed's series and cursors, then the theories go (lib/Dialect/KifTrikeShed.cpp).
 void registerKifPasses();
+void registerKifToTrikeShedPass();
 
 /// KIF text into `theory`'s block (lib/Dialect/KifImport.cpp), read as sumo-nix/kif.nix reads it: a parenthesis, a quoted string
 /// (it keeps its quotes), a `;` comment (dropped) or a run of other characters is a token.  Each top-level form is a `kif.rule`
