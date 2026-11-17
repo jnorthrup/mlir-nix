@@ -61,6 +61,29 @@ default heartbeat limit stops the hammer at 95 s, and without a limit it has not
 So relevance filtering belongs to the search, and Lean checks the slice of axioms a proof used.  The weak link in SUMO's
 own pipeline is the translation: 14 of the 43 tests never reach Vampire intact.
 
+The proofs the hammer rebuilt also pass the kernels that check kif-chase's certificates (section 4;
+bench/kali/reasoning-20261117/test2-kernels.log and test2-kernels.sh).  These are 29 theorems: the 21 tests, 7 of them
+in a second translation, and TQG11 from the repaired typed KB.  The hammer's package is pinned to Lean 4.34.1, whose
+toolchain ships no exporter, so lean4export at its tag v4.34.0 writes them.  That is the same format, 3.1.0, as the
+4.36.0 toolchain's leanexport.  The export holds every declaration the proofs use: 141 MB, 8,699 declarations, and no
+axiom but propext, Classical.choice and Quot.sound.
+
+| kernel | the file | without the 29 theorems |
+|---|---|---|
+| nanoda_bin | 14.1 s, 203 MB | 13.6 s |
+| con-leche --verified, one thread | 42.8 s, 262 MB | 40.9 s |
+| con-ron --verified, one thread | 44.4 s, 548 MB | 42.7 s |
+
+The proofs are small: 30 to 3,443 expressions each, median 773.  Together they cost the kernels 0.5-1.9 s; the
+library under them is the rest.  Each kernel rejects the control, two theorems' statements swapped:
+- nanoda_bin fails its `def_eq` assertion;
+- con-leche and con-ron report a type mismatch in tq_sigma_partitionTest1.
+
+Once in three runs a Vampire under the hammer deadlocked, so the script gives a compile 120 s and kills a stuck Vampire
+before trying again.  What no kernel checks is that a theorem's statement is the test's.  tptp2lean.py wrote each
+statement from the TPTP problem SigmaKEE made.  For kif-chase, kif-lean-check.py decodes the claims and compares them
+with the dump; nothing does that yet for these statements.
+
 ## 3. The taxonomy: a table, entered as kernel terms
 
 SUMO's 9,045 classes and 90,404 ancestor links (mlnix on onto.nix, agreeing with an independent Python reader) in Lean
@@ -147,6 +170,8 @@ and con-leche's and con-ron's 120 s.  This is the role the split gives Lean for 
   a certificate would have to state; `--lean` refuses such a fact.
 - Vampire as the search behind the kif and sumo dialects for what is not Horn, its proofs re-checked in Lean from the
   axioms they used.
+- The link from a Vampire theorem's Lean statement back to its test: tptp2lean.py's encoding of the TPTP problem, which
+  no kernel checks and no script decodes yet.
 - SigmaKEE's translation, upstream: typed output that loads in Vampire 5.1.0, test assertions kept (typed tests write them
   as untyped formulas; four modal tests lose them), one process per test.
 - Lean proofs about the rule compiler (the NARS-Rete note's "the compiler must show that the specialization preserves"

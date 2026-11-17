@@ -1,0 +1,123 @@
+29 theorems
+compile H_sigma_partitionTest1               rc=0    2.12 s    1779 MB
+'tq_sigma_partitionTest1' depends on axioms: [propext, Classical.choice, Quot.sound]
+compile H_sigma_partitionTest2               rc=0    2.26 s    1812 MB
+'tq_sigma_partitionTest2' depends on axioms: [propext, Classical.choice, Quot.sound]
+compile H_sigma_rowVarTest1                  rc=0    1.89 s    1779 MB
+'tq_sigma_rowVarTest1' depends on axioms: [propext, Classical.choice, Quot.sound]
+compile H_sigma_TQG10                        rc=0    2.31 s    1813 MB
+'tq_sigma_TQG10' depends on axioms: [propext, Classical.choice, Quot.sound]
+compile H_tfffix_sigma_TQG11                 rc=0    1.96 s    1775 MB
+'tq_tfffix_sigma_TQG11' depends on axioms: [propext, Classical.choice, Quot.sound]
+compile H_tfffix_tqsp_TQG11                  rc=0    1.88 s    1777 MB
+'tq_tfffix_tqsp_TQG11' depends on axioms: [propext, Classical.choice, Quot.sound]
+compile H_sigma_TQG26                        rc=0    2.24 s    1808 MB
+'tq_sigma_TQG26' depends on axioms: [propext, Classical.choice, Quot.sound]
+compile H_tqsp_TQG26                         rc=0    2.18 s    1809 MB
+'tq_tqsp_TQG26' depends on axioms: [propext, Classical.choice, Quot.sound]
+compile H_sigma_TQG28                        rc=0    2.36 s    1822 MB
+'tq_sigma_TQG28' depends on axioms: [propext, Classical.choice, Quot.sound]
+compile H_sigma_TQG3_a                       rc=0    2.07 s    1804 MB
+'tq_sigma_TQG3_a' depends on axioms: [propext, Classical.choice, Quot.sound]
+compile H_sigma_TQG3_d                       rc=0    2.17 s    1814 MB
+'tq_sigma_TQG3_d' depends on axioms: [propext, Classical.choice, Quot.sound]
+compile H_sigma_TQG3_e                       rc=0    2.21 s    1810 MB
+'tq_sigma_TQG3_e' depends on axioms: [propext, Classical.choice, Quot.sound]
+compile H_sigma_TQG32                        rc=0    2.24 s    1813 MB
+'tq_sigma_TQG32' depends on axioms: [propext, Classical.choice, Quot.sound]
+compile H_tqsp_TQG32                         rc=0    2.19 s    1815 MB
+'tq_tqsp_TQG32' depends on axioms: [propext, Classical.choice, Quot.sound]
+compile H_tqsp_TQG34                         rc=0    1.88 s    1779 MB
+'tq_tqsp_TQG34' depends on axioms: [propext, Classical.choice, Quot.sound]
+compile H_sigma1_TQG34                       rc=0    1.89 s    1778 MB
+'tq_sigma1_TQG34' depends on axioms: [propext, Classical.choice, Quot.sound]
+compile H_sigma_TQG46                        rc=0    2.13 s    1800 MB
+'tq_sigma_TQG46' depends on axioms: [propext, Classical.choice, Quot.sound]
+compile H_sigma_TQG47                        rc=0    2.12 s    1806 MB
+'tq_sigma_TQG47' depends on axioms: [propext, Classical.choice, Quot.sound]
+compile H_tqsp_TQG47                         rc=0    2.15 s    1800 MB
+'tq_tqsp_TQG47' depends on axioms: [propext, Classical.choice, Quot.sound]
+compile H_sigma_TQG48                        rc=0    2.18 s    1812 MB
+'tq_sigma_TQG48' depends on axioms: [propext, Classical.choice, Quot.sound]
+compile H_tqsp_TQG48                         rc=0    2.18 s    1811 MB
+'tq_tqsp_TQG48' depends on axioms: [propext, Classical.choice, Quot.sound]
+compile H_sigma_TQG49                        rc=0    2.16 s    1810 MB
+'tq_sigma_TQG49' depends on axioms: [propext, Classical.choice, Quot.sound]
+compile H_tqsp_TQG49                         rc=0    2.21 s    1810 MB
+'tq_tqsp_TQG49' depends on axioms: [propext, Classical.choice, Quot.sound]
+compile H_sigma_TQROW_fixedArity             rc=0    1.93 s    1779 MB
+'tq_sigma_TQROW_fixedArity' depends on axioms: [propext, Classical.choice, Quot.sound]
+compile H_sigma_TQROW_listFn                 rc=0    1.87 s    1778 MB
+'tq_sigma_TQROW_listFn' depends on axioms: [propext, Classical.choice, Quot.sound]
+compile H_sigma_TQROW_noDomain               rc=0    1.91 s    1779 MB
+'tq_sigma_TQROW_noDomain' depends on axioms: [propext, Classical.choice, Quot.sound]
+compile H_sigma_TQROW_withDomain             rc=0    1.95 s    1779 MB
+'tq_sigma_TQROW_withDomain' depends on axioms: [propext, Classical.choice, Quot.sound]
+compile H_sigma_TQROW_BUILTIN                rc=0    1.87 s    1779 MB
+'tq_sigma_TQROW_BUILTIN' depends on axioms: [propext, Classical.choice, Quot.sound]
+compile H_thf_TQC2                           rc=0    2.14 s    1803 MB
+'tq_thf_TQC2' depends on axioms: [propext, Classical.choice, Quot.sound]
+compile All                                  rc=0    1.78 s    1766 MB
+lean4export All (29 theorems)                rc=0    9.18 s    1936 MB
+all.ndjson: 141545748 bytes, 2623230 records
+declarations: {'inductive': 233, 'def': 3321, 'thm': 4349, 'axiom': 3, 'quot': 4, 'opaque': 13} axioms: ['Classical.choice', 'Quot.sound', 'propext']
+  tq_sigma_partitionTest1            statement     64 expressions, proof      76 expressions naming    4 constants
+  tq_sigma_partitionTest2            statement     89 expressions, proof    2261 expressions naming   88 constants
+  tq_sigma_rowVarTest1               statement     55 expressions, proof      66 expressions naming    4 constants
+  tq_sigma_TQG10._simp_1_1_2_4       statement     29 expressions, proof      34 expressions naming    5 constants
+  tq_sigma_TQG10._simp_1_1_2_3       statement     33 expressions, proof      37 expressions naming    3 constants
+  tq_sigma_TQG10                     statement     70 expressions, proof    1706 expressions naming  103 constants
+  tq_tfffix_sigma_TQG11              statement     37 expressions, proof      47 expressions naming   11 constants
+  tq_tfffix_tqsp_TQG11               statement     37 expressions, proof      47 expressions naming   11 constants
+  tq_sigma_TQG26                     statement     81 expressions, proof    1617 expressions naming   80 constants
+  tq_tqsp_TQG26                      statement     75 expressions, proof    1616 expressions naming   80 constants
+  tq_sigma_TQG28                     statement    137 expressions, proof    3443 expressions naming   88 constants
+  tq_sigma_TQG3_a                    statement     34 expressions, proof     708 expressions naming   75 constants
+  tq_sigma_TQG3_d                    statement     70 expressions, proof    1967 expressions naming  107 constants
+  tq_sigma_TQG3_e                    statement     82 expressions, proof    1644 expressions naming   91 constants
+  tq_sigma_TQG32                     statement    112 expressions, proof    2051 expressions naming   89 constants
+  tq_tqsp_TQG32._proof_1_1_2_1       statement     87 expressions, proof     458 expressions naming   20 constants
+  tq_tqsp_TQG32                      statement     71 expressions, proof    1819 expressions naming   77 constants
+  tq_tqsp_TQG34                      statement     22 expressions, proof      30 expressions naming    3 constants
+  tq_sigma1_TQG34                    statement     22 expressions, proof      30 expressions naming    3 constants
+  tq_sigma_TQG46                     statement     36 expressions, proof     769 expressions naming   75 constants
+  tq_sigma_TQG47._proof_1_1_2_1      statement     49 expressions, proof     174 expressions naming   17 constants
+  tq_sigma_TQG47                     statement     36 expressions, proof     773 expressions naming   74 constants
+  tq_tqsp_TQG47                      statement     37 expressions, proof     761 expressions naming   75 constants
+  tq_sigma_TQG48                     statement     66 expressions, proof    1749 expressions naming  109 constants
+  tq_tqsp_TQG48                      statement     66 expressions, proof    1753 expressions naming  109 constants
+  tq_sigma_TQG49                     statement     66 expressions, proof    1740 expressions naming  109 constants
+  tq_tqsp_TQG49                      statement     66 expressions, proof    1741 expressions naming  109 constants
+  tq_sigma_TQROW_fixedArity          statement     55 expressions, proof      66 expressions naming    4 constants
+  tq_sigma_TQROW_listFn              statement     39 expressions, proof      49 expressions naming    3 constants
+  tq_sigma_TQROW_noDomain            statement     55 expressions, proof      66 expressions naming    4 constants
+  tq_sigma_TQROW_withDomain          statement     55 expressions, proof      66 expressions naming    4 constants
+  tq_sigma_TQROW_BUILTIN             statement     64 expressions, proof      76 expressions naming    4 constants
+  tq_thf_TQC2                        statement     35 expressions, proof    1164 expressions naming   88 constants
+29 theorems (and 4 lemmas their elaboration made): proofs of 30..3443 expressions, median 773
+control: the statements of tq_sigma_partitionTest1 and tq_sigma_partitionTest2 swapped
+nanoda_bin all                               rc=0   14.14 s     203 MB
+Checked 8699 declarations with no typechecker errors, 1 pretty printer errors: [
+con-leche all                                rc=0   42.83 s     262 MB
+con-leche: accepted 7919 declarations (--verified)
+con-leche: 1 inductive blocks modelled in-process: Lean.Syntax (30 generated records, checked by the fold as declarations and not counted as records of the file)
+con-ron all                                  rc=0   44.42 s     548 MB
+con-ron: accepted 7919 declarations (--verified)
+con-ron: 1 inductive blocks modelled in-process: Lean.Syntax (30 generated records, checked by the fold as declarations and not counted as records of the file)
+nanoda_bin base                              rc=0   13.62 s     202 MB
+Checked 8666 declarations with no typechecker errors, 1 pretty printer errors: [
+con-leche base                               rc=0   40.92 s     262 MB
+con-leche: accepted 7886 declarations (--verified)
+con-leche: 1 inductive blocks modelled in-process: Lean.Syntax (30 generated records, checked by the fold as declarations and not counted as records of the file)
+con-ron base                                 rc=0   42.71 s     566 MB
+con-ron: accepted 7886 declarations (--verified)
+con-ron: 1 inductive blocks modelled in-process: Lean.Syntax (30 generated records, checked by the fold as declarations and not counted as records of the file)
+nanoda_bin swapped                           rc=101   14.36 s     202 MB
+thread 'main' (236067) panicked at src/tc.rs:955:71:
+assertion failed: self.def_eq(u, v)
+con-leche swapped                            rc=1   42.83 s     269 MB
+con-leche: 1 inductive blocks modelled in-process: Lean.Syntax (30 generated records, checked by the fold as declarations and not counted as records of the file)
+con-leche: invalid: type mismatch in theorem tq_sigma_partitionTest1 [at theorem tq_sigma_partitionTest1, fold position 7947] (--verified) t=42.8s
+con-ron swapped                              rc=1   44.65 s     584 MB
+con-ron: 1 inductive blocks modelled in-process: Lean.Syntax (30 generated records, checked by the fold as declarations and not counted as records of the file)
+con-ron: rejected: type mismatch in declaration [at thm tq_sigma_partitionTest1, fold position 7947] (--verified) t=44.527s
