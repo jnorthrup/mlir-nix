@@ -966,6 +966,182 @@ irdl.dialect @nixstore attributes {nix.summary = "Store writes: derivations, fet
     irdl.operands(a0: %o0)
     irdl.results(r: %r)
   }
+  irdl.operation @fetch_tree attributes {nix.key = "fetchTree", nix.fx = "store"} {
+    %n = irdl.base "!nix.value"
+    %s = irdl.base "!trikeshed.series"
+    %t = irdl.base "!trikeshed.series2"
+    %j = irdl.base "!trikeshed.join"
+    %f = irdl.base "!builtin.function"
+    %o0 = irdl.any_of(%n, %s, %t, %j, %f)
+    %r = irdl.any_of(%n, %s, %t, %j, %f)
+    irdl.operands(a0: %o0)
+    irdl.results(r: %r)
+  }
+  irdl.operation @get_flake attributes {nix.key = "getFlake", nix.fx = "store"} {
+    %n = irdl.base "!nix.value"
+    %s = irdl.base "!trikeshed.series"
+    %t = irdl.base "!trikeshed.series2"
+    %j = irdl.base "!trikeshed.join"
+    %f = irdl.base "!builtin.function"
+    %o0 = irdl.any_of(%n, %s, %t, %j, %f)
+    %r = irdl.any_of(%n, %s, %t, %j, %f)
+    irdl.operands(a0: %o0)
+    irdl.results(r: %r)
+  }
+  irdl.operation @fs_mkdir attributes {nix.key = "fsMkdir", nix.fx = "store"} {
+    %n = irdl.base "!nix.value"
+    %s = irdl.base "!trikeshed.series"
+    %t = irdl.base "!trikeshed.series2"
+    %j = irdl.base "!trikeshed.join"
+    %f = irdl.base "!builtin.function"
+    %o0 = irdl.any_of(%n, %s, %t, %j, %f)
+    %r = irdl.any_of(%n, %s, %t, %j, %f)
+    irdl.operands(a0: %o0)
+    irdl.results(r: %r)
+  }
+  irdl.operation @fs_symlink attributes {nix.key = "fsSymlink", nix.fx = "store"} {
+    %n = irdl.base "!nix.value"
+    %s = irdl.base "!trikeshed.series"
+    %t = irdl.base "!trikeshed.series2"
+    %j = irdl.base "!trikeshed.join"
+    %f = irdl.base "!builtin.function"
+    %o0 = irdl.any_of(%n, %s, %t, %j, %f)
+    %r = irdl.any_of(%n, %s, %t, %j, %f)
+    irdl.operands(a0: %o0)
+    irdl.results(r: %r)
+  }
+  irdl.operation @fs_rename attributes {nix.key = "fsRename", nix.fx = "store"} {
+    %n = irdl.base "!nix.value"
+    %s = irdl.base "!trikeshed.series"
+    %t = irdl.base "!trikeshed.series2"
+    %j = irdl.base "!trikeshed.join"
+    %f = irdl.base "!builtin.function"
+    %o0 = irdl.any_of(%n, %s, %t, %j, %f)
+    %r = irdl.any_of(%n, %s, %t, %j, %f)
+    irdl.operands(a0: %o0)
+    irdl.results(r: %r)
+  }
+  irdl.operation @fs_write attributes {nix.key = "fsWrite", nix.fx = "store"} {
+    %n = irdl.base "!nix.value"
+    %s = irdl.base "!trikeshed.series"
+    %t = irdl.base "!trikeshed.series2"
+    %j = irdl.base "!trikeshed.join"
+    %f = irdl.base "!builtin.function"
+    %o0 = irdl.any_of(%n, %s, %t, %j, %f)
+    %r = irdl.any_of(%n, %s, %t, %j, %f)
+    irdl.operands(a0: %o0)
+    irdl.results(r: %r)
+  }
+  irdl.operation @fs_read_link attributes {nix.key = "fsReadLink", nix.fx = "store"} {
+    %n = irdl.base "!nix.value"
+    %s = irdl.base "!trikeshed.series"
+    %t = irdl.base "!trikeshed.series2"
+    %j = irdl.base "!trikeshed.join"
+    %f = irdl.base "!builtin.function"
+    %o0 = irdl.any_of(%n, %s, %t, %j, %f)
+    %r = irdl.any_of(%n, %s, %t, %j, %f)
+    irdl.operands(a0: %o0)
+    irdl.results(r: %r)
+  }
+  irdl.operation @store_real attributes {nix.key = "storeReal", nix.fx = "store"} {
+    %n = irdl.base "!nix.value"
+    %s = irdl.base "!trikeshed.series"
+    %t = irdl.base "!trikeshed.series2"
+    %j = irdl.base "!trikeshed.join"
+    %f = irdl.base "!builtin.function"
+    %o0 = irdl.any_of(%n, %s, %t, %j, %f)
+    %r = irdl.any_of(%n, %s, %t, %j, %f)
+    irdl.operands(a0: %o0)
+    irdl.results(r: %r)
+  }
+  irdl.operation @proc_self attributes {nix.key = "procSelf", nix.fx = "store"} {
+    %n = irdl.base "!nix.value"
+    %s = irdl.base "!trikeshed.series"
+    %t = irdl.base "!trikeshed.series2"
+    %j = irdl.base "!trikeshed.join"
+    %f = irdl.base "!builtin.function"
+    %o0 = irdl.any_of(%n, %s, %t, %j, %f)
+    %r = irdl.any_of(%n, %s, %t, %j, %f)
+    irdl.operands(a0: %o0)
+    irdl.results(r: %r)
+  }
+  irdl.operation @proc_run attributes {nix.key = "procRun", nix.fx = "store"} {
+    %n = irdl.base "!nix.value"
+    %s = irdl.base "!trikeshed.series"
+    %t = irdl.base "!trikeshed.series2"
+    %j = irdl.base "!trikeshed.join"
+    %f = irdl.base "!builtin.function"
+    %o0 = irdl.any_of(%n, %s, %t, %j, %f)
+    %r = irdl.any_of(%n, %s, %t, %j, %f)
+    irdl.operands(a0: %o0)
+    irdl.results(r: %r)
+  }
+  irdl.operation @proc_exec attributes {nix.key = "procExec", nix.fx = "store"} {
+    %n = irdl.base "!nix.value"
+    %s = irdl.base "!trikeshed.series"
+    %t = irdl.base "!trikeshed.series2"
+    %j = irdl.base "!trikeshed.join"
+    %f = irdl.base "!builtin.function"
+    %o0 = irdl.any_of(%n, %s, %t, %j, %f)
+    %r = irdl.any_of(%n, %s, %t, %j, %f)
+    irdl.operands(a0: %o0)
+    irdl.results(r: %r)
+  }
+  irdl.operation @fs_unlink attributes {nix.key = "fsUnlink", nix.fx = "store"} {
+    %n = irdl.base "!nix.value"
+    %s = irdl.base "!trikeshed.series"
+    %t = irdl.base "!trikeshed.series2"
+    %j = irdl.base "!trikeshed.join"
+    %f = irdl.base "!builtin.function"
+    %o0 = irdl.any_of(%n, %s, %t, %j, %f)
+    %r = irdl.any_of(%n, %s, %t, %j, %f)
+    irdl.operands(a0: %o0)
+    irdl.results(r: %r)
+  }
+  irdl.operation @store_valid attributes {nix.key = "storeValid", nix.fx = "store"} {
+    %n = irdl.base "!nix.value"
+    %s = irdl.base "!trikeshed.series"
+    %t = irdl.base "!trikeshed.series2"
+    %j = irdl.base "!trikeshed.join"
+    %f = irdl.base "!builtin.function"
+    %o0 = irdl.any_of(%n, %s, %t, %j, %f)
+    %r = irdl.any_of(%n, %s, %t, %j, %f)
+    irdl.operands(a0: %o0)
+    irdl.results(r: %r)
+  }
+  irdl.operation @store_import_nar attributes {nix.key = "storeImportNar", nix.fx = "store"} {
+    %n = irdl.base "!nix.value"
+    %s = irdl.base "!trikeshed.series"
+    %t = irdl.base "!trikeshed.series2"
+    %j = irdl.base "!trikeshed.join"
+    %f = irdl.base "!builtin.function"
+    %o0 = irdl.any_of(%n, %s, %t, %j, %f)
+    %r = irdl.any_of(%n, %s, %t, %j, %f)
+    irdl.operands(a0: %o0)
+    irdl.results(r: %r)
+  }
+  irdl.operation @crypto_verify attributes {nix.key = "cryptoVerify", nix.fx = "store"} {
+    %n = irdl.base "!nix.value"
+    %s = irdl.base "!trikeshed.series"
+    %t = irdl.base "!trikeshed.series2"
+    %j = irdl.base "!trikeshed.join"
+    %f = irdl.base "!builtin.function"
+    %o0 = irdl.any_of(%n, %s, %t, %j, %f)
+    %r = irdl.any_of(%n, %s, %t, %j, %f)
+    irdl.operands(a0: %o0)
+    irdl.results(r: %r)
+  }
+  irdl.operation @store_derivation attributes {nix.key = "storeDerivation", nix.fx = "store"} {
+    %n = irdl.base "!nix.value"
+    %s = irdl.base "!trikeshed.series"
+    %t = irdl.base "!trikeshed.series2"
+    %j = irdl.base "!trikeshed.join"
+    %f = irdl.base "!builtin.function"
+    %o0 = irdl.any_of(%n, %s, %t, %j, %f)
+    %r = irdl.any_of(%n, %s, %t, %j, %f)
+    irdl.operands(a0: %o0)
+    irdl.results(r: %r)
+  }
   irdl.operation @fetch_mercurial attributes {nix.key = "fetchMercurial", nix.fx = "store"} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"

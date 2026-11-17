@@ -441,6 +441,16 @@ static void fetchImpl(EvalState &st, A args, Value &v, PosPtr pos, bool unpack, 
   st.mkStoreString(v, dst);
 }
 
+/// Call attribute ATTR of the embedded <nix/flake.nix> on the primop's argument.
+static void corepkgCall(EvalState &st, const char *attr, A args, Value &v, PosPtr pos) {
+  Value *lib = st.evalFile("/__corepkgs__/flake.nix");
+  st.forceAttrs(*lib, pos);
+  const Attr *a = lib->attrs->get(st.symbols.create(attr));
+  if (!a) throw EvalError(composite::cat("<nix/flake.nix> has no '", attr, "'"), pos);
+  Value *callArgs[1] = {args[0]};
+  st.callFunction(*a->value, 1, callArgs, v, pos);
+}
+
 static void fetchGit(EvalState &st, A args, Value &v, PosPtr pos) {
   composite::Text url, ref, rev, name("source");
   bool submodules = false, shallow = false, allRefs = false;
@@ -523,6 +533,8 @@ static void fetchGit(EvalState &st, A args, Value &v, PosPtr pos) {
   st.mkBool(bb.alloc(st.s.submodules), submodules);
   st.mkAttrs(v, bb.finish());
 }
+
+static void registerBoundary(EvalState &S);
 
 void registerStoreBuiltins(EvalState &state) {
   auto &S = state;
@@ -721,8 +733,152 @@ void registerStoreBuiltins(EvalState &state) {
   S.addPrimOp("__fetchurl", [](EvalState &st, A args, Value &v, PosPtr pos) { fetchImpl(st, args, v, pos, false, "fetchurl"); });
   S.addPrimOp("fetchTarball", [](EvalState &st, A args, Value &v, PosPtr pos) { fetchImpl(st, args, v, pos, true, "fetchTarball"); });
   S.addPrimOp("fetchGit", fetchGit);
+  // Flakes are Nix (lib/Corepkgs/flake.nix); the host supplies the fetchers it calls.
+  S.addPrimOp("fetchTree", [](EvalState &st, A args, Value &v, PosPtr pos) { corepkgCall(st, "fetchTree", args, v, pos); });
+  S.addPrimOp("getFlake", [](EvalState &st, A args, Value &v, PosPtr pos) { corepkgCall(st, "getFlake", args, v, pos); });
   S.addPrimOp("fetchMercurial", [](EvalState &st, A args, Value &v, PosPtr pos) {
     throw EvalError("fetchMercurial is not supported by mlnix", pos);
+  });
+  registerBoundary(S);
+}
+
+
+//===----------------------------------------------------------------------===//
+// The process and file-system boundary: the effects lib/Corepkgs/cli.nix needs, and no more.  Each takes one
+// value (a string, or a set of named arguments) and returns null, or the set of what the process printed.
+//===----------------------------------------------------------------------===//
+
+static Value *namedArg(EvalState &st, Value &set, const char *name, PosPtr pos) {
+  st.forceAttrs(set, pos);
+  const Attr *a = set.attrs->get(st.symbols.create(name));
+  if (!a) throw EvalError(composite::cat("attribute '", name, "' missing"), pos);
+  return a->value;
+}
+
+static composite::Text pathArg(EvalState &st, Value &set, const char *name, PosPtr pos) {
+  return composite::Text(st.forceStringNoCtx(*namedArg(st, set, name, pos), pos));
+}
+
+static composite::MutableSeries<composite::Text> wordsOf(EvalState &st, Value &list, PosPtr pos) {
+  st.forceList(list, pos);
+  composite::MutableSeries<composite::Text> words;
+  for (size_t i = 0; i < list.listSize(); i++) words.append(composite::Text(st.forceStringNoCtx(*list.list.elems[i], pos)));
+  return words;
+}
+
+static void fsEffect(EvalState &st, Value &v, PosPtr pos, const char *what, int rc, std::string_view path) {
+  if (rc != 0) throw EvalError(composite::cat("cannot ", what, " '", path, "': ", strerror(errno)), pos);
+  st.mkNull(v);
+}
+
+static void registerBoundary(EvalState &S) {
+  S.addPrimOp("fsMkdir", [](EvalState &st, A args, Value &v, PosPtr pos) {
+    composite::Text path(st.forceStringNoCtx(*args[0], pos));
+    int rc = mkdir(path.c_str(), 0755);
+    if (rc != 0 && errno == EEXIST) rc = 0;
+    fsEffect(st, v, pos, "create directory", rc, path);
+  });
+  S.addPrimOp("fsSymlink", [](EvalState &st, A args, Value &v, PosPtr pos) {
+    composite::Text target = pathArg(st, *args[0], "target", pos), link = pathArg(st, *args[0], "link", pos);
+    fsEffect(st, v, pos, "link", symlink(target.c_str(), link.c_str()), link);
+  });
+  S.addPrimOp("fsRename", [](EvalState &st, A args, Value &v, PosPtr pos) {
+    composite::Text from = pathArg(st, *args[0], "from", pos), to = pathArg(st, *args[0], "to", pos);
+    fsEffect(st, v, pos, "rename", rename(from.c_str(), to.c_str()), from);
+  });
+  S.addPrimOp("fsWrite", [](EvalState &st, A args, Value &v, PosPtr pos) {
+    composite::Text path = pathArg(st, *args[0], "path", pos), text = pathArg(st, *args[0], "text", pos);
+    try {
+      nixstore::writeFile(path, text);
+    } catch (nixstore::Error &e) {
+      throw EvalError(e.what(), pos);
+    }
+    st.mkNull(v);
+  });
+  S.addPrimOp("fsUnlink", [](EvalState &st, A args, Value &v, PosPtr pos) {
+    composite::Text path(st.forceStringNoCtx(*args[0], pos));
+    unlink(path.c_str());
+    st.mkNull(v);
+  });
+  S.addPrimOp("storeValid", [](EvalState &st, A args, Value &v, PosPtr pos) {
+    st.mkBool(v, st.store->isValidPath(st.forceStringNoCtx(*args[0], pos)));
+  });
+  // storeImportNar { path; nar; narHash; references; deriver; ca; }: restore the NAR file `nar` as store path `path`, check it
+  // against `narHash`, and register it with its references (what a binary cache's narinfo says).
+  S.addPrimOp("storeImportNar", [](EvalState &st, A args, Value &v, PosPtr pos) {
+    composite::Text path = pathArg(st, *args[0], "path", pos), nar = pathArg(st, *args[0], "nar", pos);
+    nixstore::PathInfo info;
+    info.path = path.clone();
+    info.deriver = pathArg(st, *args[0], "deriver", pos);
+    info.ca = pathArg(st, *args[0], "ca", pos);
+    for (auto &r : wordsOf(st, *namedArg(st, *args[0], "references", pos), pos)) info.references.insert(r);
+    nixstore::Store::FetchWrites writes(*st.store);
+    composite::Text real = st.store->toReal(path);
+    try {
+      nixstore::Hash want = nixstore::parseHash(pathArg(st, *args[0], "narHash", pos), nullptr);
+      nixstore::createDirs(nixstore::dirOf(real));
+      if (nixstore::pathExists(real)) nixstore::deletePathRecursive(real);
+      nixstore::restorePath(real, nixstore::readFile(nar));
+      auto [got, size] = nixstore::hashPath(real);
+      if (!(got == want)) {
+        nixstore::deletePathRecursive(real);
+        throw EvalError(composite::cat("hash mismatch in the NAR of '", path, "': wanted ", want.to_string(nixstore::HashFormat::SRI, true), ", got ",
+                                       got.to_string(nixstore::HashFormat::SRI, true)), pos);
+      }
+      info.narHash = got;
+      info.narSize = size;
+      st.store->registerValidPath(info);
+    } catch (nixstore::Error &e) {
+      throw EvalError(e.what(), pos);
+    }
+    st.mkNull(v);
+  });
+  // cryptoVerify { sig; message; key; }: an Ed25519 signature (base64) over `message` by a public key (base64).
+  S.addPrimOp("cryptoVerify", [](EvalState &st, A args, Value &v, PosPtr pos) {
+    st.mkBool(v, nixstore::ed25519VerifyBase64(pathArg(st, *args[0], "sig", pos), pathArg(st, *args[0], "message", pos), pathArg(st, *args[0], "key", pos)));
+  });
+  // storeDerivation DRVPATH: the derivation as `nix derivation show` prints it (JSON), from this evaluation's own record of it.
+  S.addPrimOp("storeDerivation", [](EvalState &st, A args, Value &v, PosPtr pos) {
+    composite::Text drvPath(st.forceStringNoCtx(*args[0], pos));
+    try {
+      st.mkString(v, nixstore::derivationToJSON(st.store->storeDir(), drvPath, st.store->readDerivation(drvPath)));
+    } catch (nixstore::Error &e) {
+      throw EvalError(e.what(), pos);
+    }
+  });
+  S.addPrimOp("fsReadLink", [](EvalState &st, A args, Value &v, PosPtr pos) { // the link's target, or null when it is not a link
+    composite::Text path(st.forceStringNoCtx(*args[0], pos));
+    char buf[4096];
+    ssize_t n = readlink(path.c_str(), buf, sizeof buf);
+    if (n < 0) st.mkNull(v);
+    else st.mkString(v, std::string_view(buf, size_t(n)));
+  });
+  // A store path where it lies on disk: itself, or inside the chroot store when the store directory is not there.
+  S.addPrimOp("storeReal", [](EvalState &st, A args, Value &v, PosPtr pos) {
+    st.mkString(v, st.store->toReal(st.forceStringNoCtx(*args[0], pos)));
+  });
+  S.addPrimOp("procSelf", [](EvalState &st, A args, Value &v, PosPtr pos) { st.mkString(v, nixsys::executablePath()); });
+  // procRun { prog; args; }: run it, standard error shared, and answer { status; stdout; }.
+  S.addPrimOp("procRun", [](EvalState &st, A args, Value &v, PosPtr pos) {
+    composite::Text prog = pathArg(st, *args[0], "prog", pos);
+    composite::Text out;
+    int rc = nixstore::runProgram(prog, wordsOf(st, *namedArg(st, *args[0], "args", pos), pos), &out);
+    EvalState::BindingsBuilder bb(st);
+    st.mkInt(bb.alloc(st.symbols.create("status")), rc);
+    st.mkString(bb.alloc(st.symbols.create("stdout")), out);
+    st.mkAttrs(v, bb.finish());
+  });
+  // procExec { prog; args; }: become it (this process ends there).
+  S.addPrimOp("procExec", [](EvalState &st, A args, Value &v, PosPtr pos) {
+    composite::Text prog = pathArg(st, *args[0], "prog", pos);
+    composite::MutableSeries<composite::Text> words = wordsOf(st, *namedArg(st, *args[0], "args", pos), pos);
+    composite::MutableSeries<char *> argv;
+    argv.append(const_cast<char *>(prog.c_str()));
+    for (auto &w : words) argv.append(const_cast<char *>(w.c_str()));
+    argv.append(nullptr);
+    fflush(stdout);
+    execvp(prog.c_str(), argv.data());
+    throw EvalError(composite::cat("cannot execute '", prog, "': ", strerror(errno)), pos);
   });
 }
 

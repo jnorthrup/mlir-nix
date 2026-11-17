@@ -3,7 +3,7 @@
 //   mlnix instantiate|build|eval|parse|emit-mlir|run-mlir|store|hash|derivation
 //
 // When invoked through a symlink named nix-instantiate, nix-build, nix-store
-// or nix-hash, behaves like that command.
+// or nix-hash, behaves like that command; named nix, it evaluates lib/Corepkgs/cli.nix on its arguments.
 //
 //===----------------------------------------------------------------------===//
 
@@ -28,6 +28,7 @@ namespace nd = mlir::nix;
 namespace nixev {
 extern bool tomlTimestamps;
 }
+
 
 namespace {
 
@@ -806,13 +807,34 @@ Common options:
   --extra-experimental-features pipe-operators|parse-toml-timestamps
 
 When invoked as nix-instantiate, nix-build, nix-store or nix-hash, mlnix
-behaves like the corresponding Nix command.
+behaves like the corresponding Nix command.  Invoked as nix it is the nix command:
+  nix build|eval|run REF#ATTR, nix profile add|list|remove REF#ATTR, nix derivation|hash|store
 )";
   nixsys::toStdout(help, sizeof help - 1);
 }
 
 int realMain(int argc, char **argv) {
   composite::Text prog = nixstore::baseNameOf(argv[0]);
+  if (prog == "nix") { // the nix command is Nix (lib/Corepkgs/cli.nix); here only its argument vector is made a Nix list
+    composite::Text list("[");
+    for (int i = 1; i < argc; i++) {
+      list.put(" \"");
+      for (const char *c = argv[i]; *c; c++) {
+        if (*c == '"' || *c == '\\') list.put('\\').put(*c);
+        else if (*c == '$' && c[1] == '{') list.put("\\$");
+        else if (*c == '\n') list.put("\\n");
+        else list.put(*c);
+      }
+      list.put('"');
+    }
+    list.put(" ]");
+    composite::Text expr = composite::cat("(import <nix/cli.nix>) { args = ", list, "; }");
+    composite::MutableSeries<char *> nargs;
+    nargs.append(argv[0]);
+    for (const char *a : {"--eval", "--raw", "--read-write-mode", "-E"}) nargs.append(const_cast<char *>(a));
+    nargs.append(const_cast<char *>(expr.c_str()));
+    return cmdInstantiate(nargs.size(), nargs.data(), 1, false);
+  }
   if (prog == "nix-instantiate") return cmdInstantiate(argc, argv, 1, false);
   if (prog == "nix-build") return cmdInstantiate(argc, argv, 1, true);
   if (prog == "nix-store") return cmdStore(argc, argv, 1);

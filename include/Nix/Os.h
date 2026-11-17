@@ -20,7 +20,25 @@
 #include <time.h>
 #include <unistd.h>
 
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
+
 namespace nixsys {
+
+/// The file this program was run from, its symlinks resolved (so that `nix`, a link to mlnix, answers mlnix).
+inline composite::Text executablePath() {
+  char buf[4096];
+#if defined(__APPLE__)
+  uint32_t n = sizeof buf;
+  char real[4096];
+  if (_NSGetExecutablePath(buf, &n) == 0 && realpath(buf, real)) return composite::Text(real);
+#else
+  ssize_t n = readlink("/proc/self/exe", buf, sizeof buf - 1);
+  if (n > 0) return composite::Text(buf, size_t(n));
+#endif
+  return composite::Text();
+}
 
 /// Nanoseconds on the monotonic clock (what std::chrono::steady_clock was read for): only differences mean anything.
 inline uint64_t monotonicNs() {

@@ -48,5 +48,9 @@ struct LowerClusters : PassWrapper<LowerClusters, OperationPass<ModuleOp>> {
   }
 };
 } // namespace
-void registerTrikeShedPasses() { PassRegistration<LowerClusters>(); }
+void registerCursorLowering(); // CursorLowering.cpp
+void registerTrikeShedPasses() {
+  PassRegistration<LowerClusters>();
+  registerCursorLowering();
+}
 } // namespace composite

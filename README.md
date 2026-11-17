@@ -231,6 +231,7 @@ compares the hash of their output.
 | [COMPOSITE](docs/COMPOSITE.md) | TrikeShed's PRELOAD in C++: what is built, what consumes it |
 | [FABRIC](docs/FABRIC.md) | the dialect fabric: logic moved into dialects, what it bought |
 | [MLIR](docs/MLIR.md) | what is MLIR here and what is C++, the dynamic profile, the MLIR survey |
+| [NIX-CLI](docs/NIX-CLI.md) | the `nix` command, flakes in Nix, binary caches with ed25519 checks, and what running a substituted program needs |
 | [PERFORMANCE](docs/PERFORMANCE.md) | the profile, the head-to-head history, the families examined, the failures |
 | [LIBRARY](docs/LIBRARY.md) | where the lambda calls are: nixpkgs' `lib` is the workload, and what moving it across the border is worth |
 | [FILL-DRAIN](docs/FILL-DRAIN.md) | fill-then-drain containers of the evaluator and what translating them is worth |

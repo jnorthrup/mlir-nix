@@ -584,11 +584,23 @@ def TS_YieldOp : TS_Op<"yield", [Pure, Terminator]> {
 def TS_ColKeyType : TS_Type<"ColKey", "colkey"> {
   let summary = "a typed column key of a Cursor's schema";
   let parameters = (ins "::mlir::StringAttr":$schema);
-  let assemblyFormat = "$schema";
+  let assemblyFormat = "`<` $schema `>`";
   let description = [{
     ColK.kt: a column is addressed by a key that fixes its type, so reading one needs no name lookup and no cast -- the
     case of the schema enum IS the ColumnMeta.  Series.h: `cursor.col<BandCol::Span>()`; the generated enums at the end
     of this file are the case sets.
+  }];
+}
+
+def TS_KeyOp : TS_Op<"key", [Pure, ConstantLike]> {
+  let summary = "the key of column `index` of a schema";
+  let arguments = (ins I64Attr:$index);
+  let results = (outs TS_ColKeyType:$key);
+  let assemblyFormat = "$index attr-dict `:` type($key)";
+  let description = [{
+    ColK.kt's key object as a value: `trikeshed.key 2 : !trikeshed.colkey<"Corpus">` names column 2 of the cursors of
+    schema "Corpus".  The column it names is fixed when the IR is written, so `column`, `facet` and the cursor lowering
+    read it here, not from a value at run time.
   }];
 }
 
@@ -613,6 +625,7 @@ def TS_ColumnOp : TS_Op<"column", [Pure]> {
   let summary = "one column of a cursor, by its typed key";
   let arguments = (ins TS_CursorType:$cursor, TS_ColKeyType:$key);
   let results = (outs TS_SeriesType:$result);
+  let assemblyFormat = "$cursor `[` $key `]` attr-dict `:` type($cursor) `,` type($key) `->` type($result)";
   let description = [{
     ColK.kt / ColumnCursor.kt: a column read by a key that fixes its type.  Laws: size(column(c, k)) = size(rows(c));
     the i-th element of the column is the column's value in row i.
@@ -678,9 +691,11 @@ def TS_FacetOp : TS_Op<"facet", [Pure]> {
   let arguments = (ins TS_CursorType:$cursor, TS_ColKeyType:$key);
   let results = (outs AnyType:$facet);
   let regions = (region SizedRegion<1>:$compute);
+  let assemblyFormat = "$cursor `[` $key `]` attr-dict `:` type($cursor) `,` type($key) `->` type($facet) $compute";
   let description = [{
     cursor/query/QueryFacets.kt and query/Fusion.kt: a facet is (a column, an operation) and the operation is a fold over
-    that column's series, so facets fuse with the projection that feeds them instead of materialising rows.
+    that column's series, so facets fuse with the projection that feeds them instead of materialising rows.  The region's
+    one argument is the column (`column(cursor, key)`); what it yields is the facet.
   }];
 }
 

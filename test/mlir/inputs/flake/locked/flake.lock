@@ -1,0 +1,9 @@
+{
+  "version": 7,
+  "root": "root",
+  "nodes": {
+    "root": { "inputs": { "dep": "d1", "inner": "i1" } },
+    "d1": { "locked": { "type": "path", "path": "@DIR@/dep" } },
+    "i1": { "locked": { "type": "path", "path": "@DIR@/inner" }, "inputs": { "dep": [ "dep" ] } }
+  }
+}

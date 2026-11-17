@@ -199,6 +199,9 @@ extern const char nix32Chars[33];
 using PathFilter = composite::Fn<bool(std::string_view path, std::string_view type)>;
 using Sink = composite::Fn<void(std::string_view)>;
 
+/// Ed25519 verification (RFC 8032) of a base64 signature (64 bytes) over `message` by a base64 public key (32 bytes).
+bool ed25519VerifyBase64(std::string_view sig, std::string_view message, std::string_view publicKey);
+
 /// Serialise `path` as a Nix ARchive.  Throws Error on I/O failure.
 void dumpPath(std::string_view path, const Sink &sink,
               const PathFilter &filter = nullptr);

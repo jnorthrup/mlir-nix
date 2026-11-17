@@ -3141,8 +3141,15 @@ derivation (
 )
 )NIX";
 
+// The Nix sources lib/Corepkgs/*.nix, embedded by lib/Corepkgs/Embed.cmake: <nix/flake.nix> and the like.
+static const struct { const char *path, *text; } corepkgsTable[] = {
+#include "Corepkgs.inc"
+};
+
 static cp::Text readSource(std::string_view path) {
   if (path == "/__corepkgs__/fetchurl.nix") return cp::Text(corepkgsFetchurl);
+  for (auto &c : corepkgsTable)
+    if (path == c.path) return cp::Text(c.text);
   try {
     return nixstore::readFile(path);
   } catch (nixstore::Error &e) {
