@@ -9,6 +9,19 @@ nix.expr @releases_a_read {
   %3 = nix.list[%2]
   // expected-error @+1 {{'son.release' op releases a value a cell passed on can still read}}
   son.release(%0, %2)
+  nix.return %3 : !trikeshed.series<!nix.value>
+}
+
+// -----
+
+// The same cell, forced on every path that returns (it is the return value): by the return it is a value and reads nothing,
+// so the frame keeps nothing.
+nix.expr @forced_cell {
+  %0 = nix.int 1
+  %1 = nix.int 2
+  %2 = nix.eq %0, %1
+  %3 = nix.list[%2]
+  son.release()
   nix.return %2
 }
 

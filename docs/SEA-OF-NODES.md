@@ -194,18 +194,115 @@ return, naming what a cell passed on without forcing can read (the operands nix-
 closure over operands); its verifier refuses a release that lets go of such a value; `son-mint` drops it. It frees
 nothing: the slots stay the collector's, and it says only when the frame stops reaching them.
 
-Checked against the arm itself (`NIXTRUFFLE_SON_PASSES=--son-release NIXTRUFFLE_CHECK_RELEASE=1`): at each return, the
+The release has two halves. What escapes: the cells passed on unforced (a list's elements, an attribute's value, an
+argument, a capture). What the schedule forces before the return: the must-force set (`MustForce`, SonDialect.cpp) --
+the return value, what a forced op always forces (an if's condition and what both arms force, the left of `&&`, both
+sides of `==` and `//`, a select's base, a primop's `nix.strict` operands), a callee's argument where the callee is a
+lambda of the frame that takes a pattern or forces it on every path; a throw returns on no path. A cell in the
+must-force set is a value by the return and reads nothing, so the frame keeps only the cells outside it and what they
+read. `son.forcedOnReturn` exposes the set to the evaluator.
+
+Checked against the arm itself (`NIXTRUFFLE_SON_PASSES=--son-release NIXTRUFFLE_CHECK_RELEASE=1`, both runs by
+`scripts/truffle-release-check.py`): at each return, the
 slots the arm keeps are compared with the frame's `son.release`.
 
     eval-okay, 147 files    frames with a cell     slots holding    kept by    named by       kept outside
                             unforced at return     a value          the arm    son.release    son.release
-    nix-truffle             930                    11,252           3,268      5,787          0
+    escapes only            930                    11,252           3,268      5,787          0
+    with the must-force set 930                    11,252           3,268      5,234          0
 
-The outputs are byte-identical with and without it (123/147 identical to `.exp` both ways). The IR alone decides 5,465 of
-the 11,252 slots (49%). The 2,519 it names that the arm lets go are cells forced before the return, which the schedule
-does not say yet; that gap is what more son would close. The evaluator registers son, so it carries the op and the pass
-(+64 KB stripped, +0.29%) and never runs them: `emit-mlir` and `son-export` are byte-identical, and toplevel is unchanged
-within noise.
+The outputs are byte-identical with and without it (147/147; 123/147 identical to `.exp` both ways). The must-force set
+takes 553 of the 2,519 slots son.release named and the arm let go (22%); the rest are cells forced before the return on
+the path the run took, not on every path, or by a callee son does not see. The evaluator registers son, so it carries
+the op and the pass (+64 KB stripped, +0.29%) and never runs them: `emit-mlir` and `son-export` are byte-identical.
+
+The native evaluator keeps son's account beside the run's (MLNIX_STATS, `son's account of the frames at their
+return`). A lambda body is dead at return by son when it makes no closure and every value of it passed on as a cell is
+in its must-force set -- the cells are the evaluator's, as son.release's are the arm's: a list's elements, an attribute's
+value, an application's arguments, a primop's operands (not the one it forces first, nor a `nix.strict` one); the other
+core ops force what they read or read it only to force it. A frame is dead at return by the run when it pinned no
+closure and every thunk made over it, projections too, was forced by then. Son wrong counts frames dead by son and not
+by the run: it must be 0.
+
+    MLNIX_DEFER=1           returns      dead by the run    dead by son    without must-force    son wrong
+    nixpkgs-73              2,880,133    1,003,419 34.8%    364,152 12.6%  358,749 12.5%         0
+    toplevel                4,568,831    1,364,094 29.9%    591,099 12.9%  583,038 12.8%         0
+
+Outputs unchanged (5e8fff66..., f1cfa7cd...). On the native side the must-force set adds little: its cells are attribute
+values and arguments, which a body passes on rather than forces. Why son keeps the frames the run found dead, by the
+worst cell of the body:
+
+                            a closure    forced on some path only    a callee son does not see    passed on unforced
+    nixpkgs-73              58,004       23,396                      516,728                      41,139
+    toplevel                89,203       58,527                      452,477                      172,788
+
+Passed on unforced is mostly attribute values, then primops whose table entry says less than they force (`__seq`'s
+second operand, `elemAt`'s index, `lessThan`, a throw's message): `nix.strict` there is precision for son and for the
+evaluator's promotion alike. A strict schedule -- make the value, not the thunk, where the body forces it on every
+path anyway -- would remove 27,959 of 3,778,193 thunks over a frame on nixpkgs-73 (0.7%) and 117,089 of 5,327,906 on
+toplevel (2.2%): too few to trade Nix's order of errors for. A release per path takes at most the second column.
+
+The callee column is a cell given to a function son does not see. Where that function comes from decides what could
+close it (MLNIX_STATS, `the callee gap, by where the callee comes from`, the deciding call of each frame):
+
+    callee gap                                   nixpkgs-73          toplevel
+    the call itself is not on every path         303,583  58.8%      270,756  59.8%
+    an argument of the body (higher order)       169,408  32.8%       71,723  15.9%
+    a set's attribute (lib.f, pkgs.f, with)       36,468   7.1%       81,852  18.1%
+    a call's result (a curried function)           4,197   0.8%       23,701   5.2%
+    a lambda of the file, lazy in it               1,494   0.3%          948   0.2%
+    a lambda of the file not minted yet            1,313   0.3%        3,297   0.7%
+    other                                            265                 200
+
+A summary of each body's strictness in its argument, resolved statically across files, closes at most the attribute,
+curried and in-file rows: 8% of the gap on nixpkgs-73, 24% on toplevel. The rest is the run's: which arm a call is on,
+and which function arrives as a value. So the next step is the arm's (profile and speculate, son.release the check of
+the guess), and its precondition is a frame the compiler can keep virtual -- the section below.
+
+## Escape on the Graal arm: what kept every frame allocated
+
+A call of a son.body allocates a Frame and its slots array (BodyRoot.execute). Graal's partial escape analysis can
+keep both virtual -- no allocation, the slots as values -- on every path on which the frame does not escape. At
+f1a7119 it escaped on every call, whatever son proves, through four doors: the release at the return (`release(f)`, a
+`@TruffleBoundary`); the ops that are boundaries and took the frame (`+`, select, attrs, `//`, interpolation); every
+op reached through `f.ops[s]`, an array read from the frame object, which the partial evaluator cannot fold, so
+`exec(f)` was a virtual call the frame went into; and slot indices that were not constants (the loops of apply,
+primop, defer and list over arrays not marked CompilationFinal; an if's `strict(f, if (c) t else e)`).
+
+Closed in graal/ (Nodes.kt): an op reads its operands itself, with constant slot indices (CompilationFinal arrays,
+exploded loops, two reads in an if), and hands boundaries values, not the frame (past 32 operands an op keeps its
+boundary over the frame, for code size); `strict` and `lazy` take the body's ops from the node (`OpNode.rootOps`, set
+by BodyRoot), a constant when compiled; a literal is its own value, never a cell (son's fixed promotion); and the
+release takes its boundary only when a cell of the frame is still unforced at the return (an inline scan), and not at
+all when son.release keeps nothing -- the schedule's half of the lifecycle, used as a fact, not checked again.
+
+    eval-okay, 147 files        f1a7119      now
+    outputs                     123/147      123/147 identical to .exp; 147/147 byte-identical to f1a7119's
+    returns                                  26,111
+      with a cell unforced      930 frames   738 (literals make no cell)  -> the boundary
+      son.release empty                      18,138 -> no release at all; a cell unforced in 0 of them
+    kept outside son.release    0            0
+
+The microbenchmarks (graal/bench/, `scripts/truffle-bench.py WT INSTALL --runs 20 --launches 5 [--son]`: the median of the
+last ten runs, five JVMs; allocation
+is the thread's bytes per run, deterministic; Oracle GraalVM 25.4 on an M3 Pro):
+
+                                   f1a7119             now                 now, son.release exported
+    leaf    foldl' of a strict leaf  40.0 ms 188.8 MB    30.6 ms 124.7 MB    24.8 ms 124.7 MB
+    attrs   a set made, selected     50.8 ms 185.4 MB    40.0 ms 170.1 MB    38.2 ms 170.1 MB
+    fib 24  lazy arguments           18.2 ms  33.2 MB    19.7 ms  26.3 MB    33.8 ms  26.3 MB (19.3 to 39.4)
+    slots1  a leaf of one slot       29.6 ms 156.8 MB    31.4 ms 111.0 MB    34.1 ms 111.0 MB
+    slots9  the leaf with nine       45.1 ms 168.2 MB    33.1 ms 111.0 MB    34.4 ms 111.0 MB
+
+slots9 against slots1 is the proof that the frame is virtual: eight more slots in the leaf cost 38 B a call at f1a7119
+(the slots array grows) and nothing now (111.0 MB both). Frames still materialize where a cell over them escapes --
+fib's `fib (n - 1)` passes a LocalThunk of the frame to the call -- which is the case speculation on the callee's
+strictness would take next: a strict callee's argument computed before the call makes no cell, and son.release checks
+the guess. Allocation falls on every one (-8% to -34%) and does not depend on the export: a frame whose son.release is
+empty makes no cell, so the inline scan folds away when compiled; son's fact saves the scan where the frame is too big
+to scan inline (more than 64 slots), where the boundary would be taken. Time falls on leaf, attrs and slots9 (the
+slowest of five JVMs now beats the fastest before); on fib and slots1 it is within the spread between JVMs, which
+reaches 2x (fib with the export: 19.3 ms in one launch, 39.4 ms in another). The allocation does not vary.
 
 ## Not built, with the number that gates it
 

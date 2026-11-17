@@ -14,6 +14,7 @@
 #include "llvm/Support/Format.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "Nix/MLIRGen.h"
+#include "NixDialect/Son.h"
 
 #include "mlir/IR/Builders.h"
 #include "mlir/Parser/Parser.h"
@@ -583,6 +584,37 @@ void EvalState::printStats() {
   if (nFrames) llvm::errs() << llvm::format("== a recycling allocator for frames (simulated, projection thunks holding no frame): %llu calls returned with their frame captured (kept), %llu uncaptured (%.1f MB released); %llu of %llu new frames (%.1f%%) would reuse released storage, %.1f MB of the %.1f MB of frame storage\n",
                                           (unsigned long long)nSimCaptured, (unsigned long long)nSimReleased, nSimReleasedBytes / 1048576.0, (unsigned long long)nSimHit, (unsigned long long)nFrames,
                                           100.0 * nSimHit / nFrames, nSimHitBytes / 1048576.0, nFrameBytes / 1048576.0);
+  if (nReturns) llvm::errs() << llvm::format("== son's account of the frames at their return (MLNIX_STATS): %llu of %llu lambda bodies dead at return by son "
+                                            "(no closure, every value a use takes lazily forced on every path that returns); of %llu returns (%.1f MB of "
+                                            "frames), dead by the run (no closure, every thunk over them forced, projections too) %llu (%.1f%%, %.1f MB), dead "
+                                            "by son %llu (%.1f%%, %.1f MB), by son without the must-force set %llu (%.1f%%); son wrong (dead by son, not by the run): %llu\n",
+                                            (unsigned long long)nSonDeadBodies, (unsigned long long)nBodies, (unsigned long long)nReturns, nReturnBytes / 1048576.0,
+                                            (unsigned long long)nRunDead, 100.0 * nRunDead / nReturns, nRunDeadBytes / 1048576.0,
+                                            (unsigned long long)nSonDead, 100.0 * nSonDead / nReturns, nSonDeadBytes / 1048576.0,
+                                            (unsigned long long)nSonDeadNoMust, 100.0 * nSonDeadNoMust / nReturns, (unsigned long long)nSonWrong);
+  if (nReturns) llvm::errs() << llvm::format("   dead by the run, not by son, by why son keeps the frame: the body makes a closure %llu, a value forced on some "
+                                            "path that returns only %llu, a value passed to a callee son does not see %llu, a value passed on unforced %llu\n",
+                                            (unsigned long long)nSonGap[1], (unsigned long long)nSonGap[2], (unsigned long long)nSonGap[3],
+                                            (unsigned long long)nSonGap[4]);
+  if (nSonGap[3])
+    llvm::errs() << llvm::format("   the callee gap, by where the callee comes from: the call itself may not run before the return %llu, a lambda of "
+                                 "the file that is lazy in it %llu, a lambda of the file not minted yet %llu, an argument of the body %llu, a set's "
+                                 "attribute (select, with, formal) %llu, a call's result %llu, other %llu\n",
+                                 (unsigned long long)nSonCallee[1], (unsigned long long)nSonCallee[2], (unsigned long long)nSonCallee[3],
+                                 (unsigned long long)nSonCallee[4], (unsigned long long)nSonCallee[5], (unsigned long long)nSonCallee[6],
+                                 (unsigned long long)nSonCallee[7]);
+  if (nProjThunks + nHardThunks)
+    llvm::errs() << llvm::format("   thunks made over a frame for a value its body forces on every path that returns (a strict schedule makes the value, "
+                                 "not the thunk): %llu of %llu (%.1f%%)\n", (unsigned long long)nSonMustThunks,
+                                 (unsigned long long)(nProjThunks + nHardThunks), 100.0 * nSonMustThunks / (nProjThunks + nHardThunks));
+  if (nSonGap[2] + nSonGap[3] + nSonGap[4]) {
+    auto g = ranked(sonGapByOp, [](auto &e) { return e.v.n[0] + e.v.n[1] + e.v.n[2]; });
+    llvm::errs() << "   the op whose lazy use decides (path, callee, passed on):";
+    for (size_t i = 0; i < g.size() && i < 10; ++i)
+      llvm::errs() << llvm::format(" %.*s %llu/%llu/%llu", int(g[i]->v.name.size()), g[i]->v.name.data(), (unsigned long long)g[i]->v.n[0],
+                                   (unsigned long long)g[i]->v.n[1], (unsigned long long)g[i]->v.n[2]);
+    llvm::errs() << "\n";
+  }
   if (nSimHit) {
     llvm::errs() << "   reuse distance (bytes allocated between a frame's release and its reuse):";
     static const char *nm[5] = {"< 32 KiB (Kali L1d)", "< 256 KiB (L2)", "< 2 MiB", "< 32 MiB (L3)", "farther"};
@@ -1012,6 +1044,80 @@ void EvalState::unindexed() { throw EvalError("internal error: unindexed SSA val
 
 void EvalState::indexRegion(Region &r) { indexer.index(r); }
 
+/// MLNIX_STATS: son's account of a frame of this lambda body (RegionInfo::sonDead): unreachable once its call returns, because the body makes
+/// no closure (a closure keeps the frame it was made in) and every value of the body that a use passes on as a cell -- a thunk over the
+/// frame, unless the value is a literal or a builtin, one cell for every frame -- is forced on every path on which the call returns
+/// (son::forcedOnReturn), so each such thunk holds its value by then and not the frame.  The uses that pass a cell on are the evaluator's
+/// (the functions below), the cells of son.release (frameReads): a list's elements (evalList), an attribute set's values (evalAttrsNode),
+/// an application's arguments (evalApply forces the callee), a primop's operands (evalPrim; not the one it forces first, nor, applied to
+/// all its arguments, a nix.strict one, forced before it returns).  The other ops of the core force what they read, or read it only to
+/// force it (a select's default and computed names, a formal's default, the scopes of a with: lookupImpl(.., true), lookup then force), or
+/// return it (an if's arms).  An op of any other dialect passes every operand on.
+/// The result is 0 (dead at return) or why not, the worst use deciding: 1 the body makes a closure; 2 a value passed on is forced on some
+/// path that returns, not all (a release per path would have it); 3 a value is passed to a callee son does not see (a summary of the
+/// callee's strictness would decide); 4 a value is passed on and nothing of the body forces it (it escapes the call).
+static uint8_t sonDiesAtReturn(mlir::Block &blk, nd::NixDialect *core, bool useMust = true, mlir::Operation **at = nullptr,
+                               uint8_t *calleeKind = nullptr) {
+  mlir::son::ForcedOnReturn must, may;
+  if (useMust) must = mlir::son::forcedOnReturn(blk, core);
+  if (must.never) return 0;
+  bool mayDone = false;
+  uint8_t why = 0;
+  auto passedOn = [&](mlir::Operation &op, mlir::Value v, uint8_t kind) {
+    auto res = dyn_cast<mlir::OpResult>(v);
+    if (!res || res.getOwner()->getBlock() != &blk) return; // an argument or a value from outside: no thunk over this frame
+    mlir::Operation *def = res.getOwner();
+    if (def->hasTrait<mlir::OpTrait::ConstantLike>() || isa<nd::PathOp, nd::BuiltinOp>(def)) return; // fixed: one cell for all frames
+    if (must.contains(v)) return;
+    uint8_t w = 4;
+    if (useMust) {
+      if (!mayDone) { may = mlir::son::forcedOnReturn(blk, core, /*may=*/true); mayDone = true; }
+      w = may.contains(v) ? 2 : kind;
+    }
+    if (w > why) {
+      if (at) *at = &op; // the use that decides: the worst, the first of its kind
+      if (calleeKind && w == 3) { // where the callee comes from, for the gap son leaves (why 3)
+        auto ap = cast<nd::ApplyOp>(op);
+        mlir::Value c = ap.getCallee();
+        mlir::Operation *cd = c.getDefiningOp();
+        if (!must.contains(ap.getResult())) *calleeKind = 1;          // the call itself may not run before the return
+        else if (auto lam = dyn_cast_or_null<nd::LambdaOp>(cd))
+          *calleeKind = lam.getBody().empty() || lam.getBody().front().empty() ? 3 : 2; // a lambda of the file: lazy in it, or not minted
+        else if (isa<mlir::BlockArgument>(c)) *calleeKind = 4;         // an argument of the body (higher order)
+        else if (isa_and_nonnull<nd::SelectOp, nd::WithVarOp, nd::FormalOp>(cd)) *calleeKind = 5; // a set's attribute: lib.f, pkgs.f
+        else if (isa_and_nonnull<nd::ApplyOp>(cd)) *calleeKind = 6;   // a call's result (a curried function)
+        else *calleeKind = 7;
+      }
+    }
+    why = std::max(why, w);
+  };
+  for (mlir::Operation &op : blk) {
+    if (isa<nd::LambdaOp>(op)) { if (at) *at = &op; return 1; }
+    if (auto l = dyn_cast<nd::ListOp>(op)) { for (mlir::Value v : l.getElements()) passedOn(op, v, 4); continue; }
+    if (auto a = dyn_cast<nd::AttrsOp>(op)) {
+      for (mlir::Value v : a.getValues()) passedOn(op, v, 4);
+      for (mlir::Value v : a.getDynValues()) passedOn(op, v, 4);
+      continue;
+    }
+    if (auto ap = dyn_cast<nd::ApplyOp>(op)) { for (mlir::Value v : ap.getArgs()) passedOn(op, v, 3); continue; }
+    if (isa<nd::ReturnOp, nd::IfOp, nd::AssertOp, nd::NotOp, nd::AndOp, nd::OrOp, nd::ImplOp, nd::EqOp, nd::NeqOp, nd::UpdateOp,
+            nd::ConcatListsOp, nd::ConcatStringsOp, nd::InterpolateOp, nd::SelectOp, nd::HasAttrOp, nd::FormalOp, nd::WithVarOp>(op))
+      continue;
+    if (const auto *prim = core->primOf(&op)) {
+      auto modes = core->modesOf(op.getName());
+      bool full = op.getNumOperands() == prim->arity;
+      for (unsigned i = 0; i < op.getNumOperands(); ++i) {
+        if (modes.first && modes.first - 1 == i) continue;
+        if (full && i < 32 && ((modes.strict >> i) & 1)) continue;
+        passedOn(op, op.getOperand(i), 4);
+      }
+      continue;
+    }
+    for (mlir::Value v : op.getOperands()) passedOn(op, v, 4);
+  }
+  return why;
+}
+
 void EvalState::Indexer::index(Region &r) {
   auto *ri = new RegionInfo{&r, 0, {}};
   if (auto lam = dyn_cast_or_null<nd::LambdaOp>(r.getParentOp())) {
@@ -1080,6 +1186,23 @@ void EvalState::Indexer::index(Region &r) {
     }
   }
   ri->numSlots = slot;
+  if (stats && isa_and_nonnull<nd::LambdaOp>(r.getParentOp())) {
+    mlir::Operation *at = nullptr;
+    uint8_t calleeKind = 0;
+    uint8_t why = sonDiesAtReturn(blk, core, true, &at, &calleeKind);
+    ri->sonCalleeKind = calleeKind;
+    ri->sonDead = why == 0;
+    ri->sonWhy = why;
+    ri->sonWhyAt = at;
+    ri->sonDeadNoMust = sonDiesAtReturn(blk, core, false) == 0; // the ablation: no must-force set, every lazy use of a body value keeps the frame
+    ++st.nBodies; st.nSonDeadBodies += ri->sonDead;
+    mlir::son::ForcedOnReturn must = mlir::son::forcedOnReturn(blk, core); // the nodes whose thunks a strict schedule would never make
+    if (!must.never)
+      for (Operation &op : blk)
+        for (mlir::Value v : op.getResults())
+          if (must.forced.contains(v))
+            if (Node **n = blockNodes.find(uint64_t(uintptr_t(v.getAsOpaquePointer())))) st.sonMustNodes.insert(*n);
+  }
   // A deferred lambda's region is a shell until its first call; it is indexed when it is minted.
   for (Operation &op : blk) {
     auto lam = dyn_cast<nd::LambdaOp>(op);
@@ -1195,7 +1318,8 @@ static bool isProjection(mlir::Operation *op) {
   return isa<mlir::BlockArgument>(base) || base.getParentRegion() != op->getParentRegion();
 }
 
-/// MLNIX_STATS: the frame's bookkeeping words, after its slots and read-mask: pinned, unforced thunks over it, state (1 = a call is running in it, 2 = released).
+/// MLNIX_STATS: the frame's bookkeeping words, after its slots and read-mask: pinned, unforced thunks over it, state (1 = a call is running in it, 2 =
+/// released), and unforced thunks over it counting projections too (the simulation's word 1 leaves them out; son's account must not).
 static inline uint64_t *frameWords(Frame *f) { unsigned n = f->info->numSlots; return reinterpret_cast<uint64_t *>(f->slots + n) + (n + 63) / 64; }
 /// A frame is released to the simulated free list when no call runs in it, nothing pins it (a closure) and every thunk over it has been forced.
 static void trySimRelease(EvalState &st, Frame *f) {
@@ -1207,15 +1331,26 @@ static void trySimRelease(EvalState &st, Frame *f) {
   st.simFree[n].append(st.allocClock()); ++st.nSimReleased; st.nSimReleasedBytes += sizeof(Frame) + n * sizeof(Value *);
 }
 /// A thunk (or, pinned, a closure) now refers to this frame.
-void EvalState::markCaptured(Frame *f) { ++frameWords(f)[1]; }
+void EvalState::markCaptured(Frame *f) { uint64_t *w = frameWords(f); ++w[1]; ++w[3]; }
 void EvalState::markPinned(Frame *f) { frameWords(f)[0] = 1; }
 /// A thunk over this frame has been forced: it holds its value now, not the frame.
-void EvalState::statUnref(Frame *f) { uint64_t *w = frameWords(f); if (w[1]) --w[1]; trySimRelease(*this, f); }
+void EvalState::statUnref(Frame *f) { uint64_t *w = frameWords(f); if (w[1]) --w[1]; if (w[3]) --w[3]; trySimRelease(*this, f); }
 /// A call has returned.
 void EvalState::statReturn(Frame *f) {
   uint64_t *w = frameWords(f);
   w[2] &= ~uint64_t(1);
   if (w[0] || w[1]) ++nSimCaptured;
+  uint64_t bytes = sizeof(Frame) + f->info->numSlots * sizeof(Value *);
+  ++nReturns; nReturnBytes += bytes;
+  bool runDead = !w[0] && !w[3];
+  if (runDead) { ++nRunDead; nRunDeadBytes += bytes; }
+  if (f->info->sonDead) { ++nSonDead; nSonDeadBytes += bytes; if (!runDead) ++nSonWrong; }
+  if (f->info->sonDeadNoMust) ++nSonDeadNoMust;
+  if (runDead && !f->info->sonDead) {
+    ++nSonGap[f->info->sonWhy & 7];
+    if (f->info->sonWhy == 3) ++nSonCallee[f->info->sonCalleeKind & 7];
+    if (f->info->sonWhyAt && f->info->sonWhy >= 2) ++countOf(sonGapByOp, f->info->sonWhyAt->getName()).n[f->info->sonWhy - 2];
+  }
   trySimRelease(*this, f);
 }
 
@@ -1229,7 +1364,7 @@ Frame *EvalState::newFrameSlow(RegionInfo *ri, Frame *up) {
     return f;
   }
   size_t sz = sizeof(Frame) + ri->numSlots * sizeof(Value *);
-  size_t maskBytes = statsEnabled ? (((ri->numSlots + 63) / 64) + 3) * sizeof(uint64_t) : 0; // stats only: the mask of slots ever read, after the slots
+  size_t maskBytes = statsEnabled ? (((ri->numSlots + 63) / 64) + 4) * sizeof(uint64_t) : 0; // stats only: the mask of slots ever read, after the slots
   if (statsEnabled) nMaskBytes += maskBytes;
   auto *f = static_cast<Frame *>(alloc.Allocate(sz + maskBytes, alignof(Frame)));
   if (statsEnabled) { ++nFrames; nFrameBytes += sz; nFrameSlots += ri->numSlots; ++nFramesBySize[ri->numSlots < 16 ? ri->numSlots : 16];
@@ -1280,8 +1415,9 @@ void EvalState::statCell(Frame *f, Node *s, Value *nv, bool eager) {
   Operation *op = s->def;
   ++countOf(cellsByKind, op->getName()).n[eager ? 0 : 1];
   if (eager || !f) return;
+  if (nv->type != VType::Lambda && sonMustNodes.contains(s)) ++nSonMustThunks; // a strict schedule would have made the value, not this thunk
   if (nv->type == VType::Lambda) markPinned(f);
-  else if (isProjection(op)) ++nProjThunks;          // in the simulated world this thunk holds (base cell, path), not the frame
+  else if (isProjection(op)) { ++nProjThunks; ++frameWords(f)[3]; } // in the simulated world this thunk holds (base cell, path), not the frame
   else {
     ++nHardThunks; markCaptured(f); lastThunk = nv; lastThunkFor = statCur;
     OpCount &e = countOf(thunksByOp, op->getName());
@@ -1441,7 +1577,10 @@ void EvalState::forceCell(Value &v, PosPtr pos) {
     v.type = VType::Blackhole; if (statsEnabled) ++nVT[unsigned(VType::Blackhole)];
     try {
       evalOp(n, env, v);
-      if (statsEnabled && env && !isProjection(n->def)) [[unlikely]] statUnref(env);
+      if (statsEnabled && env) [[unlikely]] {
+        if (!isProjection(n->def)) statUnref(env);
+        else if (uint64_t *w = frameWords(env); w[3]) --w[3]; // the simulation's word 1 never counted it
+      }
     } catch (EvalError &) {
       fail(v);
       throw;

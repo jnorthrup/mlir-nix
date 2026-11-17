@@ -31,13 +31,17 @@ fun main(args: Array<String>) {
     Prims.loader = loader
     if (bench > 0) {
         val f = File(files[0]).absolutePath
+        // the bytes this thread allocated in each run: what escape analysis removes shows here, not only in the time
+        val mx = java.lang.management.ManagementFactory.getThreadMXBean() as com.sun.management.ThreadMXBean
         for (n in 1..bench) {
             loader.reset()
+            val a0 = mx.currentThreadAllocatedBytes
             val t0 = System.nanoTime()
             val b = StringBuilder()
             printValue(loader.import(f), b, java.util.IdentityHashMap())
             val ms = (System.nanoTime() - t0) / 1e6
-            System.err.println("run $n: %.1f ms (%d chars)".format(ms, b.length))
+            val mb = (mx.currentThreadAllocatedBytes - a0) / 1048576.0
+            System.err.println("run $n: %.1f ms, %.1f MB allocated (%d chars)".format(ms, mb, b.length))
             if (n == bench) println(b)
         }
         return
