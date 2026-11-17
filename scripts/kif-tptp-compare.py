@@ -23,6 +23,35 @@ DOUBLES = ("(=> (and (instance ?REL1 Predicate) (instance ?REL2 Predicate) (disj
            "(?REL2 @ROW))")
 DOUBLES_KEY = "(the two double predicate variable axioms)"
 
+# What SUMOKBtoTPTPKB writes after the KB (printListFnSemanticAxioms, printPartitionSemanticAxioms) has no `% f:` line of
+# its own, so it would count under the last form's; mlnix-kif writes it under EXTRAS_KEY, and SigmaKEE's is moved there.
+EXTRAS_KEY = "(the ListFn and partition axioms SUMOKBtoTPTPKB writes)"
+
+
+def extras():
+    def vs(v, k):
+        return ",".join(f"{v}{i}" for i in range(1, k + 1))
+    out = set()
+    for k in range(1, 8):
+        xs = vs("V__X", k)
+        fn = f"s__ListFn__{k}Fn({xs})"
+        out.add(f"! [{xs}] : s__instance({fn},s__List)")
+        out.add(f"! [{xs}] : (s__ListLengthFn({fn}) = n__{k})")
+        for i in range(1, k + 1):
+            out.add(f"! [{xs}] : (s__ListOrderFn({fn},n__{i}) = V__X{i})")
+            out.add(f"! [{xs}] : s__inList(V__X{i},{fn})")
+    for k in range(2, 8):
+        cs = vs("V__C", k)
+        allv = "V__C," + cs
+        atom = f"s__partition__{k + 1}(V__C,{cs})"
+        disj = " | ".join(f"s__instance(V__OBJ,V__C{i})" for i in range(1, k + 1))
+        out.add(f"! [{allv}] : ({atom} => (s__ChildrenOfFn(V__C) = s__ListFn__{k}Fn({cs})))")
+        out.add(f"! [V__OBJ,{allv}] : (({atom} & s__instance(V__OBJ,V__C)) => ({disj}))")
+    return {f"({x})" for x in out}
+
+
+EXTRAS = extras()
+
 
 def blocks(path):
     """{key: [formula texts]}, {key: source}, {key: why not written}"""
@@ -44,7 +73,7 @@ def blocks(path):
         else:
             m = FOF.match(line)
             if m and key is not None and m.group(2) != "conjecture":
-                forms[key].append(m.group(3))
+                forms[EXTRAS_KEY if m.group(3) in EXTRAS else key].append(m.group(3))
     return forms, source, skipped
 
 

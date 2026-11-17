@@ -529,9 +529,21 @@ std::vector<const Node *> Tptp::handleDouble(bool disjoint) {
             if (x != y) pairs.insert({x, y});
       }
   } else {
+    // KBcache.buildDisjointRelationsMap adds each relation of a (disjointRelation a b) to its own stored set of
+    // subrelations (getChildRelations returns the cache's set, and it adds a to it), so for each that has one -- that is
+    // in a (subrelation _ _) -- SigmaKEE writes the tautology (=> (a ..) (a ..)) too.  So does this.
+    std::set<std::string> inSubrelation, selfBelow;
+    for (auto &[c, ps] : subrelationParents) {
+      inSubrelation.insert(c);
+      inSubrelation.insert(ps.begin(), ps.end());
+    }
+    for (auto &[a, bs] : binary["disjointRelation"])
+      for (const std::string &x : [&] { std::vector<std::string> v(bs); v.push_back(a); return v; }())
+        if (inSubrelation.count(x)) selfBelow.insert(x);
     for (const std::string &r1 : relations) {
       if (isFunction(r1)) continue;
       for (const std::string &r2 : subrelationsBelow(r1)) pairs.insert({r2, r1});
+      if (selfBelow.count(r1)) pairs.insert({r1, r1});
     }
   }
   std::vector<const Node *> out;
@@ -1021,10 +1033,29 @@ LogicalResult Tptp::write(raw_ostream &os) {
   std::map<std::string, unsigned> skipped;
   // FormulaPreprocessor.preProcessExpr: the predicate variables instantiated, then the row variables expanded, then
   // each variable-arity relation renamed and the variables' types made guards
+  std::set<std::string> written; // SUMOKBtoTPTPKB.alreadyWrittenTPTPs
+  auto quotedCall = [](llvm::StringRef t) { // SUMOKBtoTPTPKB.QUOTED_CALL_PATTERN: .*'[a-z][a-zA-Z0-9_]*\(.*
+    for (size_t i = 0; i + 1 < t.size(); i++) {
+      if (t[i] != '\'' || !islower((unsigned char)t[i + 1])) continue;
+      size_t j = i + 2;
+      while (j < t.size() && (isalnum((unsigned char)t[j]) || t[j] == '_')) j++;
+      if (j < t.size() && t[j] == '(') return true;
+    }
+    return false;
+  };
   auto axiom = [&](const Node *f) {
     const Node *renamed = renameVariableArity(f);
     const Node *typed = restrict(renamed, typeRestrictions(renamed));
-    os << "fof(kb_" << ++n << ",axiom,(" << translate(typed, false) << ")).\n";
+    std::string tptp = translate(typed, false);
+    if (quotedCall(tptp)) { // filterAxiom: removeNum
+      os << "% number: " << tptp << "\n";
+      return;
+    }
+    if (!written.insert(tptp).second) {
+      os << "% empty, already written or filtered formula, skipping : " << tptp << "\n";
+      return;
+    }
+    os << "fof(kb_" << ++n << ",axiom,(" << tptp << ")).\n";
   };
   auto emit = [&](const std::string &key, const Node *f, bool query) {
     os << "% f: " << key << "\n";
@@ -1109,6 +1140,31 @@ LogicalResult Tptp::write(raw_ostream &os) {
       Node l{Node::List, "", {&a, &x, &y}};
       emit("(instance " + i + " " + c + ")", &l, false);
     }
+  }
+  // SUMOKBtoTPTPKB.printListFnSemanticAxioms and printPartitionSemanticAxioms: what SigmaKEE writes after the KB, in FOF
+  os << "% f: (the ListFn and partition axioms SUMOKBtoTPTPKB writes)\n";
+  auto vars = [](const char *v, int k) {
+    std::string s;
+    for (int i = 1; i <= k; i++) s += (i > 1 ? "," : "") + std::string(v) + std::to_string(i);
+    return s;
+  };
+  auto extra = [&](const std::string &body) { os << "fof(kb_" << ++n << ",axiom,(" << body << ")).\n"; };
+  for (int k = 1; k <= 7; k++) {
+    std::string xs = vars("V__X", k), fn = "s__ListFn__" + std::to_string(k) + "Fn(" + xs + ")";
+    extra("! [" + xs + "] : s__instance(" + fn + ",s__List)");
+    extra("! [" + xs + "] : (s__ListLengthFn(" + fn + ") = n__" + std::to_string(k) + ")");
+    for (int i = 1; i <= k; i++) {
+      extra("! [" + xs + "] : (s__ListOrderFn(" + fn + ",n__" + std::to_string(i) + ") = V__X" + std::to_string(i) + ")");
+      extra("! [" + xs + "] : s__inList(V__X" + std::to_string(i) + "," + fn + ")");
+    }
+  }
+  for (int k = 2; k <= 7; k++) {
+    std::string cs = vars("V__C", k), all = "V__C," + cs;
+    std::string atom = "s__partition__" + std::to_string(k + 1) + "(V__C," + cs + ")";
+    std::string disj;
+    for (int i = 1; i <= k; i++) disj += (i > 1 ? " | " : "") + std::string("s__instance(V__OBJ,V__C") + std::to_string(i) + ")";
+    extra("! [" + all + "] : (" + atom + " => (s__ChildrenOfFn(V__C) = s__ListFn__" + std::to_string(k) + "Fn(" + cs + ")))");
+    extra("! [V__OBJ," + all + "] : ((" + atom + " & s__instance(V__OBJ,V__C)) => (" + disj + "))");
   }
   os << "% " << n << " axioms, " << queries << " conjectures; not written:";
   for (auto &[why, k] : skipped) os << " " << k << " " << why << ";";
