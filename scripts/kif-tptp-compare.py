@@ -10,6 +10,11 @@ Compares the TPTP problem `mlnix-kif --tptp` writes (lib/Dialect/KifTptp.cpp) wi
   * else `different`.  `SigmaKEE only`: a form SigmaKEE writes and we do not; `ours only`: the other way.
 The counts are by where the form comes from (SigmaKEE's comment: the KB's file, or its cache, SUMO_Cache.kif; ours have
 no file) and by the form's predicate.  --examples writes the first differences of each kind, the two texts side by side.
+
+kif-tptp-compare.py --flat SIGMA.p OURS.p [--examples OUT]
+compares two problems as multisets of formulas, include()s followed, the conjectures apart from the axioms (a test's
+problem: SigmaKEE's KB with the test's tells, and its query): each formula of one matched by text, then by formula, in
+the other.
 """
 import collections, re, sys
 
@@ -186,7 +191,69 @@ def same_formula(a, b):
         return False
 
 
+INCLUDE = re.compile(r"^include\('([^']+)'\)\.")
+
+
+def flat(path, seen=None):
+    """[(role, formula text)] of a problem, include()s followed"""
+    seen = seen if seen is not None else set()
+    if path in seen:
+        return []
+    seen.add(path)
+    out = []
+    for line in open(path, errors="replace"):
+        m = INCLUDE.match(line)
+        if m:
+            inc = m.group(1)
+            if not inc.startswith("/"):
+                import os
+                inc = os.path.join(os.path.dirname(path), inc)
+            out.extend(flat(inc, seen))
+            continue
+        m = FOF.match(line.rstrip("\n"))
+        if m:
+            out.append(("conjecture" if m.group(2) in ("conjecture", "question") else "axiom", m.group(3)))
+    return out
+
+
+def compare_flat(argv):
+    a, b = flat(argv[2]), flat(argv[3])
+    out = open(argv[argv.index("--examples") + 1], "w") if "--examples" in argv else None
+    for role in ("axiom", "conjecture"):
+        x = collections.Counter(t for r, t in a if r == role)
+        y = collections.Counter(t for r, t in b if r == role)
+        same = x & y
+        xo, yo = x - same, y - same
+        # by formula: the and/or chains and the quantifier blocks in any order, extra parentheses aside
+        def canon_of(t):
+            try:
+                return repr(canon(Reader(t).formula()))
+            except (SyntaxError, IndexError):
+                return "unparsed:" + t
+        cx = collections.Counter()
+        for t, k in xo.items():
+            cx[canon_of(t)] += k
+        cy = collections.Counter()
+        for t, k in yo.items():
+            cy[canon_of(t)] += k
+        sameform = cx & cy
+        print(f"{role:10} SigmaKEE {sum(x.values())}, ours {sum(y.values())}: same text {sum(same.values())}, "
+              f"same formula {sum(sameform.values())}, SigmaKEE only {sum((cx - sameform).values())}, "
+              f"ours only {sum((cy - sameform).values())}")
+        if out:
+            left, right = cx - sameform, cy - sameform
+            for t, k in xo.items():
+                if left[canon_of(t)] > 0:
+                    out.write(f"== {role} SigmaKEE only: {t}\n")
+            for t, k in yo.items():
+                if right[canon_of(t)] > 0:
+                    out.write(f"== {role} ours only: {t}\n")
+    return 0
+
+
 def main(argv):
+    if argv[1] == "--flat":
+        return compare_flat(argv)
     sig, sig_src, sig_skip = blocks(argv[1])
     ours, _, our_skip = blocks(argv[2])
     out = open(argv[argv.index("--examples") + 1], "w") if "--examples" in argv else None
