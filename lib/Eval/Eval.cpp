@@ -590,6 +590,13 @@ void EvalState::printStats() {
                                             "path that returns only %llu, a value passed to a callee son does not see %llu, a value passed on unforced %llu\n",
                                             (unsigned long long)nSonGap[1], (unsigned long long)nSonGap[2], (unsigned long long)nSonGap[3],
                                             (unsigned long long)nSonGap[4]);
+  if (nSonGap[3])
+    llvm::errs() << llvm::format("   the callee gap, by where the callee comes from: the call itself may not run before the return %llu, a lambda of "
+                                 "the file that is lazy in it %llu, a lambda of the file not minted yet %llu, an argument of the body %llu, a set's "
+                                 "attribute (select, with, formal) %llu, a call's result %llu, other %llu\n",
+                                 (unsigned long long)nSonCallee[1], (unsigned long long)nSonCallee[2], (unsigned long long)nSonCallee[3],
+                                 (unsigned long long)nSonCallee[4], (unsigned long long)nSonCallee[5], (unsigned long long)nSonCallee[6],
+                                 (unsigned long long)nSonCallee[7]);
   if (nProjThunks + nHardThunks)
     llvm::errs() << llvm::format("   thunks made over a frame for a value its body forces on every path that returns (a strict schedule makes the value, "
                                  "not the thunk): %llu of %llu (%.1f%%)\n", (unsigned long long)nSonMustThunks,
@@ -1043,7 +1050,8 @@ void EvalState::indexRegion(Region &r) { indexer.index(r); }
 /// The result is 0 (dead at return) or why not, the worst use deciding: 1 the body makes a closure; 2 a value passed on is forced on some
 /// path that returns, not all (a release per path would have it); 3 a value is passed to a callee son does not see (a summary of the
 /// callee's strictness would decide); 4 a value is passed on and nothing of the body forces it (it escapes the call).
-static uint8_t sonDiesAtReturn(mlir::Block &blk, nd::NixDialect *core, bool useMust = true, mlir::Operation **at = nullptr) {
+static uint8_t sonDiesAtReturn(mlir::Block &blk, nd::NixDialect *core, bool useMust = true, mlir::Operation **at = nullptr,
+                               uint8_t *calleeKind = nullptr) {
   mlir::son::ForcedOnReturn must, may;
   if (useMust) must = mlir::son::forcedOnReturn(blk, core);
   if (must.never) return 0;
@@ -1060,7 +1068,21 @@ static uint8_t sonDiesAtReturn(mlir::Block &blk, nd::NixDialect *core, bool useM
       if (!mayDone) { may = mlir::son::forcedOnReturn(blk, core, /*may=*/true); mayDone = true; }
       w = may.contains(v) ? 2 : kind;
     }
-    if (w > why && at) *at = &op; // the use that decides: the worst, the first of its kind
+    if (w > why) {
+      if (at) *at = &op; // the use that decides: the worst, the first of its kind
+      if (calleeKind && w == 3) { // where the callee comes from, for the gap son leaves (why 3)
+        auto ap = cast<nd::ApplyOp>(op);
+        mlir::Value c = ap.getCallee();
+        mlir::Operation *cd = c.getDefiningOp();
+        if (!must.contains(ap.getResult())) *calleeKind = 1;          // the call itself may not run before the return
+        else if (auto lam = dyn_cast_or_null<nd::LambdaOp>(cd))
+          *calleeKind = lam.getBody().empty() || lam.getBody().front().empty() ? 3 : 2; // a lambda of the file: lazy in it, or not minted
+        else if (isa<mlir::BlockArgument>(c)) *calleeKind = 4;         // an argument of the body (higher order)
+        else if (isa_and_nonnull<nd::SelectOp, nd::WithVarOp, nd::FormalOp>(cd)) *calleeKind = 5; // a set's attribute: lib.f, pkgs.f
+        else if (isa_and_nonnull<nd::ApplyOp>(cd)) *calleeKind = 6;   // a call's result (a curried function)
+        else *calleeKind = 7;
+      }
+    }
     why = std::max(why, w);
   };
   for (mlir::Operation &op : blk) {
@@ -1160,7 +1182,9 @@ void EvalState::Indexer::index(Region &r) {
   ri->numSlots = slot;
   if (stats && isa_and_nonnull<nd::LambdaOp>(r.getParentOp())) {
     mlir::Operation *at = nullptr;
-    uint8_t why = sonDiesAtReturn(blk, core, true, &at);
+    uint8_t calleeKind = 0;
+    uint8_t why = sonDiesAtReturn(blk, core, true, &at, &calleeKind);
+    ri->sonCalleeKind = calleeKind;
     ri->sonDead = why == 0;
     ri->sonWhy = why;
     ri->sonWhyAt = at;
@@ -1318,6 +1342,7 @@ void EvalState::statReturn(Frame *f) {
   if (f->info->sonDeadNoMust) ++nSonDeadNoMust;
   if (runDead && !f->info->sonDead) {
     ++nSonGap[f->info->sonWhy & 7];
+    if (f->info->sonWhy == 3) ++nSonCallee[f->info->sonCalleeKind & 7];
     if (f->info->sonWhyAt && f->info->sonWhy >= 2) ++countOf(sonGapByOp, f->info->sonWhyAt->getName()).n[f->info->sonWhy - 2];
   }
   trySimRelease(*this, f);

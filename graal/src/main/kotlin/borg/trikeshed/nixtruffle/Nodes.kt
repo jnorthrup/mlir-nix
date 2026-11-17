@@ -1,6 +1,7 @@
 package borg.trikeshed.nixtruffle
 
 import com.oracle.truffle.api.CallTarget
+import com.oracle.truffle.api.CompilerDirectives.CompilationFinal
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary
 import com.oracle.truffle.api.frame.VirtualFrame
 import com.oracle.truffle.api.nodes.ExplodeLoop
@@ -13,6 +14,14 @@ import java.util.TreeMap
 // op result, filled when first forced: an op runs at most once per call, when something needs its value.
 
 class Frame(@JvmField val slots: Array<Any?>, @JvmField val ops: Array<OpNode?>)
+
+// Escape: a Frame and its slots are allocated per call, and Graal's partial escape analysis keeps them virtual -- no allocation,
+// the slots as values in registers -- on every path on which the frame does not escape.  The frame escapes into a cell made over it
+// (lazy: a LocalThunk holds it until forced) and into any call that is not inlined.  So no op hands the frame to a boundary: an op
+// reads its operands here, with slot indices that are constants (CompilationFinal arrays, exploded loops), and passes the boundary
+// values; and the release at the return (BodyRoot) takes its boundary only when a cell of the frame is still unforced -- never when
+// son.release keeps nothing.  Small arity only: past EXPLODE operands an op keeps its boundary over the frame (code size).
+const val EXPLODE = 32
 
 /// A slot no op will compute again: its op ran, the value was dropped when the call returned (BodyRoot.release).
 private object Released
@@ -39,8 +48,13 @@ class LocalThunk(frame: Frame, @JvmField val slot: Int) : Thunk() {
     }
 }
 
-/// The value of slot `s`, computed now if it is not yet.
-fun strict(f: Frame, s: Int): Any {
+/// The value of slot `s`, computed now if it is not yet.  From outside the body's graph (a cell forced later): the ops come from the
+/// frame.  An op of the body reads them from itself (OpNode.strict), a constant when compiled.
+fun strict(f: Frame, s: Int): Any = strictIn(f, f.ops, s)
+
+/// strict with the body's ops given: compiled, `ops[s]` is a constant node and its exec is inlined, so the frame is not handed to a
+/// call it cannot see into (Graal keeps it virtual: no Frame, no slots array).
+fun strictIn(f: Frame, ops: Array<OpNode?>, s: Int): Any {
     val v = f.slots[s]
     if (v === Released) throw NixError("internal: a released slot was read")
     if (v != null && v !is Thunk && v !== Blackhole) return v
@@ -54,7 +68,7 @@ fun strict(f: Frame, s: Int): Any {
     }
     f.slots[s] = Blackhole
     try {
-        val r = f.ops[s]!!.exec(f)
+        val r = ops[s]!!.exec(f)
         f.slots[s] = r
         if (own) { (v as LocalThunk).value = r; v.frame = null } // the cell that stood for the slot holds the value from now on
         return r
@@ -65,10 +79,14 @@ fun strict(f: Frame, s: Int): Any {
 }
 
 /// Slot `s` as a cell, without forcing it.
-fun lazy(f: Frame, s: Int): Any? {
+fun lazy(f: Frame, s: Int): Any? = lazyIn(f, f.ops, s)
+
+fun lazyIn(f: Frame, ops: Array<OpNode?>, s: Int): Any? {
     val v = f.slots[s]
     if (v is LocalThunk && v.value != null) return v.value
     if (v == null || v === Blackhole) {
+        val op = ops[s]
+        if (op is ConstNode) { f.slots[s] = op.value; return op.value } // a literal is its value: no cell, no frame held (son: fixed)
         val t = LocalThunk(f, s)
         if (v == null) f.slots[s] = t
         return t
@@ -77,8 +95,13 @@ fun lazy(f: Frame, s: Int): Any? {
 }
 
 abstract class OpNode : Node() {
+    /// The ops of the body this op belongs to (BodyRoot sets it once, before any call): compiled, a constant.
+    @CompilationFinal @JvmField var rootOps: Array<OpNode?>? = null
     /// The op's value, in weak head normal form.
     abstract fun exec(f: Frame): Any
+    /// strict and lazy of the body's slots, its ops read from this node, not from the frame (strictIn).
+    fun strict(f: Frame, s: Int): Any = strictIn(f, rootOps!!, s)
+    fun lazy(f: Frame, s: Int): Any? = lazyIn(f, rootOps!!, s)
 }
 
 class BodyRoot(
@@ -87,15 +110,42 @@ class BodyRoot(
     @JvmField val operands: Array<IntArray>, // per slot, the slots its op reads (none for an argument)
     @JvmField val keepable: BooleanArray?, // the slots son.release names (mlnix-opt --son-release), when the export has one
 ) : RootNode(null) {
+    /// son.release keeps nothing: every cell of the frame is forced on every path on which the call returns, so nothing reads the
+    /// frame after it and there is nothing to drop (the schedule's half of the lifecycle, SonDialect.cpp MustForce).
+    @JvmField val releaseNoop: Boolean = keepable != null && keepable.none { it }
+    @JvmField val smallFrame: Boolean = nslots <= 2 * EXPLODE
+    init { for (o in ops) o?.rootOps = ops }
+
     override fun execute(frame: VirtualFrame): Any {
         val a = frame.arguments
         val slots = arrayOfNulls<Any?>(nslots)
         if (ncaptures > 0) System.arraycopy(a[0] as Array<Any?>, 0, slots, 0, ncaptures)
         if (hasArg) slots[ncaptures] = a[1]
         val f = Frame(slots, ops)
-        val r = strict(f, ret)
+        val r = strictIn(f, ops, ret)
+        if (ReleaseCheck.on) ReleaseCheck.call(releaseNoop, pendingAny(f))
+        else if (releaseNoop) return r
+        if (smallFrame) {
+            if (!pendingSmall(f)) { clearSmall(f); return r } // no cell escaped unforced: the frame is garbage, and stays virtual
+        }
         release(f)
         return r
+    }
+
+    /// A cell of this frame, still unforced, sits in a slot: someone may read the frame after the return.
+    @ExplodeLoop
+    private fun pendingSmall(f: Frame): Boolean {
+        val s = f.slots
+        for (i in 0 until nslots) { val v = s[i]; if (v is LocalThunk && v.frame === f && v.value == null) return true }
+        return false
+    }
+    @ExplodeLoop
+    private fun clearSmall(f: Frame) { val s = f.slots; for (i in 0 until nslots) s[i] = null }
+    @TruffleBoundary
+    private fun pendingAny(f: Frame): Boolean {
+        val s = f.slots
+        for (i in s.indices) { val v = s[i]; if (v is LocalThunk && v.frame === f && v.value == null) return true }
+        return false
     }
 
     /// After the call: the frame keeps what its pending cells will read, and nothing else.  A pending slot (its op not run: empty,
@@ -137,10 +187,15 @@ class BodyRoot(
 object ReleaseCheck {
     @JvmField val on = System.getenv("NIXTRUFFLE_CHECK_RELEASE") == "1"
     var frames = 0L; var slots = 0L; var keptHere = 0L; var namedByIr = 0L; var faults = 0L
+    var calls = 0L; var noopCalls = 0L; var noopPending = 0L; var pendingCalls = 0L
     val faulty = LinkedHashSet<String>()
     init { if (on) Runtime.getRuntime().addShutdownHook(Thread { System.err.println(
         "release check: $frames frames with an unforced cell at return, $slots slots holding a value: kept $keptHere; " +
-        "son.release named $namedByIr; kept outside son.release $faults" + (if (faulty.isEmpty()) "" else " in ${faulty.joinToString()}")) }) }
+        "son.release named $namedByIr; kept outside son.release $faults" + (if (faulty.isEmpty()) "" else " in ${faulty.joinToString()}") +
+        "\nrelease calls: $calls returns, $pendingCalls with a cell of the frame unforced; son.release empty (no release at all) in " +
+        "$noopCalls, of which with a cell unforced $noopPending") }) }
+    @TruffleBoundary
+    fun call(noop: Boolean, pending: Boolean) { calls++; if (pending) pendingCalls++; if (noop) { noopCalls++; if (pending) noopPending++ } }
     fun frame(label: String, s: Array<Any?>, keep: BooleanArray, keepable: BooleanArray) {
         frames++
         for (i in s.indices) {
@@ -159,7 +214,9 @@ class ConstNode(@JvmField val value: Any) : OpNode() { override fun exec(f: Fram
 // ── control and logic ───────────────────────────────────────────────────────────────────────────────────────────────────
 
 class IfNode(@JvmField val c: Int, @JvmField val t: Int, @JvmField val e: Int) : OpNode() {
-    override fun exec(f: Frame): Any = strict(f, if (forceBool(strict(f, c))) t else e)
+    // Two reads, each of a constant slot: `strict(f, if (..) t else e)` would read a slot the compiler cannot name, and hand the
+    // frame to a call of either arm's op.
+    override fun exec(f: Frame): Any = if (forceBool(strict(f, c))) strict(f, t) else strict(f, e)
 }
 class AssertNode(@JvmField val c: Int, @JvmField val body: Int, @JvmField val text: String) : OpNode() {
     override fun exec(f: Frame): Any {
@@ -184,9 +241,13 @@ class EqNode(@JvmField val neg: Boolean, @JvmField val a: Int, @JvmField val b: 
 
 // ── values ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-class ListNode(@JvmField val elems: IntArray) : OpNode() {
+class ListNode(@field:CompilationFinal(dimensions = 1) @JvmField val elems: IntArray) : OpNode() {
+    @JvmField val small = elems.size <= EXPLODE
+    override fun exec(f: Frame): Any = if (small) execSmall(f) else execLarge(f)
     @ExplodeLoop
-    override fun exec(f: Frame): Any = NixList(Array(elems.size) { lazy(f, elems[it]) })
+    private fun execSmall(f: Frame): Any { val a = arrayOfNulls<Any?>(elems.size); for (i in elems.indices) a[i] = lazy(f, elems[i]); return NixList(a) }
+    @TruffleBoundary
+    private fun execLarge(f: Frame): Any = NixList(Array(elems.size) { lazy(f, elems[it]) })
 }
 class ConcatListsNode(@JvmField val a: Int, @JvmField val b: Int) : OpNode() {
     override fun exec(f: Frame): Any {
@@ -194,19 +255,56 @@ class ConcatListsNode(@JvmField val a: Int, @JvmField val b: Int) : OpNode() {
     }
 }
 class UpdateNode(@JvmField val a: Int, @JvmField val b: Int) : OpNode() {
-    @TruffleBoundary
-    override fun exec(f: Frame): Any {
-        val x = forceAttrs(strict(f, a)); val y = forceAttrs(strict(f, b))
-        if (x.size == 0) return y
-        if (y.size == 0) return x
-        val m = TreeMap(x.map); m.putAll(y.map)
-        return NixAttrs(m)
+    override fun exec(f: Frame): Any { val x = forceAttrs(strict(f, a)); val y = forceAttrs(strict(f, b)); return update(x, y) }
+    companion object {
+        @TruffleBoundary
+        fun update(x: NixAttrs, y: NixAttrs): Any {
+            if (x.size == 0) return y
+            if (y.size == 0) return x
+            val m = TreeMap(x.map); m.putAll(y.map)
+            return NixAttrs(m)
+        }
     }
 }
-class AttrsNode(@JvmField val names: Array<String>, @JvmField val values: IntArray, @JvmField val dynNames: IntArray,
-                @JvmField val dynValues: IntArray) : OpNode() {
+class AttrsNode(@field:CompilationFinal(dimensions = 1) @JvmField val names: Array<String>,
+                @field:CompilationFinal(dimensions = 1) @JvmField val values: IntArray,
+                @field:CompilationFinal(dimensions = 1) @JvmField val dynNames: IntArray,
+                @field:CompilationFinal(dimensions = 1) @JvmField val dynValues: IntArray) : OpNode() {
+    @JvmField val small = values.size + dynNames.size <= EXPLODE
+    override fun exec(f: Frame): Any = if (small) execSmall(f) else execLarge(f)
+    /// The cells and the dynamic names read here; the map built behind boundaries that see values, not the frame.  The order is
+    /// execLarge's: the static cells, then each dynamic name forced, checked and its cell put, in turn.
+    @ExplodeLoop
+    private fun execSmall(f: Frame): Any {
+        val cells = arrayOfNulls<Any?>(values.size)
+        for (i in values.indices) cells[i] = lazy(f, values[i])
+        val m = statics(names, cells)
+        for (i in dynNames.indices) {
+            val n = strict(f, dynNames[i])
+            if (n === NixNull) continue
+            val k = dynKey(m, n)
+            put(m, k, lazy(f, dynValues[i]))
+        }
+        return NixAttrs(m)
+    }
+    companion object {
+        @TruffleBoundary
+        fun statics(names: Array<String>, cells: Array<Any?>): TreeMap<String, Any?> {
+            val m = TreeMap<String, Any?>()
+            for (i in names.indices) m[names[i]] = cells[i]
+            return m
+        }
+        @TruffleBoundary
+        fun dynKey(m: TreeMap<String, Any?>, n: Any): String {
+            val k = (n as? NixString)?.s ?: throw NixError("expected a string but found ${showType(n)}")
+            if (m.containsKey(k)) throw NixError("dynamic attribute '$k' already defined")
+            return k
+        }
+        @TruffleBoundary
+        fun put(m: TreeMap<String, Any?>, k: String, cell: Any?) { m[k] = cell }
+    }
     @TruffleBoundary
-    override fun exec(f: Frame): Any {
+    private fun execLarge(f: Frame): Any {
         val m = TreeMap<String, Any?>()
         for (i in names.indices) m[names[i]] = lazy(f, values[i])
         for (i in dynNames.indices) {
@@ -221,10 +319,41 @@ class AttrsNode(@JvmField val names: Array<String>, @JvmField val values: IntArr
 }
 
 /// `e.a.b or d`, and `e ? a.b` when `test`: a null path component takes the next dynamic key.
-class SelectNode(@JvmField val base: Int, @JvmField val path: Array<String?>, @JvmField val keys: IntArray, @JvmField val default: Int,
+class SelectNode(@JvmField val base: Int, @field:CompilationFinal(dimensions = 1) @JvmField val path: Array<String?>,
+                 @field:CompilationFinal(dimensions = 1) @JvmField val keys: IntArray, @JvmField val default: Int,
                  @JvmField val test: Boolean) : OpNode() {
+    @JvmField val small = path.size <= EXPLODE
+    override fun exec(f: Frame): Any = if (small) execSmall(f) else execLarge(f)
+    /// execLarge's walk, with the frame read here and the attribute looked up behind a boundary over values.
+    @ExplodeLoop
+    private fun execSmall(f: Frame): Any {
+        var v: Any = strict(f, base)
+        var k = 0
+        var depth = 0
+        for (p in path) {
+            val name = p ?: forceStr(strict(f, keys[k++]))
+            val cell = attrOf(v, name)
+            if (cell == null) {
+                if (test) return false
+                if (default >= 0) return strict(f, default)
+                missing(v, name)
+            }
+            if (test) { if (++depth == path.size) return true } // `e ? a.b`: the last attribute is not forced
+            v = force(cell)
+        }
+        return if (test) true else v
+    }
+    companion object {
+        @TruffleBoundary
+        fun attrOf(v: Any, name: String): Any? = (v as? NixAttrs)?.get(name)
+        @TruffleBoundary
+        fun missing(v: Any, name: String): Nothing {
+            if (v !is NixAttrs) throw NixError("expected a set but found ${showType(v)}")
+            throw NixError("attribute '$name' missing")
+        }
+    }
     @TruffleBoundary
-    override fun exec(f: Frame): Any {
+    private fun execLarge(f: Frame): Any {
         var v: Any = strict(f, base)
         var k = 0
         var depth = 0
@@ -255,18 +384,47 @@ class FormalNode(@JvmField val arg: Int, @JvmField val name: String, @JvmField v
     }
 }
 
-class WithVarNode(@JvmField val name: String, @JvmField val scopes: IntArray) : OpNode() {
-    override fun exec(f: Frame): Any {
+class WithVarNode(@JvmField val name: String, @field:CompilationFinal(dimensions = 1) @JvmField val scopes: IntArray) : OpNode() {
+    @JvmField val small = scopes.size <= EXPLODE
+    override fun exec(f: Frame): Any = if (small) execSmall(f) else execLarge(f)
+    @ExplodeLoop
+    private fun execSmall(f: Frame): Any {
+        for (s in scopes) lookup(forceAttrs(strict(f, s)), name)?.let { return force(it) }
+        undefined(name)
+    }
+    @TruffleBoundary
+    private fun execLarge(f: Frame): Any {
         for (s in scopes) forceAttrs(strict(f, s))[name]?.let { return force(it) }
-        throw NixError("undefined variable '$name'")
+        undefined(name)
+    }
+    companion object {
+        @TruffleBoundary
+        fun lookup(set: NixAttrs, name: String): Any? = set[name]
+        @TruffleBoundary
+        fun undefined(name: String): Nothing = throw NixError("undefined variable '$name'")
     }
 }
 
 /// `+`, one op for a chain `a + b + c` (and a path with string parts): the first part's kind decides; a path is canonical once,
 /// at the end (ExprConcatStrings).
-class AddNode(@JvmField val parts: IntArray) : OpNode() {
+class AddNode(@field:CompilationFinal(dimensions = 1) @JvmField val parts: IntArray) : OpNode() {
+    @JvmField val small = parts.size <= EXPLODE
+    override fun exec(f: Frame): Any = if (small) execSmall(f) else execLarge(f)
+    /// execLarge's order: each part forced, then added (or appended to the path) before the next part is forced.
+    @ExplodeLoop
+    private fun execSmall(f: Frame): Any {
+        val first = strict(f, parts[0])
+        if (first is NixPath) {
+            val b = pathStart(first)
+            for (i in 1 until parts.size) pathPart(b, strict(f, parts[i]))
+            return pathEnd(b)
+        }
+        var acc = first
+        for (i in 1 until parts.size) acc = add(acc, strict(f, parts[i]))
+        return acc
+    }
     @TruffleBoundary
-    override fun exec(f: Frame): Any {
+    private fun execLarge(f: Frame): Any {
         val first = strict(f, parts[0])
         if (first is NixPath) {
             val b = StringBuilder(first.p)
@@ -282,6 +440,12 @@ class AddNode(@JvmField val parts: IntArray) : OpNode() {
     }
     companion object {
         @TruffleBoundary
+        fun pathStart(p: NixPath): StringBuilder = StringBuilder(p.p)
+        @TruffleBoundary
+        fun pathPart(b: StringBuilder, v: Any) { when (v) { is NixPath -> b.append(v.p); else -> b.append(coerceToString(v, false)) } }
+        @TruffleBoundary
+        fun pathEnd(b: StringBuilder): Any = NixPath(canonPath(b.toString()))
+        @TruffleBoundary
         fun add(x: Any, y: Any): Any = when {
             x is Long && y is Long -> try { Math.addExact(x, y) } catch (e: ArithmeticException) { throw NixError("integer overflow in adding $x + $y") }
             x is Long && y is Double -> x + y
@@ -295,9 +459,33 @@ class AddNode(@JvmField val parts: IntArray) : OpNode() {
         }
     }
 }
-class InterpolateNode(@JvmField val parts: IntArray) : OpNode() {
+class InterpolateNode(@field:CompilationFinal(dimensions = 1) @JvmField val parts: IntArray) : OpNode() {
+    @JvmField val small = parts.size <= EXPLODE
+    override fun exec(f: Frame): Any = if (small) execSmall(f) else execLarge(f)
+    /// execLarge's order: each part forced and coerced before the next is forced.
+    @ExplodeLoop
+    private fun execSmall(f: Frame): Any {
+        val first = strict(f, parts[0])
+        if (first is NixPath) { // `./a/${x}`: a path
+            val b = AddNode.pathStart(first)
+            for (i in 1 until parts.size) strPart(b, strict(f, parts[i]))
+            return AddNode.pathEnd(b)
+        }
+        val b = strStart()
+        strPart(b, first)
+        for (i in 1 until parts.size) strPart(b, strict(f, parts[i]))
+        return strEnd(b)
+    }
+    companion object {
+        @TruffleBoundary
+        fun strStart(): StringBuilder = StringBuilder()
+        @TruffleBoundary
+        fun strPart(b: StringBuilder, v: Any) { b.append(coerceToString(v, false)) }
+        @TruffleBoundary
+        fun strEnd(b: StringBuilder): Any = NixString(b.toString())
+    }
     @TruffleBoundary
-    override fun exec(f: Frame): Any {
+    private fun execLarge(f: Frame): Any {
         val first = strict(f, parts[0])
         if (first is NixPath) { // `./a/${x}`: a path
             val b = StringBuilder(first.p)
@@ -313,15 +501,26 @@ class InterpolateNode(@JvmField val parts: IntArray) : OpNode() {
 // ── functions ───────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /// son.defer: a lambda over its captures; the body's CallTarget is made on the first call (the module mints rows on demand).
-class DeferNode(@JvmField val module: Module, @JvmField val row: String, @JvmField val captures: IntArray) : OpNode() {
+class DeferNode(@JvmField val module: Module, @JvmField val row: String,
+                @field:CompilationFinal(dimensions = 1) @JvmField val captures: IntArray) : OpNode() {
+    @JvmField val small = captures.size <= EXPLODE
     override fun exec(f: Frame): Any {
         val b = module.body(row)
-        return Closure(b.target, Array(captures.size) { lazy(f, captures[it]) }, b.formals, b.defaults, b.ellipsis, b.name)
+        return Closure(b.target, if (small) cellsSmall(f) else cellsLarge(f), b.formals, b.defaults, b.ellipsis, b.name)
     }
+    @ExplodeLoop
+    private fun cellsSmall(f: Frame): Array<Any?> { val a = arrayOfNulls<Any?>(captures.size); for (i in captures.indices) a[i] = lazy(f, captures[i]); return a }
+    @TruffleBoundary
+    private fun cellsLarge(f: Frame): Array<Any?> = Array(captures.size) { lazy(f, captures[it]) }
 }
 
-class ApplyNode(@JvmField val callee: Int, @JvmField val args: IntArray) : OpNode() {
-    override fun exec(f: Frame): Any = Apply.call(strict(f, callee), Array(args.size) { lazy(f, args[it]) })
+class ApplyNode(@JvmField val callee: Int, @field:CompilationFinal(dimensions = 1) @JvmField val args: IntArray) : OpNode() {
+    @JvmField val small = args.size <= EXPLODE
+    override fun exec(f: Frame): Any { val fn = strict(f, callee); return Apply.call(fn, if (small) cellsSmall(f) else cellsLarge(f)) }
+    @ExplodeLoop
+    private fun cellsSmall(f: Frame): Array<Any?> { val a = arrayOfNulls<Any?>(args.size); for (i in args.indices) a[i] = lazy(f, args[i]); return a }
+    @TruffleBoundary
+    private fun cellsLarge(f: Frame): Array<Any?> = Array(args.size) { lazy(f, args[it]) }
 }
 
 object Apply {
@@ -358,11 +557,16 @@ object Apply {
 }
 
 /// A primop op (nix-prims made it from a call): the builtin applied to its operands.
-class PrimNode(@JvmField val prim: Prim, @JvmField val args: IntArray) : OpNode() {
+class PrimNode(@JvmField val prim: Prim, @field:CompilationFinal(dimensions = 1) @JvmField val args: IntArray) : OpNode() {
+    @JvmField val small = args.size <= EXPLODE
     override fun exec(f: Frame): Any {
-        val a = Array(args.size) { lazy(f, args[it]) }
+        val a = if (small) cellsSmall(f) else cellsLarge(f)
         return if (a.size == prim.arity) prim.impl(a) else Apply.call(prim, a)
     }
+    @ExplodeLoop
+    private fun cellsSmall(f: Frame): Array<Any?> { val a = arrayOfNulls<Any?>(args.size); for (i in args.indices) a[i] = lazy(f, args[i]); return a }
+    @TruffleBoundary
+    private fun cellsLarge(f: Frame): Array<Any?> = Array(args.size) { lazy(f, args[it]) }
 }
 
 // ── building ────────────────────────────────────────────────────────────────────────────────────────────────────────────

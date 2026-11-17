@@ -288,6 +288,7 @@ struct RegionInfo {
   uint8_t sonDeadNoMust = 0; // MLNIX_STATS: the same account without the must-force set (the ablation)
   uint8_t sonWhy = 0;        // MLNIX_STATS: why son keeps the frame (sonDiesAtReturn): 0 it does not, 1 closure, 2 path, 3 callee, 4 escape
   mlir::Operation *sonWhyAt = nullptr; // MLNIX_STATS: the op whose use decides it
+  uint8_t sonCalleeKind = 0; // MLNIX_STATS: for sonWhy 3, where the deciding call's callee comes from (sonDiesAtReturn)
   /// MLNIX_STATS: what this region's sea of nodes holds.  nOps its body's ops; nThunks its cells that start as
   /// thunks (finer-grain deferral would mint those, so they are its rows); nEvals its ops' evals (a region called
   /// N times counts N times); everRan the distinct ops that ran, one bit an op, opIdx the op -> bit.
@@ -1025,6 +1026,7 @@ struct EvalState {
   uint64_t nSonDead = 0, nSonDeadBytes = 0, nRunDead = 0, nRunDeadBytes = 0, nSonWrong = 0, nReturns = 0, nReturnBytes = 0, nSonDeadNoMust = 0;
   uint64_t nSonDeadBodies = 0, nBodies = 0; // lambda bodies indexed, and those son calls dead at return
   uint64_t nSonGap[8] = {};                  // returns dead by the run and not by son, by RegionInfo::sonWhy
+  uint64_t nSonCallee[8] = {};               // of those with sonWhy 3, by RegionInfo::sonCalleeKind
   OpCounts sonGapByOp;                       // the same, by the op whose lazy use decides (n[0] path, n[1] callee, n[2] passed on)
   llvm::DenseSet<const Node *> sonMustNodes;  // the values of lambda bodies forced on every path on which the body returns (son::forcedOnReturn)
   uint64_t nSonMustThunks = 0;               // thunks made over a frame for such a value
