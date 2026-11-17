@@ -8,8 +8,10 @@
 //                subclass, instance and subrelation), the functions (the relations that are instances of Function), and a
 //                relation's signature: arg 0 its range (rangeSubclass: "C+"), arg i its domain (domainSubclass: "C+"),
 //                Entity where none is given, inherited down subrelation where the child states no domain of that class.
-//                The closure is written as SigmaKEE's SUMO_Cache.kif is: each (subclass C P) and (subrelation R S) of the
-//                transitive closure, and (instance X C) of instanceOf, that is not asserted.
+//                instanceOf also climbs subrelation and subAttribute (KBcache.buildTransInstOf: an attribute is an instance
+//                of what the attributes above it are instances of).  The closure is written as SigmaKEE's SUMO_Cache.kif
+//                is: for each transitive relation (an instance of TransitiveRelation or of a subclass, or a subrelation
+//                of one) each (rel A B) of its transitive closure, and each (instance X C) of instanceOf, not asserted.
 //   not written  a form whose predicate is excluded (documentation, domain, format, termFormat, externalImage,
 //                relatedExternalConcept, relatedInternalConcept, formerName, abbreviation, conventionalShortName,
 //                conventionalLongName) or that is a test's note, category, time or answer; a higher-order form
@@ -95,8 +97,11 @@ private:
   std::map<std::string, std::vector<std::string>> subclassParents, subclassChildren, subrelationParents, subrelationChildren,
       instanceClasses, instancesOf;
   std::set<std::pair<std::string, std::string>> asserted[3]; // (subclass), (subrelation), (instance) facts as stated
+  std::map<std::string, std::map<std::string, std::vector<std::string>>> binary; // rel -> a -> [b] for each (rel a b) of atoms
+  std::map<std::string, std::map<std::string, std::set<std::string>>> closureMemo; // rel -> a -> what (rel a _) reaches
+  std::set<std::string> transRels;
   std::set<std::pair<std::string, std::string>> domainClass; // (domain R _ C): R, C
-  std::map<std::string, std::set<std::string>> supersMemo, subrelSupersMemo;
+  std::map<std::string, std::set<std::string>> supersMemo;
   std::set<std::string> relations, functions;
   std::map<std::string, std::vector<std::string>> sigs;
   std::map<std::string, int> valences;
@@ -111,7 +116,8 @@ private:
   const Node *node(Value v);
   void buildCache(llvm::ArrayRef<const Node *> forms);
   const std::set<std::string> &supers(const std::string &c);
-  const std::set<std::string> &subrelSupers(const std::string &r);
+  const std::set<std::string> &reach(const std::string &rel, const std::string &a);
+  bool instTransRel(const std::string &rel);
   std::set<std::string> instanceOf(const std::string &i);
   bool isSubclass(const std::string &c, const std::string &p) { return c == p || supers(c).count(p); }
   bool isFunction(const std::string &f) { return functions.count(f); }
@@ -160,7 +166,17 @@ const Node *Tptp::node(Value v) {
                    : s.starts_with("\"")               ? Node::Str
                    : isNumeric(s)                      ? Node::Num
                                                        : Node::Atom;
-    n = mk(k, s.str());
+    std::string text = s.str();
+    if (k == Node::Str) { // SigmaKEE's reader makes each run of white space in a string one space
+      std::string t;
+      for (char c : text) {
+        bool white = c == ' ' || c == '\n' || c == '\t' || c == '\r' || c == '\f';
+        if (!white) t += c;
+        else if (t.empty() || t.back() != ' ') t += ' ';
+      }
+      text = t;
+    }
+    n = mk(k, text);
   } else if (auto var = v.getDefiningOp<VarOp>()) {
     n = mk(Node::Var, var.getName().str());
   } else {
@@ -183,6 +199,7 @@ void Tptp::buildCache(llvm::ArrayRef<const Node *> forms) {
     if (h.empty()) continue;
     if (nargs(f) == 2 && isAtom(arg(f, 0)) && isAtom(arg(f, 1))) {
       const std::string &a = arg(f, 0)->name, &b = arg(f, 1)->name;
+      binary[h.str()][a].push_back(b);
       if (h == "subclass") subclassParents[a].push_back(b), subclassChildren[b].push_back(a), asserted[0].insert({a, b});
       else if (h == "subrelation") subrelationParents[a].push_back(b), subrelationChildren[b].push_back(a), asserted[1].insert({a, b});
       else if (h == "instance") instanceClasses[a].push_back(b), instancesOf[b].push_back(a), asserted[2].insert({a, b});
@@ -208,6 +225,17 @@ void Tptp::buildCache(llvm::ArrayRef<const Node *> forms) {
       for (const std::string &s : subrelationChildren[r]) relations.insert(s), next.insert(s);
     }
     frontier.swap(next);
+  }
+  // KBcache.buildTransitiveRelationsSet: from TransitiveRelation down subclass; its instances and subrelations
+  for (std::set<std::string> rels{"TransitiveRelation"}, done; !rels.empty();) {
+    std::set<std::string> next;
+    for (const std::string &r : rels) {
+      if (!done.insert(r).second) continue;
+      for (const std::string &c : subclassChildren[r]) next.insert(c);
+      for (const std::string &i : instancesOf[r]) transRels.insert(i);
+      for (const std::string &s : subrelationChildren[r]) transRels.insert(s);
+    }
+    rels.swap(next);
   }
   for (const std::string &r : relations)
     if (instanceOf(r).count("Function")) functions.insert(r);
@@ -271,28 +299,44 @@ const std::set<std::string> &Tptp::supers(const std::string &c) {
   return out;
 }
 
-const std::set<std::string> &Tptp::subrelSupers(const std::string &r) {
-  if (auto it = subrelSupersMemo.find(r); it != subrelSupersMemo.end()) return it->second;
-  std::set<std::string> &out = subrelSupersMemo[r];
-  std::vector<std::string> todo(subrelationParents[r].begin(), subrelationParents[r].end());
+const std::set<std::string> &Tptp::reach(const std::string &rel, const std::string &a) {
+  auto &memo = closureMemo[rel];
+  if (auto it = memo.find(a); it != memo.end()) return it->second;
+  std::set<std::string> &out = memo[a];
+  auto &edges = binary[rel];
+  std::vector<std::string> todo;
+  if (auto it = edges.find(a); it != edges.end()) todo.assign(it->second.begin(), it->second.end());
   while (!todo.empty()) {
-    std::string p = todo.back();
+    std::string b = todo.back();
     todo.pop_back();
-    if (p == r || !out.insert(p).second) continue;
-    for (const std::string &g : subrelationParents[p]) todo.push_back(g);
+    if (b == a || !out.insert(b).second) continue;
+    if (auto it = edges.find(b); it != edges.end()) todo.insert(todo.end(), it->second.begin(), it->second.end());
   }
   return out;
 }
 
-std::set<std::string> Tptp::instanceOf(const std::string &i) {
+bool Tptp::instTransRel(const std::string &rel) { // KBcache.buildInstTransRels: no argument is a class
+  if (!transRels.count(rel)) return false;
+  auto it = sigs.find(rel);
+  if (it == sigs.end()) return false;
+  return llvm::none_of(it->second, [](const std::string &t) { return llvm::StringRef(t).ends_with("+") || t == "Class"; });
+}
+
+std::set<std::string> Tptp::instanceOf(const std::string &i) { // KBcache.buildTransInstOf
   std::set<std::string> out;
-  auto it = instanceClasses.find(i);
-  if (it == instanceClasses.end()) return out;
-  for (const std::string &c : it->second) {
+  auto add = [&](const std::string &c) {
     out.insert(c);
     const std::set<std::string> &s = supers(c);
     out.insert(s.begin(), s.end());
-  }
+  };
+  if (auto it = instanceClasses.find(i); it != instanceClasses.end())
+    for (const std::string &c : it->second) add(c);
+  if (!sigs.empty()) // once the signatures are known: up subrelation and subAttribute, to what is above
+    for (const char *rel : {"subrelation", "subAttribute"})
+      if (instTransRel(rel))
+        for (const std::string &p : reach(rel, i))
+          if (auto it = instanceClasses.find(p); it != instanceClasses.end())
+            for (const std::string &c : it->second) add(c);
   return out;
 }
 
@@ -705,21 +749,24 @@ LogicalResult Tptp::write(raw_ostream &os) {
     }
     emit(key, f, false);
   }
-  // SUMO_Cache.kif: the closure, less what is asserted
-  auto closure = [&](const char *rel, std::map<std::string, std::vector<std::string>> &parents, int which, bool sub) {
-    for (auto &[c, ps] : parents) {
-      (void)ps;
-      const std::set<std::string> &up = sub ? supers(c) : subrelSupers(c);
-      for (const std::string &p : up) {
-        if (asserted[which].count({c, p})) continue;
+  // SUMO_Cache.kif: each transitive relation's closure, less what is asserted
+  for (const std::string &rel : transRels) {
+    if (excluded.count(rel)) continue;
+    auto bit = binary.find(rel);
+    if (bit == binary.end()) continue;
+    std::set<std::pair<std::string, std::string>> stated;
+    for (auto &[a, bs] : bit->second)
+      for (const std::string &b : bs) stated.insert({a, b});
+    std::vector<std::string> from;
+    for (auto &[a, bs] : bit->second) from.push_back(a);
+    for (const std::string &c : from)
+      for (const std::string &p : reach(rel, c)) {
+        if (stated.count({c, p})) continue;
         Node a{Node::Atom, rel, {}}, x{Node::Atom, c, {}}, y{Node::Atom, p, {}};
         Node l{Node::List, "", {&a, &x, &y}};
-        emit(std::string("(") + rel + " " + c + " " + p + ")", &l, false);
+        emit("(" + rel + " " + c + " " + p + ")", &l, false);
       }
-    }
-  };
-  closure("subclass", subclassParents, 0, true);
-  closure("subrelation", subrelationParents, 1, false);
+  }
   for (auto &[i, cs] : instanceClasses) {
     (void)cs;
     if (llvm::StringRef(i).contains("__")) continue; // a renamed variable-arity relation
