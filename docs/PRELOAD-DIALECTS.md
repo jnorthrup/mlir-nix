@@ -183,5 +183,7 @@ Steps:
    - Not done: the callers that build facts in Nix (sumo-nix's tq.nix, org/check.nix, paperclip's second stratum, the
      scenario's checks) still call datalog.nix.  Retiring it needs the chase as a primop over Nix values (the facts lowered into a
      theory, `ask`/`holds`/`why` on the closure), then each caller moved and compared.
+   - Who checks and who searches (Lean's kernel, Vampire, these layers): REASONING-SPLIT.md, three tests on Kali with
+     their tables in bench/kali/reasoning-20261117/.
 
 Each step: lang 487/487 on both schedules (229 exact), mlir tests, the three workloads' answers, and the Kali difftest.
