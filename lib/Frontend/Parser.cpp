@@ -68,10 +68,29 @@ using namespace lex; // the character classes and matchers shared with the Confi
 /// The keyword with exactly this text, else T_ID.  The identifier rule matches every keyword's text, so a keyword is
 /// an identifier of the same length (the earlier rule wins the tie) and loses to a longer identifier (`iffy`).
 Tok keywordOf(std::string_view w) {
-  std::optional<Keyword> k = w.size() < 2 || w.size() > 7 ? std::nullopt : symbolizeKeyword(llvm::StringRef(w.data(), w.size()));
-  return k ? Tok(uint8_t(*k)) : T_ID;
+  switch (w.size()) {
+  case 2:
+    if (w == "if") return T_IF;
+    if (w == "in") return T_IN;
+    if (w == "or") return T_OR_KW;
+    return T_ID;
+  case 3:
+    if (w == "let") return T_LET;
+    if (w == "rec") return T_REC;
+    return T_ID;
+  case 4:
+    if (w == "then") return T_THEN;
+    if (w == "else") return T_ELSE;
+    if (w == "with") return T_WITH;
+    return T_ID;
+  case 6: return w == "assert" ? T_ASSERT : T_ID;
+  case 7: return w == "inherit" ? T_INHERIT : T_ID;
+  default: return T_ID;
+  }
 }
 
+static uint64_t gLexBytes[4], gLexTokens[4], gSrcBytes, gParsers[4];
+static bool gLexInit = [] { atexit([] { if (getenv("MLNIX_LEXCOUNT")) fprintf(stderr, "LEXCOUNT gen: %llu parsers %llu tokens %llu bytes; skip: %llu parsers %llu tokens %llu bytes; show %llu; source bytes of gen parsers %llu\n", (unsigned long long)gParsers[0], (unsigned long long)gLexTokens[0], (unsigned long long)gLexBytes[0], (unsigned long long)gParsers[1], (unsigned long long)gLexTokens[1], (unsigned long long)gLexBytes[1], (unsigned long long)gLexBytes[2], (unsigned long long)gSrcBytes); }); return true; }();
 struct Lexer : public lex::Rules {
   Lexer(Origin *o, const ParseOptions &opts)
       : Rules(o->text->view()), origin(o), opts(opts) {
@@ -610,8 +629,16 @@ struct Hdr {
 struct Parser {
   Parser(Mode m, Origin *o, const ParseOptions &po, confix::Bands *bands,
          mlir::ModuleOp module = {}, const GenOptions *go = nullptr)
+<<<<<<< HEAD
       : mode(m), origin(o), opts(po), lx(origin, opts), bands(bands), module(module),
         b(module ? module.getContext() : nullptr), go(go) {}
+||||||| 2995112
+      : mode(m), origin(std::move(o)), opts(po), lx(origin, opts), bands(bands), module(module),
+        b(module ? module.getContext() : nullptr), go(go) {}
+=======
+      : mode(m), origin(std::move(o)), opts(po), lx(origin, opts), bands(bands), module(module),
+        b(module ? module.getContext() : nullptr), go(go) { gParsers[int(m)]++; if (m == Mode::Gen) gSrcBytes += lx.src.size(); }
+>>>>>>> 0899bbe83a65958c6a6913d39db717815ee85675
 
   /// The whole source.
   Node top() {
@@ -749,7 +776,9 @@ struct Parser {
       Token &slot = ring[(head + count) % kLook];
       if (sawEof) slot = ring[(head + count + kLook - 1) % kLook]; // end of file repeats
       else {
+        size_t before = lx.p;
         slot = lx.nextToken();
+        gLexBytes[int(mode)] += lx.p - before; gLexTokens[int(mode)]++;
         if (slot.t == T_EOF) sawEof = true;
       }
       count++;
