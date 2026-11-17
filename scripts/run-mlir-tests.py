@@ -4,12 +4,13 @@
 Each RUN line is executed with `%s` replaced by the test file (`%S`: its directory) and with
 build/bin (mlnix, mlnix-opt) and the LLVM bin dir (FileCheck, not) on PATH.
 
-A RUN line may start with `[feature]`; it is skipped, and the skip is reported, when this LLVM lacks the feature.
+A RUN line may start with `[feature]`; it is skipped, and the skip is reported, when this LLVM (or this machine) lacks the
+feature.
 Features are probed by running something small (see probe_features), not read from a version string.
 
 usage: run-mlir-tests.py [-v] [FILTER]
 """
-import glob, os, re, subprocess, sys, tempfile
+import glob, os, re, shutil, subprocess, sys, tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LLVM_BIN = os.environ.get("LLVM_BIN", "/opt/homebrew/opt/llvm/bin")
@@ -22,10 +23,14 @@ def probe_features(env):
     DynamicOpDefinition::compareProperties returns false, so there two such ops are never equal: a test that
     expects a merge cannot pass, and one that expects two ops to stay apart passes without proving anything.
     LLVM 23 returns true.
+
+    lean-checkers: the kernels that read lean4export's format are on PATH (nanoda_bin, con-leche and con-ron: elan's Lean
+    4.36 toolchain bin), so a certificate can be checked, not only decoded.
     """
     probe = os.path.join(ROOT, "test", "mlir", "inputs", "probe-cse.mlir")
     p = subprocess.run(["bash", "-c", f"mlnix-opt {probe} -cse"], env=env, cwd=ROOT, capture_output=True, text=True)
-    return {"cse-dynamic-ops": p.returncode == 0 and p.stdout.count("nixnum.add") == 1}
+    return {"cse-dynamic-ops": p.returncode == 0 and p.stdout.count("nixnum.add") == 1,
+            "lean-checkers": all(shutil.which(x, path=env["PATH"]) for x in ("nanoda_bin", "con-leche", "con-ron"))}
 
 
 def main():
@@ -68,7 +73,7 @@ def main():
             if verbose:
                 print(f"PASS {os.path.basename(f)}")
     for name, feature in skipped:
-        print(f"SKIP {name}: a RUN line needs {feature}, which this LLVM lacks")
+        print(f"SKIP {name}: a RUN line needs {feature}, which is missing here")
     note = f", {len(skipped)} run lines skipped ({', '.join(sorted({ft for _, ft in skipped}))})" if skipped else ""
     print(f"mlir tests: {passed} passed, {failed} failed{note}")
     return 1 if failed else 0

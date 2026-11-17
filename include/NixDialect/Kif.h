@@ -45,6 +45,12 @@ void internCounts(const KifInterner &, uint64_t &atoms, uint64_t &vars, uint64_t
 /// The facts of a chased theory as lines `fact\trule\tfrom1\tfrom2...` (asserted: rule `-`), sorted by fact, a term printed as
 /// datalog.nix's `show` prints it: what scripts/kif-oracle.py compares across the engines.
 void dumpClosure(TheoryOp theory, raw_ostream &os);
+
+/// What kif-chase derived in `theory`, with its proofs, as one Lean theorem in lean4export's format (NDJSON, format 3.1.0)
+/// that uses no axiom: the theory's facts and rules (and the ontology's subclass edges its proofs use) are hypotheses of its
+/// statement, and each derived fact is a let of its proof (lib/Dialect/KifLean.cpp).  A derived fact whose rule has a
+/// (not ..) premise is an error: negation as failure is not a proof from the facts.
+LogicalResult exportLean(TheoryOp theory, raw_ostream &os);
 } // namespace mlir::kif
 
 #endif // NIXDIALECT_KIF_H
