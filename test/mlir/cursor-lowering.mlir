@@ -10,10 +10,10 @@
 // RUN: mlnix-opt %s --trikeshed-lower-cursors | mlir-opt --ownership-based-buffer-deallocation --canonicalize --buffer-deallocation-simplification --bufferization-lower-deallocations --convert-scf-to-cf --expand-strided-metadata --finalize-memref-to-llvm --convert-arith-to-llvm --convert-index-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts | mlir-runner -e main -entry-point-result=void -shared-libs=$(ls $(dirname $(which mlir-runner))/../lib/libmlir_runner_utils.* | head -1) | FileCheck %s
 
 // LOWERED-LABEL: func.func @query(
-// LOWERED-SAME: memref<?xi32>, %{{.*}}: memref<?xi32>, %{{.*}}: memref<?xi32>, %{{.*}}: memref<?xi32>
+// LOWERED-SAME: memref<?xi32, strided<[1], offset: ?>>, %{{.*}}: memref<?xi32, strided<[1], offset: ?>>, %{{.*}}: memref<?xi32, strided<[1], offset: ?>>, %{{.*}}: memref<?xi32, strided<[1], offset: ?>>
 // LOWERED-NOT: trikeshed.
 // LOWERED: scf.for
-// LOWERED: memref.reinterpret_cast
+// LOWERED: memref.subview
 
 // CHECK: [3]
 // CHECK: [2,  3,  4]

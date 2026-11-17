@@ -107,6 +107,18 @@ Steps:
    311 MB of flat merges (b58d02c chose flat for speed: layering every merge read 2.5-7% slower).  The layer here is only for the
    package set.  Fix the stale `Bindings::Layer` reference in TS_LayersType's description in the same change.
 5. confix's index as twin + series; its LLVM lowering moves below trikeshed.
+   - Built (branch confix-trikeshed): `confix.index` scans a `!trikeshed.series<i8>` into ConfixIndexK's rows as a
+     `!trikeshed.cursor<"ConfixIndex", [!trikeshed.twin<i32>, i8, !trikeshed.twinpacked<i32>]>` (Spans as (open, close), Tags,
+     DirectChildren as (first, count) into the kid series it also makes), and `confix.columns` is the Columns facet: over a
+     series of object rows, a cursor of one i32 column per member name, the value's row or -1.  Both lower in
+     trikeshed-lower-cursors' conversion, through CursorLoweringInterface (include/Composite/CursorLowering.h): the scanner's
+     arrays are series buffers and every read after the scan is a trikeshed op.  The scan itself is still confix.ll.
+   - trikeshed-lower-cursors also lowers what the facets are read with: slice (a view: a series is now
+     `memref<?xT, strided<[1], offset: ?>>`, the same descriptor, so a caller passing offset 0 sees no change), compare,
+     sorted (stable) and bisect with a comparator region, and j/first/second on a pair of two i32 (one i64, the first high).
+     test/mlir/confix-index.mlir checks every column, both facets, and a sort and a search of the text's strings against a
+     separate reader of the text.
+   - Not done: Depths, KeyToChild for a key known only at run time, YAML (its retry on Room), groupBy.
 6. kif and sumo as series and cursors.
    - KIF lowered out of the Nix reader (started): `mlnix-kif` reads KIF files into a `kif.theory` (lib/Dialect/KifImport.cpp,
      sumo-nix/kif.nix's tokens and forms; equal terms one node across all the files of a bag; `file` on each fact and rule).

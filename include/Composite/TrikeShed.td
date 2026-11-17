@@ -164,26 +164,32 @@ def TS_EitherType : TS_Type<"Either", "either"> {
 // Join: construction, the two halves, and the domain
 //===----------------------------------------------------------------------===//
 
+// Join.kt: `Twin<T> = Join<T, T>`, and TwinPacked is a Twin in one word, so all three are pairs that j makes and first and
+// second take apart.
+def TS_PairType : AnyTypeOf<[TS_JoinType, TS_TwinType, TS_TwinPackedType], "a Join, a Twin or a TwinPacked">;
+
 def TS_JOp : TS_Op<"j", [Pure]> {
   let summary = "`a j b`: the infix constructor";
   let arguments = (ins AnyType:$a, AnyType:$b);
-  let results = (outs TS_JoinType:$result);
+  let results = (outs TS_PairType:$result);
   let assemblyFormat = "$a `,` $b attr-dict `:` type($a) `,` type($b) `->` type($result)";
   let description = [{
-    Laws: first(a j b) = a; second(a j b) = b; first(p) j second(p) = p.  Series.h: `a |j| b`.
+    Laws: first(a j b) = a; second(a j b) = b; first(p) j second(p) = p.  Series.h: `a |j| b`.  A pair of two 32-bit
+    halves is one 64-bit word, the first half high (Pack.h's TwInt): `trikeshed-lower-cursors` lowers j, first and second
+    on such pairs to shifts.
   }];
 }
 
 def TS_FirstOp : TS_Op<"first", [Pure]> {
   let summary = "the `a` of a Join";
-  let arguments = (ins TS_JoinType:$join);
+  let arguments = (ins TS_PairType:$join);
   let results = (outs AnyType:$a);
   let assemblyFormat = "$join attr-dict `:` type($join) `->` type($a)";
 }
 
 def TS_SecondOp : TS_Op<"second", [Pure]> {
   let summary = "the `b` of a Join";
-  let arguments = (ins TS_JoinType:$join);
+  let arguments = (ins TS_PairType:$join);
   let results = (outs AnyType:$b);
   let assemblyFormat = "$join attr-dict `:` type($join) `->` type($b)";
 }
@@ -354,7 +360,8 @@ def TS_SliceOp : TS_Op<"slice", [Pure]> {
   let assemblyFormat = "$series `[` $offset `,` $count `]` attr-dict `:` type($series) `->` type($result)";
   let description = [{
     Join.kt's range get: `range.count() j { i -> this[range.first + i] }`.  `drop` and `take` are its cases.
-    Laws: size(xs[r]) = r.count; at(xs[r], i) = at(xs, r.first + i); xs[0, size(xs)] = xs.
+    Laws: size(xs[r]) = r.count; at(xs[r], i) = at(xs, r.first + i); xs[0, size(xs)] = xs.  Lowered, a slice is a view of
+    the same buffer at an offset, never a copy.
   }];
 }
 
@@ -394,11 +401,17 @@ def TS_BisectOp : TS_Op<"bisect", [Pure]> {
   let summary = "binary search over a series sorted by its key: K's contract";
   let arguments = (ins TS_SeriesType:$series, AnyType:$key);
   let results = (outs Index:$index);
-  let assemblyFormat = "$series `,` $key attr-dict `:` type($series) `,` type($key) `->` type($index)";
+  let regions = (region MaxSizedRegion<1>:$order);
+  let assemblyFormat = "$series `,` $key attr-dict `:` type($series) `,` type($key) `->` type($index) (`by` $order^)?";
   let description = [{
-    Series.kt's `binarySearch`: the index when the key is present, else the index of the first greater element
-    (`-(insertion) - 1`), the size when it is greater than all of them.  Series.h `lowerBound(xs, less)` is the same
-    search, and it is how an attribute set's sorted rows are looked up (`Bindings::get`).
+    Series.kt's `binarySearch(key, comparison)`: the index of an element equal to the key when there is one, else
+    `-(insertion) - 1`, where the insertion point is the index of the first greater element (the size when the key is
+    greater than all of them).  The series must be sorted by the same order.  Series.h `lowerBound(xs, less)` is the
+    same search, and it is how an attribute set's sorted rows are looked up (`Bindings::get`).
+
+    The order is the region, when there is one: `^bb0(%x: T, %key: K)` yields an i32, negative when the element sorts
+    before the key, zero when they are equal, positive after.  Without it the elements and the key are integers of one
+    type, compared signed (Kotlin's Int and Byte).
   }];
 }
 
@@ -433,8 +446,16 @@ def TS_SortedOp : TS_Op<"sorted", [Pure]> {
   let summary = "fill one buffer, sort it, drain it: an ordered series";
   let arguments = (ins TS_SeriesType:$series);
   let results = (outs TS_SeriesType:$result);
-  let assemblyFormat = "$series attr-dict `:` type($series) `->` type($result)";
-  let description = [{ Series.kt's `sortedWith`.  A sort is the one place a lazy series must be read to be ordered. }];
+  let regions = (region MaxSizedRegion<1>:$order);
+  let assemblyFormat = "$series attr-dict `:` type($series) `->` type($result) (`by` $order^)?";
+  let description = [{
+    Series.kt's `sortedWith`.  A sort is the one place a lazy series must be read to be ordered.  The sort is stable,
+    as Kotlin's is: equal elements keep their order.
+
+    The order is the region, when there is one: `^bb0(%a: T, %b: T)` yields an i32, negative when a sorts before b, zero
+    when they are equal, positive after (a Comparator).  Without it the elements are integers, compared signed.  A
+    series of row indices ordered by the text each row stands for is a region that compares two slices.
+  }];
 }
 
 def TS_ClusterOrderOp : TS_Op<"cluster_order"> {
@@ -471,7 +492,8 @@ def TS_CompareOp : TS_Op<"compare", [Pure]> {
   let assemblyFormat = "$a `,` $b attr-dict `:` type($a) `,` type($b)";
   let description = [{
     Join.kt's `CSeries<T : Comparable<T>>`: walk both to the shorter length and return the first non-zero comparison,
-    else compare the sizes.  `shortestLength` and `commonPrefixWith` are what that walk gives.
+    else compare the sizes.  `shortestLength` and `commonPrefixWith` are what that walk gives.  The elements are integers,
+    compared signed as Kotlin compares Int and Byte; the result is -1, 0 or 1.
   }];
 }
 
