@@ -1,0 +1,17 @@
+agrees with the dump: 500 asserted facts, 1500 derived facts
+N=500: 1445305 bytes
+nanoda_bin N=500             rc=  0     0.90 s     130 MB | Checked 1 declarations with no typechecker errors, 1 pretty printer errors: [
+con-leche N=500              rc=  0     0.59 s     111 MB | con-leche: accepted 1 declarations (--verified)
+con-ron N=500                rc=  0     0.71 s     187 MB | con-ron: accepted 1 declarations (--verified)
+agrees with the dump: 1000 asserted facts, 3000 derived fact
+N=1000: 2937760 bytes
+nanoda_bin N=1000            rc=  0     4.68 s     504 MB | Checked 1 declarations with no typechecker errors, 1 pretty printer errors: [
+con-leche N=1000             rc=  0     2.39 s     377 MB | con-leche: accepted 1 declarations (--verified)
+con-ron N=1000               rc=  0     2.53 s     613 MB | con-ron: accepted 1 declarations (--verified)
+agrees with the dump: 2000 asserted facts, 6000 derived fact
+N=2000: 5953065 bytes
+nanoda_bin N=2000            rc=  0    23.96 s    1996 MB | Checked 1 declarations with no typechecker errors, 1 pretty printer errors: [
+con-leche N=2000             rc=  0    10.01 s    1429 MB | con-leche: accepted 1 declarations (--verified)
+con-ron N=2000               rc=  0    11.13 s    2293 MB | con-ron: accepted 1 declarations (--verified)
+agrees with the dump: 4000 asserted facts, 12000 derived fac
+N=4000: 12187555 bytes

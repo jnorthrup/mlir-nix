@@ -1,0 +1,13 @@
+agrees with the dump: 1000 asserted facts, 3000 derived fact
+N=1000: 2027571 bytes
+nanoda_bin N=1000            rc=  0     0.85 s     131 MB | Checked 1 declarations with no typechecker errors, 1 pretty printer errors: [
+con-leche N=1000             rc=  0     0.57 s     116 MB | con-leche: accepted 1 declarations (--verified)
+con-ron N=1000               rc=  0     0.62 s     165 MB | con-ron: accepted 1 declarations (--verified)
+agrees with the dump: 4000 asserted facts, 12000 derived fac
+N=4000: 8375502 bytes
+nanoda_bin N=4000            rc=  0    22.60 s    2003 MB | Checked 1 declarations with no typechecker errors, 1 pretty printer errors: [
+con-leche N=4000             rc=  0    10.00 s    1520 MB | con-leche: accepted 1 declarations (--verified)
+con-ron N=4000               rc=  0    12.26 s    2041 MB | con-ron: accepted 1 declarations (--verified)
+agrees with the dump: 16000 asserted facts, 48000 derived fa
+N=16000: 34783814 bytes
+nanoda_bin N=16000           rc=  1     0.13 s      14 MB | Error: invalid value: integer `80010`, expected u16 at line 1 column 26

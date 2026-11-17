@@ -1,0 +1,52 @@
+== inputs
+b62a43635b08163b3  /home/jim/kif-assess/mlir-nix-cx/test/kif/paperclip-structural.kif
+f5d3d78f2ecea5472  /home/jim/kif-assess/sumo-nix/paperclip/world.kif
+52c47bf684d9a4774  /home/jim/kif-assess/sumo-nix/paperclip/analysis.kif
+19defcd mlnix-kif --lean: the lets are the claims and the conclusion is Done, as a body naming every let made the kernels superlinear; the statement control breaks the last let, which nothing uses
+ 05:15:58 up 1 day, 20:01,  0 users,  load average: 1.81, 0.77, 0.65
+== mlnix-kif --chase --lean, three runs (its --stats: the phases' times and peak RSS)
+rc=0 wall 0.115 s, max RSS 68 MB | read: 0.01 s, peak RSS 59 MB | chase: 1964 derived, 0.05 s, peak RSS 62 MB | lean: 0.04 s, peak RSS 68 MB
+rc=0 wall 0.118 s, max RSS 68 MB | read: 0.01 s, peak RSS 59 MB | chase: 1964 derived, 0.05 s, peak RSS 62 MB | lean: 0.04 s, peak RSS 68 MB
+rc=0 wall 0.118 s, max RSS 68 MB | read: 0.01 s, peak RSS 59 MB | chase: 1964 derived, 0.05 s, peak RSS 62 MB | lean: 0.04 s, peak RSS 68 MB
+== the certificate
+5053371 bytes
+103088
+5821052f06082bfc
+{'meta': 1, 'succ': 1, 'str': 3493, 'sort': 2, 'bvar': 10628, 'forallE': 8724, 'num': 7157, 'app': 62451, 'letE': 1964, 'lam': 8666, 'thm': 1}
+== the dump
+7147
+1964
+== decoded against the dump
+pc.ndjson: one theorem, no axiom, no constant; 8666 hypotheses (3467 atoms, 5183 facts, 10 rules, 0 ontology edges); 1964 lets
+agrees with the dump: 5183 asserted facts, 1964 derived facts, each by the dump's rule from the dump's premises
+rc=0 0.48 s
+== kernels, three runs each
+nanoda_bin certificate accepted   0.18 s     33 MB | Checked 1 declarations with no typechecker errors, 1 pretty printer errors: [
+con-leche  certificate accepted   0.33 s     60 MB | con-leche: accepted 1 declarations (--verified)
+con-ron    certificate accepted   0.42 s    101 MB | con-ron: accepted 1 declarations (--verified)
+nanoda_bin certificate accepted   0.17 s     33 MB | Checked 1 declarations with no typechecker errors, 1 pretty printer errors: [
+con-leche  certificate accepted   0.30 s     60 MB | con-leche: accepted 1 declarations (--verified)
+con-ron    certificate accepted   0.38 s    101 MB | con-ron: accepted 1 declarations (--verified)
+nanoda_bin certificate accepted   0.18 s     33 MB | Checked 1 declarations with no typechecker errors, 1 pretty printer errors: [
+con-leche  certificate accepted   0.33 s     60 MB | con-leche: accepted 1 declarations (--verified)
+con-ron    certificate accepted   0.41 s    101 MB | con-ron: accepted 1 declarations (--verified)
+== kernels on the controls
+control premise: (isa Clippy PaperclipOptimizer): premise 1 is a proof of (domain instance 1 Entity)
+control binding: (isa Clippy PaperclipOptimizer): its rule's first variable is bound to domain, not Clippy
+control statement: the proof of (inconsistent lot07), the last let, claims (isa Clippy PaperclipOptimizer)
+nanoda_bin certificate accepted   0.18 s     33 MB | Checked 1 declarations with no typechecker errors, 1 pretty printer errors: [
+con-leche  certificate accepted   0.39 s     60 MB | con-leche: accepted 1 declarations (--verified)
+con-ron    certificate accepted   0.41 s    101 MB | con-ron: accepted 1 declarations (--verified)
+nanoda_bin premise     rejected   0.08 s     14 MB | assertion failed: self.def_eq(u, v)
+con-leche  premise     rejected   0.13 s     30 MB | con-leche: invalid: application type mismatch [at theorem closure, fold position 8] (--verified) t=0.1s
+con-ron    premise     rejected   0.15 s     59 MB | con-ron: rejected: application type mismatch [at thm closure, fold position 8] (--verified) t=0.145s
+nanoda_bin binding     rejected   0.08 s     14 MB | assertion failed: self.def_eq(u, v)
+con-leche  binding     rejected   0.13 s     31 MB | con-leche: invalid: application type mismatch [at theorem closure, fold position 8] (--verified) t=0.1s
+con-ron    binding     rejected   0.16 s     59 MB | con-ron: rejected: application type mismatch [at thm closure, fold position 8] (--verified) t=0.147s
+nanoda_bin statement   rejected   0.18 s     33 MB | assertion failed: self.def_eq(u, v)
+con-leche  statement   rejected   0.25 s     50 MB | con-leche: invalid: let value type mismatch [at theorem closure, fold position 8] (--verified) t=0.2s
+con-ron    statement   rejected   0.31 s     83 MB | con-ron: rejected: let value type mismatch [at thm closure, fold position 8] (--verified) t=0.297s
+== con-leche, all threads
+con-leche: accepted 1 declarations (--verified)
+0.32 s
+ 05:16:25 up 1 day, 20:02,  0 users,  load average: 1.53, 0.79, 0.66

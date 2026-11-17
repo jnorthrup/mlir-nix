@@ -22,14 +22,15 @@
 // its rule applied to the bindings and to the proofs of the facts its premises matched (`from`: asserted facts, or lets before
 // it).  The lets are the claims: a kernel checks every let's value against its type, used or not, so the theorem type-checks
 // only if each derived fact follows from the hypotheses (a control that breaks the last let, which nothing uses, is rejected).
-// Two choices keep the kernels' time near linear (Kali, paperclip's stratum 1, 1,964 lets: nanoda_bin 0.18 s, con-leche
-// 0.33 s, con-ron 0.42 s):
+// Two choices keep the kernels' time near linear (Kali, paperclip's stratum 1, 1,964 lets: nanoda_bin 0.12-0.14 s, con-leche
+// 0.26-0.32 s, con-ron 0.32-0.34 s):
 //   - the conclusion is the trivial Done, not the derived facts' conjunction: with `pack d.1 .. d.n` the same certificate took
-//     1.3-1.9 s, and 6,000 lets 10-23 s;
+//     1.3-1.9 s, and 6,000 synthetic lets 10-23 s;
 //   - the lets go depth first from the facts derived last (localize), each near the lets it rests on: in the chase's order,
 //     12,000 lets of a chain p -> q -> r -> s took 10-23 s, depth first 0.2-0.4 s.
-// The certificate is one deep term: nanoda_bin reads a de Bruijn index as a u16, so hypotheses and lets together must stay
-// under 65,536, and con-leche did not finish 80,000 in 120 s.  A theory past that needs the certificate in pieces.
+// The certificate is one deep term, which bounds it: nanoda_bin reads a de Bruijn index as a u16 (hypotheses and lets together
+// under 65,536), and con-leche and con-ron did not finish 64,000 in 120 s, where nanoda_bin took 0.9 s.  A theory past that
+// needs the certificate in pieces.
 //
 // The bindings are not recorded in a kif.derived: they are found again by matching the rule's premises against `from` in
 // order, as the chase matched them.  A rule with a (not ..) premise is negation as failure, the closed world of a stratum,

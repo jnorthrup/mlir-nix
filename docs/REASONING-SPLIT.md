@@ -85,10 +85,44 @@ eight took 101 s over the kernel-term table, 0.8-18.5 s each.
 So the taxonomy stays a table, as sumo.nix and the TrikeShed query already compute it; Lean holds it as terms and proves
 things about it.
 
+## 4. The certificate path: `mlnix-kif --chase --lean`
+
+Built after the tests, as test 1 points: the MLIR layer writes kernel terms, and nothing elaborates.  `mlnix-kif --chase
+--lean OUT` (lib/Dialect/KifLean.cpp) writes what kif-chase derived as one theorem in lean4export's format that uses no axiom:
+the atoms, the asserted facts and the rules are hypotheses (`(equal a b)` adds Same and same; an `(instance X C)` premise read
+through the ontology adds Sub, sub_trans, inst_up and the subclass edges its proofs use), and each derived fact is a let of
+its proof, its rule applied to the bindings (found again by matching the premises against `from`) and to the proofs of its
+premises.  The lets are the claims: a kernel checks each let against its fact, whether anything uses it or not.  The Lean 4.36
+toolchain ships three kernels that read the format: nanoda_bin, and con-leche and con-ron, whose `--verified` mode carries a
+proof that what they accept proves no False (they refuse axioms, so the theory's facts are hypotheses, not axioms).
+`scripts/kif-lean-check.py` decodes the claims and compares them with the chase's dump; `scripts/kif-lean-kernels.py` runs
+the three kernels on a certificate and on three controls with one proof broken (bench/kali/lean-cert-20261117/).
+
+Paperclip's stratum 1 on Kali (the same 1,964 derived facts as test 1):
+
+| step | time | peak RSS |
+|---|---|---|
+| mlnix-kif: read, chase, write the certificate (5.05 MB, 8,666 hypotheses, 1,964 lets) | 0.11-0.12 s (the writing 0.04 s) | 68 MB |
+| kif-lean-check.py: the claims decoded, equal to the dump | 0.46 s | |
+| nanoda_bin | 0.12-0.14 s | 19 MB |
+| con-leche --verified, one thread | 0.26-0.32 s | 47 MB |
+| con-ron --verified, one thread | 0.32-0.34 s | 83 MB |
+
+against test 1's 16 s and 863 MB to elaborate the generated .lean.  Each kernel rejects each control: a premise's proof
+swapped for another fact's, a binding changed, and the last let (which nothing uses) claiming another fact.
+
+Two choices keep the kernels near linear, both measured: the conclusion is a trivial `Done`, since a body that names every
+let (`pack d.1 .. d.n`) took the same certificate 1.3-1.9 s; and the lets go depth first from the facts derived last, since in
+the chase's order a chain of 12,000 lets took 10-23 s, against 0.2-0.4 s depth first.  The limit is depth: the certificate is
+one term, nanoda_bin reads a de Bruijn index as a u16 (hypotheses and lets under 65,536), and con-leche and con-ron did not
+finish a 64,000-deep certificate in 120 s (nanoda_bin: 0.9 s).
+
 ## Not done
 
-- The certificate path: kif-chase records each derived fact's rule and premises; emit them as kernel terms (the export
-  format) rather than .lean text, and check them with leanchecker or nanoda.
+- The certificate in pieces, each with the hypotheses its proofs use, for theories past the depth limit (sumo.full alone has
+  201,007 forms).
+- Negation as failure (paperclip's second stratum): a `(not ..)` premise rests on the closed world of the stratum below, which
+  a certificate would have to state; `--lean` refuses such a fact.
 - Vampire as the search behind the kif and sumo dialects for what is not Horn, its proofs re-checked in Lean from the
   axioms they used.
 - SigmaKEE's translation, upstream: typed output that loads in Vampire 5.1.0, test assertions kept (typed tests write them
