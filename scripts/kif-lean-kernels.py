@@ -10,7 +10,7 @@ the one expected.  The checkers come from PATH (elan's toolchain bin: Lean 4.36 
 that takes longer is stopped (timeout(1)) and counts as no verdict, which is never the expected one.  EXPORT may hold the
 pieces --lean-piece writes: each kernel checks them all, one theorem after another.
 """
-import os, subprocess, sys, tempfile, time
+import os, shutil, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CHECK = os.path.join(HERE, "kif-lean-check.py")
@@ -65,7 +65,8 @@ def main(argv):
                 wrong += 1
                 verdict += " (WRONG)"
             cost = f" {secs:6.2f} s {mb:6.0f} MB" if times else ""
-            print(f"{name:10} {label:11} {verdict}{cost} | {last}")
+            print(f"{name:10} {label:11} {verdict}{cost} | {last}", flush=True)
+    shutil.rmtree(tmp, ignore_errors=True)
     return 1 if wrong else 0
 
 
