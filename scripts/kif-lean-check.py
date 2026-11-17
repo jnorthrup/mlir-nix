@@ -2,16 +2,16 @@
 """kif-lean-check.py EXPORT DUMP [--rules] [--mutate premise|binding|statement OUT] [--nanoda-config OUT]
 
 Reads the theorem `mlnix-kif --chase --lean EXPORT` wrote (lean4export's NDJSON; lib/Dialect/KifLean.cpp) and checks what it
-STATES against the chase's closure, DUMP (`mlnix-kif --chase --dump` on the same files): its fact hypotheses are exactly the
-asserted facts, its lets and its Pack exactly the derived facts, and each let applies the rule the dump names to proofs of
-the premises the dump lists, in order.  It also checks that the file declares nothing but that theorem: no axiom, and no
+CLAIMS against the chase's closure, DUMP (`mlnix-kif --chase --dump` on the same files): its fact hypotheses are exactly the
+asserted facts, its lets' types exactly the derived facts, and each let applies the rule the dump names to proofs of the
+premises the dump lists, in order.  It also checks that the file declares nothing but that theorem: no axiom, and no
 constant in any expression.  Whether the proofs are proofs is a Lean kernel's to check (nanoda_bin, con-leche, con-ron).
 
 --rules            print each rule hypothesis decoded back to KIF
 --mutate KIND OUT  write a copy with one proof broken, a control a kernel must reject:
                      premise    the first let that uses an asserted fact applies its rule to a proof of another fact
                      binding    the first let with a variable binds it to another term
-                     statement  the first let claims the next let's fact
+                     statement  the last let (which nothing uses) claims the first let's fact
 --nanoda-config OUT  write a nanoda_bin config for EXPORT that permits no axiom at all
 """
 import json, sys
@@ -104,7 +104,7 @@ class Theorem:
 
     FIXED = {("Term",): "Term", ("Holds",): "Holds", ("nil",): "nil", ("cons",): "cons", ("Same",): "Same",
              ("same",): "same", ("Sub",): "Sub", ("sub_trans",): "sub_trans", ("inst_up",): "inst_up",
-             ("Pack",): "Pack", ("pack",): "pack"}
+             ("Done",): "Done", ("done",): "done"}
 
     def decode(self):
         """The hypotheses, the lets and the conclusion, decoded."""
@@ -129,16 +129,9 @@ class Theorem:
             self.hyps.append(b)
             e = f["body"]
         cb = self.binder(e, stack)
-        if cb is None or cb["kind"] != "Pack":
-            raise SystemExit("the theorem does not conclude Pack")
+        if cb is None or cb["kind"] != "Done":
+            raise SystemExit("the theorem does not conclude Done")
         self.B = len(stack)
-        pack = next(b for b in stack if b["kind"] == "pack")
-        self.packed, t, inner = [], pack["type"], stack[: stack.index(pack)]
-        while self.kind(t) == "forallE":
-            f = self.exprs[t][1]
-            self.packed.append(show(self.holds(f["type"], inner)))
-            inner = inner + [{"kind": "hyp"}]
-            t = f["body"]
         # the proof: the same binders as lambdas, then the lets
         v = self.thm["value"]
         for b in self.hyps:
@@ -153,12 +146,9 @@ class Theorem:
             self.lets.append({"stmt": stmt, "node": v, "depth": len(lstack), **proof})
             lstack.append({"kind": "let", "stmt": stmt})
             v = f["body"]
-        head, args = self.spine(v)
-        hb = self.binder(head, lstack)
-        if hb is None or hb["kind"] != "pack":
-            raise SystemExit("the proof does not end in pack d.1 .. d.n")
-        if [show(self.binder(a, lstack)["stmt"]) for a in args] != [show(l["stmt"]) for l in self.lets]:
-            raise SystemExit("pack is not applied to the lets in order")
+        hb = self.binder(v, lstack)
+        if hb is None or hb["kind"] != "done":
+            raise SystemExit("the proof does not end in done")
         self.stack = stack
 
     def rule(self, t, stack):
@@ -219,8 +209,6 @@ def check(th, dump_path):
     lets = [show(l["stmt"]) for l in th.lets]
     if sorted(lets) != sorted(derived):
         errs.append(f"the lets ({len(lets)}) are not the dump's derived facts ({len(derived)}): {sorted(set(lets) ^ set(derived))[:5]}")
-    if th.packed != lets:
-        errs.append("Pack does not list the lets' facts in order")
     for l in th.lets:
         s = show(l["stmt"])
         if s in derived and (l["rule"], l["facts"]) != (derived[s][0], derived[s][1]):
@@ -289,10 +277,10 @@ def mutate(th, kind):
             other = next(a for a in atoms if a != l["terms"][0])
             f["value"] = respine(f["value"], 0, encode(other, l["depth"]))
             return f"{show(l['stmt'])}: its rule's first variable is bound to {other}, not {show(l['terms'][0])}"
-        elif kind == "statement" and li + 1 < len(th.lets):
-            claim = th.lets[li + 1]["stmt"]
+        elif kind == "statement" and li == len(th.lets) - 1:
+            claim = next(x["stmt"] for x in th.lets if x["stmt"] != l["stmt"])
             f["type"] = new("app", {"fn": bvar(l["depth"], holds_q), "arg": encode(claim, l["depth"])})
-            return f"the proof of {show(l['stmt'])} claims {show(claim)}"
+            return f"the proof of {show(l['stmt'])}, the last let, claims {show(claim)}"
     raise SystemExit(f"no let to break by {kind}")
 
 

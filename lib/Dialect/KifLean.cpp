@@ -15,12 +15,15 @@
 //                                       the (subclass C P) edges its proofs use
 //     (f.i : Holds fact)...             each asserted fact
 //     (r.k : ∀ vars, H p1 → .. → H pn → Holds consequent)...    each rule: H p is Holds p, or Same a b for (equal a b)
-//     (Pack : Prop) (pack : Holds d1 → .. → Holds dn → Pack),
-//   Pack
+//     (Done : Prop) (done : Done),
+//   Done
 //
-// that is, the facts and rules entail every derived fact (Pack and pack are their conjunction, Church-encoded).  The proof is
-// `fun .. => let d.1 : Holds d1 := r.k terms proofs; ..; pack d.1 .. d.n`: each derived fact a let, its rule applied to the
-// bindings and to the proofs of the facts its premises matched (`from`: asserted facts, or lets before it).
+// proved by `fun .. => let d.1 : Holds d1 := r.k terms proofs; ..; let d.n : Holds dn := ..; done`: each derived fact a let,
+// its rule applied to the bindings and to the proofs of the facts its premises matched (`from`: asserted facts, or lets before
+// it).  The lets are the claims: a kernel checks every let's value against its type, used or not, so the theorem type-checks
+// only if each derived fact follows from the hypotheses.  The conclusion is the trivial Done, not the derived facts' conjunction:
+// a body that names every let (pack d.1 .. d.n, or a tree of And) made nanoda_bin, con-leche and con-ron superlinear in the
+// lets (6,000 lets: 10-23 s, against 0.4 s for a body that names one), while the lets alone check in linear time.
 //
 // The bindings are not recorded in a kif.derived: they are found again by matching the rule's premises against `from` in
 // order, as the chase matched them.  A rule with a (not ..) premise is negation as failure, the closed world of a stratum,
@@ -491,7 +494,7 @@ struct Certificate {
 
   // a binder's place in the telescope (0: Term, outermost); a reference from depth d to place q is bvar(d - 1 - q)
   uint32_t qTerm = 0, qHolds = 1, qNil = 2, qCons = 3, qSame = kNone, qSameRefl = kNone, qSub = kNone, qSubTrans = kNone,
-           qInstUp = kNone, qPack = kNone, qPackIntro = kNone, nBinders = 0;
+           qInstUp = kNone, qDone = kNone, qDoneIntro = kNone, nBinders = 0;
   llvm::DenseMap<uint32_t, uint32_t> qAtom, qFact; // an atom's place; an asserted fact's
   SmallVector<uint32_t, 0> qEdge, qRule;          // the place of each used edge (usedEdges' order); of each rule
   SmallVector<uint32_t, 0> atomOrder;
@@ -527,7 +530,7 @@ struct Certificate {
     for (size_t i = 0; i < usedEdges.size(); i++) qEdge.push_back(q++);
     for (uint32_t f : asserted) qFact[f] = q++;
     for (Rule &r : rules) qRule.push_back(r.negation ? kNone : q++);
-    qPack = q++, qPackIntro = q++;
+    qDone = q++, qDoneIntro = q++;
     nBinders = q;
   }
 
@@ -592,13 +595,9 @@ struct Certificate {
       body = arrow(inst(q + 3, c), body);
       return w->pi(w->name("x"), termTy, w->pi(w->name("c"), termAt(q + 1), w->pi(w->name("d"), termAt(q + 2), body)));
     }
-    if (q == qPack) return prop;
-    assert(q == qPackIntro && "not a fixed binder");
-    // Holds d1 → .. → Holds dn → Pack
-    uint32_t n = uint32_t(proofs.size());
-    uint32_t body = ref(q + n, qPack);
-    for (uint32_t i = n; i-- > 0;) body = arrow(holds(proofs[i].fact, q + i), body);
-    return body;
+    if (q == qDone) return prop;
+    assert(q == qDoneIntro && "not a fixed binder");
+    return ref(q, qDone);
   }
 
   /// ∀ vars, H p1 → .. → H pn → Holds consequent, made at depth q.
@@ -689,14 +688,13 @@ struct Certificate {
       names[q] = w->numName("r", k + 1);
       types[q] = ruleType(r, q);
     }
-    fixed(qPack, "Pack"), fixed(qPackIntro, "pack");
+    fixed(qDone, "Done"), fixed(qDoneIntro, "done");
     uint32_t n = uint32_t(proofs.size());
-    // the statement: ∀ binders, Pack
-    uint32_t type = ref(nBinders, qPack);
+    // the statement: ∀ binders, Done
+    uint32_t type = ref(nBinders, qDone);
     for (uint32_t q = nBinders; q-- > 0;) type = w->pi(names[q], types[q], type);
-    // the proof: fun binders => let d.1 := ..; ..; pack d.1 .. d.n
-    uint32_t body = ref(nBinders + n, qPackIntro);
-    for (uint32_t i = 0; i < n; i++) body = w->app(body, ref(nBinders + n, nBinders + i));
+    // the proof: fun binders => let d.1 := ..; ..; let d.n := ..; done
+    uint32_t body = ref(nBinders + n, qDoneIntro);
     for (uint32_t i = n; i-- > 0;) {
       uint32_t depth = nBinders + i;
       body = w->let(w->numName("d", i), holds(proofs[i].fact, depth), proofValue(proofs[i], depth), body);

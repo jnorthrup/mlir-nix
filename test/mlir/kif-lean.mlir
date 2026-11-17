@@ -1,8 +1,8 @@
 // The chase's proofs as one Lean theorem: `mlnix-kif --chase --lean` (lib/Dialect/KifLean.cpp) writes lean4export's format,
 // which the Lean toolchain's kernels read without elaborating.  The theorem has no axiom: the asserted facts, the rules and
-// the ontology's subclass edges its proofs use are hypotheses, each derived fact a let of its proof, and its conclusion all of
-// them.  scripts/kif-lean-check.py decodes what it states and compares that with the chase's dump: the same asserted facts,
-// the same derived facts, each by the dump's rule from the dump's premises in order.
+// the ontology's subclass edges its proofs use are hypotheses, and each derived fact is a let of its proof, which a kernel
+// checks against the fact.  scripts/kif-lean-check.py decodes what it claims and compares that with the chase's dump: the
+// same asserted facts, the same derived facts, each by the dump's rule from the dump's premises in order.
 // RUN: d=%S/../kif; t=$(mktemp -d); mlnix-kif --chase --lean $t/c.ndjson --ontology $d/chase-onto.kif $d/certify-cases.kif && mlnix-kif --chase --dump --ontology $d/chase-onto.kif $d/certify-cases.kif > $t/c.dump && python3 %S/../../scripts/kif-lean-check.py $t/c.ndjson $t/c.dump --rules | FileCheck %s; s=$?; rm -rf $t; exit $s
 //
 // Negation as failure is the closed world of a stratum, not a proof from the facts: a fact derived by a (not ..) rule is an
@@ -32,7 +32,7 @@
 
 // KERNEL: control premise: (petOwner ann): premise 2 is a proof of
 // KERNEL: control binding: (animal rex): its rule's first variable is bound to
-// KERNEL: control statement: the proof of (animal rex) claims
+// KERNEL: control statement: the proof of {{.*}}, the last let, claims
 // KERNEL: nanoda_bin certificate accepted
 // KERNEL: con-leche  certificate accepted
 // KERNEL: con-ron    certificate accepted

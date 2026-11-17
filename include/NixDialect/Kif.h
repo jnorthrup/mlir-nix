@@ -48,8 +48,8 @@ void dumpClosure(TheoryOp theory, raw_ostream &os);
 
 /// What kif-chase derived in `theory`, with its proofs, as one Lean theorem in lean4export's format (NDJSON, format 3.1.0)
 /// that uses no axiom: the theory's facts and rules (and the ontology's subclass edges its proofs use) are hypotheses of its
-/// statement, and each derived fact is a let of its proof (lib/Dialect/KifLean.cpp).  A derived fact whose rule has a
-/// (not ..) premise is an error: negation as failure is not a proof from the facts.
+/// statement, and each derived fact is a let of its proof, which a kernel checks against the fact (lib/Dialect/KifLean.cpp).
+/// A derived fact whose rule has a (not ..) premise is an error: negation as failure is not a proof from the facts.
 LogicalResult exportLean(TheoryOp theory, raw_ostream &os);
 } // namespace mlir::kif
 
