@@ -6,9 +6,12 @@ admits through, the jobs and resources it owns, and its drain. It is TrikeShed's
 it runs and lowered to the two places lifetimes live here: inside a process (a ring, its workers, its buffers) and
 outside one (a service, its runtime directory, its mounts).
 
-What is built: the types and ops (`include/NixDialect/Life.td`), registered with the family in `mlnix-opt`, parsed,
-printed, and checked by op verifiers for the laws one op and its block can decide (`lib/Dialect/LifeDialect.cpp`).
-`test/mlir/life.mlir` is mini-luci's server in the dialect; `test/mlir/inputs/life-laws.mlir` breaks each local law once.
+What is built: the types and ops (`include/NixDialect/Life.td`), registered in `mlnix-opt`, parsed, printed, and checked
+by op verifiers for the laws one op and its block can decide (`lib/Dialect/LifeDialect.cpp`, its own library `MLIRLife`).
+The evaluator does not register it and does not link it: `mlnix` never meets a life op. Registered with the family in the
+evaluator, it cost `mlnix` 1,311 symbols and 180 KB of code it never runs (+263 KB stripped, +1.2%), with no measurable time
+(startup 8.6 ms median both ways, NixOS toplevel within 0.5%). `test/mlir/life.mlir` is mini-luci's server in the dialect;
+`test/mlir/inputs/life-laws.mlir` breaks each local law once.
 What is not built: `life-verify` (the laws over a whole function), the two lowerings, and their runtime. Nothing emits
 or reads these ops yet.
 

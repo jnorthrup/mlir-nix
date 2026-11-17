@@ -1,7 +1,8 @@
 //===- Life.h - Lifetimes: elements, admission, owned effects, drain --------===//
 //
 // Generated from NixDialect/Life.td; the op verifiers (the local laws) are in lib/Dialect/LifeDialect.cpp, the design
-// and the rest of the laws in docs/LIFE.md.  registerNixDialects (NixDialect.h) registers it with the family.
+// and the rest of the laws in docs/LIFE.md.  mlnix-opt registers it; the evaluator does not (registerNixDialects leaves it
+// out), so mlnix carries none of it.
 //
 //===----------------------------------------------------------------------===//
 #ifndef NIXDIALECT_LIFE_H
