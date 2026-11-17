@@ -9,6 +9,7 @@
 #ifndef COMPOSITE_TRIKESHED_H
 #define COMPOSITE_TRIKESHED_H
 
+#include "mlir/Bytecode/BytecodeOpInterface.h" // the generated properties of ops with attributes (trikeshed.key)
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/OpImplementation.h"
