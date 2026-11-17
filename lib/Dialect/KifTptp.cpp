@@ -16,8 +16,16 @@
 //                relatedExternalConcept, relatedInternalConcept, formerName, abbreviation, conventionalShortName,
 //                conventionalLongName) or that is a test's note, category, time or answer; a higher-order form
 //                (Formula.isHigherOrderExpr: a predicate with an argument of type Formula, or with a compound argument that
-//                is no function term); and, for now, one with a variable in predicate position or a row variable (@ROW),
-//                which SigmaKEE instantiates and expands.  Each is a comment with the reason.
+//                is no function term); one with two predicate variables but the two SigmaKEE instantiates pair by pair
+//                (PredVarInst.handleDoubles); one whose predicate variable has no instance.  Each is a comment with the
+//                reason.
+//   predicate    PredVarInst's: a variable in predicate position is each relation in turn (predicates, or functions where
+//   variables    the variable's types include Function) that has the arity of its literals (any, with a row variable) and
+//                is an instance of each of its types (from its argument places, and a rule's (instance ?REL C)); not
+//                equal, a comparison, an arithmetic function or a relation SigmaKEE made (a name with __).
+//   row          RowVar.expandRowVarExpr: @ROW becomes ?ROW1 .. ?ROWn, n the arity its relations leave it, or each of 1..7
+//   variables    where one is of variable arity (and the relation becomes R__k); two arities that disagree, or numeric
+//                and non-numeric types at one place, leave it as it is.
 //   preprocess   a variable-arity relation takes its arity as a suffix (partition__3, ListFn__3Fn); then a variable gets
 //                the types its argument places give (the signature of the relation or function it is an argument of, a
 //                function's range when it is equal to the function's value), the supertypes dropped where two places
@@ -41,8 +49,10 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <algorithm>
 #include <deque>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -102,9 +112,12 @@ private:
   std::set<std::string> transRels;
   std::set<std::pair<std::string, std::string>> domainClass; // (domain R _ C): R, C
   std::map<std::string, std::set<std::string>> supersMemo;
-  std::set<std::string> relations, functions;
+  std::set<std::string> relations, functions, predicates;
   std::map<std::string, std::vector<std::string>> sigs;
   std::map<std::string, int> valences;
+  bool cacheBuilt = false;
+  std::map<std::string, std::set<std::string>> instMemo;
+  std::set<std::string> doublesWritten; // the double-predicate-variable axioms whose instances are written
 
   const Node *mk(Node::Kind k, std::string name, std::vector<const Node *> kids = {}) {
     pool.push_back(Node{k, std::move(name), std::move(kids)});
@@ -119,8 +132,12 @@ private:
   const std::set<std::string> &reach(const std::string &rel, const std::string &a);
   bool instTransRel(const std::string &rel);
   std::set<std::string> instanceOf(const std::string &i);
+  bool isInstanceOf(const std::string &i, const std::string &c) { return instanceOf(i).count(c); }
   bool isSubclass(const std::string &c, const std::string &p) { return c == p || supers(c).count(p); }
   bool isFunction(const std::string &f) { return functions.count(f); }
+  int valence(const std::string &rel);
+  void copyNewPred(const std::string &renamed, const std::string &old, int arity);
+  std::set<std::string> subrelationsBelow(const std::string &r);
   std::string findType(int arg, const std::string &pred);
   std::string getRange(const std::string &f);
 
@@ -136,6 +153,16 @@ private:
   static bool hasPredVar(const Node *e);
   static bool hasRowVar(const Node *e);
   const Node *renameVariableArity(const Node *e);
+  bool simpleClause(const Node *e, size_t start);
+  void gatherPredVars(const Node *e, size_t start, std::set<std::string> &vars, std::map<std::string, int> &arity);
+  TypeMap allTypeRestrictions(const Node *e);
+  const Node *substitute(const Node *e, const std::string &var, const Node *by);
+  std::optional<std::vector<const Node *>> instantiatePredVars(const Node *f, const std::string &key);
+  std::vector<const Node *> handleDouble(bool disjoint);
+  void rowStructs(const Node *e, bool varList, std::map<std::string, std::vector<std::pair<std::string, int>>> &out);
+  std::map<std::string, int> findArities(const Node *f);
+  const Node *splice(const Node *e, const std::string &row, const std::vector<const Node *> &vars, bool varList);
+  std::vector<const Node *> expandRowVars(const Node *f);
   void merge(TypeMap &into, const TypeMap &from);
   TypeMap variableTypes(const Node *e);
   void explicitTypes(const Node *e, bool negative, TypeMap &types, TypeMap &classes);
@@ -237,8 +264,6 @@ void Tptp::buildCache(llvm::ArrayRef<const Node *> forms) {
     }
     rels.swap(next);
   }
-  for (const std::string &r : relations)
-    if (instanceOf(r).count("Function")) functions.insert(r);
   // KBcache.collectDomains
   for (const std::string &rel : relations) {
     std::vector<std::string> a(21);
@@ -284,6 +309,10 @@ void Tptp::buildCache(llvm::ArrayRef<const Node *> forms) {
       }
     }
   }
+  // KBcache.buildTransInstOf, correctValences, buildFunctionsSet: once the signatures are known
+  for (const std::string &r : relations)
+    (isInstanceOf(r, "Function") ? functions : predicates).insert(r);
+  cacheBuilt = true;
 }
 
 const std::set<std::string> &Tptp::supers(const std::string &c) {
@@ -323,6 +352,8 @@ bool Tptp::instTransRel(const std::string &rel) { // KBcache.buildInstTransRels:
 }
 
 std::set<std::string> Tptp::instanceOf(const std::string &i) { // KBcache.buildTransInstOf
+  if (cacheBuilt)
+    if (auto it = instMemo.find(i); it != instMemo.end()) return it->second;
   std::set<std::string> out;
   auto add = [&](const std::string &c) {
     out.insert(c);
@@ -337,6 +368,41 @@ std::set<std::string> Tptp::instanceOf(const std::string &i) { // KBcache.buildT
         for (const std::string &p : reach(rel, i))
           if (auto it = instanceClasses.find(p); it != instanceClasses.end())
             for (const std::string &c : it->second) add(c);
+  if (cacheBuilt) instMemo[i] = out;
+  return out;
+}
+
+int Tptp::valence(const std::string &rel) { // KBcache.getArity after correctValences: -1 for a variable arity
+  if (isInstanceOf(rel, "VariableArityRelation")) return -1;
+  auto it = valences.find(rel);
+  return it == valences.end() ? 0 : it->second;
+}
+
+void Tptp::copyNewPred(const std::string &renamed, const std::string &old, int arity) { // copyNewPredFromVariableArity
+  if (sigs.count(renamed)) return;
+  auto it = sigs.find(old);
+  std::vector<std::string> sig;
+  std::string last = "Entity";
+  if (it == sigs.end() || it->second.empty()) {
+    sig.push_back(isFunction(old) ? "Entity" : "");
+  } else {
+    sig = it->second;
+    last = sig.back().empty() ? "Entity" : sig.back();
+  }
+  while (int(sig.size()) <= arity) sig.push_back(last);
+  sigs[renamed] = sig;
+  valences[renamed] = arity;
+  (isFunction(old) ? functions : predicates).insert(renamed);
+  instanceClasses[renamed] = instanceClasses[old];
+  instMemo.erase(renamed);
+}
+
+std::set<std::string> Tptp::subrelationsBelow(const std::string &r) { // KBcache.getChildRelations: transitive
+  std::set<std::string> out;
+  for (auto &[c, ps] : subrelationParents) {
+    (void)ps;
+    if (c != r && reach("subrelation", c).count(r)) out.insert(c);
+  }
   return out;
 }
 
@@ -388,6 +454,258 @@ bool Tptp::hasRowVar(const Node *e) {
   return e->kind == Node::List && llvm::any_of(e->kids, hasRowVar);
 }
 
+// ---- predicate variables (com.articulate.sigma.PredVarInst) ---------------------------------------------------------
+
+bool Tptp::simpleClause(const Node *e, size_t start) { // Formula.isSimpleClause of the list e->kids[start..]
+  if (e->kind != Node::List || start >= e->kids.size() || e->kids[start]->kind == Node::List) return false;
+  for (size_t i = start + 1; i < e->kids.size(); i++) {
+    const Node *a = e->kids[i];
+    if (a->kind != Node::List) continue;
+    llvm::StringRef h = head(a);
+    if (h.empty() || !isFunction(h.str())) return false;
+  }
+  return true;
+}
+
+// PredVarInst.gatherPredVarRecurse: car and cdr, as SigmaKEE walks the formula's text
+void Tptp::gatherPredVars(const Node *e, size_t start, std::set<std::string> &vars, std::map<std::string, int> &arity) {
+  if (e->kind != Node::List || start >= e->kids.size()) return;
+  if (simpleClause(e, start)) {
+    const Node *h = e->kids[start];
+    if (h->kind == Node::Var && e->kids.size() - start > 1) {
+      vars.insert(h->name);
+      bool row = std::any_of(e->kids.begin() + start + 1, e->kids.end(), [](const Node *k) { return k->kind == Node::Row; });
+      arity[h->name] = row ? 0 : int(e->kids.size() - start - 1); // 0: any arity
+    }
+    return;
+  }
+  const Node *car = e->kids[start];
+  if (car->kind == Node::Atom && isQuantifier(car->name)) return gatherPredVars(e, start + 2, vars, arity); // cddr
+  gatherPredVars(car, 0, vars, arity);
+  gatherPredVars(e, start + 1, vars, arity);
+}
+
+TypeMap Tptp::allTypeRestrictions(const Node *e) { // FormulaPreprocessor.findAllTypeRestrictions
+  TypeMap out = variableTypes(e);
+  const Node *ante = e;
+  llvm::StringRef h = head(e);
+  if ((h == "=>" || h == "<=>") && nargs(e) >= 2) ante = arg(e, 0);
+  TypeMap types, classes;
+  explicitTypes(ante, false, types, classes);
+  for (auto &[v, ts] : types) out[v].insert(ts.begin(), ts.end());
+  return out;
+}
+
+const Node *Tptp::substitute(const Node *e, const std::string &var, const Node *by) { // parsing.PredVarInst.substituteVar
+  if (e->kind == Node::Var) return e->name == var ? by : e;
+  if (e->kind != Node::List) return e;
+  std::vector<const Node *> kids;
+  bool changed = false;
+  for (const Node *k : e->kids) {
+    kids.push_back(substitute(k, var, by));
+    changed |= kids.back() != k;
+  }
+  return changed ? list(std::move(kids)) : e;
+}
+
+static const char *doubleAxiom = // PredVarInst.DOUBLE_PREDICATE_AXIOM
+    "(=> (and (instance ?REL1 Predicate) (instance ?REL2 Predicate) (disjointRelation ?REL1 ?REL2) (?REL1 @ROW2)) "
+    "(not (?REL2 @ROW2)))";
+static const char *subrelationAxiom = // PredVarInst.handleDouble2's
+    "(=> (and (subrelation ?REL1 ?REL2) (instance ?REL1 Predicate) (instance ?REL2 Predicate) (?REL1 @ROW)) (?REL2 @ROW))";
+
+// PredVarInst.handleDouble1 (disjoint) and handleDouble2: the two axioms with two predicate variables SigmaKEE
+// instantiates, pair by pair of relations of one arity.  (SigmaKEE writes both sets under whichever double axiom a
+// thread meets first; here each set is written under its own axiom.)
+std::vector<const Node *> Tptp::handleDouble(bool disjoint) {
+  std::set<std::pair<std::string, std::string>> pairs;
+  if (disjoint) { // KBcache.buildDisjointRelationsMap
+    for (auto &[a, bs] : binary["disjointRelation"])
+      for (const std::string &b : bs) {
+        std::set<std::string> c1 = subrelationsBelow(a), c2 = subrelationsBelow(b);
+        c1.insert(a), c2.insert(b);
+        for (const std::string &x : c1)
+          for (const std::string &y : c2)
+            if (x != y) pairs.insert({x, y});
+      }
+  } else {
+    for (const std::string &r1 : relations) {
+      if (isFunction(r1)) continue;
+      for (const std::string &r2 : subrelationsBelow(r1)) pairs.insert({r2, r1});
+    }
+  }
+  std::vector<const Node *> out;
+  for (auto &[x, y] : pairs) {
+    int ax = valence(x), ay = valence(y);
+    if (ax != ay) continue;
+    std::vector<const Node *> vars;
+    for (int i = 1; i <= ax; i++) vars.push_back(mk(Node::Var, "?ROW" + std::to_string(i)));
+    std::vector<const Node *> l{atom(x)}, r{atom(y)};
+    l.insert(l.end(), vars.begin(), vars.end());
+    r.insert(r.end(), vars.begin(), vars.end());
+    const Node *rhs = list(std::move(r));
+    if (disjoint) rhs = list({atom("not"), rhs});
+    out.push_back(list({atom("=>"), list(std::move(l)), rhs}));
+  }
+  return out;
+}
+
+// PredVarInst.instantiatePredVars: each relation of the variable's arity that is an instance of each of its types, in
+// its place.  nullopt: dropped (more than one predicate variable); empty: no instance.
+std::optional<std::vector<const Node *>> Tptp::instantiatePredVars(const Node *f, const std::string &key) {
+  std::set<std::string> vars;
+  std::map<std::string, int> arity;
+  gatherPredVars(f, 0, vars, arity);
+  if (vars.size() > 1) {
+    if (key == doubleAxiom) return handleDouble(true);
+    if (key == subrelationAxiom) return handleDouble(false);
+    return std::nullopt;
+  }
+  TypeMap all = allTypeRestrictions(f), varTypes;
+  for (const std::string &v : vars)
+    if (auto it = all.find(v); it != all.end()) varTypes[v] = it->second;
+  // addExplicitTypes: a rule's antecedent's (instance ?V C) and (subclass ?V C), the latter replacing the former
+  llvm::StringRef h = head(f);
+  const Node *rule = f;
+  while (isQuantifier(head(rule)) && nargs(rule) == 2 && arg(rule, 1)->kind == Node::List) rule = arg(rule, 1);
+  llvm::StringRef rh = head(rule);
+  if ((rh == "=>" || rh == "<=>") && nargs(f) >= 1) {
+    TypeMap types, classes;
+    explicitTypes(arg(f, 0), false, types, classes);
+    for (auto &[v, c] : classes) types[v] = c;
+    if (!types.empty()) {
+      TypeMap result;
+      for (auto &[v, ts] : types)
+        if (auto it = varTypes.find(v); it != varTypes.end()) {
+          std::set<std::string> hs = it->second;
+          hs.insert(ts.begin(), ts.end());
+          result[v] = hs;
+        }
+      varTypes = result;
+    }
+  }
+  (void)h;
+  static const std::set<std::string> skip{"equal", "greaterThan", "greaterThanOrEqualTo", "lessThan", "lessThanOrEqualTo",
+                                          "AdditionFn", "SubtractionFn", "MultiplicationFn", "DivisionFn", "FloorFn",
+                                          "RoundFn", "CeilingFn", "RemainderFn"};
+  std::vector<const Node *> out;
+  for (auto &[v, ts] : varTypes) {
+    int a = arity.count(v) ? arity[v] : 0;
+    std::set<std::string> rels = ts.count("Function") ? functions : predicates;
+    for (const std::string &rel : rels) {
+      if (skip.count(rel) || isLogOp(rel) || rel.find("__") != std::string::npos) continue;
+      if (valence(rel) != a && a != 0) continue;
+      if (llvm::all_of(ts, [&](const std::string &t) { return isInstanceOf(rel, t); }))
+        out.push_back(substitute(f, v, atom(rel)));
+    }
+  }
+  return out;
+}
+
+// ---- row variables (parsing.RowVar.expandRowVarExpr) ----------------------------------------------------------------
+
+// Formula.initCachesFromExpr's RowStructs: for each row variable, the relation of each literal it is an argument of and
+// the literal's number of arguments.  A quantifier's variable list has no head, so none.
+void Tptp::rowStructs(const Node *e, bool varList, std::map<std::string, std::vector<std::pair<std::string, int>>> &out) {
+  if (e->kind != Node::List || varList) return;
+  llvm::StringRef h = head(e);
+  for (size_t i = 0; i < nargs(e); i++)
+    if (arg(e, i)->kind == Node::Row && !h.empty()) out[arg(e, i)->name].push_back({h.str(), int(nargs(e))});
+  bool q = isQuantifier(h) && nargs(e) == 2;
+  for (size_t i = 0; i < nargs(e); i++) rowStructs(arg(e, i), q && i == 0, out);
+}
+
+std::map<std::string, int> Tptp::findArities(const Node *f) { // RowVar.findArities: -1 variable, 0 a conflict
+  std::map<std::string, std::vector<std::pair<std::string, int>>> rs;
+  rowStructs(f, false, rs);
+  std::map<std::string, int> arities;
+  for (auto &[rv, structs] : rs) {
+    std::vector<std::pair<std::string, int>> sorted = structs;
+    std::stable_sort(sorted.begin(), sorted.end(), [](auto &a, auto &b) { return a.first < b.first; });
+    for (auto &[pred, n] : sorted) {
+      if (llvm::StringRef(pred).starts_with("?")) continue; // a variable predicate
+      int predArity = valence(pred);
+      int rva = predArity;
+      if (n > 1) rva -= n - 1;
+      if (predArity == -1) rva = -1;
+      auto it = arities.find(rv);
+      if (it == arities.end() || predArity != -1) {
+        if (it != arities.end() && it->second > 0 && rva > 0 && it->second != rva) arities[rv] = 0;
+        else if (it == arities.end() || it->second != 0) arities[rv] = rva;
+      }
+    }
+  }
+  for (auto &[rv, a] : arities) { // a numeric and a non-numeric type at one position: a conflict
+    if (a <= 0) continue;
+    std::map<int, std::set<std::string>> posTypes;
+    for (auto &[pred, n] : rs[rv]) {
+      auto sit = sigs.find(pred);
+      if (sit == sigs.end()) continue;
+      int pArity = valence(pred);
+      if (pArity <= 0) continue;
+      for (int abs = n; abs <= pArity; abs++)
+        if (abs < int(sit->second.size()) && !sit->second[abs].empty()) posTypes[abs - (n - 1)].insert(sit->second[abs]);
+    }
+    for (auto &[pos, ts] : posTypes) {
+      (void)pos;
+      bool num = false, non = false;
+      for (const std::string &t : ts) (isSubclass(t, "RealNumber") ? num : non) = true;
+      if (num && non) {
+        a = 0;
+        break;
+      }
+    }
+  }
+  return arities;
+}
+
+const Node *Tptp::splice(const Node *e, const std::string &row, const std::vector<const Node *> &vars, bool varList) {
+  if (e->kind != Node::List) return e;
+  std::vector<const Node *> kids;
+  size_t first = varList ? 0 : 1; // a variable list has no head
+  if (!varList && !e->kids.empty()) kids.push_back(e->kids[0]);
+  bool q = !varList && isQuantifier(head(e)) && nargs(e) == 2, spliced = false;
+  for (size_t i = first; i < e->kids.size(); i++) {
+    const Node *a = e->kids[i];
+    if (a->kind == Node::Row && a->name == row) {
+      kids.insert(kids.end(), vars.begin(), vars.end());
+      spliced = true;
+    } else {
+      kids.push_back(splice(a, row, vars, q && i == 1));
+    }
+  }
+  if (spliced && !varList && !kids.empty() && kids[0]->kind == Node::Atom && valence(kids[0]->name) == -1) {
+    const std::string &pred = kids[0]->name;
+    int total = int(kids.size()) - 1;
+    std::string renamed = pred + "__" + std::to_string(total) + (llvm::StringRef(pred).ends_with("Fn") ? "Fn" : "");
+    copyNewPred(renamed, pred, total);
+    kids[0] = atom(renamed);
+  }
+  return list(std::move(kids));
+}
+
+std::vector<const Node *> Tptp::expandRowVars(const Node *f) { // empty: f as it is
+  std::vector<const Node *> working{f};
+  for (auto &[rv, a] : findArities(f)) {
+    if (a == 0) return {};
+    std::string base = rv.substr(1);
+    auto vars = [&](int n) {
+      std::vector<const Node *> v;
+      for (int i = 1; i <= n; i++) v.push_back(mk(Node::Var, "?" + base + std::to_string(i)));
+      return v;
+    };
+    std::vector<const Node *> next;
+    for (int n = a == -1 ? 1 : a; n <= (a == -1 ? 7 : a); n++) {
+      std::vector<const Node *> vs = vars(n);
+      for (const Node *e : working) next.push_back(splice(e, rv, vs, false));
+    }
+    if (a < -1) // a literal with more arguments than its relation: the row variable goes
+      for (const Node *e : working) next.push_back(splice(e, rv, {}, false));
+    working = next;
+  }
+  return working;
+}
+
 const Node *Tptp::renameVariableArity(const Node *e) { // FormulaPreprocessor.renameVariableArityInExpr
   if (e->kind != Node::List) return e;
   std::vector<const Node *> kids;
@@ -400,22 +718,7 @@ const Node *Tptp::renameVariableArity(const Node *e) { // FormulaPreprocessor.re
       std::string suffix = "__" + std::to_string(arity) + (io.count("Function") ? "Fn" : "");
       if (!llvm::StringRef(h->name).ends_with(suffix)) {
         std::string renamed = h->name + suffix;
-        if (!sigs.count(renamed)) { // KBcache.copyNewPredFromVariableArity
-          auto old = sigs.find(h->name);
-          std::vector<std::string> sig;
-          std::string last = "Entity";
-          if (old == sigs.end() || old->second.empty()) {
-            sig.push_back(isFunction(h->name) ? "Entity" : "");
-          } else {
-            sig = old->second;
-            last = sig.back().empty() ? "Entity" : sig.back();
-          }
-          while (int(sig.size()) <= arity) sig.push_back(last);
-          sigs[renamed] = sig;
-          valences[renamed] = arity;
-          if (isFunction(h->name)) functions.insert(renamed);
-          instanceClasses[renamed] = instanceClasses[h->name];
-        }
+        copyNewPred(renamed, h->name, arity);
         kids[0] = atom(renamed);
       }
     }
@@ -716,15 +1019,20 @@ LogicalResult Tptp::write(raw_ostream &os) {
   os << "% the theory " << theory.getSymName() << " as TPTP FOF, as SigmaKEE translates it (mlnix-kif --tptp)\n";
   unsigned n = 0, queries = 0;
   std::map<std::string, unsigned> skipped;
+  // FormulaPreprocessor.preProcessExpr: the predicate variables instantiated, then the row variables expanded, then
+  // each variable-arity relation renamed and the variables' types made guards
+  auto axiom = [&](const Node *f) {
+    const Node *renamed = renameVariableArity(f);
+    const Node *typed = restrict(renamed, typeRestrictions(renamed));
+    os << "fof(kb_" << ++n << ",axiom,(" << translate(typed, false) << ")).\n";
+  };
   auto emit = [&](const std::string &key, const Node *f, bool query) {
     os << "% f: " << key << "\n";
     if (query) {
       os << "fof(query_" << queries++ << ",conjecture,(" << translate(renameVariableArity(f), true) << ")).\n";
       return;
     }
-    const Node *renamed = renameVariableArity(f);
-    const Node *typed = restrict(renamed, typeRestrictions(renamed));
-    os << "fof(kb_" << ++n << ",axiom,(" << translate(typed, false) << ")).\n";
+    axiom(f);
   };
   for (const Node *f : forms) {
     std::string key;
@@ -736,8 +1044,14 @@ LogicalResult Tptp::write(raw_ostream &os) {
     const Node *g = query ? arg(f, 0) : f; // a query asks its formula
     if (excluded.count(h.str())) why = "excluded";
     else if (higherOrder(g)) why = "higher order";
-    else if (hasPredVar(g)) why = "a predicate variable";
-    else if (hasRowVar(g)) why = "a row variable";
+    else if (query && (hasPredVar(g) || hasRowVar(g))) why = "a query with a predicate or row variable";
+    std::vector<const Node *> stage{f};
+    if (why.empty() && !query && hasPredVar(f)) {
+      std::optional<std::vector<const Node *>> inst = instantiatePredVars(f, key);
+      if (!inst) why = "more than one predicate variable";
+      else if (inst->empty()) why = "no instance of its predicate variable";
+      else stage = *inst;
+    }
     if (query && why.empty()) {
       emit(key, g, true);
       continue;
@@ -747,8 +1061,24 @@ LogicalResult Tptp::write(raw_ostream &os) {
       skipped[why]++;
       continue;
     }
-    emit(key, f, false);
+    std::map<std::string, const Node *> expanded; // by text, as SigmaKEE's TreeSet by toKifString
+    for (const Node *x : stage) {
+      std::vector<const Node *> e;
+      if (hasRowVar(x)) e = expandRowVars(x);
+      if (e.empty()) e.push_back(x);
+      for (const Node *y : e) {
+        std::string t;
+        print(y, t);
+        expanded.emplace(t, y);
+      }
+    }
+    os << "% f: " << key << "\n";
+    for (auto &[t, y] : expanded) {
+      (void)t;
+      axiom(y);
+    }
   }
+
   // SUMO_Cache.kif: each transitive relation's closure, less what is asserted
   for (const std::string &rel : transRels) {
     if (excluded.count(rel)) continue;

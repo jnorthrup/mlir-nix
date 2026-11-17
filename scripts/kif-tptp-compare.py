@@ -15,6 +15,14 @@ import collections, re, sys
 
 FOF = re.compile(r"^(?:fof|tff)\(([^,]+),(\w+),(.*)\)\.\s*$")
 
+# The two axioms with two predicate variables SigmaKEE instantiates (PredVarInst.handleDoubles): it writes both sets of
+# instances under whichever of them a thread meets first, mlnix-kif each under its own; compared as one.
+DOUBLES = ("(=> (and (instance ?REL1 Predicate) (instance ?REL2 Predicate) (disjointRelation ?REL1 ?REL2) (?REL1 @ROW2)) "
+           "(not (?REL2 @ROW2)))",
+           "(=> (and (subrelation ?REL1 ?REL2) (instance ?REL1 Predicate) (instance ?REL2 Predicate) (?REL1 @ROW)) "
+           "(?REL2 @ROW))")
+DOUBLES_KEY = "(the two double predicate variable axioms)"
+
 
 def blocks(path):
     """{key: [formula texts]}, {key: source}, {key: why not written}"""
@@ -24,6 +32,8 @@ def blocks(path):
         line = line.rstrip("\n")
         if line.startswith("% f: "):
             key = line[5:].strip()
+            if key in DOUBLES:
+                key = DOUBLES_KEY
             forms.setdefault(key, [])
         elif key is not None and line.startswith("% ") and " from file " in line:
             source[key] = "cache" if "SUMO_Cache" in line else "kb"
@@ -50,7 +60,7 @@ def tokens(s):
             if s[i:].strip() == "":
                 break
             raise SyntaxError(s[i:i + 30])
-        out.append(m.group(m.lastgroup))
+        out.append(m.group(m.lastgroup or 0))
         i = m.end()
     return out
 
