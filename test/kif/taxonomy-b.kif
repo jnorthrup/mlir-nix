@@ -1,0 +1,9 @@
+; The second file of kif-trikeshed.mlir's theory: its atoms are the first file's.
+(subclass Human Hominid)          ; again: one more parent edge, not one more ancestor
+(subclass Dog Canine)
+(subclass Canine Mammal)
+(subclass ?C Mammal)
+(instance Fido Pet)
+(domain owns 1 Agent)
+(domain owns 2 "Object")
+(<=> (instance ?X Pet) (owns ?Y ?X))

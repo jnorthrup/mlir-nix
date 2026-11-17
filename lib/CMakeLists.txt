@@ -5,6 +5,9 @@ add_mlir_dialect_library(MLIRNix
   Dialect/KifDialect.cpp
   Dialect/KifImport.cpp
   Dialect/KifChase.cpp
+  Dialect/KifLean.cpp
+  Dialect/KifTptp.cpp
+  Dialect/KifTrikeShed.cpp
   Dialect/SumoDialect.cpp
   Dialect/SonDialect.cpp
   Dialect/ConfixDialect.cpp
@@ -58,6 +61,7 @@ add_mlir_dialect_library(MLIRTrikeShed
 <<<<<<< HEAD
 <<<<<<< HEAD
   LINK_LIBS PUBLIC MLIRIR MLIRSideEffectInterfaces MLIRFuncDialect MLIRMemRefDialect MLIRPass
+<<<<<<< HEAD
                    MLIRArithDialect MLIRSCFDialect MLIRFuncTransforms MLIRTransformUtils)
 ||||||| 46182e5
   LINK_LIBS PUBLIC MLIRIR MLIRSideEffectInterfaces)
@@ -73,6 +77,11 @@ add_mlir_dialect_library(MLIRTrikeShed
 add_library(TrikeShedRuntime SHARED Composite/ClusterRuntime.cpp)
 set_target_properties(TrikeShedRuntime PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/lib)
 >>>>>>> 35fea687ba1ada38fce0ceacb142f01d560d78f4
+||||||| 60130ba
+                   MLIRArithDialect MLIRSCFDialect MLIRFuncTransforms MLIRTransformUtils)
+=======
+                   MLIRArithDialect MLIRSCFDialect MLIRSCFTransforms MLIRFuncTransforms MLIRTransformUtils)
+>>>>>>> a4d0008beac579eb00af4fb266f7ca5956635938
 
 add_library(TrikeShedRuntime SHARED Composite/ClusterRuntime.cpp)
 set_target_properties(TrikeShedRuntime PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/lib)

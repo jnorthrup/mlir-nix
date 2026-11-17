@@ -1,0 +1,56 @@
+; Cases for the Lean certificate of a chase (test/mlir/kif-lean.mlir): chase-cases.kif without its two (not ..) rules, whose
+; facts no certificate can prove (negation as failure is the closed world of a stratum), and terms that need care as JSON.
+; The ontology for (instance X Class) is chase-onto.kif.
+
+; instance through the ontology: rex is a Dog, a Dog is a Canine is a Mammal is an Animal (one, two and three subclass steps)
+(instance rex Dog)
+(instance tom Cat)
+(instance tweety Bird)
+(=> (instance ?x Animal) (animal ?x))
+(=> (and (instance ?x Mammal) (owns ?o ?x)) (petOwner ?o))
+(owns ann rex)
+(owns bob tweety)
+
+; one fact, several proofs (the first solution in the facts' printed order is kept)
+(likes c d)
+(likes a c)
+(likes d e)
+(likes b d)
+(likes a b)
+(=> (and (likes ?x ?y) (likes ?y ?z)) (fof ?x ?z))
+
+; two rules give one fact in one round: the first rule names it
+(=> (likes ?x ?y) (knows ?x ?y))
+(=> (fof ?x ?y) (knows ?x ?y))
+(=> (likes ?y ?x) (knows ?x ?y))
+
+; a chain: each round adds one link of the closure, from the facts of the rounds before
+(next n1 n2)
+(next n2 n3)
+(next n3 n4)
+(next n4 n5)
+(=> (next ?a ?b) (reach ?a ?b))
+(=> (and (reach ?a ?b) (next ?b ?c)) (reach ?a ?c))
+
+; equal, exists
+(pair p1 p1)
+(pair p1 p2)
+(pair p2 p3)
+(=> (and (pair ?a ?b) (equal ?a ?b)) (same ?a))
+(parent p1 p3)
+(=> (exists (?y) (parent ?x ?y)) (hasChild ?x))
+
+; a ground premise, and a premise whose relation is a variable (it reads every fact)
+(person p1)
+(person p2)
+(flag on)
+(=> (and (flag on) (person ?x)) (flagged ?x))
+(=> (and (?r p1 ?z) (person ?z)) (touches ?r ?z))
+
+; a variable bound to a list, a string with a quote's neighbours and a backslash, a name that is not ASCII
+(holds (likes ann (FavoriteFn bob)))
+(=> (holds ?p) (believed ?p))
+(says ann "a \ b, (c)")
+(=> (says ?x ?s) (said ?s ?x))
+(name café Café)
+(=> (name ?x ?y) (named ?y))

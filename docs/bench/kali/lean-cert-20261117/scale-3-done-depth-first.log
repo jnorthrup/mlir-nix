@@ -1,0 +1,30 @@
+agrees with the dump: 1000 asserted facts, 3000 derived facts, each by
+s1000: 2025883 bytes
+nanoda_bin s1000             rc=  0     0.04 s      11 MB | Checked 1 declarations with no typechecker errors, 1 pretty printer errors: [
+con-leche s1000              rc=  0     0.08 s      24 MB | con-leche: accepted 1 declarations (--verified)
+con-ron s1000                rc=  0     0.11 s      43 MB | con-ron: accepted 1 declarations (--verified)
+agrees with the dump: 1001 asserted facts, 2001 derived facts, each by
+h1000: 1611358 bytes
+nanoda_bin h1000             rc=  0     0.04 s      11 MB | Checked 1 declarations with no typechecker errors, 1 pretty printer errors: [
+con-leche h1000              rc=  0     0.06 s      22 MB | con-leche: accepted 1 declarations (--verified)
+con-ron h1000                rc=  0     0.09 s      45 MB | con-ron: accepted 1 declarations (--verified)
+agrees with the dump: 4000 asserted facts, 12000 derived facts, each b
+s4000: 8360868 bytes
+nanoda_bin s4000             rc=  0     0.20 s      24 MB | Checked 1 declarations with no typechecker errors, 1 pretty printer errors: [
+con-leche s4000              rc=  0     0.34 s      50 MB | con-leche: accepted 1 declarations (--verified)
+con-ron s4000                rc=  0     0.41 s      89 MB | con-ron: accepted 1 declarations (--verified)
+agrees with the dump: 4001 asserted facts, 8001 derived facts, each by
+h4000: 6617419 bytes
+nanoda_bin h4000             rc=  0     0.17 s      22 MB | Checked 1 declarations with no typechecker errors, 1 pretty printer errors: [
+con-leche h4000              rc=  0     0.27 s      43 MB | con-leche: accepted 1 declarations (--verified)
+con-ron h4000                rc=  0     0.33 s      75 MB | con-ron: accepted 1 declarations (--verified)
+agrees with the dump: 16000 asserted facts, 48000 derived facts, each 
+s16000: 34671197 bytes
+nanoda_bin s16000            rc=  1     0.10 s      14 MB | Error: invalid value: integer `80010`, expected u16 at line 1 column 26
+con-leche s16000             rc=124   120.00 s      95 MB | 
+con-ron s16000               rc=124   120.01 s     195 MB | 
+agrees with the dump: 16001 asserted facts, 32001 derived facts, each 
+h16000: 27591324 bytes
+nanoda_bin h16000            rc=  0     0.93 s      82 MB | Checked 1 declarations with no typechecker errors, 1 pretty printer errors: [
+con-leche h16000             rc=124   120.00 s      80 MB | 
+con-ron h16000               rc=124   120.00 s     163 MB | 

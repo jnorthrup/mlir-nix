@@ -40,6 +40,7 @@ mlir::LogicalResult ClusterOrderOp::verify() {
   return mlir::success();
 }
 
+<<<<<<< HEAD
 ||||||| 46182e5
 =======
 mlir::LogicalResult ClusterOrderOp::verify() {
@@ -70,6 +71,73 @@ mlir::LogicalResult ClusterOrderOp::verify() {
 }
 
 >>>>>>> 35fea687ba1ada38fce0ceacb142f01d560d78f4
+||||||| 60130ba
+=======
+mlir::LogicalResult PartsOp::verify() {
+  auto s = llvm::dyn_cast<SeriesType>(getSeries().getType());
+  if (!s || s.getElement() != getDelimiter().getType() || !s.getElement().isSignlessInteger())
+    return emitOpError("splits a series of integers at a delimiter of the same type");
+  auto r = llvm::dyn_cast<SeriesType>(getParts().getType());
+  auto p = r ? llvm::dyn_cast<TwinPackedType>(r.getElement()) : TwinPackedType();
+  if (!p || !p.getElement().isSignlessInteger(32))
+    return emitOpError("gives the parts as a !trikeshed.series<!trikeshed.twinpacked<i32>> (start, length)");
+  return mlir::success();
+}
+
+mlir::LogicalResult CombineOp::verify() {
+  auto r = llvm::cast<SeriesType>(getResult().getType());
+  for (mlir::Type t : getParts().getTypes())
+    if (llvm::cast<SeriesType>(t).getElement() != r.getElement())
+      return emitOpError("combines series of the result's element type");
+  return mlir::success();
+}
+
+mlir::LogicalResult CombineAllOp::verify() {
+  mlir::Block &body = getPart().front();
+  if (body.getNumArguments() != 1 || !body.getArgument(0).getType().isIndex())
+    return emitOpError("has a region of one index argument, k");
+  auto yield = llvm::dyn_cast<YieldOp>(body.getTerminator());
+  if (!yield || yield.getValues().size() != 1 || yield.getValues()[0].getType() != getResult().getType())
+    return emitOpError("has a region that yields part k, a series of the result's type");
+  auto c = llvm::cast<SeriesType>(getCoordinates().getType());
+  auto p = llvm::dyn_cast<TwinPackedType>(c.getElement());
+  if (!p || !p.getElement().isSignlessInteger(32))
+    return emitOpError("gives the coordinates as a !trikeshed.series<!trikeshed.twinpacked<i32>> (start, length)");
+  return mlir::success();
+}
+
+mlir::LogicalResult AdjacencyOp::verify() {
+  auto nodes = [](mlir::Type t) {
+    auto s = llvm::dyn_cast<SeriesType>(t);
+    return s && s.getElement().isSignlessInteger(32);
+  };
+  auto s = llvm::dyn_cast<SeriesType>(getIndex().getType());
+  auto p = s ? llvm::dyn_cast<TwinPackedType>(s.getElement()) : TwinPackedType();
+  if (!nodes(getFrom().getType()) || !nodes(getTo().getType()) || !nodes(getEnds().getType()))
+    return emitOpError("takes the edges' ends and gives the far ends as !trikeshed.series<i32>");
+  if (!p || !p.getElement().isSignlessInteger(32))
+    return emitOpError("gives each node's (first, count) as a !trikeshed.series<!trikeshed.twinpacked<i32>>");
+  return mlir::success();
+}
+
+mlir::LogicalResult ClosureOp::verify() {
+  auto pairs = [](mlir::Type t) {
+    auto s = llvm::dyn_cast<SeriesType>(t);
+    auto p = s ? llvm::dyn_cast<TwinPackedType>(s.getElement()) : TwinPackedType();
+    return p && p.getElement().isSignlessInteger(32);
+  };
+  auto nodes = [](mlir::Type t) {
+    auto s = llvm::dyn_cast<SeriesType>(t);
+    return s && s.getElement().isSignlessInteger(32);
+  };
+  if (!pairs(getParents().getType()) || !pairs(getAncestors().getType()))
+    return emitOpError("takes and gives each node's (first, count) as a !trikeshed.series<!trikeshed.twinpacked<i32>>");
+  if (!nodes(getAbove().getType()) || !nodes(getMembers().getType()))
+    return emitOpError("takes and gives the nodes they count as a !trikeshed.series<i32>");
+  return mlir::success();
+}
+
+>>>>>>> a4d0008beac579eb00af4fb266f7ca5956635938
 void TrikeShedDialect::initialize() {
   addTypes<
 #define GET_TYPEDEF_LIST

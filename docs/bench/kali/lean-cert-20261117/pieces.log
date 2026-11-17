@@ -1,0 +1,111 @@
+== s16000: 64000 facts in the closure, 48000 derived
+write s16000.p4000                 rc=0    0.52 s     138 MB
+chase: 48000 derived, 0.21 s, peak RSS 99 MB lean: 0.25 s, peak RSS 138 MB 19287975 bytes
+s16000.p4000.ndjson: 12 theorems, no axiom, no constant; 32172 hypotheses in all (16056 atoms, 16000 facts, 36 rules, 0 ontology edges, 8 imports); 48000 lets; the deepest theorem 6681 binders and lets
+agrees with the dump: 16000 asserted facts used, 48000 derived facts, each by the dump's rule from the dump's premises, each import what an earlier piece's let proves
+decode s16000.p4000                rc=0    2.28 s     244 MB
+nanoda_bin certificate accepted   0.47 s     27 MB | Checked 12 declarations with no typechecker errors, 1 pretty printer errors: [
+con-leche  certificate accepted   0.98 s     39 MB | con-leche: accepted 12 declarations (--verified)
+con-ron    certificate accepted   1.31 s     81 MB | con-ron: accepted 12 declarations (--verified)
+write s16000.p8000                 rc=0    0.54 s     138 MB
+chase: 48000 derived, 0.20 s, peak RSS 99 MB lean: 0.27 s, peak RSS 138 MB 25056407 bytes
+s16000.p8000.ndjson: 6 theorems, no axiom, no constant; 32086 hypotheses in all (16028 atoms, 16000 facts, 18 rules, 0 ontology edges, 4 imports); 48000 lets; the deepest theorem 13349 binders and lets
+agrees with the dump: 16000 asserted facts used, 48000 derived facts, each by the dump's rule from the dump's premises, each import what an earlier piece's let proves
+decode s16000.p8000                rc=0    2.81 s     315 MB
+control premise: (q x9999): premise 1 is a proof of (p x8)
+control binding: (q x9999): its rule's first variable is bound to p, not x9999
+control statement: the proof of (s x0), the last let, claims (r x12397)
+nanoda_bin certificate accepted   0.58 s     38 MB | Checked 6 declarations with no typechecker errors, 1 pretty printer errors: [
+con-leche  certificate accepted   1.18 s     53 MB | con-leche: accepted 6 declarations (--verified)
+con-ron    certificate accepted   1.51 s    109 MB | con-ron: accepted 6 declarations (--verified)
+nanoda_bin premise     rejected   0.32 s     34 MB | assertion failed: self.def_eq(u, v)
+con-leche  premise     rejected   0.38 s     53 MB | con-leche: invalid: application type mismatch [at theorem closure.0, fold position 8] (--verified) t=0.3s
+con-ron    premise     rejected   0.33 s     87 MB | con-ron: rejected: application type mismatch [at thm closure.0, fold position 8] (--verified) t=0.304s
+nanoda_bin binding     rejected   0.32 s     34 MB | assertion failed: self.def_eq(u, v)
+con-leche  binding     rejected   0.31 s     52 MB | con-leche: invalid: application type mismatch [at theorem closure.0, fold position 8] (--verified) t=0.2s
+con-ron    binding     rejected   0.31 s     87 MB | con-ron: rejected: application type mismatch [at thm closure.0, fold position 8] (--verified) t=0.290s
+nanoda_bin statement   rejected   0.56 s     38 MB | assertion failed: self.def_eq(u, v)
+con-leche  statement   rejected   1.13 s     53 MB | con-leche: invalid: let value type mismatch [at theorem closure.5, fold position 13] (--verified) t=1.1s
+con-ron    statement   rejected   1.38 s    109 MB | con-ron: rejected: let value type mismatch [at thm closure.5, fold position 13] (--verified) t=1.354s
+write s16000.p16000                rc=0    0.60 s     156 MB
+chase: 48000 derived, 0.20 s, peak RSS 99 MB lean: 0.33 s, peak RSS 156 MB 29355830 bytes
+s16000.p16000.ndjson: 3 theorems, no axiom, no constant; 32043 hypotheses in all (16014 atoms, 16000 facts, 9 rules, 0 ontology edges, 2 imports); 48000 lets; the deepest theorem 26681 binders and lets
+agrees with the dump: 16000 asserted facts used, 48000 derived facts, each by the dump's rule from the dump's premises, each import what an earlier piece's let proves
+decode s16000.p16000               rc=0    3.20 s     358 MB
+nanoda_bin certificate accepted   0.73 s     57 MB | Checked 3 declarations with no typechecker errors, 1 pretty printer errors: [
+con-leche  certificate accepted   1.47 s     80 MB | con-leche: accepted 3 declarations (--verified)
+con-ron    certificate accepted   1.59 s    143 MB | con-ron: accepted 3 declarations (--verified)
+== h16000: 48002 facts in the closure, 32001 derived
+write h16000.p4000                 rc=0    0.40 s     119 MB
+chase: 32001 derived, 0.16 s, peak RSS 88 MB lean: 0.18 s, peak RSS 119 MB 15812445 bytes
+h16000.p4000.ndjson: 9 theorems, no axiom, no constant; 32131 hypotheses in all (16043 atoms, 16001 facts, 18 rules, 0 ontology edges, 15 imports); 32001 lets; the deepest theorem 8015 binders and lets
+agrees with the dump: 16001 asserted facts used, 32001 derived facts, each by the dump's rule from the dump's premises, each import what an earlier piece's let proves
+decode h16000.p4000                rc=0    1.74 s     198 MB
+nanoda_bin certificate accepted   0.42 s     25 MB | Checked 9 declarations with no typechecker errors, 1 pretty printer errors: [
+con-leche  certificate accepted   0.80 s     38 MB | con-leche: accepted 9 declarations (--verified)
+con-ron    certificate accepted   1.08 s     81 MB | con-ron: accepted 9 declarations (--verified)
+write h16000.p8000                 rc=0    0.41 s     119 MB
+chase: 32001 derived, 0.14 s, peak RSS 88 MB lean: 0.20 s, peak RSS 119 MB 19809335 bytes
+h16000.p8000.ndjson: 5 theorems, no axiom, no constant; 32071 hypotheses in all (16023 atoms, 16001 facts, 10 rules, 0 ontology edges, 7 imports); 32001 lets; the deepest theorem 16015 binders and lets
+agrees with the dump: 16001 asserted facts used, 32001 derived facts, each by the dump's rule from the dump's premises, each import what an earlier piece's let proves
+decode h16000.p8000                rc=0    2.17 s     240 MB
+control premise: (hub): premise 1 is a proof of (p x7)
+control binding: (q x9999): its rule's first variable is bound to p, not x9999
+control statement: the proof of (r x0), the last let, claims (q x0)
+nanoda_bin certificate accepted   0.54 s     37 MB | Checked 5 declarations with no typechecker errors, 1 pretty printer errors: [
+con-leche  certificate accepted   0.99 s     55 MB | con-leche: accepted 5 declarations (--verified)
+con-ron    certificate accepted   1.16 s    115 MB | con-ron: accepted 5 declarations (--verified)
+nanoda_bin premise     rejected   0.27 s     37 MB | assertion failed: self.def_eq(u, v)
+con-leche  premise     rejected   0.29 s     47 MB | con-leche: invalid: application type mismatch [at theorem closure.0, fold position 8] (--verified) t=0.2s
+con-ron    premise     rejected   0.30 s     79 MB | con-ron: rejected: application type mismatch [at thm closure.0, fold position 8] (--verified) t=0.276s
+nanoda_bin binding     rejected   0.27 s     37 MB | assertion failed: self.def_eq(u, v)
+con-leche  binding     rejected   0.29 s     47 MB | con-leche: invalid: application type mismatch [at theorem closure.0, fold position 8] (--verified) t=0.2s
+con-ron    binding     rejected   0.29 s     79 MB | con-ron: rejected: application type mismatch [at thm closure.0, fold position 8] (--verified) t=0.273s
+nanoda_bin statement   rejected   0.54 s     37 MB | assertion failed: self.def_eq(u, v)
+con-leche  statement   rejected   0.97 s     55 MB | con-leche: invalid: let value type mismatch [at theorem closure.4, fold position 12] (--verified) t=0.9s
+con-ron    statement   rejected   1.13 s    115 MB | con-ron: rejected: let value type mismatch [at thm closure.4, fold position 12] (--verified) t=1.112s
+write h16000.p16000                rc=0    0.48 s     143 MB
+chase: 32001 derived, 0.14 s, peak RSS 88 MB lean: 0.28 s, peak RSS 143 MB 24361744 bytes
+h16000.p16000.ndjson: 3 theorems, no axiom, no constant; 32041 hypotheses in all (16013 atoms, 16001 facts, 6 rules, 0 ontology edges, 3 imports); 32001 lets; the deepest theorem 32015 binders and lets
+agrees with the dump: 16001 asserted facts used, 32001 derived facts, each by the dump's rule from the dump's premises, each import what an earlier piece's let proves
+decode h16000.p16000               rc=0    2.53 s     295 MB
+nanoda_bin certificate accepted   0.68 s     52 MB | Checked 3 declarations with no typechecker errors, 1 pretty printer errors: [
+con-leche  certificate accepted   1.20 s     80 MB | con-leche: accepted 3 declarations (--verified)
+con-ron    certificate accepted   1.32 s    153 MB | con-ron: accepted 3 declarations (--verified)
+== subclass: 90404 facts in the closure, 80096 derived
+write subclass.p4000               rc=0    1.87 s     237 MB
+chase: 80096 derived, 1.02 s, peak RSS 210 MB lean: 0.79 s, peak RSS 237 MB 76018243 bytes
+subclass.p4000.ndjson: 21 theorems, no axiom, no constant; 71791 hypotheses in all (30646 atoms, 22100 facts, 21 rules, 0 ontology edges, 18898 imports); 80096 lets; the deepest theorem 10213 binders and lets
+agrees with the dump: 10056 asserted facts used, 80096 derived facts, each by the dump's rule from the dump's premises, each import what an earlier piece's let proves
+decode subclass.p4000              rc=0    8.63 s     901 MB
+nanoda_bin certificate accepted   2.20 s    120 MB | Checked 21 declarations with no typechecker errors, 1 pretty printer errors: [
+con-leche  certificate accepted   3.78 s    122 MB | con-leche: accepted 21 declarations (--verified)
+con-ron    certificate accepted   4.59 s    223 MB | con-ron: accepted 21 declarations (--verified)
+write subclass.p8000               rc=0    1.85 s     237 MB
+chase: 80096 derived, 1.03 s, peak RSS 210 MB lean: 0.75 s, peak RSS 237 MB 73916120 bytes
+subclass.p8000.ndjson: 11 theorems, no axiom, no constant; 62180 hypotheses in all (26666 atoms, 20059 facts, 11 rules, 0 ontology edges, 15378 imports); 80096 lets; the deepest theorem 17733 binders and lets
+agrees with the dump: 10056 asserted facts used, 80096 derived facts, each by the dump's rule from the dump's premises, each import what an earlier piece's let proves
+decode subclass.p8000              rc=0    8.44 s     879 MB
+control premise: (subclass SoutheasternOielLanguage GalloRhaetianLanguage): premise 1 is a proof of (subclass Physical Entity)
+control binding: (subclass SoutheasternOielLanguage GalloRhaetianLanguage): its rule's first variable is bound to subclass, not SoutheasternOielLanguage
+control statement: the proof of (subclass AAV WaterVehicle), the last let, claims (subclass Bomber MilitaryVehicle)
+nanoda_bin certificate accepted   3.37 s    164 MB | Checked 11 declarations with no typechecker errors, 1 pretty printer errors: [
+con-leche  certificate accepted   4.76 s    155 MB | con-leche: accepted 11 declarations (--verified)
+con-ron    certificate accepted   5.38 s    301 MB | con-ron: accepted 11 declarations (--verified)
+nanoda_bin premise     rejected   1.30 s     91 MB | assertion failed: self.def_eq(u, v)
+con-leche  premise     rejected   0.96 s    102 MB | con-leche: invalid: application type mismatch [at theorem closure.0, fold position 8] (--verified) t=0.9s
+con-ron    premise     rejected   0.92 s    185 MB | con-ron: rejected: application type mismatch [at thm closure.0, fold position 8] (--verified) t=0.866s
+nanoda_bin binding     rejected   1.07 s     91 MB | assertion failed: self.def_eq(u, v)
+con-leche  binding     rejected   0.87 s    103 MB | con-leche: invalid: application type mismatch [at theorem closure.0, fold position 8] (--verified) t=0.8s
+con-ron    binding     rejected   0.89 s    185 MB | con-ron: rejected: application type mismatch [at thm closure.0, fold position 8] (--verified) t=0.826s
+nanoda_bin statement   rejected   3.17 s    157 MB | assertion failed: self.def_eq(u, v)
+con-leche  statement   rejected   4.64 s    175 MB | con-leche: invalid: let value type mismatch [at theorem closure.10, fold position 18] (--verified) t=4.6s
+con-ron    statement   rejected   5.26 s    293 MB | con-ron: rejected: let value type mismatch [at thm closure.10, fold position 18] (--verified) t=5.201s
+write subclass.p16000              rc=0    1.87 s     237 MB
+chase: 80096 derived, 1.04 s, peak RSS 210 MB lean: 0.77 s, peak RSS 237 MB 72722581 bytes
+subclass.p16000.ndjson: 6 theorems, no axiom, no constant; 53617 hypotheses in all (23123 atoms, 18034 facts, 6 rules, 0 ontology edges, 12418 imports); 80096 lets; the deepest theorem 32131 binders and lets
+agrees with the dump: 10056 asserted facts used, 80096 derived facts, each by the dump's rule from the dump's premises, each import what an earlier piece's let proves
+decode subclass.p16000             rc=0    7.96 s     864 MB
+nanoda_bin certificate accepted   7.77 s    394 MB | Checked 6 declarations with no typechecker errors, 1 pretty printer errors: [
+con-leche  certificate accepted   8.56 s    400 MB | con-leche: accepted 6 declarations (--verified)
+con-ron    certificate accepted   8.42 s    568 MB | con-ron: accepted 6 declarations (--verified)

@@ -164,26 +164,32 @@ def TS_EitherType : TS_Type<"Either", "either"> {
 // Join: construction, the two halves, and the domain
 //===----------------------------------------------------------------------===//
 
+// Join.kt: `Twin<T> = Join<T, T>`, and TwinPacked is a Twin in one word, so all three are pairs that j makes and first and
+// second take apart.
+def TS_PairType : AnyTypeOf<[TS_JoinType, TS_TwinType, TS_TwinPackedType], "a Join, a Twin or a TwinPacked">;
+
 def TS_JOp : TS_Op<"j", [Pure]> {
   let summary = "`a j b`: the infix constructor";
   let arguments = (ins AnyType:$a, AnyType:$b);
-  let results = (outs TS_JoinType:$result);
+  let results = (outs TS_PairType:$result);
   let assemblyFormat = "$a `,` $b attr-dict `:` type($a) `,` type($b) `->` type($result)";
   let description = [{
-    Laws: first(a j b) = a; second(a j b) = b; first(p) j second(p) = p.  Series.h: `a |j| b`.
+    Laws: first(a j b) = a; second(a j b) = b; first(p) j second(p) = p.  Series.h: `a |j| b`.  A pair of two 32-bit
+    halves is one 64-bit word, the first half high (Pack.h's TwInt): `trikeshed-lower-cursors` lowers j, first and second
+    on such pairs to shifts.
   }];
 }
 
 def TS_FirstOp : TS_Op<"first", [Pure]> {
   let summary = "the `a` of a Join";
-  let arguments = (ins TS_JoinType:$join);
+  let arguments = (ins TS_PairType:$join);
   let results = (outs AnyType:$a);
   let assemblyFormat = "$join attr-dict `:` type($join) `->` type($a)";
 }
 
 def TS_SecondOp : TS_Op<"second", [Pure]> {
   let summary = "the `b` of a Join";
-  let arguments = (ins TS_JoinType:$join);
+  let arguments = (ins TS_PairType:$join);
   let results = (outs AnyType:$b);
   let assemblyFormat = "$join attr-dict `:` type($join) `->` type($b)";
 }
@@ -219,7 +225,8 @@ def TS_TextOp : TS_Op<"text", [Pure]> {
   let assemblyFormat = "$witness attr-dict `:` type($witness) `->` type($result)";
   let description = [{
     Series.kt's `String.toSeries()` and CharSeries' 4096-byte window.  The witness is the immutable `Source`; a token is
-    a `!trikeshed.twinpacked` index into it, never a copy.
+    a `!trikeshed.twinpacked` index into it, never a copy.  A 1-D memref witness of the series' elements (a constant's
+    buffer, from memref.get_global) lowers to that buffer itself, seen in the series' strided layout.
   }];
 }
 
@@ -333,9 +340,33 @@ def TS_CombineOp : TS_Op<"combine", [Pure]> {
   let arguments = (ins Variadic<TS_SeriesType>:$parts);
   let results = (outs TS_SeriesType:$result);
   let assemblyFormat = "$parts attr-dict `:` type($parts) `->` type($result)";
+  let hasVerifier = 1;
   let description = [{
-    Series.h `a + b` and `Combine`: the size counted once in 64 bits, drained part by part, never indexed (an indexed
-    combine is the staircase `reify` exists to decide about).
+    Combine.kt's `combine(vararg catn)` and `Series.plus` (`a + b`); Series.h `a + b` and `Combine`, where the size is
+    counted once in 64 bits and the parts are drained one by one, never indexed (an indexed combine is the staircase
+    `reify` exists to decide about).  Lowered as a series is where it is made: a buffer of the parts' total size, each
+    part copied into it in turn.
+    Laws: size(combine(a, b)) = size(a) + size(b); at(combine(a, b), i) = at(a, i) for i < size(a), else
+    at(b, i - size(a)); combine is associative and the empty series is its unit.
+  }];
+}
+
+def TS_CombineAllOp : TS_Op<"combineAll", [Pure]> {
+  let summary = "combine(count j { k -> part }): the parts one after the other, and where each one is";
+  let arguments = (ins Index:$count);
+  let results = (outs TS_SeriesType:$result, TS_SeriesType:$coordinates);
+  let regions = (region SizedRegion<1>:$part);
+  let assemblyFormat = "$count attr-dict `:` type($result) `,` type($coordinates) $part";
+  let hasVerifier = 1;
+  let description = [{
+    Combine.kt's `combine(catn: Series<Series<A>>)`, with catn = `count j { k -> part }`: the region, run with k, yields
+    part k.  Kotlin's combine keeps each part's offset inside the view it returns; here the parts are copied into one
+    buffer, so where each one landed is a result: its (start, length), the TwinPacked a `trikeshed.parts` gives (this
+    is parts' inverse: the parts of xs at d, combined with d between each two, are xs again).
+    Laws: size(result) = the sum of size(part k); slice(result, coordinates[k]) = part k; size(coordinates) = count;
+    the starts ascend from 0, each the one before plus its length.
+    Lowered: the region runs twice for each k, once to count its part's size and once to copy it, so a part costs what
+    making it costs, twice.
   }];
 }
 
@@ -354,7 +385,8 @@ def TS_SliceOp : TS_Op<"slice", [Pure]> {
   let assemblyFormat = "$series `[` $offset `,` $count `]` attr-dict `:` type($series) `->` type($result)";
   let description = [{
     Join.kt's range get: `range.count() j { i -> this[range.first + i] }`.  `drop` and `take` are its cases.
-    Laws: size(xs[r]) = r.count; at(xs[r], i) = at(xs, r.first + i); xs[0, size(xs)] = xs.
+    Laws: size(xs[r]) = r.count; at(xs[r], i) = at(xs, r.first + i); xs[0, size(xs)] = xs.  Lowered, a slice is a view of
+    the same buffer at an offset, never a copy.
   }];
 }
 
@@ -394,11 +426,17 @@ def TS_BisectOp : TS_Op<"bisect", [Pure]> {
   let summary = "binary search over a series sorted by its key: K's contract";
   let arguments = (ins TS_SeriesType:$series, AnyType:$key);
   let results = (outs Index:$index);
-  let assemblyFormat = "$series `,` $key attr-dict `:` type($series) `,` type($key) `->` type($index)";
+  let regions = (region MaxSizedRegion<1>:$order);
+  let assemblyFormat = "$series `,` $key attr-dict `:` type($series) `,` type($key) `->` type($index) (`by` $order^)?";
   let description = [{
-    Series.kt's `binarySearch`: the index when the key is present, else the index of the first greater element
-    (`-(insertion) - 1`), the size when it is greater than all of them.  Series.h `lowerBound(xs, less)` is the same
-    search, and it is how an attribute set's sorted rows are looked up (`Bindings::get`).
+    Series.kt's `binarySearch(key, comparison)`: the index of an element equal to the key when there is one, else
+    `-(insertion) - 1`, where the insertion point is the index of the first greater element (the size when the key is
+    greater than all of them).  The series must be sorted by the same order.  Series.h `lowerBound(xs, less)` is the
+    same search, and it is how an attribute set's sorted rows are looked up (`Bindings::get`).
+
+    The order is the region, when there is one: `^bb0(%x: T, %key: K)` yields an i32, negative when the element sorts
+    before the key, zero when they are equal, positive after.  Without it the elements and the key are integers of one
+    type, compared signed (Kotlin's Int and Byte).
   }];
 }
 
@@ -433,8 +471,71 @@ def TS_SortedOp : TS_Op<"sorted", [Pure]> {
   let summary = "fill one buffer, sort it, drain it: an ordered series";
   let arguments = (ins TS_SeriesType:$series);
   let results = (outs TS_SeriesType:$result);
-  let assemblyFormat = "$series attr-dict `:` type($series) `->` type($result)";
-  let description = [{ Series.kt's `sortedWith`.  A sort is the one place a lazy series must be read to be ordered. }];
+  let regions = (region MaxSizedRegion<1>:$order);
+  let assemblyFormat = "$series attr-dict `:` type($series) `->` type($result) (`by` $order^)?";
+  let description = [{
+    Series.kt's `sortedWith`.  A sort is the one place a lazy series must be read to be ordered.  The sort is stable,
+    as Kotlin's is: equal elements keep their order.
+
+    The order is the region, when there is one: `^bb0(%a: T, %b: T)` yields an i32, negative when a sorts before b, zero
+    when they are equal, positive after (a Comparator).  Without it the elements are integers, compared signed.  A
+    series of row indices ordered by the text each row stands for is a region that compares two slices.
+  }];
+}
+
+def TS_PartsOp : TS_Op<"parts", [Pure]> {
+  let summary = "the parts of a series between the elements equal to a delimiter: Series.div, the lazy split";
+  let arguments = (ins TS_SeriesType:$series, AnyType:$delimiter);
+  let results = (outs TS_SeriesType:$parts);
+  let assemblyFormat = [{
+    $series `,` $delimiter attr-dict `:` type($series) `,` type($delimiter) `->` type($parts)
+  }];
+  let hasVerifier = 1;
+  let description = [{
+    CharSeries.kt's `Series<Char>.div(delim)` and `Series<Byte>.div(delim)`: one part more than there are delimiters,
+    part i running from just after the i-th delimiter (or the start) to the next one (or the end), so two delimiters side
+    by side give an empty part and an empty series gives one empty part.  Kotlin's part is `this[p until l]`, a view; here
+    it is that view's coordinates, a TwinPacked (start, length) within the series, not a copy.
+    Laws: size(parts(xs, d)) = (the number of d in xs) + 1; the parts with a d between each two are xs again.
+  }];
+}
+
+def TS_AdjacencyOp : TS_Op<"adjacency", [Pure]> {
+  let summary = "a graph given as edges (from, to) over nodes 0 ..< n, as each node's (first, count) into the far ends";
+  let arguments = (ins TS_SeriesType:$from, TS_SeriesType:$to, Index:$nodes);
+  let results = (outs TS_SeriesType:$index, TS_SeriesType:$ends);
+  let assemblyFormat = [{
+    $from `,` $to `over` $nodes attr-dict `:` type($from) `,` type($to) `->` type($index) `,` type($ends)
+  }];
+  let hasVerifier = 1;
+  let description = [{
+    The counting sort of ClosureIndex.kt's build (childCount, then fill) and of SumoClassifier.of's parent lists: edge e
+    runs from from[e] to to[e]; index[k] is the TwinPacked (first, count) of node k's edges in ends, which holds their
+    far ends, k's in edge order.  That is the shape trikeshed.closure reads and Confix's DirectChildren has.  An edge
+    whose from is not a node (below 0 or n and above) is left out.
+    Laws: size(index) = n; sum of the counts = size(ends) = the edges kept; ends[first(k) + i] is the to of k's i-th edge.
+  }];
+}
+
+def TS_ClosureOp : TS_Op<"closure", [Pure]> {
+  let summary = "every node above each node of a graph of parents: ClosureIndex";
+  let arguments = (ins TS_SeriesType:$parents, TS_SeriesType:$above);
+  let results = (outs TS_SeriesType:$ancestors, TS_SeriesType:$members);
+  let assemblyFormat = [{
+    $parents `,` $above attr-dict `:` type($parents) `,` type($above) `->` type($ancestors) `,` type($members)
+  }];
+  let hasVerifier = 1;
+  let description = [{
+    collections/bits/ClosureIndex.kt's ancestor sets (`ancestorNodes`), over nodes 0 ..< size(parents): node k's parents
+    are above[first(k) ..< first(k) + count(k)], where parents[k] is the TwinPacked (first, count), the shape Confix's
+    DirectChildren has.  The result has the same shape: ancestors[k] is (first, count) into members, the nodes k reaches by
+    one or more parent edges, k itself not among them (a self edge adds nothing, as ClosureIndex skips p == n), each once,
+    in the order the walk first meets them (k's parents, then theirs) where ClosureIndex orders a set by preorder id.  A
+    node met again is not walked again, so a cycle is cut where it is met.  The preorder numbering and the descendant
+    sets ClosureIndex also keeps are not built here.
+    Laws: on a graph without cycles a is among k's ancestors iff a path k -> ... -> a of parent edges exists (sumo-nix's
+    sumo.nix `ancestors`); the ancestors of k are those of its parents and the parents themselves.
+  }];
 }
 
 def TS_ClusterOrderOp : TS_Op<"cluster_order"> {
@@ -466,12 +567,15 @@ def TS_ClusterOrderOp : TS_Op<"cluster_order"> {
 
 def TS_CompareOp : TS_Op<"compare", [Pure]> {
   let summary = "the first difference between two series, then the shorter one is less";
-  let arguments = (ins TS_SeriesType:$a, TS_SeriesType:$b);
+  let arguments = (ins TS_SeriesType:$a, TS_SeriesType:$b, UnitAttr:$unsignedOrder);
   let results = (outs I32:$order);
-  let assemblyFormat = "$a `,` $b attr-dict `:` type($a) `,` type($b)";
+  let assemblyFormat = "$a `,` $b (`unsigned` $unsignedOrder^)? attr-dict `:` type($a) `,` type($b)";
   let description = [{
     Join.kt's `CSeries<T : Comparable<T>>`: walk both to the shorter length and return the first non-zero comparison,
-    else compare the sizes.  `shortestLength` and `commonPrefixWith` are what that walk gives.
+    else compare the sizes.  `shortestLength` and `commonPrefixWith` are what that walk gives.  The elements are integers,
+    compared signed as Kotlin compares Int and Byte; the result is -1, 0 or 1.  With `unsigned` they are compared
+    unsigned, as Kotlin compares Chars (by their code): the bytes of a text, so that a UTF-8 text sorts in the order of its
+    code points, as its String would.
   }];
 }
 

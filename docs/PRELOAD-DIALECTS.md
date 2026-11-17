@@ -107,6 +107,18 @@ Steps:
    311 MB of flat merges (b58d02c chose flat for speed: layering every merge read 2.5-7% slower).  The layer here is only for the
    package set.  Fix the stale `Bindings::Layer` reference in TS_LayersType's description in the same change.
 5. confix's index as twin + series; its LLVM lowering moves below trikeshed.
+   - Built (branch confix-trikeshed): `confix.index` scans a `!trikeshed.series<i8>` into ConfixIndexK's rows as a
+     `!trikeshed.cursor<"ConfixIndex", [!trikeshed.twin<i32>, i8, !trikeshed.twinpacked<i32>]>` (Spans as (open, close), Tags,
+     DirectChildren as (first, count) into the kid series it also makes), and `confix.columns` is the Columns facet: over a
+     series of object rows, a cursor of one i32 column per member name, the value's row or -1.  Both lower in
+     trikeshed-lower-cursors' conversion, through CursorLoweringInterface (include/Composite/CursorLowering.h): the scanner's
+     arrays are series buffers and every read after the scan is a trikeshed op.  The scan itself is still confix.ll.
+   - trikeshed-lower-cursors also lowers what the facets are read with: slice (a view: a series is now
+     `memref<?xT, strided<[1], offset: ?>>`, the same descriptor, so a caller passing offset 0 sees no change), compare,
+     sorted (stable) and bisect with a comparator region, and j/first/second on a pair of two i32 (one i64, the first high).
+     test/mlir/confix-index.mlir checks every column, both facets, and a sort and a search of the text's strings against a
+     separate reader of the text.
+   - Not done: Depths, KeyToChild for a key known only at run time, YAML (its retry on Room), groupBy.
 6. kif and sumo as series and cursors.
    - KIF lowered out of the Nix reader (started): `mlnix-kif` reads KIF files into a `kif.theory` (lib/Dialect/KifImport.cpp,
      sumo-nix/kif.nix's tokens and forms; equal terms one node across all the files of a bag; `file` on each fact and rule).
@@ -123,6 +135,34 @@ Steps:
      new facts, `not` and `equal` ignored (the byFirst index is an equivalent mutant: it narrows, in the same order).
    - The Graal analog: nix-truffle `--kif` reads the theory from son-export and makes each rule's antecedent a tree of Truffle
      nodes (and, not, equal, exists, instance, pattern) under a RootNode; identical to datalog.nix on the same three cases.
+   - sumo-nix's tables over TrikeShed (built, branch confix-trikeshed).  `kif.terms`, `kif.facts` and `kif.rules` give a
+     theory as TrikeShed forms: the terms a cursor (tag, name, kids) in the shape of Confix's index, with the kid series and
+     the names text; the facts (term, file); the rules (antecedent, consequent, file); `kif.atom_row` an atom's row.
+     `kif-to-trikeshed` lays the tables out as constant buffers seen as those series and cursors (an atom's row a constant)
+     and removes the theory, so a query over it is trikeshed and sumo ops that `trikeshed-lower-cursors` takes to loops.
+     Each relation is a cursor of rows: `sumo.relation` is SumoClassifier.kt's taxonomy projection (`subclassEdges`,
+     `instanceEdges`, the domain slots) with sumo.nix's reading of an argument (anything but a list: SumoClassifier also
+     drops variables, string literals and a position that is not an integer), lowered below TrikeShed through
+     CursorLoweringInterface as confix's ops are.  `trikeshed.adjacency` is the counting sort of ClosureIndex.build and
+     SumoClassifier.of (edges to each node's (first, count)), and `trikeshed.closure` ClosureIndex's ancestor sets in that
+     DirectChildren shape.  test/mlir/kif-trikeshed.mlir is sumo.nix's `parents`, `ancestors`, `classOf` and `domains` in
+     those ops, checked against sumo.nix's own evaluation of the same KIF (test/kif/taxonomy-oracle.nix through `mlnix
+     eval`); test/mlir/closure.mlir checks adjacency and closure on a cycle and a self edge.  `scripts/sumo-trikeshed.sh`
+     runs the query, compiled, on sumo.full's 78 files (Kali, each step in a 4 GB cgroup without swap, load 6-8 on 8
+     cores): identical to sumo.nix in 201,007 forms, 9,045 classes, 9,040 with a parent, 90,404 ancestor links, 21,691
+     things, 1,765 relations, Human's 17 ancestors, and the ancestor count of each of the 9,040 classes in name order.
+     | step | time | peak RSS |
+     | sumo.nix on `mlnix eval` (kif.nix's parse, then the tables, forced) | 3.00 s | 902 MB |
+     | mlnix-kif, the text into kif IR, printed (31 MB of MLIR) | 2.64 s | 249 MB |
+     | mlnix-opt: that text parsed again, kif-to-trikeshed, trikeshed-lower-cursors | 3.96 s | 332 MB |
+     | mlir-opt to the LLVM dialect; mlir-translate; clang -O2 | 0.52 + 1.59 + 2.20 s | 188-235 MB |
+     | the compiled query (17 MB, the tables inside) | 0.07 s | 78 MB |
+     (The first version, with the selections written by hand in trikeshed ops, ran in 0.09 s: it found each relation's
+     atom by a scan of the terms.)  kif-to-nix does not track sumo.nix better: it lowers a theory to a nix.expr of its
+     facts and rules, which is sumo.nix's input, so its tables would still be sumo.nix evaluated by Nix (the first row).
+     Not done: the tables straight from mlnix-kif (most of the 10.9 s before the query runs is printing the theory as text
+     and parsing it again); tq.nix's queries and SumoClassifier's other masks (instance types closed upward, disjointness)
+     over the closure.
    - Memory, measured on Kali only (each case in a cgroup of 12 GB, no swap: an OOM kill is the result), sumo.full whole through
      kif.nix (78 files, 201,007 forms):
      | engine | result | time | peak RSS |
@@ -143,5 +183,7 @@ Steps:
    - Not done: the callers that build facts in Nix (sumo-nix's tq.nix, org/check.nix, paperclip's second stratum, the
      scenario's checks) still call datalog.nix.  Retiring it needs the chase as a primop over Nix values (the facts lowered into a
      theory, `ask`/`holds`/`why` on the closure), then each caller moved and compared.
+   - Who checks and who searches (Lean's kernel, Vampire, these layers): REASONING-SPLIT.md, three tests on Kali with
+     their tables in bench/kali/reasoning-20261117/.
 
 Each step: lang 487/487 on both schedules (229 exact), mlir tests, the three workloads' answers, and the Kali difftest.

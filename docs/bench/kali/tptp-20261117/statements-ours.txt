@@ -1,0 +1,22 @@
+tq_sigma_TQG10                   agrees: 7 symbols; 3 hypotheses, the axioms kb_4829, kb_4830, kb_4828; the goal the conjecture query_0; the axioms Vampire's proof used
+tq_sigma_TQG26                   agrees: 9 symbols; 6 hypotheses, the axioms kb_4828, kb_4833, kb_4834, kb_4830, kb_4832, kb_4831; the goal the conjecture query_0; the axioms Vampire's proof used
+tq_sigma_TQG28                   agrees: 13 symbols; 10 hypotheses, the axioms kb_4836, kb_10497, kb_4834, kb_4838, kb_4839, kb_4831, kb_4833, kb_4840, kb_4832, kb_4830; the goal the conjecture query_0; the axioms Vampire's proof used
+tq_sigma_TQG32                   agrees: 9 symbols; 15 hypotheses, the axioms kb_13, kb_9439, kb_9441, kb_9442, kb_9444, kb_9445, kb_9447, kb_4834, kb_4832, kb_4829, kb_4830, kb_4835, kb_4833, kb_4836, kb_4828; the goal the conjecture query_0; the axioms Vampire's proof used
+tq_sigma_TQG3_a                  agrees: 4 symbols; 2 hypotheses, the axioms kb_4828, kb_4829; the goal the conjecture query_0; the axioms Vampire's proof used
+tq_sigma_TQG3_d                  agrees: 8 symbols; 5 hypotheses, the axioms kb_2514, kb_2512, kb_4828, kb_4832, kb_4831; the goal the conjecture query_0; the axioms Vampire's proof used
+tq_sigma_TQG3_e                  agrees: 8 symbols; 8 hypotheses, the axioms kb_262, kb_10365, kb_10345, kb_4830, kb_4831, kb_4832, kb_4829, kb_4828; the goal the conjecture query_0; the axioms Vampire's proof used
+tq_sigma_TQG46                   agrees: 5 symbols; 2 hypotheses, the axioms kb_4834, kb_4835; the goal the conjecture query_0; the axioms Vampire's proof used
+tq_sigma_TQG47                   agrees: 5 symbols; 2 hypotheses, the axioms kb_4834, kb_4835; the goal the conjecture query_0; the axioms Vampire's proof used
+tq_sigma_TQG48                   agrees: 8 symbols; 3 hypotheses, the axioms kb_4836, kb_4837, kb_4838; the goal the conjecture query_0; the axioms Vampire's proof used
+tq_sigma_TQG49                   agrees: 8 symbols; 3 hypotheses, the axioms kb_4837, kb_4836, kb_4838; the goal the conjecture query_0; the axioms Vampire's proof used
+tq_sigma_TQROW_BUILTIN           DISAGREES: the goal is not the conjecture (none: False)
+tq_sigma_TQROW_fixedArity        agrees: 6 symbols; 2 hypotheses, the axioms kb_4835, kb_4836; the goal the conjecture query_0; the axioms Vampire's proof used
+tq_sigma_TQROW_listFn            agrees: 5 symbols; 1 hypothesis, the axioms kb_13055; the goal the conjecture query_0; the axioms Vampire's proof used
+tq_sigma_TQROW_noDomain          agrees: 6 symbols; 2 hypotheses, the axioms kb_4854, kb_4857; the goal the conjecture query_0; the axioms Vampire's proof used
+tq_sigma_TQROW_withDomain        agrees: 6 symbols; 2 hypotheses, the axioms kb_4854, kb_4857; the goal the conjecture query_0; the axioms Vampire's proof used
+tq_sigma_partitionTest1          agrees: 7 symbols; 2 hypotheses, the axioms kb_13091, kb_4830; the goal the conjecture query_0; the axioms Vampire's proof used
+tq_sigma_partitionTest2          agrees: 8 symbols; 6 hypotheses, the axioms kb_13089, kb_4829, kb_4831, kb_4828, kb_4832, kb_4830; the goal the conjecture query_0; the axioms Vampire's proof used
+tq_sigma_rowVarTest1             agrees: 6 symbols; 2 hypotheses, the axioms kb_4854, kb_4857; the goal the conjecture query_0; the axioms Vampire's proof used
+tq_thf_TQC2                      not read: THF, encoded by hand
+18 statements are their problems', 1 disagree
+controls: 54 of 54 disagree (each statement against another test's problem, with a conjecture of another form; against its own, the conjecture negated; and against its own without the axioms its first hypothesis matches)

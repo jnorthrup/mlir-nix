@@ -130,4 +130,78 @@ def Confix_KidOp : Confix_Op<"kid"> {
   let assemblyFormat = "$flat `[` $at `]` attr-dict `:` type($flat)";
 }
 
+// ---- the index as TrikeShed's series and cursor (PRELOAD-DIALECTS step 5): ConfixIndex's facets, lowered below TrikeShed.
+//
+// The ops above read a Flat record through a pointer.  These two are the same index as Kotlin hands it out
+// (ConfixIndex = FacetedRow<ConfixIndexK>, parse/confix/ConfixIndexK.kt), in the types of include/Composite/TrikeShed.td:
+// the rows are a Cursor, a span a Twin, a row's children a TwinPacked (first, count) into a Series of rows.  They are lowered
+// by trikeshed-lower-cursors, through Composite/CursorLowering.h's CursorLoweringInterface, in the same conversion as the
+// TrikeShed ops that read them; the scan itself is still confix.ll's.
+
+def Confix_IndexOp : Confix_Op<"index", [Pure]> {
+  let summary = "scan a text into its index: TrikeShed's cursor of rows and series of children";
+  let description = [{
+    Syntax.scanIndex (Confix.kt) for JSON and CBOR.  `text` is a `!trikeshed.series<i8>`.  `rows` is a cursor of schema
+    "ConfixIndex", one row per element in the order the elements open, with the columns of include/Composite/Confix.h's
+    Index (Col: Span, Tag, Kids) and the facets of ConfixIndexK:
+
+      0 span  !trikeshed.twin<i32>        (open, close): the first and the last byte, a string's quotes included  (Spans)
+      1 tag   i8                           the TagKind (IOMemento)                                                (Tags)
+      2 kids  !trikeshed.twinpacked<i32>   (first, count) into `kids`: the rows of its direct children     (DirectChildren)
+
+    `kids` is the series of those rows; an object's children are its keys and its values, alternating.  `fault` and `at`
+    are confix.scan's; after a fault, `rows` and `kids` are empty (where Kotlin throws).  YAML is not taken: its rows can
+    outgrow the room a text of n bytes gives, and it needs the retry on Room that a caller of confix.scan makes.
+
+    Laws (those of confix.scan): same bytes, same rows; a JSON text never faults; the rows are in the order of their open;
+    the children of row k are kids[first(k) ..< first(k) + count(k)], the rows it directly encloses.
+  }];
+  let arguments = (ins Confix_SyntaxKind:$syntax, AnyType:$text);
+  let results = (outs AnyType:$rows, AnyType:$kids, I32:$fault, I32:$at);
+  let assemblyFormat = "$syntax $text attr-dict `:` type($text) `->` type($rows) `,` type($kids)";
+  let hasVerifier = 1;
+}
+
+def Confix_ColumnsOp : Confix_Op<"columns", [Pure]> {
+  let summary = "the Columns facet: the members of a series of objects, by name";
+  let description = [{
+    ConfixIndexK.Columns (parse/confix/ConfixColumns.kt) over the objects whose rows `objects` lists, then cursorSelect of
+    the columns `names`: row r, column c of `table` is the row of the value of the member named names[c] of the element at
+    row objects[r], or -1 when that element is not an object or has no such member.  As in Kotlin's table of member
+    positions, a name that a later member repeats is that later member's, and only the table is made: a cell is read
+    through the index (its span, its tag) when it is needed.  Kotlin's facet takes a root array's elements; `objects` is
+    any series of rows: an array's children (a slice of `kids`), or one object.
+
+    A key is matched by its bytes between its quotes, as written: a key spelled with an escape (`"\u0070ath"`) is not the
+    name it decodes to, where Kotlin decodes the key first.  Only JSON is taken.
+  }];
+  let arguments = (ins Confix_SyntaxKind:$syntax, AnyType:$rows, AnyType:$kids, AnyType:$text, AnyType:$objects,
+                       StrArrayAttr:$names);
+  let results = (outs AnyType:$table);
+  let assemblyFormat = [{
+    $syntax $rows `,` $kids `,` $text `,` $objects $names attr-dict `:` type($rows) `,` type($kids) `,` type($text) `,`
+    type($objects) `->` type($table)
+  }];
+  let hasVerifier = 1;
+}
+
+def Confix_UnescapeOp : Confix_Op<"unescape", [Pure]> {
+  let summary = "a string's value: the bytes between its quotes with their escapes read";
+  let description = [{
+    KnownSchema.decodeEscaped (parse/confix/KnownSchema.kt) over the bytes between a JSON string's quotes, giving bytes:
+    each of \" \\ \/ \b \f \n \r \t is the one byte it names, and \uXXXX its code point in UTF-8, a high and a low
+    surrogate in a row one code point (4 bytes).  A lone surrogate is U+FFFD: Kotlin's String keeps the lone half, which
+    UTF-8 cannot hold, and Kotlin's encodeToByteArray writes U+FFFD for it.  Every other byte is itself.  Kotlin takes
+    the text to be valid and reads any other letter after a backslash as \u; here a backslash that begins none of
+    JSON's escapes (an unknown letter, \u without four hex digits, a backslash at the end) is kept as written, and
+    what follows it is read as text.  Only JSON is taken.
+    Laws: the value is never longer than the text; a text without a backslash is its own value; the value of a text
+    escaped as JSON escapes it is that text.
+  }];
+  let arguments = (ins Confix_SyntaxKind:$syntax, AnyType:$text);
+  let results = (outs AnyType:$value);
+  let assemblyFormat = "$syntax $text attr-dict `:` type($text) `->` type($value)";
+  let hasVerifier = 1;
+}
+
 #endif // CONFIX_TD

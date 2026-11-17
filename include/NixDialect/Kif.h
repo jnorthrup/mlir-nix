@@ -26,7 +26,10 @@
 namespace mlir::kif {
 /// `kif-to-nix`: a theory becomes a `nix.expr` of { facts = [..]; rules = [..]; } built from `nix.list` and `nix.str`.
 /// `kif-chase`: every theory with rules gets a `kif.derived` for each fact its rules give (lib/Dialect/KifChase.cpp).
+/// `kif-to-trikeshed`: each `kif.terms`, `kif.facts` and `kif.rules` becomes the theory's tables as constant buffers seen as
+/// TrikeShed's series and cursors, then the theories go (lib/Dialect/KifTrikeShed.cpp).
 void registerKifPasses();
+void registerKifToTrikeShedPass();
 
 /// KIF text into `theory`'s block (lib/Dialect/KifImport.cpp), read as sumo-nix/kif.nix reads it: a parenthesis, a quoted string
 /// (it keeps its quotes), a `;` comment (dropped) or a run of other characters is a token.  Each top-level form is a `kif.rule`
@@ -42,6 +45,20 @@ void internCounts(const KifInterner &, uint64_t &atoms, uint64_t &vars, uint64_t
 /// The facts of a chased theory as lines `fact\trule\tfrom1\tfrom2...` (asserted: rule `-`), sorted by fact, a term printed as
 /// datalog.nix's `show` prints it: what scripts/kif-oracle.py compares across the engines.
 void dumpClosure(TheoryOp theory, raw_ostream &os);
+
+/// What kif-chase derived in `theory`, with its proofs, as one Lean theorem in lean4export's format (NDJSON, format 3.1.0)
+/// that uses no axiom: the theory's facts and rules (and the ontology's subclass edges its proofs use) are hypotheses of its
+/// statement, and each derived fact is a let of its proof, which a kernel checks against the fact (lib/Dialect/KifLean.cpp).
+/// A derived fact whose rule has a (not ..) premise is an error: negation as failure is not a proof from the facts.
+/// With `pieceLets`, theorems of at most that many lets, each with only the hypotheses its lets use, and the facts that
+/// lets of earlier theorems prove as hypotheses of its own (one theorem is bounded by the kernels' depth).
+LogicalResult exportLean(TheoryOp theory, raw_ostream &os, unsigned pieceLets = 0);
+
+/// The theory as a TPTP problem in FOF, as SigmaKEE translates a KB (lib/Dialect/KifTptp.cpp): its cache (the subclass,
+/// subrelation and instance closure), each fact and rule type-restricted from the relations' signatures, a test's
+/// (query F) as the conjecture; what SigmaKEE leaves out or that is not done yet (row and predicate variables) as comments.
+/// Each formula follows a `% f: ` line with the form, the key scripts/kif-tptp-compare.py matches SigmaKEE's output by.
+LogicalResult exportTptp(TheoryOp theory, raw_ostream &os);
 } // namespace mlir::kif
 
 #endif // NIXDIALECT_KIF_H

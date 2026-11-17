@@ -1,0 +1,97 @@
+; Cases for `mlnix-kif --tptp` (lib/Dialect/KifTptp.cpp; test/mlir/kif-tptp.mlir): a small SUMO-like KB, each case one
+; rule of SigmaKEE's translation.
+(subclass Relation Abstract)
+(subclass Abstract Entity)
+(subclass Physical Entity)
+(subclass Object Physical)
+(subclass Animal Object)
+(subclass Human Animal)
+(subclass Class Abstract)
+(subclass Predicate Relation)
+(subclass Function Relation)
+(subclass BinaryPredicate Predicate)
+(subclass TernaryPredicate Predicate)
+(subclass UnaryFunction Function)
+(subclass VariableArityRelation Relation)
+(subclass TransitiveRelation Relation)
+(subclass Number Abstract)
+(subclass RealNumber Number)
+(subclass List Abstract)
+(instance instance BinaryPredicate)
+(instance subclass BinaryPredicate)
+(instance subclass TransitiveRelation)
+(instance subrelation BinaryPredicate)
+(instance subrelation TransitiveRelation)
+(instance disjointRelation BinaryPredicate)
+(domain subclass 1 Class)
+(domain subclass 2 Class)
+(domain subrelation 1 Relation)
+(domain subrelation 2 Relation)
+
+; a binary relation, transitive; two below it, one of them disjoint from a third
+(instance part BinaryPredicate)
+(instance part TransitiveRelation)
+(domain part 1 Object)
+(domain part 2 Object)
+(instance properPart BinaryPredicate)
+(subrelation properPart part)
+(instance member BinaryPredicate)
+(subrelation member part)
+(domain member 1 Animal)
+(instance touches BinaryPredicate)
+(domain touches 1 Object)
+(domain touches 2 Object)
+(disjointRelation member touches)
+(documentation part EnglishLanguage "A part.")
+
+; a function, its range and a domainSubclass
+(instance HeightFn UnaryFunction)
+(domain HeightFn 1 Object)
+(range HeightFn RealNumber)
+(instance KindFn UnaryFunction)
+(domainSubclass KindFn 1 Object)
+(range KindFn Class)
+
+; variable arity: a predicate and ListFn
+(instance partition Predicate)
+(instance partition VariableArityRelation)
+(domain partition 1 Class)
+(domain partition 2 Class)
+(instance ListFn Function)
+(instance ListFn VariableArityRelation)
+(domain ListFn 1 Entity)
+(range ListFn List)
+(instance inList BinaryPredicate)
+(domain inList 1 Entity)
+(domain inList 2 List)
+
+(instance Bob Human)
+(partition Animal Human Object)
+
+; the domains guard the variables; the antecedent's (instance ?X Human) makes ?X's Object guard go
+(=> (part ?X ?Y) (exists (?Z) (part ?Z ?X)))
+(=> (and (instance ?X Human) (part ?X ?Y)) (touches ?X ?Y))
+(=> (equal ?H (HeightFn ?X)) (instance ?H Number))
+(=> (subclass ?C (KindFn ?X)) (instance ?X Object))
+
+; higher order, not written
+(=> (holdsDuring ?T (part ?X ?Y)) (part ?X ?Y))
+(instance holdsDuring BinaryPredicate)
+(domain holdsDuring 2 Formula)
+
+; a row variable: of a fixed arity, then of variable arity
+(=> (touches @ROW) (part @ROW))
+(=> (partition @ROW) (inList Bob (ListFn @ROW)))
+
+; a predicate variable
+(=> (instance ?REL TransitiveRelation) (forall (?A ?B ?C) (=> (and (?REL ?A ?B) (?REL ?B ?C)) (?REL ?A ?C))))
+
+; the two axioms with two predicate variables SigmaKEE instantiates pair by pair, and one it leaves out
+(=> (and (instance ?REL1 Predicate) (instance ?REL2 Predicate) (disjointRelation ?REL1 ?REL2) (?REL1 @ROW2)) (not (?REL2 @ROW2)))
+(=> (and (subrelation ?REL1 ?REL2) (instance ?REL1 Predicate) (instance ?REL2 Predicate) (?REL1 @ROW)) (?REL2 @ROW))
+(=> (inverse ?REL1 ?REL2) (forall (?A ?B) (<=> (?REL1 ?A ?B) (?REL2 ?B ?A))))
+
+; a test's query: the conjecture, its free variables existential
+(query (part ?P Bob))
+(instance Rex Animal)
+(member Rex Bob)
