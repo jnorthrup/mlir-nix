@@ -34,7 +34,9 @@
 // each with only the hypotheses its lets use; a fact that a let of an earlier piece proves is a hypothesis there too, named
 // for that let (`i.K` for let d.K), and the theorems are checked one by one.  That an import is what an earlier piece's let
 // proves is not the kernel's to see: scripts/kif-lean-check.py checks it (each i.K claims what d.K claims, and d.K is in an
-// earlier piece), as it checks what each let claims.
+// earlier piece), as it checks what each let claims.  Smaller pieces check faster, though they import more (Kali, SUMO's
+// taxonomy: 80,096 lets in 21 pieces of 4,000, 18,898 imports, nanoda_bin 2.2 s, con-leche 3.8 s, con-ron 4.6 s; in 6 pieces
+// of 16,000, 7.8-8.6 s).
 //
 // The bindings are not recorded in a kif.derived: they are found again by matching the rule's premises against `from` in
 // order, as the chase matched them.  A rule with a (not ..) premise is negation as failure, the closed world of a stratum,

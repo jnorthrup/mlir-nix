@@ -117,10 +117,32 @@ the chase's order a chain of 12,000 lets took 10-23 s, against 0.2-0.4 s depth f
 one term, nanoda_bin reads a de Bruijn index as a u16 (hypotheses and lets under 65,536), and con-leche and con-ron did not
 finish a 64,000-deep certificate in 120 s (nanoda_bin: 0.9 s).
 
+So a larger theory's certificate is written in pieces: `--lean-piece N` makes theorems closure.0, closure.1, .. of at most N
+lets each, in the same order, each with only the hypotheses its lets use, and a fact that a let of an earlier piece proves a
+hypothesis there too (`i.K`, for let d.K).  That such an import is what the earlier let proves is the one link no kernel
+sees, since each checks one theorem at a time; kif-lean-check.py checks it with the claims (each i.K claims what d.K claims,
+d.K in an earlier piece).  SUMO's taxonomy is the first theory past the limit: sumo.full's 10,308 subclass edges with
+transitivity, which kif-chase closes into sumo.nix's 90,404 ancestor links (each class's count equal to sumo.nix's) by 80,096
+derived facts in 1.0 s.  On Kali, in pieces of 4,000 lets (bench/kali/lean-cert-20261117/pieces.log):
+
+| step | time | peak RSS |
+|---|---|---|
+| mlnix-kif: read, chase, write 21 theorems (76 MB; 71,791 hypotheses in all, 18,898 of them imports; at most 10,213 deep) | 1.87 s | 237 MB |
+| kif-lean-check.py: the claims decoded, equal to the dump, every import an earlier piece's let | 8.6 s | 0.9 GB |
+| nanoda_bin | 2.20 s | 120 MB |
+| con-leche --verified, one thread | 3.78 s | 122 MB |
+| con-ron --verified, one thread | 4.59 s | 223 MB |
+
+Each kernel rejects each control (at 8,000 lets a piece).  Larger pieces cost more, not less: at 16,000 lets (6 theorems,
+32,131 deep) the kernels take 7.8-8.6 s, though the pieces import a third fewer facts.  The same holds for the synthetic
+theories one theorem could not hold: 48,000 lets in 12 pieces check in 0.5-1.3 s, where one theorem was past nanoda_bin's u16
+and con-leche's and con-ron's 120 s.  This is the role the split gives Lean for SUMO: not the taxonomy as Lean types (test
+3), but kernel-checked proofs about the table the MLIR layer computes, each of its 90,404 links proved from SUMO's own edges.
+
 ## Not done
 
-- The certificate in pieces, each with the hypotheses its proofs use, for theories past the depth limit (sumo.full alone has
-  201,007 forms).
+- Pieces chosen for their imports: a piece is a run of the depth-first order, and SUMO's upper classes make about one import
+  for every four lets; grouping the lets by the classes they rest on would make fewer.
 - Negation as failure (paperclip's second stratum): a `(not ..)` premise rests on the closed world of the stratum below, which
   a certificate would have to state; `--lean` refuses such a fact.
 - Vampire as the search behind the kif and sumo dialects for what is not Horn, its proofs re-checked in Lean from the
