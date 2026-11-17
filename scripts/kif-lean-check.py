@@ -238,7 +238,18 @@ def summary(th, path):
 
 def mutate(th, kind):
     ex = th.exprs
-    new = lambda k, f: (ex.__setitem__(max(ex) + 1, [k, f]), max(ex))[1]
+    # an expression made here is the existing one when there is one: lean4export's format has each expression once (nanoda_bin
+    # refuses a file with two equal records before it checks anything)
+    index = {(k, json.dumps(f, sort_keys=True)): i for i, (k, f) in ex.items()}
+    fresh = [max(ex) + 1]
+
+    def new(k, f):
+        key = (k, json.dumps(f, sort_keys=True))
+        if key not in index:
+            index[key] = fresh[0]
+            ex[fresh[0]] = [k, f]
+            fresh[0] += 1
+        return index[key]
 
     def bvar(depth, q):
         return new("bvar", depth - 1 - q)
