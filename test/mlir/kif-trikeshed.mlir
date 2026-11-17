@@ -1,5 +1,7 @@
-// PRELOAD-DIALECTS step 6: sumo-nix's sumo.nix over a KIF theory as TrikeShed's series (kif.terms, kif.facts), the
-// ancestors by trikeshed.closure (ClosureIndex), lowered by kif-to-trikeshed and trikeshed-lower-cursors and run.
+// PRELOAD-DIALECTS step 6: sumo-nix's sumo.nix over a KIF theory in dialect forms.  The theory as TrikeShed's series and
+// cursors (kif.terms, kif.facts), each relation a cursor of rows (sumo.relation: SumoClassifier's taxonomy projection),
+// `parents` grouped by child (trikeshed.adjacency) and closed (trikeshed.closure: ClosureIndex); lowered by
+// kif-to-trikeshed and trikeshed-lower-cursors and run.
 //
 // RUN: d=%S/../kif; { mlnix-kif $d/taxonomy-a.kif $d/taxonomy-b.kif | sed '1d;$d'; cat %s; } | mlnix-opt --kif-to-trikeshed | FileCheck %s --check-prefix=TABLES
 // RUN: d=%S/../kif; { mlnix-kif $d/taxonomy-a.kif $d/taxonomy-b.kif | sed '1d;$d'; cat %s; } | mlnix-opt --kif-to-trikeshed --trikeshed-lower-cursors | mlir-opt --ownership-based-buffer-deallocation --canonicalize --buffer-deallocation-simplification --bufferization-lower-deallocations --convert-scf-to-cf --expand-strided-metadata --lower-affine --finalize-memref-to-llvm --convert-arith-to-llvm --convert-index-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts | mlir-runner -e main -entry-point-result=i32 -shared-libs=$(ls $(dirname $(which mlir-runner))/../lib/libmlir_runner_utils.* | head -1) | FileCheck %s
@@ -14,11 +16,13 @@
 // step 6).
 
 // TABLES-NOT: kif.theory
+// TABLES-NOT: kif.atom_row
 // TABLES-DAG: memref.global "private" constant @__kif_kb_tag : memref<75xi8>
 // TABLES-DAG: memref.global "private" constant @__kif_kb_fact_term : memref<28xi32>
 // TABLES-DAG: memref.global "private" constant @__kif_kb_rule_antecedent : memref<2xi32>
 // TABLES-DAG: memref.global "private" constant @__kif_kb_rule_consequent : memref<2xi32>
 // TABLES-DAG: trikeshed.closure
+// TABLES-DAG: sumo.relation
 
 // CHECK: [30,  13,  12,  49,  3,  3,  9]
 // CHECK: [5,  2,  5,  2,  6,  6,  9,  4,  1,  5,  1,  3]
@@ -34,105 +38,12 @@
 !fk = !trikeshed.colkey<"KifFact">
 !rules = !trikeshed.cursor<"KifRule", [i32, i32, i32]>
 !rk = !trikeshed.colkey<"KifRule">
+!pairs = !trikeshed.cursor<"pairs", [i32, i32]>
+!pk = !trikeshed.colkey<"pairs">
+!slots = !trikeshed.cursor<"slots", [i32, i32, i32]>
+!sk = !trikeshed.colkey<"slots">
 
-memref.global "private" constant @k_subclass : memref<8xi8> = dense<[115, 117, 98, 99, 108, 97, 115, 115]>
-memref.global "private" constant @k_instance : memref<8xi8> = dense<[105, 110, 115, 116, 97, 110, 99, 101]>
-memref.global "private" constant @k_domain : memref<6xi8> = dense<[100, 111, 109, 97, 105, 110]>
-memref.global "private" constant @k_Human : memref<5xi8> = dense<[72, 117, 109, 97, 110]>
 func.func private @printMemrefI32(memref<*xi32>) attributes {llvm.emit_c_interface}
-
-// The row of the atom written as the bytes of name, or -1: the theory holds each atom once.
-func.func private @atom_row(%tags: !s8, %names: !sp, %text: !s8, %name: !s8) -> i32 {
-  %n = trikeshed.size %tags : !s8
-  %rows = trikeshed.series %n : !s32 {
-  ^bb0(%i: index):
-    %r = arith.index_cast %i : index to i32
-    trikeshed.yield %r : i32
-  }
-  %hits = trikeshed.where %rows : !s32 -> !s32 {
-  ^bb0(%r: i32):
-    %tag = trikeshed.at %tags[%r] : !s8, i32 -> i8
-    %atom = arith.constant 0 : i8
-    %isAtom = arith.cmpi eq, %tag, %atom : i8
-    %hit = scf.if %isAtom -> (i1) {
-      %p = trikeshed.at %names[%r] : !sp, i32 -> !tp
-      %s = trikeshed.first %p : !tp -> i32
-      %l = trikeshed.second %p : !tp -> i32
-      %si = arith.index_cast %s : i32 to index
-      %li = arith.index_cast %l : i32 to index
-      %piece = trikeshed.slice %text[%si, %li] : !s8 -> !s8
-      %c = trikeshed.compare %piece, %name unsigned : !s8, !s8
-      %zero = arith.constant 0 : i32
-      %same = arith.cmpi eq, %c, %zero : i32
-      scf.yield %same : i1
-    } else {
-      %no = arith.constant false
-      scf.yield %no : i1
-    }
-    trikeshed.yield %hit : i1
-  }
-  %k = trikeshed.size %hits : !s32
-  %c0 = arith.constant 0 : index
-  %some = arith.cmpi ugt, %k, %c0 : index
-  %row = scf.if %some -> (i32) {
-    %r = trikeshed.at %hits[%c0] : !s32, index -> i32
-    scf.yield %r : i32
-  } else {
-    %none = arith.constant -1 : i32
-    scf.yield %none : i32
-  }
-  return %row : i32
-}
-
-// Is term t a top-level form of relation rel with arity elements (rel included), none of its arguments a list: what
-// sumo.nix's `top rel` and its `length f == arity && isString ...` keep.
-func.func private @is_form(%tags: !s8, %kfc: !sp, %kid: !s32, %t: i32, %rel: i32, %arity: i32) -> i1 {
-  %list = arith.constant 2 : i8
-  %tag = trikeshed.at %tags[%t] : !s8, i32 -> i8
-  %isList = arith.cmpi eq, %tag, %list : i8
-  %form = scf.if %isList -> (i1) {
-    %fc = trikeshed.at %kfc[%t] : !sp, i32 -> !tp
-    %f = trikeshed.first %fc : !tp -> i32
-    %n = trikeshed.second %fc : !tp -> i32
-    %sized = arith.cmpi eq, %n, %arity : i32
-    %ok = scf.if %sized -> (i1) {
-      %h = trikeshed.at %kid[%f] : !s32, i32 -> i32
-      %isRel = arith.cmpi eq, %h, %rel : i32
-      %one = arith.constant 1 : i32
-      %f1 = arith.addi %f, %one : i32
-      %end = arith.addi %f, %n : i32
-      %args = scf.for %e = %f1 to %end step %one iter_args(%acc = %isRel) -> (i1) : i32 {
-        %a = trikeshed.at %kid[%e] : !s32, i32 -> i32
-        %at = trikeshed.at %tags[%a] : !s8, i32 -> i8
-        %notList = arith.cmpi ne, %at, %list : i8
-        %acc2 = arith.andi %acc, %notList : i1
-        scf.yield %acc2 : i1
-      }
-      scf.yield %args : i1
-    } else {
-      %no = arith.constant false
-      scf.yield %no : i1
-    }
-    scf.yield %ok : i1
-  } else {
-    %no = arith.constant false
-    scf.yield %no : i1
-  }
-  return %form : i1
-}
-
-// The k-th element (k 1 or more) of each of the forms ts: a column of a relation's rows.
-func.func private @element(%kfc: !sp, %kid: !s32, %ts: !s32, %k: i32) -> !s32 {
-  %col = trikeshed.alpha %ts : !s32 -> !s32 {
-  ^bb0(%t: i32):
-    %fc = trikeshed.at %kfc[%t] : !sp, i32 -> !tp
-    %f = trikeshed.first %fc : !tp -> i32
-    %at = arith.addi %f, %k : i32
-    %x = trikeshed.at %kid[%at] : !s32, i32 -> i32
-    trikeshed.yield %x : i32
-  }
-  return %col : !s32
-}
 
 // The different rows of xs, ascending: sorted, then the places where a run starts.
 func.func private @distinct(%xs: !s32) -> !s32 {
@@ -182,34 +93,14 @@ func.func private @name_order(%names: !sp, %text: !s8, %a: i32, %b: i32) -> i32 
   return %c : i32
 }
 
-// The first place in xs (sorted ascending) whose element is not below v: bisect with an order that is never equal.
-func.func private @lower_bound(%xs: !s32, %v: i32) -> i32 {
-  %at = trikeshed.bisect %xs, %v : !s32, i32 -> index by {
-  ^bb0(%x: i32, %key: i32):
-    %below = arith.cmpi slt, %x, %key : i32
-    %before = arith.constant -1 : i32
-    %after = arith.constant 1 : i32
-    %o = arith.select %below, %before, %after : i32
-    trikeshed.yield %o : i32
-  }
-  %at32 = arith.index_cast %at : index to i32
-  %m1 = arith.constant -1 : i32
-  %lb = arith.subi %m1, %at32 : i32
-  return %lb : i32
-}
-
-// sumo.nix over the theory @kb, counted as onto.nix counts it: forms, classes, withParent, ancestorLinks, things,
-// relations, humanAncestors.
+// sumo.nix over the theory @kb, counted as sumo-bench's onto.nix counts it: forms, classes, withParent, ancestorLinks,
+// things, relations, humanAncestors; then each class with a parent, by name, and its number of ancestors.
 func.func @main() -> i32 {
-  %terms, %kid, %text = kif.terms @kb : !terms, !s32, !s8
+  %terms, %kids, %text = kif.terms @kb : !terms, !s32, !s8
   %facts = kif.facts @kb : !facts
   %rules = kif.rules @kb : !rules
-  %t0 = trikeshed.key 0 : !tk
   %t1 = trikeshed.key 1 : !tk
-  %t2 = trikeshed.key 2 : !tk
-  %tags = trikeshed.column %terms[%t0] : !terms, !tk -> !s8
   %names = trikeshed.column %terms[%t1] : !terms, !tk -> !sp
-  %kfc = trikeshed.column %terms[%t2] : !terms, !tk -> !sp
   %f0 = trikeshed.key 0 : !fk
   %forms = trikeshed.column %facts[%f0] : !facts, !fk -> !s32
   %r0 = trikeshed.key 0 : !rk
@@ -217,37 +108,26 @@ func.func @main() -> i32 {
   %nfacts = trikeshed.size %forms : !s32
   %nrules = trikeshed.size %antecedents : !s32
   %nforms = arith.addi %nfacts, %nrules : index
+  %nterms = trikeshed.size %names : !sp
 
-  %gs = memref.get_global @k_subclass : memref<8xi8>
-  %gi = memref.get_global @k_instance : memref<8xi8>
-  %gd = memref.get_global @k_domain : memref<6xi8>
-  %gh = memref.get_global @k_Human : memref<5xi8>
-  %vs = memref.cast %gs : memref<8xi8> to memref<?xi8, strided<[1], offset: ?>>
-  %vi = memref.cast %gi : memref<8xi8> to memref<?xi8, strided<[1], offset: ?>>
-  %vd = memref.cast %gd : memref<6xi8> to memref<?xi8, strided<[1], offset: ?>>
-  %vh = memref.cast %gh : memref<5xi8> to memref<?xi8, strided<[1], offset: ?>>
-  %ns = builtin.unrealized_conversion_cast %vs : memref<?xi8, strided<[1], offset: ?>> to !s8
-  %ni = builtin.unrealized_conversion_cast %vi : memref<?xi8, strided<[1], offset: ?>> to !s8
-  %nd = builtin.unrealized_conversion_cast %vd : memref<?xi8, strided<[1], offset: ?>> to !s8
-  %nh = builtin.unrealized_conversion_cast %vh : memref<?xi8, strided<[1], offset: ?>> to !s8
-  %subclass = func.call @atom_row(%tags, %names, %text, %ns) : (!s8, !sp, !s8, !s8) -> i32
-  %instance = func.call @atom_row(%tags, %names, %text, %ni) : (!s8, !sp, !s8, !s8) -> i32
-  %domain = func.call @atom_row(%tags, %names, %text, %nd) : (!s8, !sp, !s8, !s8) -> i32
-  %human = func.call @atom_row(%tags, %names, %text, %nh) : (!s8, !sp, !s8, !s8) -> i32
-  %c1 = arith.constant 1 : i32
-  %c2 = arith.constant 2 : i32
-  %c3 = arith.constant 3 : i32
-  %c4 = arith.constant 4 : i32
+  // the relations: parents (subclass Child Parent), classOf (instance Thing Class), domains (domain Relation Position Class)
+  %subclass = kif.atom_row @kb "subclass" : i32
+  %instance = kif.atom_row @kb "instance" : i32
+  %domain = kif.atom_row @kb "domain" : i32
+  %human = kif.atom_row @kb "Human" : i32
+  %sub = sumo.relation %subclass of %facts in %terms, %kids : !facts, !terms, !s32 -> !pairs
+  %ins = sumo.relation %instance of %facts in %terms, %kids : !facts, !terms, !s32 -> !pairs
+  %dom = sumo.relation %domain of %facts in %terms, %kids : !facts, !terms, !s32 -> !slots
+  %p0 = trikeshed.key 0 : !pk
+  %p1 = trikeshed.key 1 : !pk
+  %s0 = trikeshed.key 0 : !sk
+  %child = trikeshed.column %sub[%p0] : !pairs, !pk -> !s32
+  %parent = trikeshed.column %sub[%p1] : !pairs, !pk -> !s32
+  %thing = trikeshed.column %ins[%p0] : !pairs, !pk -> !s32
+  %relation = trikeshed.column %dom[%s0] : !slots, !sk -> !s32
 
-  // parents: (subclass Child Parent)
-  %subs = trikeshed.where %forms : !s32 -> !s32 {
-  ^bb0(%t: i32):
-    %ok = func.call @is_form(%tags, %kfc, %kid, %t, %subclass, %c3) : (!s8, !sp, !s32, i32, i32, i32) -> i1
-    trikeshed.yield %ok : i1
-  }
-  %child = func.call @element(%kfc, %kid, %subs, %c1) : (!sp, !s32, !s32, i32) -> !s32
-  %parent = func.call @element(%kfc, %kid, %subs, %c2) : (!sp, !s32, !s32, i32) -> !s32
-  %m = trikeshed.size %subs : !s32
+  // classes: the children and the parents; withParent: the children
+  %m = trikeshed.size %child : !s32
   %m2 = arith.addi %m, %m : index
   %both = trikeshed.series %m2 : !s32 {
   ^bb0(%i: index):
@@ -267,39 +147,8 @@ func.func @main() -> i32 {
   %children = func.call @distinct(%child) : (!s32) -> !s32
   %withParent = trikeshed.size %children : !s32
 
-  // ancestors: the edges in the order of their child, each term's (first, count) among them, then the closure
-  %edges = trikeshed.series %m : !s32 {
-  ^bb0(%i: index):
-    %e = arith.index_cast %i : index to i32
-    trikeshed.yield %e : i32
-  }
-  %byChild = trikeshed.sorted %edges : !s32 -> !s32 by {
-  ^bb0(%a: i32, %b: i32):
-    %ca = trikeshed.at %child[%a] : !s32, i32 -> i32
-    %cb = trikeshed.at %child[%b] : !s32, i32 -> i32
-    %lt = arith.cmpi slt, %ca, %cb : i32
-    %gt = arith.cmpi sgt, %ca, %cb : i32
-    %m1 = arith.constant -1 : i32
-    %p1 = arith.constant 1 : i32
-    %z = arith.constant 0 : i32
-    %g = arith.select %gt, %p1, %z : i32
-    %o = arith.select %lt, %m1, %g : i32
-    trikeshed.yield %o : i32
-  }
-  %cs = trikeshed.project %child[%byChild] : !s32, !s32 -> !s32
-  %ps = trikeshed.project %parent[%byChild] : !s32, !s32 -> !s32
-  %nterms = trikeshed.size %tags : !s8
-  %up = trikeshed.series %nterms : !sp {
-  ^bb0(%i: index):
-    %v = arith.index_cast %i : index to i32
-    %one = arith.constant 1 : i32
-    %v1 = arith.addi %v, %one : i32
-    %lb = func.call @lower_bound(%cs, %v) : (!s32, i32) -> i32
-    %ub = func.call @lower_bound(%cs, %v1) : (!s32, i32) -> i32
-    %count = arith.subi %ub, %lb : i32
-    %fc = trikeshed.j %lb, %count : i32, i32 -> !tp
-    trikeshed.yield %fc : !tp
-  }
+  // ancestors: parents grouped by child over the terms, then closed
+  %up, %ps = trikeshed.adjacency %child, %parent over %nterms : !s32, !s32 -> !sp, !s32
   %ancestors, %above = trikeshed.closure %up, %ps : !sp, !s32 -> !sp, !s32
   %links = trikeshed.size %above : !s32
   %c0i = arith.constant 0 : i32
@@ -312,21 +161,8 @@ func.func @main() -> i32 {
     scf.yield %c0i : i32
   }
 
-  // classOf: (instance Thing Class); domains: (domain Relation Position Class)
-  %insts = trikeshed.where %forms : !s32 -> !s32 {
-  ^bb0(%t: i32):
-    %ok = func.call @is_form(%tags, %kfc, %kid, %t, %instance, %c3) : (!s8, !sp, !s32, i32, i32, i32) -> i1
-    trikeshed.yield %ok : i1
-  }
-  %thing = func.call @element(%kfc, %kid, %insts, %c1) : (!sp, !s32, !s32, i32) -> !s32
   %allThings = func.call @distinct(%thing) : (!s32) -> !s32
   %things = trikeshed.size %allThings : !s32
-  %doms = trikeshed.where %forms : !s32 -> !s32 {
-  ^bb0(%t: i32):
-    %ok = func.call @is_form(%tags, %kfc, %kid, %t, %domain, %c4) : (!s8, !sp, !s32, i32, i32, i32) -> i1
-    trikeshed.yield %ok : i1
-  }
-  %relation = func.call @element(%kfc, %kid, %doms, %c1) : (!sp, !s32, !s32, i32) -> !s32
   %allRelations = func.call @distinct(%relation) : (!s32) -> !s32
   %relations = trikeshed.size %allRelations : !s32
 

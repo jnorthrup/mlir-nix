@@ -10,6 +10,7 @@
 //              length) in the names text, kids (first, count) in the kid series; plus the kid series and the names text
 //   kif.facts  each kif.fact: (term, file)
 //   kif.rules  each kif.rule: (antecedent, consequent, file)
+//   kif.atom_row  the row of an atom, a constant (-1 when the theory has none)
 //
 // Not lowered: kif.derived (the chase's proofs), and sumo ops still in a theory (run sumo-to-kif first: an error).
 //
@@ -19,6 +20,7 @@
 
 #include "Composite/TrikeShed.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -78,6 +80,7 @@ LogicalResult RulesOp::verify() {
   return success();
 }
 LogicalResult RulesOp::verifySymbolUses(SymbolTableCollection &symbols) { return theoryUse(*this, getTheoryAttr(), symbols); }
+LogicalResult AtomRowOp::verifySymbolUses(SymbolTableCollection &symbols) { return theoryUse(*this, getTheoryAttr(), symbols); }
 
 namespace {
 
@@ -142,7 +145,7 @@ struct KifToTrikeShedPass : PassWrapper<KifToTrikeShedPass, OperationPass<Module
            "and remove the theories";
   }
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<memref::MemRefDialect, composite::TrikeShedDialect>();
+    registry.insert<arith::ArithDialect, memref::MemRefDialect, composite::TrikeShedDialect>();
   }
 
   void runOnOperation() override {
@@ -192,6 +195,33 @@ struct KifToTrikeShedPass : PassWrapper<KifToTrikeShedPass, OperationPass<Module
       laid[theory] = g;
       return g;
     };
+
+    // kif.atom_row: a constant, from the theory's atoms (its tables are not laid out for it)
+    llvm::DenseMap<Operation *, llvm::StringMap<int32_t>> atomRows;
+    SmallVector<AtomRowOp> rowUses;
+    module.walk([&](AtomRowOp op) { rowUses.push_back(op); });
+    for (AtomRowOp op : rowUses) {
+      auto theory = symbols.lookup<TheoryOp>(op.getTheory());
+      if (!theory) {
+        op.emitOpError("names no kif.theory: ") << op.getTheoryAttr();
+        return signalPassFailure();
+      }
+      auto it = atomRows.find(theory);
+      if (it == atomRows.end()) {
+        llvm::StringMap<int32_t> rows;
+        int32_t row = 0;
+        for (Operation &t : theory.getBody().front()) {
+          if (auto a = dyn_cast<AtomOp>(t)) rows.try_emplace(a.getName(), row);
+          if (isa<AtomOp, VarOp, ListOp>(t)) row++;
+        }
+        it = atomRows.try_emplace(theory, std::move(rows)).first;
+      }
+      OpBuilder b(op);
+      auto found = it->second.find(op.getName());
+      int32_t row = found == it->second.end() ? -1 : found->second;
+      op.replaceAllUsesWith(arith::ConstantOp::create(b, op.getLoc(), b.getI32IntegerAttr(row)).getResult());
+      op.erase();
+    }
 
     SmallVector<Operation *> uses;
     module.walk([&](Operation *op) {

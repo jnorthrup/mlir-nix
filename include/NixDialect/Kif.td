@@ -157,4 +157,15 @@ def Kif_RulesOp : Kif_Op<"rules", [Pure, DeclareOpInterfaceMethods<SymbolUserOpI
   let hasVerifier = 1;
 }
 
+def Kif_AtomRowOp : Kif_Op<"atom_row", [Pure, DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "the row of an atom in a theory's terms (kif.terms), or -1 when the theory has no such atom";
+  let description = [{
+    `kif.atom_row @kb "subclass" : i32` is the row a query compares a list's head with to find a relation's facts (a theory
+    holds each atom once).  kif-to-trikeshed makes it a constant.
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$theory, StrAttr:$name);
+  let results = (outs I32:$row);
+  let assemblyFormat = "$theory $name attr-dict `:` type($row)";
+}
+
 #endif // KIF_TD

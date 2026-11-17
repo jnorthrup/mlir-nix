@@ -458,6 +458,23 @@ def TS_SortedOp : TS_Op<"sorted", [Pure]> {
   }];
 }
 
+def TS_AdjacencyOp : TS_Op<"adjacency", [Pure]> {
+  let summary = "a graph given as edges (from, to) over nodes 0 ..< n, as each node's (first, count) into the far ends";
+  let arguments = (ins TS_SeriesType:$from, TS_SeriesType:$to, Index:$nodes);
+  let results = (outs TS_SeriesType:$index, TS_SeriesType:$ends);
+  let assemblyFormat = [{
+    $from `,` $to `over` $nodes attr-dict `:` type($from) `,` type($to) `->` type($index) `,` type($ends)
+  }];
+  let hasVerifier = 1;
+  let description = [{
+    The counting sort of ClosureIndex.kt's build (childCount, then fill) and of SumoClassifier.of's parent lists: edge e
+    runs from from[e] to to[e]; index[k] is the TwinPacked (first, count) of node k's edges in ends, which holds their
+    far ends, k's in edge order.  That is the shape trikeshed.closure reads and Confix's DirectChildren has.  An edge
+    whose from is not a node (below 0 or n and above) is left out.
+    Laws: size(index) = n; sum of the counts = size(ends) = the edges kept; ends[first(k) + i] is the to of k's i-th edge.
+  }];
+}
+
 def TS_ClosureOp : TS_Op<"closure", [Pure]> {
   let summary = "every node above each node of a graph of parents: ClosureIndex";
   let arguments = (ins TS_SeriesType:$parents, TS_SeriesType:$above);
