@@ -185,4 +185,23 @@ def Confix_ColumnsOp : Confix_Op<"columns", [Pure]> {
   let hasVerifier = 1;
 }
 
+def Confix_UnescapeOp : Confix_Op<"unescape", [Pure]> {
+  let summary = "a string's value: the bytes between its quotes with their escapes read";
+  let description = [{
+    KnownSchema.decodeEscaped (parse/confix/KnownSchema.kt) over the bytes between a JSON string's quotes, giving bytes:
+    each of \" \\ \/ \b \f \n \r \t is the one byte it names, and \uXXXX its code point in UTF-8, a high and a low
+    surrogate in a row one code point (4 bytes).  A lone surrogate is U+FFFD: Kotlin's String keeps the lone half, which
+    UTF-8 cannot hold, and Kotlin's encodeToByteArray writes U+FFFD for it.  Every other byte is itself.  Kotlin takes
+    the text to be valid and reads any other letter after a backslash as \u; here a backslash that begins none of
+    JSON's escapes (an unknown letter, \u without four hex digits, a backslash at the end) is kept as written, and
+    what follows it is read as text.  Only JSON is taken.
+    Laws: the value is never longer than the text; a text without a backslash is its own value; the value of a text
+    escaped as JSON escapes it is that text.
+  }];
+  let arguments = (ins Confix_SyntaxKind:$syntax, AnyType:$text);
+  let results = (outs AnyType:$value);
+  let assemblyFormat = "$syntax $text attr-dict `:` type($text) `->` type($value)";
+  let hasVerifier = 1;
+}
+
 #endif // CONFIX_TD

@@ -24,6 +24,9 @@
 //   j, first, second                shifts of the i64 that a pair of i32 halves is
 //   facet(c, k) {col -> r}          the region with col = column(c, k)
 //   drain(xs, into)                 a loop storing xs into `into`; the result is size(xs)
+//   combine(a, b, ..)               a buffer of the total size, each part copied into it in turn
+//   combineAll(n) {k -> part}       a loop counting each part's size (a copy of the region) and writing its (start,
+//                                   length); a buffer of the total; a loop copying each part (the region again) to its start
 //   parts(xs, d)                    Series.div: count the delimiters, then each part's (start, length)
 //   text(buffer)                    a constant's 1-D buffer, cast to the series' strided layout
 //   adjacency(from, to, n)          a counting sort: each node's (first, count) into the far ends, in edge order
@@ -34,8 +37,8 @@
 // conversion leaves between a cursor and its buffers are reconciled at the end, so a caller that built its cursor from
 // buffers ends up passing the buffers.  A dialect below TrikeShed (confix: its index and its Columns facet) adds its
 // patterns through CursorLoweringInterface (Composite/CursorLowering.h).  Not lowered: groupBy, pivot, keyedJoin and the
-// other cursor combinators, text, combine, joins, contains, zipnext, the lazy (unmaterialised) form of a series, and series
-// whose elements are neither builtin types nor pairs of two i32.
+// other cursor combinators, joins, contains, zipnext, the lazy (unmaterialised) form of a series, and series whose
+// elements are neither builtin types nor pairs of two i32.
 //
 //===-----------------------------------------------------------------------------------------------------------------===//
 
@@ -720,6 +723,85 @@ struct ClosureLowering : Lowering<ClosureOp> {
   }
 };
 
+/// n elements of `from`, stored into `into` from `at` on.
+void copyInto(OpBuilder &b, Location loc, Value from, Value n, Value into, Value at) {
+  OpBuilder::InsertionGuard guard(b);
+  auto loop = scf::ForOp::create(b, loc, cIndex(b, loc, 0), n, cIndex(b, loc, 1));
+  b.setInsertionPoint(loop.getBody()->getTerminator());
+  Value i = loop.getInductionVar();
+  store(b, loc, load(b, loc, from, i), into, arith::AddIOp::create(b, loc, at, i));
+}
+
+/// combine(a, b, ..): a buffer of the parts' total size, each part copied into it in turn.
+struct CombineLowering : Lowering<CombineOp> {
+  using Lowering::Lowering;
+  LogicalResult matchAndRewrite(CombineOp op, OpAdaptor a, ConversionPatternRewriter &rw) const override {
+    Location loc = op.getLoc();
+    Type element = elementOf(types(), op.getResult().getType());
+    Value total = cIndex(rw, loc, 0);
+    SmallVector<Value> sizes;
+    for (Value part : a.getParts()) {
+      sizes.push_back(length(rw, loc, part));
+      total = arith::AddIOp::create(rw, loc, total, sizes.back());
+    }
+    Value out = newSeriesBuffer(rw, loc, element, total), at = cIndex(rw, loc, 0);
+    for (auto [part, n] : llvm::zip(a.getParts(), sizes)) {
+      copyInto(rw, loc, part, n, out, at);
+      at = arith::AddIOp::create(rw, loc, at, n);
+    }
+    rw.replaceOp(op, out);
+    return success();
+  }
+};
+
+/// combineAll(n) {k -> part}: the first loop runs a copy of the region for each k and writes its part's (start, length),
+/// carrying the running start; then a buffer of the total, and the second loop runs the region itself for each k and
+/// copies its part to its start.
+struct CombineAllLowering : Lowering<CombineAllOp> {
+  CombineAllLowering(const TypeConverter &types, MLIRContext *ctx) : Lowering(types, ctx) {
+    // the copy of the region that the first loop runs holds any combineAll nested in it, which this pattern lowers in
+    // turn while it is still being applied: as many times as they are nested in the source, so the recursion ends
+    setHasBoundedRewriteRecursion();
+  }
+  LogicalResult matchAndRewrite(CombineAllOp op, OpAdaptor a, ConversionPatternRewriter &rw) const override {
+    Location loc = op.getLoc();
+    Type element = elementOf(types(), op.getResult().getType());
+    Type i64 = rw.getI64Type(), idx = rw.getIndexType();
+    Value n = a.getCount(), zero = cIndex(rw, loc, 0), one = cIndex(rw, loc, 1);
+    Value c32 = cInt(rw, loc, i64, 32), mask = cInt(rw, loc, i64, 0xffffffff);
+    Value coordinates = newSeriesBuffer(rw, loc, i64, n);
+    auto counting = scf::ForOp::create(rw, loc, zero, n, one, ValueRange{zero});
+    Block *body = counting.getBody();
+    rw.cloneRegionBefore(op.getPart(), counting.getRegion(), counting.getRegion().end());
+    Block *copy = &counting.getRegion().back();
+    auto yield = dyn_cast<YieldOp>(copy->getTerminator());
+    if (!yield || yield.getValues().size() != 1) return rw.notifyMatchFailure(op, "combineAll's region yields one series");
+    Value yielded = yield.getValues()[0];
+    rw.eraseOp(yield);
+    rw.inlineBlockBefore(copy, body, body->end(), ValueRange{counting.getInductionVar()});
+    rw.setInsertionPointToEnd(body);
+    Value part = rw.getRemappedValue(yielded);
+    if (!part) return rw.notifyMatchFailure(op, "the part does not lower to a buffer");
+    Value start = counting.getRegionIterArgs()[0], size = length(rw, loc, part);
+    Value s = arith::IndexCastUIOp::create(rw, loc, i64, start), l = arith::IndexCastUIOp::create(rw, loc, i64, size);
+    store(rw, loc, arith::OrIOp::create(rw, loc, arith::ShLIOp::create(rw, loc, s, c32), arith::AndIOp::create(rw, loc, l, mask)),
+          coordinates, counting.getInductionVar());
+    scf::YieldOp::create(rw, loc, ValueRange{arith::AddIOp::create(rw, loc, start, size).getResult()});
+    rw.setInsertionPointAfter(counting);
+    Value out = newSeriesBuffer(rw, loc, element, counting.getResult(0));
+    auto copying = scf::ForOp::create(rw, loc, zero, n, one);
+    rw.setInsertionPoint(copying.getBody()->getTerminator());
+    Value k = copying.getInductionVar();
+    auto again = inlineBody(rw, types(), op.getPart(), ValueRange{k});
+    if (failed(again) || again->size() != 1) return rw.notifyMatchFailure(op, "combineAll's region yields one series");
+    Value at = arith::IndexCastUIOp::create(rw, loc, idx, arith::ShRUIOp::create(rw, loc, load(rw, loc, coordinates, k), c32));
+    copyInto(rw, loc, (*again)[0], length(rw, loc, (*again)[0]), out, at);
+    rw.setInsertionPointAfter(copying);
+    rw.replaceOp(op, ValueRange{out, coordinates});
+    return success();
+  }
+};
+
 struct DrainLowering : Lowering<DrainOp> {
   using Lowering::Lowering;
   LogicalResult matchAndRewrite(DrainOp op, OpAdaptor a, ConversionPatternRewriter &rw) const override {
@@ -768,7 +850,7 @@ struct LowerCursors : PassWrapper<LowerCursors, OperationPass<ModuleOp>> {
     RewritePatternSet patterns(ctx);
     patterns.add<ColumnLowering, FacetLowering, SizeLowering, AtLowering, SeriesLowering, AlphaLowering, WhereLowering,
                  ProjectLowering, SliceLowering, FoldLowering, CompareLowering, SortedLowering, BisectLowering, JLowering,
-                 HalfLowering<FirstOp, true>, HalfLowering<SecondOp, false>, DrainLowering, PartsLowering, AdjacencyLowering, ClosureLowering, TextLowering>(types, ctx);
+                 HalfLowering<FirstOp, true>, HalfLowering<SecondOp, false>, DrainLowering, CombineLowering, CombineAllLowering, PartsLowering, AdjacencyLowering, ClosureLowering, TextLowering>(types, ctx);
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, types);
     populateReturnOpTypeConversionPattern(patterns, types);
     populateCallOpTypeConversionPattern(patterns, types);

@@ -49,6 +49,28 @@ mlir::LogicalResult PartsOp::verify() {
   return mlir::success();
 }
 
+mlir::LogicalResult CombineOp::verify() {
+  auto r = llvm::cast<SeriesType>(getResult().getType());
+  for (mlir::Type t : getParts().getTypes())
+    if (llvm::cast<SeriesType>(t).getElement() != r.getElement())
+      return emitOpError("combines series of the result's element type");
+  return mlir::success();
+}
+
+mlir::LogicalResult CombineAllOp::verify() {
+  mlir::Block &body = getPart().front();
+  if (body.getNumArguments() != 1 || !body.getArgument(0).getType().isIndex())
+    return emitOpError("has a region of one index argument, k");
+  auto yield = llvm::dyn_cast<YieldOp>(body.getTerminator());
+  if (!yield || yield.getValues().size() != 1 || yield.getValues()[0].getType() != getResult().getType())
+    return emitOpError("has a region that yields part k, a series of the result's type");
+  auto c = llvm::cast<SeriesType>(getCoordinates().getType());
+  auto p = llvm::dyn_cast<TwinPackedType>(c.getElement());
+  if (!p || !p.getElement().isSignlessInteger(32))
+    return emitOpError("gives the coordinates as a !trikeshed.series<!trikeshed.twinpacked<i32>> (start, length)");
+  return mlir::success();
+}
+
 mlir::LogicalResult AdjacencyOp::verify() {
   auto nodes = [](mlir::Type t) {
     auto s = llvm::dyn_cast<SeriesType>(t);

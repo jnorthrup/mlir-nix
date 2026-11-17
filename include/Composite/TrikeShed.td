@@ -340,9 +340,33 @@ def TS_CombineOp : TS_Op<"combine", [Pure]> {
   let arguments = (ins Variadic<TS_SeriesType>:$parts);
   let results = (outs TS_SeriesType:$result);
   let assemblyFormat = "$parts attr-dict `:` type($parts) `->` type($result)";
+  let hasVerifier = 1;
   let description = [{
-    Series.h `a + b` and `Combine`: the size counted once in 64 bits, drained part by part, never indexed (an indexed
-    combine is the staircase `reify` exists to decide about).
+    Combine.kt's `combine(vararg catn)` and `Series.plus` (`a + b`); Series.h `a + b` and `Combine`, where the size is
+    counted once in 64 bits and the parts are drained one by one, never indexed (an indexed combine is the staircase
+    `reify` exists to decide about).  Lowered as a series is where it is made: a buffer of the parts' total size, each
+    part copied into it in turn.
+    Laws: size(combine(a, b)) = size(a) + size(b); at(combine(a, b), i) = at(a, i) for i < size(a), else
+    at(b, i - size(a)); combine is associative and the empty series is its unit.
+  }];
+}
+
+def TS_CombineAllOp : TS_Op<"combineAll", [Pure]> {
+  let summary = "combine(count j { k -> part }): the parts one after the other, and where each one is";
+  let arguments = (ins Index:$count);
+  let results = (outs TS_SeriesType:$result, TS_SeriesType:$coordinates);
+  let regions = (region SizedRegion<1>:$part);
+  let assemblyFormat = "$count attr-dict `:` type($result) `,` type($coordinates) $part";
+  let hasVerifier = 1;
+  let description = [{
+    Combine.kt's `combine(catn: Series<Series<A>>)`, with catn = `count j { k -> part }`: the region, run with k, yields
+    part k.  Kotlin's combine keeps each part's offset inside the view it returns; here the parts are copied into one
+    buffer, so where each one landed is a result: its (start, length), the TwinPacked a `trikeshed.parts` gives (this
+    is parts' inverse: the parts of xs at d, combined with d between each two, are xs again).
+    Laws: size(result) = the sum of size(part k); slice(result, coordinates[k]) = part k; size(coordinates) = count;
+    the starts ascend from 0, each the one before plus its length.
+    Lowered: the region runs twice for each k, once to count its part's size and once to copy it, so a part costs what
+    making it costs, twice.
   }];
 }
 
