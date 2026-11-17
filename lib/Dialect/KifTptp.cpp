@@ -767,8 +767,11 @@ LogicalResult Tptp::write(raw_ostream &os) {
         emit("(" + rel + " " + c + " " + p + ")", &l, false);
       }
   }
-  for (auto &[i, cs] : instanceClasses) {
-    (void)cs;
+  std::set<std::string> insts; // what has classes: an instance, or what is below one by subrelation or subAttribute
+  for (auto &[i, cs] : instanceClasses) insts.insert(i);
+  for (const char *rel : {"subrelation", "subAttribute"})
+    for (auto &[a, bs] : binary[rel]) insts.insert(a);
+  for (const std::string &i : insts) {
     if (llvm::StringRef(i).contains("__")) continue; // a renamed variable-arity relation
     for (const std::string &c : instanceOf(i)) {
       if (asserted[2].count({i, c})) continue;
