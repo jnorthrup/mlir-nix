@@ -21,8 +21,8 @@ def run(cmd):
     _, status, ru = os.wait4(p.pid, 0)
     p.returncode = os.waitstatus_to_exitcode(status)
     lines = [l.strip() for l in out.splitlines() if l.strip()]
-    # the checker's verdict: nanoda_bin's "Checked .." or its error, con-leche's and con-ron's last line
-    said = [l for l in lines if l.startswith(("Checked", "Error", "error", "con-leche:", "con-ron:"))] or lines
+    # the checker's verdict: nanoda_bin's "Checked .." or the assertion it panics on, con-leche's and con-ron's last line
+    said = [l for l in lines if l.startswith(("Checked", "Error", "error", "assertion failed", "con-leche:", "con-ron:"))] or lines
     return p.returncode, time.time() - t, ru.ru_maxrss / 1024.0, (said[-1] if said else "")[:160]
 
 
