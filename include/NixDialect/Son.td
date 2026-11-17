@@ -15,6 +15,8 @@
 //   son.defer   the lambda as a node that holds no body, only the row it is minted from and the values it captures.
 //   nix-defer   nix.lambda -> son.defer + son.body   (the demand schedule, as a rewrite)
 //   son-mint    son.defer -> nix.lambda               (the eager schedule; the inverse: a round trip is the identity)
+//   son.release what a call's frame may keep when it returns: the Graal arm's frame (graal/, BodyRoot.release),
+//               made by son-release, until the schedule says which cells are forced before the return
 //
 // The pool rows are TrikeShed's PoolCol columns (TrikeShed.td); lowering the pool to trikeshed.append and trikeshed.anchor
 // is the next step.
@@ -67,6 +69,26 @@ def Son_DeferOp : Son_Op<"defer", [DeclareOpInterfaceMethods<SymbolUserOpInterfa
   let arguments = (ins SymbolRefAttr:$row, Variadic<NixAny>:$captures);
   let results = (outs NixFreshFn:$result); // the lambda it stands for
   let assemblyFormat = "$row `(` custom<NixValues>($captures, type($captures)) `)` attr-dict";
+}
+
+def Son_ReleaseOp : Son_Op<"release", [ParentOneOf<["BodyOp", "::mlir::nix::ExprOp"]>]> {
+  let summary = "what a call's frame may keep when the call returns";
+  let description = [{
+    The Graal arm's frame, in the IR (graal/: BodyRoot.release).  A call of a body is a frame of slots, one per block
+    argument and per op result; an op runs when its value is first forced, and an op result passed on without forcing (a
+    list element, an attribute's value, an argument of an apply or a primop, a capture of a defer or of a lambda not
+    deferred yet) is a cell that holds the frame until it is forced.  An argument passed on is the caller's cell, as it
+    came, and holds no frame.  When the call returns, the frame keeps what its unforced cells can read and releases the
+    rest.  Which cells are still unforced is known only then; `kept` is what the IR knows before: the cells and,
+    transitively, every operand of theirs.  Every value of the frame not in `kept` is released when the call returns, on
+    every path.  The verifier checks that no value a cell can read is released; `kept` may hold more (a release that
+    keeps the whole frame is sound).  `son-release` makes it; `son-mint` drops it (it is derived, and a minted lambda is
+    not a frame).  It stands in for what son does not say yet: once the schedule knows which cells are forced before the
+    return, `kept` shrinks to the cells that can escape.
+  }];
+  let arguments = (ins Variadic<NixAny>:$kept);
+  let assemblyFormat = "`(` custom<NixValues>($kept, type($kept)) `)` attr-dict";
+  let hasVerifier = 1;
 }
 
 #endif // SON_TD
