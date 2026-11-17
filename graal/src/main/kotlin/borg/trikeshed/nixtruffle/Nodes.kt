@@ -85,6 +85,7 @@ class BodyRoot(
     @JvmField val label: String, @JvmField val nslots: Int, @JvmField val ncaptures: Int, @JvmField val hasArg: Boolean,
     @JvmField val ret: Int, @field:Children @JvmField val ops: Array<OpNode?>,
     @JvmField val operands: Array<IntArray>, // per slot, the slots its op reads (none for an argument)
+    @JvmField val keepable: BooleanArray?, // the slots son.release names (mlnix-opt --son-release), when the export has one
 ) : RootNode(null) {
     override fun execute(frame: VirtualFrame): Any {
         val a = frame.arguments
@@ -123,10 +124,32 @@ class BodyRoot(
                 if (pending(o)) work[n++] = o
             }
         }
+        if (ReleaseCheck.on && keepable != null) ReleaseCheck.frame(label, s, keep, keepable)
         for (i in s.indices) if (!keep[i] && s[i] != null) s[i] = Released
     }
     override fun getName() = label
     override fun toString() = label
+}
+
+/// NIXTRUFFLE_CHECK_RELEASE=1: each release is checked against son.release, the IR's account of the frame (son-release):
+/// a slot kept here that son.release does not name is a fault of the IR; the counts say how much of the release the IR
+/// already decides.  Printed to stderr at exit.
+object ReleaseCheck {
+    @JvmField val on = System.getenv("NIXTRUFFLE_CHECK_RELEASE") == "1"
+    var frames = 0L; var slots = 0L; var keptHere = 0L; var namedByIr = 0L; var faults = 0L
+    val faulty = LinkedHashSet<String>()
+    init { if (on) Runtime.getRuntime().addShutdownHook(Thread { System.err.println(
+        "release check: $frames frames with an unforced cell at return, $slots slots holding a value: kept $keptHere; " +
+        "son.release named $namedByIr; kept outside son.release $faults" + (if (faulty.isEmpty()) "" else " in ${faulty.joinToString()}")) }) }
+    fun frame(label: String, s: Array<Any?>, keep: BooleanArray, keepable: BooleanArray) {
+        frames++
+        for (i in s.indices) {
+            if (s[i] == null) continue
+            slots++
+            if (keepable[i]) namedByIr++
+            if (keep[i]) { keptHere++; if (!keepable[i]) { faults++; faulty.add(label) } }
+        }
+    }
 }
 
 // ── constants ───────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -380,13 +403,15 @@ class Module(@JvmField val ops: List<Op>, @JvmField val loader: Loader) {
         for (o in block.ops) for (r in o.res) slot[r] = slot.size
         val nodes = arrayOfNulls<OpNode>(slot.size)
         var ret = -1
+        var keepable: BooleanArray? = null
         for (o in block.ops) {
             if (o.name == "nix.return") { ret = slot[o.ins[0]]!!; continue }
+            if (o.name == "son.release") { keepable = BooleanArray(slot.size).also { k -> for (v in o.ins) k[slot[v]!!] = true }; continue }
             nodes[slot[o.res[0]]!!] = node(o, IntArray(o.ins.size) { slot[o.ins[it]]!! })
         }
         val operands = Array(slot.size) { IntArray(0) }
-        for (o in block.ops) if (o.name != "nix.return") operands[slot[o.res[0]]!!] = IntArray(o.ins.size) { slot[o.ins[it]]!! }
-        return BodyRoot(label, slot.size, ncaptures, hasArg, ret, nodes, operands)
+        for (o in block.ops) if (o.name != "nix.return" && o.name != "son.release") operands[slot[o.res[0]]!!] = IntArray(o.ins.size) { slot[o.ins[it]]!! }
+        return BodyRoot(label, slot.size, ncaptures, hasArg, ret, nodes, operands, keepable)
     }
 
     @Suppress("UNCHECKED_CAST")

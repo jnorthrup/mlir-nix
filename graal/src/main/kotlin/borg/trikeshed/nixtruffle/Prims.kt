@@ -400,7 +400,7 @@ class Loader(private val bin: String) {
 
     @TruffleBoundary
     fun module(file: String): Module = modules.getOrPut(file) {
-        val p = ProcessBuilder("sh", "-c", "'$bin/mlnix' emit-mlir \"$1\" | '$bin/mlnix-opt' --nix-defer --son-export -o /dev/null", "sh", file)
+        val p = ProcessBuilder("sh", "-c", "'$bin/mlnix' emit-mlir \"$1\" | '$bin/mlnix-opt' --nix-defer ${System.getenv("NIXTRUFFLE_SON_PASSES") ?: ""} --son-export -o /dev/null", "sh", file)
             .redirectError(ProcessBuilder.Redirect.PIPE).start()
         val out = p.inputStream.readAllBytes(); val err = p.errorStream.readAllBytes()
         if (p.waitFor() != 0 || out.isEmpty()) throw NixError("export of $file failed: ${String(err).trim()}")

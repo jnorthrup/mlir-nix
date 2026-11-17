@@ -3,6 +3,7 @@
 #include "NixDialect/Son.h"
 
 #include "mlir/IR/Builders.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallString.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/IRMapping.h"
@@ -45,6 +46,51 @@ LogicalResult DeferOp::verifySymbolUses(SymbolTableCollection &symbols) {
     return emitOpError("refers to ") << getRowAttr() << ", which is no son.body";
   if (body.getCaptures() != getCaptures().size())
     return emitOpError("binds ") << getCaptures().size() << " captures, the body takes " << body.getCaptures();
+  return success();
+}
+
+namespace {
+/// What a frame's cells can read when the call returns (son.release, Son.td).  A cell is an op result passed on without
+/// forcing: an operand nix-truffle reads with `lazy` (graal/, Nodes.kt) -- a list's elements, an attribute set's values
+/// (static and dynamic; not the dynamic names), an apply's arguments (not the callee), a defer's captures, every operand of a
+/// primop -- or a value used inside a lambda not deferred yet, which captures it.  An argument passed on is the caller's cell,
+/// as it came, and holds no frame.  The cells and their closure over operands, in the frame's order: arguments, results.
+/// The Graal arm's keep set at a return is a subset: it starts from the cells still unforced, and stops at a slot forced.
+SmallVector<Value> frameReads(Block &block, nix::NixDialect *nixd) {
+  SmallVector<Value> work;
+  auto pass = [&](ValueRange vs) { for (Value v : vs) if (isa<OpResult>(v) && v.getParentBlock() == &block) work.push_back(v); };
+  for (Operation &o : block) {
+    if (auto list = dyn_cast<nix::ListOp>(o)) pass(list.getElements());
+    else if (auto attrs = dyn_cast<nix::AttrsOp>(o)) { pass(attrs.getValues()); pass(attrs.getDynValues()); }
+    else if (auto apply = dyn_cast<nix::ApplyOp>(o)) pass(apply.getArgs());
+    else if (auto defer = dyn_cast<DeferOp>(o)) pass(defer.getCaptures());
+    else if (nixd && nixd->primOf(&o)) pass(o.getOperands());
+    for (Region &r : o.getRegions()) r.walk([&](Operation *inner) { pass(inner->getOperands()); });
+  }
+  llvm::DenseSet<Value> kept;
+  while (!work.empty()) {
+    Value v = work.pop_back_val();
+    if (v.getParentBlock() != &block || !kept.insert(v).second) continue;
+    if (Operation *def = v.getDefiningOp()) for (Value u : def->getOperands()) work.push_back(u);
+  }
+  SmallVector<Value> ordered;
+  for (BlockArgument a : block.getArguments()) if (kept.contains(a)) ordered.push_back(a);
+  for (Operation &o : block) for (Value r : o.getResults()) if (kept.contains(r)) ordered.push_back(r);
+  return ordered;
+}
+} // namespace
+
+LogicalResult ReleaseOp::verify() {
+  for (Operation *o = getOperation()->getPrevNode(); o; o = o->getPrevNode())
+    if (isa<ReleaseOp>(o)) return emitOpError("follows another in its frame: a frame is released once");
+  llvm::DenseSet<Value> kept;
+  kept.insert(getKept().begin(), getKept().end());
+  for (Value v : frameReads(*getOperation()->getBlock(), getContext()->getLoadedDialect<nix::NixDialect>()))
+    if (!kept.contains(v)) {
+      InFlightDiagnostic d = emitOpError("releases a value a cell passed on can still read");
+      d.attachNote(v.getLoc()) << "this value";
+      return d;
+    }
   return success();
 }
 
@@ -119,6 +165,7 @@ struct SonMintPass : PassWrapper<SonMintPass, OperationPass<ModuleOp>> {
 
   void runOnOperation() override {
     ModuleOp module = getOperation();
+    module.walk([](ReleaseOp r) { r.erase(); }); // derived (son-release), and a minted lambda is not a frame
     auto pool = module.lookupSymbol<PoolOp>(kPool);
     if (!pool)
       return;
@@ -155,6 +202,31 @@ struct SonMintPass : PassWrapper<SonMintPass, OperationPass<ModuleOp>> {
 } // namespace
 
 namespace {
+/// son-release: each frame's son.release (Son.td), as the Graal arm keeps a frame (graal/, Nodes.kt): what frameReads finds.
+struct SonReleasePass : PassWrapper<SonReleasePass, OperationPass<ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SonReleasePass)
+  StringRef getArgument() const override { return "son-release"; }
+  StringRef getDescription() const override { return "Mark in each frame what its unforced cells can read when the call returns"; }
+
+  void frame(Block &block, nix::NixDialect *nixd) {
+    for (Operation &o : llvm::make_early_inc_range(block))
+      if (isa<ReleaseOp>(o)) o.erase();
+    SmallVector<Value> kept = frameReads(block, nixd);
+    OpBuilder b(block.getTerminator());
+    ReleaseOp::create(b, block.getTerminator()->getLoc(), kept);
+  }
+
+  void runOnOperation() override {
+    auto *nixd = getContext().getLoadedDialect<nix::NixDialect>();
+    getOperation().walk([&](Operation *o) {
+      if (isa<BodyOp, nix::ExprOp>(o))
+        for (Region &r : o->getRegions())
+          for (Block &b : r)
+            if (!b.empty() && b.back().hasTrait<OpTrait::IsTerminator>()) frame(b, nixd);
+    });
+  }
+};
+
 /// son-export: the module as JSON on stdout, for an executor outside this process (the Graal arm, docs/PRELOAD-DIALECTS.md step 3: a
 /// Truffle interpreter builds its nodes from it).  Generic: every op is {"op", "res", "ins", "types", "attrs", "regions"}, a region a
 /// list of blocks {"args", "ops"}, a value a number unique in the module (a graph region reads values before their definition, so a
@@ -278,6 +350,7 @@ void registerSonPasses() {
   static const bool registered = [] {
     PassRegistration<NixDeferPass>();
     PassRegistration<SonMintPass>();
+    PassRegistration<SonReleasePass>();
     PassRegistration<SonExportPass>();
     return true;
   }();

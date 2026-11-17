@@ -185,6 +185,28 @@ file in place and restores it, so it is not kept in the repo.
   are 1 MB, three orders below the effect being measured. The columnar form is there because it is the
   algebra's pool, and it costs nothing measurable.
 
+## The frame's release: the Graal arm's lifetime, in son
+
+The Graal arm (`graal/`, nix-truffle) runs son form: a call of a `son.body` is a frame of slots, and its one lifecycle
+rule is `BodyRoot.release`: when the call returns, the frame keeps what its unforced cells can read and lets go of the
+rest. `son.release` states that rule in this dialect, not in a new one. `son-release` puts one before each frame's
+return, naming what a cell passed on without forcing can read (the operands nix-truffle reads with `lazy`, and their
+closure over operands); its verifier refuses a release that lets go of such a value; `son-mint` drops it. It frees
+nothing: the slots stay the collector's, and it says only when the frame stops reaching them.
+
+Checked against the arm itself (`NIXTRUFFLE_SON_PASSES=--son-release NIXTRUFFLE_CHECK_RELEASE=1`): at each return, the
+slots the arm keeps are compared with the frame's `son.release`.
+
+    eval-okay, 147 files    frames with a cell     slots holding    kept by    named by       kept outside
+                            unforced at return     a value          the arm    son.release    son.release
+    nix-truffle             930                    11,252           3,268      5,787          0
+
+The outputs are byte-identical with and without it (123/147 identical to `.exp` both ways). The IR alone decides 5,465 of
+the 11,252 slots (49%). The 2,519 it names that the arm lets go are cells forced before the return, which the schedule
+does not say yet; that gap is what more son would close. The evaluator registers son, so it carries the op and the pass
+(+64 KB stripped, +0.29%) and never runs them: `emit-mlir` and `son-export` are byte-identical, and toplevel is unchanged
+within noise.
+
 ## Not built, with the number that gates it
 
 Type pools for every node (the whole AST as `Cursor`s of typed instances, Confix mapping a tree to rows)
