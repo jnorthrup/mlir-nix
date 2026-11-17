@@ -16,7 +16,7 @@
 //   nix-defer   nix.lambda -> son.defer + son.body   (the demand schedule, as a rewrite)
 //   son-mint    son.defer -> nix.lambda               (the eager schedule; the inverse: a round trip is the identity)
 //   son.release what a call's frame may keep when it returns: the Graal arm's frame (graal/, BodyRoot.release),
-//               made by son-release, until the schedule says which cells are forced before the return
+//               made by son-release from the schedule's must-force set (what is forced on every path that returns)
 //
 // The pool rows are TrikeShed's PoolCol columns (TrikeShed.td); lowering the pool to trikeshed.append and trikeshed.anchor
 // is the next step.
@@ -79,12 +79,14 @@ def Son_ReleaseOp : Son_Op<"release", [ParentOneOf<["BodyOp", "::mlir::nix::Expr
     list element, an attribute's value, an argument of an apply or a primop, a capture of a defer or of a lambda not
     deferred yet) is a cell that holds the frame until it is forced.  An argument passed on is the caller's cell, as it
     came, and holds no frame.  When the call returns, the frame keeps what its unforced cells can read and releases the
-    rest.  Which cells are still unforced is known only then; `kept` is what the IR knows before: the cells and,
-    transitively, every operand of theirs.  Every value of the frame not in `kept` is released when the call returns, on
-    every path.  The verifier checks that no value a cell can read is released; `kept` may hold more (a release that
-    keeps the whole frame is sound).  `son-release` makes it; `son-mint` drops it (it is derived, and a minted lambda is
-    not a frame).  It stands in for what son does not say yet: once the schedule knows which cells are forced before the
-    return, `kept` shrinks to the cells that can escape.
+    rest.  Which cells are still unforced is known only then; `kept` is what the IR knows before.  The schedule knows the
+    values forced on every path on which the call returns (the must-force set, SonDialect.cpp: the return value, what a
+    forced op always forces, what both arms of an if force, a callee's argument where the callee is a defer of the frame
+    that forces it; a throw returns on no path): a cell among them is a value by the return and reads nothing.  So `kept`
+    is the other cells and their operands, followed through the operands not forced either (a forced one is kept as the
+    value it is).  Every value of the frame not in `kept` is released when the call returns, on every path.  The
+    verifier checks that no value a cell can read is released; `kept` may hold more (a release that keeps the whole
+    frame is sound).  `son-release` makes it; `son-mint` drops it (it is derived, and a minted lambda is not a frame).
   }];
   let arguments = (ins Variadic<NixAny>:$kept);
   let assemblyFormat = "`(` custom<NixValues>($kept, type($kept)) `)` attr-dict";

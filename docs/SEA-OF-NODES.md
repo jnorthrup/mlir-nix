@@ -194,18 +194,56 @@ return, naming what a cell passed on without forcing can read (the operands nix-
 closure over operands); its verifier refuses a release that lets go of such a value; `son-mint` drops it. It frees
 nothing: the slots stay the collector's, and it says only when the frame stops reaching them.
 
+The release has two halves. What escapes: the cells passed on unforced (a list's elements, an attribute's value, an
+argument, a capture). What the schedule forces before the return: the must-force set (`MustForce`, SonDialect.cpp) --
+the return value, what a forced op always forces (an if's condition and what both arms force, the left of `&&`, both
+sides of `==` and `//`, a select's base, a primop's `nix.strict` operands), a callee's argument where the callee is a
+lambda of the frame that takes a pattern or forces it on every path; a throw returns on no path. A cell in the
+must-force set is a value by the return and reads nothing, so the frame keeps only the cells outside it and what they
+read. `son.forcedOnReturn` exposes the set to the evaluator.
+
 Checked against the arm itself (`NIXTRUFFLE_SON_PASSES=--son-release NIXTRUFFLE_CHECK_RELEASE=1`): at each return, the
 slots the arm keeps are compared with the frame's `son.release`.
 
     eval-okay, 147 files    frames with a cell     slots holding    kept by    named by       kept outside
                             unforced at return     a value          the arm    son.release    son.release
-    nix-truffle             930                    11,252           3,268      5,787          0
+    escapes only            930                    11,252           3,268      5,787          0
+    with the must-force set 930                    11,252           3,268      5,234          0
 
-The outputs are byte-identical with and without it (123/147 identical to `.exp` both ways). The IR alone decides 5,465 of
-the 11,252 slots (49%). The 2,519 it names that the arm lets go are cells forced before the return, which the schedule
-does not say yet; that gap is what more son would close. The evaluator registers son, so it carries the op and the pass
-(+64 KB stripped, +0.29%) and never runs them: `emit-mlir` and `son-export` are byte-identical, and toplevel is unchanged
-within noise.
+The outputs are byte-identical with and without it (147/147; 123/147 identical to `.exp` both ways). The must-force set
+takes 553 of the 2,519 slots son.release named and the arm let go (22%); the rest are cells forced before the return on
+the path the run took, not on every path, or by a callee son does not see. The evaluator registers son, so it carries
+the op and the pass (+64 KB stripped, +0.29%) and never runs them: `emit-mlir` and `son-export` are byte-identical.
+
+The native evaluator keeps son's account beside the run's (MLNIX_STATS, `son's account of the frames at their
+return`). A lambda body is dead at return by son when it makes no closure and every value of it passed on as a cell is
+in its must-force set -- the cells are the evaluator's, as son.release's are the arm's: a list's elements, an attribute's
+value, an application's arguments, a primop's operands (not the one it forces first, nor a `nix.strict` one); the other
+core ops force what they read or read it only to force it. A frame is dead at return by the run when it pinned no
+closure and every thunk made over it, projections too, was forced by then. Son wrong counts frames dead by son and not
+by the run: it must be 0.
+
+    MLNIX_DEFER=1           returns      dead by the run    dead by son    without must-force    son wrong
+    nixpkgs-73              2,880,133    1,003,419 34.8%    364,152 12.6%  358,749 12.5%         0
+    toplevel                4,568,831    1,364,094 29.9%    591,099 12.9%  583,038 12.8%         0
+
+Outputs unchanged (5e8fff66..., f1cfa7cd...). On the native side the must-force set adds little: its cells are attribute
+values and arguments, which a body passes on rather than forces. Why son keeps the frames the run found dead, by the
+worst cell of the body:
+
+                            a closure    forced on some path only    a callee son does not see    passed on unforced
+    nixpkgs-73              58,004       23,396                      516,728                      41,139
+    toplevel                89,203       58,527                      452,477                      172,788
+
+The callee column is a function from outside the frame (captured, or from lib) given a cell: 81% (nixpkgs-73) and 59%
+(toplevel) of what son misses, and in each of those frames the run shows the cell forced before the return. Passed on
+unforced is mostly attribute values, then primops whose table entry says less than they force (`__seq`'s second
+operand, `elemAt`'s index, `lessThan`, a throw's message): `nix.strict` there is precision for son and for the
+evaluator's promotion alike. A strict schedule -- make the value, not the thunk, where the body forces it on every
+path anyway -- would remove 27,959 of 3,778,193 thunks over a frame on nixpkgs-73 (0.7%) and 117,089 of 5,327,906 on
+toplevel (2.2%): too few to trade Nix's order of errors for. A release per path takes at most the second column. The
+callee column is the one that pays: a summary of whether a function forces its argument, which son cannot read from
+one frame's IR -- the function arrives as a value -- and the Graal arm can profile and speculate on.
 
 ## Not built, with the number that gates it
 

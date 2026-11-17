@@ -3,12 +3,16 @@
 #include "NixDialect/Son.h"
 
 #include "mlir/IR/Builders.h"
+#include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallString.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/RegionUtils.h"
+
+#include <deque>
+#include <optional>
 
 #include "NixDialect/SonDialect.cpp.inc"
 
@@ -50,15 +54,199 @@ LogicalResult DeferOp::verifySymbolUses(SymbolTableCollection &symbols) {
 }
 
 namespace {
+/// The values of a frame forced on every path on which its call returns: the schedule's half of the frame's lifecycle, read
+/// by son.release (Son.td).  The return value is forced (the call returns it in weak head normal form), and forcing a value
+/// forces, every time, the operands its op always forces:
+///   nix.if        its condition, and what both of its arms force (one of them runs);
+///   nix.assert    its condition and its body;            nix.not, nix.formal   their operand (a formal, the argument set);
+///   nix.and/or/impl  the left side (the right only when it decides);
+///   nix.eq/neq, nix.update, nix.concat_lists  both sides;   nix.concat_strings, nix.interpolate  every part;
+///   nix.select, nix.has_attr  the base, and the first key when it is computed;   nix.with_var  the innermost scope;
+///   nix.attrs     every computed name;                    nix.apply  the callee, and its first argument when the callee is a
+///                 son.defer of this frame whose lambda takes an attribute pattern or whose body forces its argument;
+///   a primop      applied to all its arguments: every operand of a nix.strict one, else its nix.first one (NixPrims.irdl.mlir).
+/// A list, an attribute's value, an argument of an apply or a primop, a defer's capture: none (they are cells).  A primop that
+/// never returns (throw, abort) forces everything, since no path through it returns.  A block argument is the caller's.
+/// The set is an under-approximation: a cycle of forcing is cut (it never returns: infinite recursion), and a block too big
+/// for the bit sets gets the return value alone.
+class MustForce {
+public:
+  /// `may`: the values forced on some path that returns instead (the arms of an if joined, both sides of and/or/impl).
+  MustForce(Block &block, nix::NixDialect *nixd, llvm::DenseMap<Operation *, bool> *argStrict = nullptr, bool may = false)
+      : block(block), nixd(nixd), argStrict(argStrict), may(may) {
+    for (BlockArgument a : block.getArguments()) if (index.try_emplace(a, index.size()).second) values.push_back(a);
+    for (Operation &o : block)
+      for (Value r : o.getResults()) if (index.try_emplace(r, index.size()).second) values.push_back(r);
+    memo.resize(index.size());
+    state.assign(index.size(), 0);
+    top.assign(index.size(), false);
+    if (block.empty() || !isa<nix::ReturnOp>(block.back())) return;
+    Value ret = block.back().getOperand(0);
+    auto it = index.find(ret);
+    if (it == index.end()) return;
+    if (!of(it->second, 0)) { never = true; return; } // the body never returns: nothing is released
+    forcedSet = *memo[it->second];
+  }
+  /// v is computed when the call returns, on every path that returns.
+  bool forced(Value v) const {
+    if (never) return true;
+    auto it = index.find(v);
+    return it != index.end() && forcedSet.size() > it->second && forcedSet.test(it->second);
+  }
+  /// No path of the body returns (every one throws).
+  bool neverReturns() const { return never; }
+
+private:
+  Block &block;
+  nix::NixDialect *nixd;
+  llvm::DenseMap<Operation *, bool> *argStrict; // per son.body: forces its argument (memo, shared across bodies)
+  bool may;
+  llvm::DenseMap<Value, unsigned> index;
+  std::vector<Value> values; // by index
+  std::vector<std::optional<llvm::BitVector>> memo;
+  std::vector<uint8_t> state; // 0 not seen, 1 being computed (a cycle), 2 done
+  std::vector<bool> top;      // done and forcing it never returns
+  llvm::BitVector forcedSet;
+  bool never = false;
+  size_t bits = 0;
+  static constexpr size_t kBitBudget = size_t(1) << 26; // 8 MB of sets for one frame
+
+  /// The set forced when value i is, or null when forcing it never returns (it throws on every path).
+  const llvm::BitVector *of(unsigned i, unsigned depth) {
+    if (state[i] == 2) return top[i] ? nullptr : &*memo[i];
+    llvm::BitVector self(index.size());
+    self.set(i);
+    if (state[i] == 1 || depth > 4096 || bits + index.size() > kBitBudget) return keep(i, std::move(self), false, state[i] == 1);
+    state[i] = 1;
+    Value v = valueAt(i);
+    SmallVector<Value, 4> must, alts;
+    bool throws = false;
+    if (Operation *op = v.getDefiningOp()) demands(op, must, alts, throws);
+    if (throws) return keep(i, std::move(self), true);
+    for (Value m : must) {
+      auto it = index.find(m);
+      if (it == index.end()) continue;
+      const llvm::BitVector *d = of(it->second, depth + 1);
+      if (!d) return keep(i, std::move(self), true);
+      self |= *d;
+    }
+    if (!alts.empty()) {
+      std::optional<llvm::BitVector> meet; // what every arm that returns forces (`may`: some arm)
+      for (Value a : alts) {
+        auto it = index.find(a);
+        if (it == index.end()) { // an arm from outside the frame: it forces nothing of it
+          if (!may) { meet = llvm::BitVector(index.size()); break; }
+          if (!meet) meet = llvm::BitVector(index.size());
+          continue;
+        }
+        const llvm::BitVector *d = of(it->second, depth + 1);
+        if (!d) continue; // this arm never returns
+        if (!meet) meet = *d;
+        else if (may) *meet |= *d;
+        else *meet &= *d;
+      }
+      if (!meet) return keep(i, std::move(self), true); // no arm returns
+      self |= *meet;
+    }
+    return keep(i, std::move(self), false);
+  }
+  const llvm::BitVector *keep(unsigned i, llvm::BitVector set, bool throws, bool cycle = false) {
+    if (cycle) { // the value is being computed below us: what is known of it so far is itself (not memoized)
+      scratch.push_back(std::move(set));
+      return &scratch.back();
+    }
+    bits += set.size();
+    state[i] = 2;
+    top[i] = throws;
+    memo[i] = std::move(set);
+    return throws ? nullptr : &*memo[i];
+  }
+  std::deque<llvm::BitVector> scratch;
+
+  Value valueAt(unsigned i) const { return values[i]; }
+
+  void demands(Operation *op, SmallVectorImpl<Value> &must, SmallVectorImpl<Value> &alts, bool &throws) {
+    auto firstKey = [](auto path, ValueRange keys, SmallVectorImpl<Value> &out) { // a computed first name: its key
+      if (!path.empty() && !keys.empty() && path.front().isNull()) out.push_back(keys.front());
+    };
+    if (auto o = dyn_cast<nix::IfOp>(op)) { must.push_back(o.getCond()); alts.push_back(o.getThenValue()); alts.push_back(o.getElseValue()); }
+    else if (auto o = dyn_cast<nix::AssertOp>(op)) { must.push_back(o.getCond()); must.push_back(o.getBody()); }
+    else if (isa<nix::NotOp>(op)) must.push_back(op->getOperand(0));
+    else if (isa<nix::AndOp, nix::OrOp, nix::ImplOp>(op)) { must.push_back(op->getOperand(0)); if (may) must.push_back(op->getOperand(1)); }
+    else if (isa<nix::EqOp, nix::NeqOp, nix::UpdateOp, nix::ConcatListsOp>(op)) { must.push_back(op->getOperand(0)); must.push_back(op->getOperand(1)); }
+    else if (isa<nix::ConcatStringsOp, nix::InterpolateOp>(op)) must.append(op->operand_begin(), op->operand_end());
+    else if (auto o = dyn_cast<nix::SelectOp>(op)) { must.push_back(o.getBase()); firstKey(o.getPath(), o.getDynKeys(), must); }
+    else if (auto o = dyn_cast<nix::HasAttrOp>(op)) { must.push_back(o.getBase()); firstKey(o.getPath(), o.getDynKeys(), must); }
+    else if (auto o = dyn_cast<nix::FormalOp>(op)) must.push_back(o.getArg());
+    else if (auto o = dyn_cast<nix::WithVarOp>(op)) { if (!o.getScopes().empty()) must.push_back(o.getScopes().front()); }
+    else if (auto o = dyn_cast<nix::AttrsOp>(op)) must.append(o.getDynNames().begin(), o.getDynNames().end());
+    else if (auto o = dyn_cast<nix::ApplyOp>(op)) {
+      must.push_back(o.getCallee());
+      if (!o.getArgs().empty() && calleeForcesArg(o.getCallee())) must.push_back(o.getArgs().front());
+    } else if (const auto *prim = nixd ? nixd->primOf(op) : nullptr) {
+      if (prim->key == "throw" || prim->key == "abort") { throws = true; return; }
+      if (prim->key == "__tryEval") return; // catches: its operand's throwing returns, and a cell that threw stays unforced
+      if (op->getNumOperands() != prim->arity) return; // a partial application forces nothing
+      auto modes = nixd->modesOf(op->getName());
+      for (unsigned k = 0; k < op->getNumOperands(); ++k)
+        if ((modes.strict >> k) & 1) must.push_back(op->getOperand(k));
+      if (modes.first && modes.first <= op->getNumOperands() && !((modes.strict >> (modes.first - 1)) & 1))
+        must.push_back(op->getOperand(modes.first - 1));
+    }
+  }
+
+  /// The callee is a lambda of this frame -- a son.defer, or a nix.lambda with its body -- and calling it forces the
+  /// argument: it takes an attribute pattern (a call checks the set's names, which forces it), or its body forces the
+  /// argument on every path that returns.
+  bool calleeForcesArg(Value callee) {
+    if (!argStrict) return false;
+    Operation *key = nullptr;
+    Block *body = nullptr;
+    bool pattern = false;
+    if (auto defer = callee.getDefiningOp<DeferOp>()) {
+      auto module = defer->getParentOfType<ModuleOp>(); // the row is named from the module, as DeferOp verifies it
+      auto row = module ? dyn_cast_or_null<BodyOp>(SymbolTable::lookupSymbolIn(module, defer.getRowAttr())) : BodyOp();
+      if (!row || row.getBody().empty()) return false;
+      key = row;
+      body = &row.getBody().front();
+      auto props = dyn_cast_or_null<DictionaryAttr>(row.getLambda());
+      pattern = props && props.get("formals");
+    } else if (auto lam = callee.getDefiningOp<nix::LambdaOp>()) {
+      key = lam;
+      pattern = bool(lam.getFormals());
+      if (!lam.getBody().empty() && !lam.getBody().front().empty()) body = &lam.getBody().front();
+      else if (!pattern) return false; // a deferred shell: its body is not minted yet
+    } else {
+      return false;
+    }
+    if (auto it = argStrict->find(key); it != argStrict->end()) return it->second;
+    (*argStrict)[key] = false; // a body that calls itself: not known yet, so not strict
+    bool strict = pattern;
+    if (!strict && body) {
+      MustForce inner(*body, nixd, argStrict);
+      strict = inner.forced(body->getArgument(body->getNumArguments() - 1));
+    }
+    (*argStrict)[key] = strict;
+    return strict;
+  }
+};
+
 /// What a frame's cells can read when the call returns (son.release, Son.td).  A cell is an op result passed on without
 /// forcing: an operand nix-truffle reads with `lazy` (graal/, Nodes.kt) -- a list's elements, an attribute set's values
 /// (static and dynamic; not the dynamic names), an apply's arguments (not the callee), a defer's captures, every operand of a
 /// primop -- or a value used inside a lambda not deferred yet, which captures it.  An argument passed on is the caller's cell,
-/// as it came, and holds no frame.  The cells and their closure over operands, in the frame's order: arguments, results.
-/// The Graal arm's keep set at a return is a subset: it starts from the cells still unforced, and stops at a slot forced.
+/// as it came, and holds no frame.  A cell forced on every path that returns (MustForce) is a value by then and reads nothing:
+/// the cells are the others, and their closure over operands, followed through the operands not forced either (a forced one
+/// is kept as the value it is).  In the frame's order: arguments, results.  The Graal arm's keep set at a return is a subset:
+/// it starts from the cells still unforced, and stops at a slot forced.
 SmallVector<Value> frameReads(Block &block, nix::NixDialect *nixd) {
+  llvm::DenseMap<Operation *, bool> argStrict;
+  MustForce must(block, nixd, &argStrict);
   SmallVector<Value> work;
-  auto pass = [&](ValueRange vs) { for (Value v : vs) if (isa<OpResult>(v) && v.getParentBlock() == &block) work.push_back(v); };
+  auto pass = [&](ValueRange vs) {
+    for (Value v : vs)
+      if (isa<OpResult>(v) && v.getParentBlock() == &block && !must.forced(v)) work.push_back(v);
+  };
   for (Operation &o : block) {
     if (auto list = dyn_cast<nix::ListOp>(o)) pass(list.getElements());
     else if (auto attrs = dyn_cast<nix::AttrsOp>(o)) { pass(attrs.getValues()); pass(attrs.getDynValues()); }
@@ -71,6 +259,7 @@ SmallVector<Value> frameReads(Block &block, nix::NixDialect *nixd) {
   while (!work.empty()) {
     Value v = work.pop_back_val();
     if (v.getParentBlock() != &block || !kept.insert(v).second) continue;
+    if (must.forced(v)) continue; // computed by the return: kept as its value, its operands not needed again
     if (Operation *def = v.getDefiningOp()) for (Value u : def->getOperands()) work.push_back(u);
   }
   SmallVector<Value> ordered;
@@ -79,6 +268,18 @@ SmallVector<Value> frameReads(Block &block, nix::NixDialect *nixd) {
   return ordered;
 }
 } // namespace
+
+ForcedOnReturn forcedOnReturn(Block &block, nix::NixDialect *nixd, bool may) {
+  llvm::DenseMap<Operation *, bool> argStrict;
+  MustForce must(block, nixd, &argStrict, may);
+  ForcedOnReturn out;
+  out.never = must.neverReturns();
+  if (!out.never) {
+    for (BlockArgument a : block.getArguments()) if (must.forced(a)) out.forced.insert(a);
+    for (Operation &o : block) for (Value r : o.getResults()) if (must.forced(r)) out.forced.insert(r);
+  }
+  return out;
+}
 
 LogicalResult ReleaseOp::verify() {
   for (Operation *o = getOperation()->getPrevNode(); o; o = o->getPrevNode())
