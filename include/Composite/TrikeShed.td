@@ -487,13 +487,15 @@ def TS_ClusterOrderOp : TS_Op<"cluster_order"> {
 
 def TS_CompareOp : TS_Op<"compare", [Pure]> {
   let summary = "the first difference between two series, then the shorter one is less";
-  let arguments = (ins TS_SeriesType:$a, TS_SeriesType:$b);
+  let arguments = (ins TS_SeriesType:$a, TS_SeriesType:$b, UnitAttr:$unsignedOrder);
   let results = (outs I32:$order);
-  let assemblyFormat = "$a `,` $b attr-dict `:` type($a) `,` type($b)";
+  let assemblyFormat = "$a `,` $b (`unsigned` $unsignedOrder^)? attr-dict `:` type($a) `,` type($b)";
   let description = [{
     Join.kt's `CSeries<T : Comparable<T>>`: walk both to the shorter length and return the first non-zero comparison,
     else compare the sizes.  `shortestLength` and `commonPrefixWith` are what that walk gives.  The elements are integers,
-    compared signed as Kotlin compares Int and Byte; the result is -1, 0 or 1.
+    compared signed as Kotlin compares Int and Byte; the result is -1, 0 or 1.  With `unsigned` they are compared
+    unsigned, as Kotlin compares Chars (by their code): the bytes of a text, so that a UTF-8 text sorts in the order of its
+    code points, as its String would.
   }];
 }
 

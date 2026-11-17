@@ -18,7 +18,7 @@
 //   project(xs, idx)                a buffer of size(idx): xs[idx[i]]
 //   slice(xs, off, n)               a subview: the same buffer at an offset
 //   fold(xs, z) {acc, x -> acc}     an scf.for carrying the accumulator
-//   compare(a, b)                   a loop to the first difference, then the sizes: -1, 0 or 1
+//   compare(a, b) [unsigned]        a loop to the first difference, then the sizes: -1, 0 or 1
 //   sorted(xs) [by {a, b -> c}]     a stable bottom-up merge sort into a new buffer; the region is the comparator
 //   bisect(xs, k) [by {x, k -> c}]  a binary search: the index, or -(insertion) - 1
 //   j, first, second                shifts of the i64 that a pair of i32 halves is
@@ -146,11 +146,11 @@ FailureOr<SmallVector<Value>> inlineBody(ConversionPatternRewriter &rw, const Ty
   return results;
 }
 
-/// The signed order of two integers: -1, 0 or 1 as an i32.
-Value threeWay(OpBuilder &b, Location loc, Value x, Value y) {
+/// The order of two integers, signed or unsigned: -1, 0 or 1 as an i32.
+Value threeWay(OpBuilder &b, Location loc, Value x, Value y, bool isUnsigned = false) {
   Type i32 = b.getI32Type();
-  Value lt = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::slt, x, y);
-  Value gt = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::sgt, x, y);
+  Value lt = arith::CmpIOp::create(b, loc, isUnsigned ? arith::CmpIPredicate::ult : arith::CmpIPredicate::slt, x, y);
+  Value gt = arith::CmpIOp::create(b, loc, isUnsigned ? arith::CmpIPredicate::ugt : arith::CmpIPredicate::sgt, x, y);
   Value one = cInt(b, loc, i32, 1), zero = cInt(b, loc, i32, 0), minus = cInt(b, loc, i32, -1);
   return arith::SelectOp::create(b, loc, lt, minus, arith::SelectOp::create(b, loc, gt, one, zero));
 }
@@ -324,8 +324,8 @@ struct FoldLowering : Lowering<FoldOp> {
   }
 };
 
-/// compare(a, b): walk to the first difference within the shorter length; there, the signed order of the two elements,
-/// else the order of the sizes.
+/// compare(a, b) [unsigned]: walk to the first difference within the shorter length; there, the order of the two
+/// elements (signed, or unsigned), else the order of the sizes.
 struct CompareLowering : Lowering<CompareOp> {
   using Lowering::Lowering;
   LogicalResult matchAndRewrite(CompareOp op, OpAdaptor a, ConversionPatternRewriter &rw) const override {
@@ -358,7 +358,7 @@ struct CompareLowering : Lowering<CompareOp> {
     Value inside = arith::CmpIOp::create(rw, loc, arith::CmpIPredicate::ult, i, m);
     auto pick = scf::IfOp::create(rw, loc, TypeRange{rw.getI32Type()}, inside, /*withElseRegion=*/true);
     rw.setInsertionPointToStart(pick.thenBlock());
-    scf::YieldOp::create(rw, loc, ValueRange{threeWay(rw, loc, load(rw, loc, xs, i), load(rw, loc, ys, i))});
+    scf::YieldOp::create(rw, loc, ValueRange{threeWay(rw, loc, load(rw, loc, xs, i), load(rw, loc, ys, i), op.getUnsignedOrder())});
     rw.setInsertionPointToStart(pick.elseBlock());
     Value na64 = arith::IndexCastOp::create(rw, loc, rw.getI64Type(), na), nb64 = arith::IndexCastOp::create(rw, loc, rw.getI64Type(), nb);
     scf::YieldOp::create(rw, loc, ValueRange{threeWay(rw, loc, na64, nb64)});
