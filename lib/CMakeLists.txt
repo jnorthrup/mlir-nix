@@ -39,7 +39,7 @@ add_mlir_dialect_library(MLIRTrikeShed
   PARTIAL_SOURCES_INTENDED
   DEPENDS TrikeShedIncGen
   LINK_LIBS PUBLIC MLIRIR MLIRSideEffectInterfaces MLIRFuncDialect MLIRMemRefDialect MLIRPass
-                   MLIRArithDialect MLIRSCFDialect MLIRFuncTransforms MLIRTransformUtils)
+                   MLIRArithDialect MLIRSCFDialect MLIRSCFTransforms MLIRFuncTransforms MLIRTransformUtils)
 
 add_library(TrikeShedRuntime SHARED Composite/ClusterRuntime.cpp)
 set_target_properties(TrikeShedRuntime PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/lib)

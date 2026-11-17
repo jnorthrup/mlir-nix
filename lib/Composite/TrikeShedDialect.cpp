@@ -38,6 +38,17 @@ mlir::LogicalResult ClusterOrderOp::verify() {
   return mlir::success();
 }
 
+mlir::LogicalResult PartsOp::verify() {
+  auto s = llvm::dyn_cast<SeriesType>(getSeries().getType());
+  if (!s || s.getElement() != getDelimiter().getType() || !s.getElement().isSignlessInteger())
+    return emitOpError("splits a series of integers at a delimiter of the same type");
+  auto r = llvm::dyn_cast<SeriesType>(getParts().getType());
+  auto p = r ? llvm::dyn_cast<TwinPackedType>(r.getElement()) : TwinPackedType();
+  if (!p || !p.getElement().isSignlessInteger(32))
+    return emitOpError("gives the parts as a !trikeshed.series<!trikeshed.twinpacked<i32>> (start, length)");
+  return mlir::success();
+}
+
 mlir::LogicalResult AdjacencyOp::verify() {
   auto nodes = [](mlir::Type t) {
     auto s = llvm::dyn_cast<SeriesType>(t);

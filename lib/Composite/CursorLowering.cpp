@@ -24,6 +24,8 @@
 //   j, first, second                shifts of the i64 that a pair of i32 halves is
 //   facet(c, k) {col -> r}          the region with col = column(c, k)
 //   drain(xs, into)                 a loop storing xs into `into`; the result is size(xs)
+//   parts(xs, d)                    Series.div: count the delimiters, then each part's (start, length)
+//   text(buffer)                    a constant's 1-D buffer, cast to the series' strided layout
 //   adjacency(from, to, n)          a counting sort: each node's (first, count) into the far ends, in edge order
 //   closure(parents, above)         ClosureIndex: two walks from each node over its parents (count, then write)
 //
@@ -45,6 +47,7 @@
 #include "mlir/Dialect/Func/Transforms/FuncConversions.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/SCF/Transforms/Patterns.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
@@ -296,6 +299,18 @@ struct ProjectLowering : Lowering<ProjectOp> {
 };
 
 /// xs[off, n]: a view of the same buffer.
+/// text(witness): a constant's 1-D buffer seen as the series' buffer (a cast to the strided layout).
+struct TextLowering : Lowering<TextOp> {
+  using Lowering::Lowering;
+  LogicalResult matchAndRewrite(TextOp op, OpAdaptor a, ConversionPatternRewriter &rw) const override {
+    auto buffer = dyn_cast<MemRefType>(a.getWitness().getType());
+    auto want = dyn_cast_or_null<MemRefType>(getTypeConverter()->convertType(op.getResult().getType()));
+    if (!buffer || !want || buffer.getRank() != 1 || buffer.getElementType() != want.getElementType())
+      return rw.notifyMatchFailure(op, "the witness is not a 1-D buffer of the series' elements");
+    rw.replaceOp(op, memref::CastOp::create(rw, op.getLoc(), want, a.getWitness()).getResult());
+    return success();
+  }
+};
 struct SliceLowering : Lowering<SliceOp> {
   using Lowering::Lowering;
   LogicalResult matchAndRewrite(SliceOp op, OpAdaptor a, ConversionPatternRewriter &rw) const override {
@@ -501,6 +516,54 @@ template <class Op, bool High> struct HalfLowering : Lowering<Op> {
   }
 };
 
+/// parts(xs, d): Series.div.  The delimiters counted, then each part's (start, length) written as a delimiter ends it, and
+/// the last part after the loop.
+struct PartsLowering : Lowering<PartsOp> {
+  using Lowering::Lowering;
+  LogicalResult matchAndRewrite(PartsOp op, OpAdaptor a, ConversionPatternRewriter &rw) const override {
+    Location loc = op.getLoc();
+    Type i64 = rw.getI64Type(), idx = rw.getIndexType();
+    Value xs = a.getSeries(), d = a.getDelimiter();
+    Value n = length(rw, loc, xs);
+    Value zero = cIndex(rw, loc, 0), one = cIndex(rw, loc, 1);
+    Value c32 = cInt(rw, loc, i64, 32), mask = cInt(rw, loc, i64, 0xffffffff);
+    auto isDelimiter = [&](Value i) -> Value {
+      return arith::CmpIOp::create(rw, loc, arith::CmpIPredicate::eq, load(rw, loc, xs, i), d);
+    };
+    auto pack = [&](Value start, Value end) -> Value {
+      Value s = arith::IndexCastUIOp::create(rw, loc, i64, start);
+      Value l = arith::IndexCastUIOp::create(rw, loc, i64, arith::SubIOp::create(rw, loc, end, start));
+      return arith::OrIOp::create(rw, loc, arith::ShLIOp::create(rw, loc, s, c32), arith::AndIOp::create(rw, loc, l, mask));
+    };
+    auto counting = scf::ForOp::create(rw, loc, zero, n, one, ValueRange{one});
+    rw.setInsertionPointToEnd(counting.getBody());
+    {
+      Value add = arith::SelectOp::create(rw, loc, isDelimiter(counting.getInductionVar()), one, zero);
+      scf::YieldOp::create(rw, loc, ValueRange{arith::AddIOp::create(rw, loc, counting.getRegionIterArgs()[0], add).getResult()});
+    }
+    rw.setInsertionPointAfter(counting);
+    Value parts = newSeriesBuffer(rw, loc, i64, counting.getResult(0));
+    auto writing = scf::ForOp::create(rw, loc, zero, n, one, ValueRange{zero, zero});
+    rw.setInsertionPointToEnd(writing.getBody());
+    {
+      Value i = writing.getInductionVar(), k = writing.getRegionIterArgs()[0], start = writing.getRegionIterArgs()[1];
+      auto ends = scf::IfOp::create(rw, loc, TypeRange{idx, idx}, isDelimiter(i), /*withElseRegion=*/true);
+      rw.setInsertionPointToStart(ends.thenBlock());
+      store(rw, loc, pack(start, i), parts, k);
+      scf::YieldOp::create(rw, loc, ValueRange{arith::AddIOp::create(rw, loc, k, one).getResult(),
+                                               arith::AddIOp::create(rw, loc, i, one).getResult()});
+      rw.setInsertionPointToStart(ends.elseBlock());
+      scf::YieldOp::create(rw, loc, ValueRange{k, start});
+      rw.setInsertionPointAfter(ends);
+      scf::YieldOp::create(rw, loc, ends.getResults());
+    }
+    rw.setInsertionPointAfter(writing);
+    store(rw, loc, pack(writing.getResult(1), n), parts, writing.getResult(0));
+    rw.replaceOp(op, parts);
+    return success();
+  }
+};
+
 /// adjacency(from, to, n): a counting sort.  The counts of each node's edges, their running sum as each node's first
 /// (packed with its count), then each edge's far end written at its node's next place, so a node's ends keep edge order.
 struct AdjacencyLowering : Lowering<AdjacencyOp> {
@@ -673,6 +736,16 @@ struct DrainLowering : Lowering<DrainOp> {
   }
 };
 
+/// arith.select of a pair or a series (scf and arith take them as they are): the same select of what they lower to.
+struct SelectLowering : OpConversionPattern<arith::SelectOp> {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(arith::SelectOp op, OpAdaptor a, ConversionPatternRewriter &rw) const override {
+    if (!getTypeConverter()->convertType(op.getType())) return rw.notifyMatchFailure(op, "a type that does not lower to one");
+    rw.replaceOp(op, arith::SelectOp::create(rw, op.getLoc(), a.getCondition(), a.getTrueValue(), a.getFalseValue()).getResult());
+    return success();
+  }
+};
+
 struct LowerCursors : PassWrapper<LowerCursors, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LowerCursors)
   StringRef getArgument() const final { return "trikeshed-lower-cursors"; }
@@ -695,10 +768,14 @@ struct LowerCursors : PassWrapper<LowerCursors, OperationPass<ModuleOp>> {
     RewritePatternSet patterns(ctx);
     patterns.add<ColumnLowering, FacetLowering, SizeLowering, AtLowering, SeriesLowering, AlphaLowering, WhereLowering,
                  ProjectLowering, SliceLowering, FoldLowering, CompareLowering, SortedLowering, BisectLowering, JLowering,
-                 HalfLowering<FirstOp, true>, HalfLowering<SecondOp, false>, DrainLowering, AdjacencyLowering, ClosureLowering>(types, ctx);
+                 HalfLowering<FirstOp, true>, HalfLowering<SecondOp, false>, DrainLowering, PartsLowering, AdjacencyLowering, ClosureLowering, TextLowering>(types, ctx);
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, types);
     populateReturnOpTypeConversionPattern(patterns, types);
     populateCallOpTypeConversionPattern(patterns, types);
+    // scf.if/for/while and arith.select that carry a pair or a series: their types lowered with them
+    scf::populateSCFStructuralTypeConversionsAndLegality(types, patterns, target);
+    target.addDynamicallyLegalOp<arith::SelectOp>([&](arith::SelectOp op) { return types.isLegal(op.getOperation()); });
+    patterns.add<SelectLowering>(types, ctx);
     // the dialects below TrikeShed: their ops that make or read series and cursors (confix's index, its Columns facet)
     for (Dialect *d : ctx->getLoadedDialects())
       if (auto *below = d->getRegisteredInterface<CursorLoweringInterface>()) below->populateCursorLowering(types, patterns, target);

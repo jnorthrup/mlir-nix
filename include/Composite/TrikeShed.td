@@ -225,7 +225,8 @@ def TS_TextOp : TS_Op<"text", [Pure]> {
   let assemblyFormat = "$witness attr-dict `:` type($witness) `->` type($result)";
   let description = [{
     Series.kt's `String.toSeries()` and CharSeries' 4096-byte window.  The witness is the immutable `Source`; a token is
-    a `!trikeshed.twinpacked` index into it, never a copy.
+    a `!trikeshed.twinpacked` index into it, never a copy.  A 1-D memref witness of the series' elements (a constant's
+    buffer, from memref.get_global) lowers to that buffer itself, seen in the series' strided layout.
   }];
 }
 
@@ -455,6 +456,23 @@ def TS_SortedOp : TS_Op<"sorted", [Pure]> {
     The order is the region, when there is one: `^bb0(%a: T, %b: T)` yields an i32, negative when a sorts before b, zero
     when they are equal, positive after (a Comparator).  Without it the elements are integers, compared signed.  A
     series of row indices ordered by the text each row stands for is a region that compares two slices.
+  }];
+}
+
+def TS_PartsOp : TS_Op<"parts", [Pure]> {
+  let summary = "the parts of a series between the elements equal to a delimiter: Series.div, the lazy split";
+  let arguments = (ins TS_SeriesType:$series, AnyType:$delimiter);
+  let results = (outs TS_SeriesType:$parts);
+  let assemblyFormat = [{
+    $series `,` $delimiter attr-dict `:` type($series) `,` type($delimiter) `->` type($parts)
+  }];
+  let hasVerifier = 1;
+  let description = [{
+    CharSeries.kt's `Series<Char>.div(delim)` and `Series<Byte>.div(delim)`: one part more than there are delimiters,
+    part i running from just after the i-th delimiter (or the start) to the next one (or the end), so two delimiters side
+    by side give an empty part and an empty series gives one empty part.  Kotlin's part is `this[p until l]`, a view; here
+    it is that view's coordinates, a TwinPacked (start, length) within the series, not a copy.
+    Laws: size(parts(xs, d)) = (the number of d in xs) + 1; the parts with a d between each two are xs again.
   }];
 }
 
