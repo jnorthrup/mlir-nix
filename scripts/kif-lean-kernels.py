@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""kif-lean-kernels.py EXPORT DUMP [--controls] [--times]
+"""kif-lean-kernels.py EXPORT DUMP [--controls] [--times] [--timeout SECONDS]
 
 Runs the Lean toolchain's kernels that read lean4export's format on the theorem `mlnix-kif --chase --lean` wrote: nanoda_bin
 (an independent checker; its config permits no axiom), and con-leche and con-ron (--verified, the mode their soundness
 theorems are about; one thread).  Each must accept the theorem.  With --controls each must also reject three copies with one
 proof broken (kif-lean-check.py --mutate: a premise, a binding, a statement).  One line per run: the checker, the file, its
 verdict, and with --times its wall time and peak RSS; then the checker's last line of output.  Exits 1 when a verdict is not
-the one expected.  The checkers come from PATH (elan's toolchain bin: Lean 4.36 ships all three).
+the one expected.  The checkers come from PATH (elan's toolchain bin: Lean 4.36 ships all three).  With --timeout, a run
+that takes longer is stopped (timeout(1)) and counts as no verdict, which is never the expected one.  EXPORT may hold the
+pieces --lean-piece writes: each kernel checks them all, one theorem after another.
 """
 import os, subprocess, sys, tempfile, time
 
@@ -14,7 +16,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CHECK = os.path.join(HERE, "kif-lean-check.py")
 
 
-def run(cmd):
+def run(cmd, limit=None):
+    if limit:
+        cmd = ["timeout", str(limit)] + cmd
     t = time.time()
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     out = p.stdout.read().decode("utf-8", "replace")
@@ -23,6 +27,8 @@ def run(cmd):
     lines = [l.strip() for l in out.splitlines() if l.strip()]
     # the checker's verdict: nanoda_bin's "Checked .." or the assertion it panics on, con-leche's and con-ron's last line
     said = [l for l in lines if l.startswith(("Checked", "Error", "error", "assertion failed", "con-leche:", "con-ron:"))] or lines
+    if limit and p.returncode == 124:
+        said = [f"stopped after {limit} s"]
     return p.returncode, time.time() - t, ru.ru_maxrss / 1024.0, (said[-1] if said else "")[:160]
 
 
@@ -38,6 +44,7 @@ def main(argv):
         raise SystemExit(__doc__)
     export, dump = argv[1], argv[2]
     times = "--times" in argv
+    limit = int(argv[argv.index("--timeout") + 1]) if "--timeout" in argv else None
     tmp = tempfile.mkdtemp(prefix="kif-lean-")
     files = [("certificate", export, True)]
     if "--controls" in argv:
@@ -52,9 +59,9 @@ def main(argv):
     wrong = 0
     for label, path, good in files:
         for name, cmd in kernels(path, dump, tmp):
-            rc, secs, mb, last = run(cmd)
-            verdict = "accepted" if rc == 0 else "rejected"
-            if (rc == 0) != good:
+            rc, secs, mb, last = run(cmd, limit)
+            verdict = "accepted" if rc == 0 else "no verdict" if limit and rc == 124 else "rejected"
+            if (rc == 0) != good or verdict == "no verdict":
                 wrong += 1
                 verdict += " (WRONG)"
             cost = f" {secs:6.2f} s {mb:6.0f} MB" if times else ""

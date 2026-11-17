@@ -1,4 +1,4 @@
-//===- KifLean.cpp - a chased theory's proofs as one Lean theorem -----------===//
+//===- KifLean.cpp - a chased theory's proofs as Lean theorems -------------===//
 //
 // `mlnix-kif --chase --lean OUT`: the facts kif-chase derived in a theory, with the proofs it recorded, as one theorem in
 // lean4export's format (NDJSON, format 3.1.0).  The Lean toolchain's kernels read that format without elaborating anything:
@@ -28,9 +28,13 @@
 //     1.3-1.9 s, and 6,000 synthetic lets 10-23 s;
 //   - the lets go depth first from the facts derived last (localize), each near the lets it rests on: in the chase's order,
 //     12,000 lets of a chain p -> q -> r -> s took 10-23 s, depth first 0.2-0.4 s.
-// The certificate is one deep term, which bounds it: nanoda_bin reads a de Bruijn index as a u16 (hypotheses and lets together
-// under 65,536), and con-leche and con-ron did not finish 64,000 in 120 s, where nanoda_bin took 0.9 s.  A theory past that
-// needs the certificate in pieces.
+// A theorem is one deep term, which bounds it: nanoda_bin reads a de Bruijn index as a u16 (hypotheses and lets together
+// under 65,536), and con-leche and con-ron did not finish 64,000 in 120 s, where nanoda_bin took 0.9 s.  So a theory past
+// that is written in pieces (`--lean-piece N`): theorems closure.0, closure.1, .. of at most N lets each, in the same order,
+// each with only the hypotheses its lets use; a fact that a let of an earlier piece proves is a hypothesis there too, named
+// for that let (`i.K` for let d.K), and the theorems are checked one by one.  That an import is what an earlier piece's let
+// proves is not the kernel's to see: scripts/kif-lean-check.py checks it (each i.K claims what d.K claims, and d.K is in an
+// earlier piece), as it checks what each let claims.
 //
 // The bindings are not recorded in a kif.derived: they are found again by matching the rule's premises against `from` in
 // order, as the chase matched them.  A rule with a (not ..) premise is negation as failure, the closed world of a stratum,
@@ -43,6 +47,7 @@
 
 #include "mlir/IR/SymbolTable.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
@@ -533,14 +538,17 @@ struct Certificate {
     return success();
   }
 
-  // ---- the theorem
+  // ---- the theorems: one with every hypothesis the theory gives, or pieces of at most `pieceLets` lets each, with only the
+  // hypotheses their lets use; a fact a let of an earlier piece proves is a hypothesis of its own there (`i.K`, let d.K)
 
+  uint32_t lo = 0, hi = 0; // the lets of the theorem being written: proofs[lo, hi)
   // a binder's place in the telescope (0: Term, outermost); a reference from depth d to place q is bvar(d - 1 - q)
   uint32_t qTerm = 0, qHolds = 1, qNil = 2, qCons = 3, qSame = kNone, qSameRefl = kNone, qSub = kNone, qSubTrans = kNone,
            qInstUp = kNone, qDone = kNone, qDoneIntro = kNone, nBinders = 0;
-  llvm::DenseMap<uint32_t, uint32_t> qAtom, qFact; // an atom's place; an asserted fact's
-  SmallVector<uint32_t, 0> qEdge, qRule;          // the place of each used edge (usedEdges' order); of each rule
-  SmallVector<uint32_t, 0> atomOrder;
+  llvm::DenseMap<uint32_t, uint32_t> qAtom, qFact, qImport, qEdge; // the place of an atom, an asserted fact, an import, an edge
+  SmallVector<uint32_t, 0> qRule;                                   // the place of each rule (kNone: not a hypothesis)
+  SmallVector<uint32_t, 0> atomOrder, factOrder, importOrder, edgeOrder;
+  bool hasSame = false, hasUp = false;
 
   void atomsOf(uint32_t t, bool rule) {
     if (T.isList(t)) {
@@ -551,34 +559,75 @@ struct Certificate {
     if (qAtom.try_emplace(t, kNone).second) atomOrder.push_back(t);
   }
 
-  void place() {
-    for (uint32_t f : asserted) atomsOf(f, false);
-    for (Rule &r : rules)
-      if (!r.negation) {
+  /// The binders of the theorem of proofs[lo, hi): all the theory's facts, rules and used edges when `everything`, else
+  /// those its lets use, and the facts they use that earlier lets prove.
+  void place(bool everything) {
+    qAtom.clear(), qFact.clear(), qImport.clear(), qEdge.clear(), groundAt.clear();
+    atomOrder.clear(), factOrder.clear(), importOrder.clear(), edgeOrder.clear();
+    SmallVector<uint8_t, 0> ruleUsed(rules.size(), everything ? 1 : 0);
+    hasSame = everything && usesSame, hasUp = everything && usesUp;
+    if (everything) {
+      factOrder.assign(asserted.begin(), asserted.end());
+      edgeOrder.assign(usedEdges.begin(), usedEdges.end());
+    } else {
+      llvm::DenseSet<uint32_t> facts, imports, seenEdges;
+      for (uint32_t i = lo; i < hi; i++) {
+        ruleUsed[proofs[i].rule] = 1;
+        for (const Premise &pr : proofs[i].premises) {
+          if (pr.kind == Premise::Same) {
+            hasSame = true;
+            continue;
+          }
+          if (assertedAt.count(pr.fact)) facts.insert(pr.fact);
+          else if (derivedAt.lookup(pr.fact) < lo) imports.insert(pr.fact);
+          if (pr.kind == Premise::Up) {
+            hasUp = true;
+            for (uint32_t e : pr.path)
+              if (seenEdges.insert(e).second) edgeOrder.push_back(e);
+          }
+        }
+      }
+      for (uint32_t f : asserted)
+        if (facts.count(f)) factOrder.push_back(f);
+      importOrder.assign(imports.begin(), imports.end());
+      llvm::sort(importOrder, [&](uint32_t a, uint32_t b) { return derivedAt.lookup(a) < derivedAt.lookup(b); });
+    }
+    for (uint32_t f : factOrder) atomsOf(f, false);
+    for (uint32_t f : importOrder) atomsOf(f, false);
+    for (auto [k, r] : llvm::enumerate(rules))
+      if (ruleUsed[k] && !r.negation) {
         for (const Form &form : r.forms) {
           if (form.kind == Form::Equal) atomsOf(form.a, true), atomsOf(form.b, true);
           else atomsOf(form.p, true);
         }
         atomsOf(r.consequent, true);
       }
-    for (Proof &p : proofs) atomsOf(p.fact, false);
-    if (usesUp) {
+    for (uint32_t i = lo; i < hi; i++) {
+      atomsOf(proofs[i].fact, false);
+      for (uint32_t t : proofs[i].inst)
+        if (t != kNone) atomsOf(t, false);
+    }
+    if (hasUp) {
       atomsOf(aInstance, false);
-      for (uint32_t e : usedEdges) atomsOf(T.atom(edges[e].first), false), atomsOf(T.atom(edges[e].second), false);
+      for (uint32_t e : edgeOrder) atomsOf(T.atom(edges[e].first), false), atomsOf(T.atom(edges[e].second), false);
     }
     uint32_t q = 4;
     for (uint32_t a : atomOrder) qAtom[a] = q++;
-    if (usesSame) qSame = q++, qSameRefl = q++;
-    if (usesUp) qSub = q++, qSubTrans = q++, qInstUp = q++;
-    for (size_t i = 0; i < usedEdges.size(); i++) qEdge.push_back(q++);
-    for (uint32_t f : asserted) qFact[f] = q++;
-    for (Rule &r : rules) qRule.push_back(r.negation ? kNone : q++);
+    qSame = qSameRefl = qSub = qSubTrans = qInstUp = kNone;
+    if (hasSame) qSame = q++, qSameRefl = q++;
+    if (hasUp) qSub = q++, qSubTrans = q++, qInstUp = q++;
+    for (uint32_t e : edgeOrder) qEdge[e] = q++;
+    for (uint32_t f : factOrder) qFact[f] = q++;
+    for (uint32_t f : importOrder) qImport[f] = q++;
+    qRule.assign(rules.size(), kNone);
+    for (auto [k, r] : llvm::enumerate(rules))
+      if (ruleUsed[k] && !r.negation) qRule[k] = q++;
     qDone = q++, qDoneIntro = q++;
     nBinders = q;
   }
 
   Writer *w = nullptr;
-  llvm::DenseMap<std::pair<uint32_t, uint32_t>, uint32_t> groundAt; // (term, depth) -> expression
+  llvm::DenseMap<std::pair<uint32_t, uint32_t>, uint32_t> groundAt; // (term, depth) -> expression, in this theorem
 
   uint32_t ref(uint32_t depth, uint32_t q) { return w->bvar(depth - 1 - q); }
   /// A term at `depth`; a rule's variable is the binder at its place in `vars` (`varQ`: the place of the first).
@@ -659,14 +708,16 @@ struct Certificate {
     return body;
   }
 
-  /// The proof of a fact (asserted, or the let of a derived one before the i-th) at depth `depth` (= nBinders + i).
+  /// The proof of a fact at depth `depth` (= nBinders + the let's place in this theorem): an asserted fact's hypothesis,
+  /// an import, or the let of this theorem that proves it.
   uint32_t factProof(uint32_t f, uint32_t depth) {
-    if (auto it = assertedAt.find(f); it != assertedAt.end()) return ref(depth, qFact.lookup(f));
-    return ref(depth, nBinders + derivedAt.lookup(f));
+    if (auto it = qFact.find(f); it != qFact.end()) return ref(depth, it->second);
+    if (auto it = qImport.find(f); it != qImport.end()) return ref(depth, it->second);
+    return ref(depth, nBinders + derivedAt.lookup(f) - lo);
   }
   uint32_t subProof(ArrayRef<uint32_t> path, uint32_t depth) { // Sub (path's first child) (path's last parent)
     uint32_t e0 = path.front();
-    uint32_t edge = ref(depth, qEdge[edgeAt.lookup(e0)]);
+    uint32_t edge = ref(depth, qEdge.lookup(e0));
     if (path.size() == 1) return edge;
     uint32_t top = T.atom(edges[path.back()].second);
     uint32_t e = ref(depth, qSubTrans);
@@ -696,14 +747,13 @@ struct Certificate {
     return e;
   }
 
-  void write(raw_ostream &os) {
-    place();
-    Writer writer(os);
-    w = &writer;
+  /// `theorem closure[.piece] : ∀ binders, Done := fun binders => let d.lo := ..; ..; let d.(hi-1) := ..; done`, as place()
+  /// set it (the name is made last, as one theorem's always was).
+  void theorem(int64_t piece) {
     SmallVector<uint32_t, 0> names(nBinders, kNone), types(nBinders, kNone);
-    auto fixed = [&](uint32_t q, StringRef name) {
+    auto fixed = [&](uint32_t q, StringRef text) {
       if (q == kNone) return;
-      names[q] = w->name(name);
+      names[q] = w->name(text);
       types[q] = fixedType(q);
     };
     fixed(qTerm, "Term"), fixed(qHolds, "Holds"), fixed(qNil, "nil"), fixed(qCons, "cons");
@@ -715,14 +765,19 @@ struct Certificate {
     }
     fixed(qSame, "Same"), fixed(qSameRefl, "same"), fixed(qSub, "Sub"), fixed(qSubTrans, "sub_trans");
     fixed(qInstUp, "inst_up");
-    for (auto [i, e] : llvm::enumerate(usedEdges)) {
-      uint32_t q = qEdge[i];
-      names[q] = w->numName("o", i);
+    for (uint32_t e : edgeOrder) {
+      uint32_t q = qEdge[e];
+      names[q] = w->numName("o", edgeAt.lookup(e));
       types[q] = w->app(w->app(ref(q, qSub), term(T.atom(edges[e].first), q)), term(T.atom(edges[e].second), q));
     }
-    for (auto [i, f] : llvm::enumerate(asserted)) {
+    for (uint32_t f : factOrder) {
       uint32_t q = qFact[f];
-      names[q] = w->numName("f", i);
+      names[q] = w->numName("f", assertedAt.lookup(f));
+      types[q] = holds(f, q);
+    }
+    for (uint32_t f : importOrder) {
+      uint32_t q = qImport[f];
+      names[q] = w->numName("i", derivedAt.lookup(f));
       types[q] = holds(f, q);
     }
     for (auto [k, r] : llvm::enumerate(rules)) {
@@ -732,28 +787,46 @@ struct Certificate {
       types[q] = ruleType(r, q);
     }
     fixed(qDone, "Done"), fixed(qDoneIntro, "done");
-    uint32_t n = uint32_t(proofs.size());
+    uint32_t n = hi - lo;
     // the statement: ∀ binders, Done
     uint32_t type = ref(nBinders, qDone);
     for (uint32_t q = nBinders; q-- > 0;) type = w->pi(names[q], types[q], type);
-    // the proof: fun binders => let d.1 := ..; ..; let d.n := ..; done
+    // the proof: fun binders => let d.lo := ..; ..; done
     uint32_t body = ref(nBinders + n, qDoneIntro);
-    for (uint32_t i = n; i-- > 0;) {
-      uint32_t depth = nBinders + i;
-      body = w->let(w->numName("d", i), holds(proofs[i].fact, depth), proofValue(proofs[i], depth), body);
+    for (uint32_t j = n; j-- > 0;) {
+      uint32_t depth = nBinders + j;
+      const Proof &p = proofs[lo + j];
+      body = w->let(w->numName("d", lo + j), holds(p.fact, depth), proofValue(p, depth), body);
     }
     for (uint32_t q = nBinders; q-- > 0;) body = w->lam(names[q], types[q], body);
-    w->theorem(w->name("closure"), type, body);
+    w->theorem(piece < 0 ? w->name("closure") : w->numName("closure", uint64_t(piece)), type, body);
+  }
+
+  void write(raw_ostream &os, uint32_t pieceLets) {
+    Writer writer(os);
+    w = &writer;
+    uint32_t n = uint32_t(proofs.size());
+    if (!pieceLets) {
+      lo = 0, hi = n;
+      place(true);
+      theorem(-1);
+    } else {
+      for (uint32_t k = 0; k == 0 || uint64_t(k) * pieceLets < n; k++) {
+        lo = k * pieceLets, hi = std::min<uint64_t>(n, uint64_t(lo) + pieceLets);
+        place(false);
+        theorem(k);
+      }
+    }
     w = nullptr;
   }
 };
 
 } // namespace
 
-LogicalResult exportLean(TheoryOp theory, raw_ostream &os) {
+LogicalResult exportLean(TheoryOp theory, raw_ostream &os, unsigned pieceLets) {
   Certificate c(theory);
   if (failed(c.read())) return failure();
-  c.write(os);
+  c.write(os, pieceLets);
   return success();
 }
 

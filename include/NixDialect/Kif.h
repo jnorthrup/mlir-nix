@@ -50,7 +50,9 @@ void dumpClosure(TheoryOp theory, raw_ostream &os);
 /// that uses no axiom: the theory's facts and rules (and the ontology's subclass edges its proofs use) are hypotheses of its
 /// statement, and each derived fact is a let of its proof, which a kernel checks against the fact (lib/Dialect/KifLean.cpp).
 /// A derived fact whose rule has a (not ..) premise is an error: negation as failure is not a proof from the facts.
-LogicalResult exportLean(TheoryOp theory, raw_ostream &os);
+/// With `pieceLets`, theorems of at most that many lets, each with only the hypotheses its lets use, and the facts that
+/// lets of earlier theorems prove as hypotheses of its own (one theorem is bounded by the kernels' depth).
+LogicalResult exportLean(TheoryOp theory, raw_ostream &os, unsigned pieceLets = 0);
 } // namespace mlir::kif
 
 #endif // NIXDIALECT_KIF_H
