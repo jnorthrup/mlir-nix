@@ -80,9 +80,30 @@ library under them is the rest.  Each kernel rejects the control, two theorems' 
 - con-leche and con-ron report a type mismatch in tq_sigma_partitionTest1.
 
 Once in three runs a Vampire under the hammer deadlocked, so the script gives a compile 120 s and kills a stuck Vampire
-before trying again.  What no kernel checks is that a theorem's statement is the test's.  tptp2lean.py wrote each
-statement from the TPTP problem SigmaKEE made.  For kif-chase, kif-lean-check.py decodes the claims and compares them
-with the dump; nothing does that yet for these statements.
+before trying again.
+
+What no kernel checks is that a statement is its problem's: tptp2lean.py wrote each one from the TPTP problem SigmaKEE
+made.  test2-statements.py checks it, as kif-lean-check.py checks kif-chase's claims against the dump
+(test2-statements.log):
+- it decodes each statement from the exported kernel terms;
+- it reads the problem Vampire ran with a TPTP parser of its own, not tptp2lean.py's;
+- the statement must be h1 -> .. -> hk -> goal, with the goal the conjecture and each hi an axiom of the problem, up to
+  the names of bound variables, under one assignment of the problem's symbols to the theorem's (arity and sorts kept).
+
+If so, the theorem the kernels accept, instantiated by that assignment, says the conjecture holds in every model of those
+axioms.  So the problem is a Theorem whatever Vampire did.
+
+All 28 statements are their problems'.  TQC2 is THF, encoded by hand, and not read.  The 28 bind 176 symbols and 99
+hypotheses; each hypothesis is one of the axioms Vampire's proof used, and every assignment is one to one.  All 82
+controls disagree:
+- a statement against another test's problem whose conjecture has another form;
+- against its own problem with the conjecture negated;
+- against its own problem without the axioms its first hypothesis matches.
+
+The check takes 59 s, mostly reading the 20 SUMO KBs of 3.4 MB.  The match uses no name from the export.  lean4export
+writes an expression once up to alpha-equivalence, so two statements that differ only in binder names share one record,
+with the first one's names: tq_sigma1_TQG34 carries tq_tqsp_TQG34's.  Matching hypotheses to axioms by those names
+failed for 6 theorems before the check was made name-free.
 
 ## 3. The taxonomy: a table, entered as kernel terms
 
@@ -170,8 +191,8 @@ and con-leche's and con-ron's 120 s.  This is the role the split gives Lean for 
   a certificate would have to state; `--lean` refuses such a fact.
 - Vampire as the search behind the kif and sumo dialects for what is not Horn, its proofs re-checked in Lean from the
   axioms they used.
-- The link from a Vampire theorem's Lean statement back to its test: tptp2lean.py's encoding of the TPTP problem, which
-  no kernel checks and no script decodes yet.
+- The link from a TPTP problem back to its KIF test, SigmaKEE's translation: section 2's statements are checked against
+  the problem, and nothing checks the problem against the test.
 - SigmaKEE's translation, upstream: typed output that loads in Vampire 5.1.0, test assertions kept (typed tests write them
   as untyped formulas; four modal tests lose them), one process per test.
 - Lean proofs about the rule compiler (the NARS-Rete note's "the compiler must show that the specialization preserves"
