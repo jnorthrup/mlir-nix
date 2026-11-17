@@ -2,7 +2,7 @@
 // ancestors by trikeshed.closure (ClosureIndex), lowered by kif-to-trikeshed and trikeshed-lower-cursors and run.
 //
 // RUN: d=%S/../kif; { mlnix-kif $d/taxonomy-a.kif $d/taxonomy-b.kif | sed '1d;$d'; cat %s; } | mlnix-opt --kif-to-trikeshed | FileCheck %s --check-prefix=TABLES
-// RUN: d=%S/../kif; { mlnix-kif $d/taxonomy-a.kif $d/taxonomy-b.kif | sed '1d;$d'; cat %s; } | mlnix-opt --kif-to-trikeshed --trikeshed-lower-cursors | mlir-opt --ownership-based-buffer-deallocation --canonicalize --buffer-deallocation-simplification --bufferization-lower-deallocations --convert-scf-to-cf --expand-strided-metadata --lower-affine --finalize-memref-to-llvm --convert-arith-to-llvm --convert-index-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts | mlir-runner -e main -entry-point-result=void -shared-libs=$(ls $(dirname $(which mlir-runner))/../lib/libmlir_runner_utils.* | head -1) | FileCheck %s
+// RUN: d=%S/../kif; { mlnix-kif $d/taxonomy-a.kif $d/taxonomy-b.kif | sed '1d;$d'; cat %s; } | mlnix-opt --kif-to-trikeshed --trikeshed-lower-cursors | mlir-opt --ownership-based-buffer-deallocation --canonicalize --buffer-deallocation-simplification --bufferization-lower-deallocations --convert-scf-to-cf --expand-strided-metadata --lower-affine --finalize-memref-to-llvm --convert-arith-to-llvm --convert-index-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts | mlir-runner -e main -entry-point-result=i32 -shared-libs=$(ls $(dirname $(which mlir-runner))/../lib/libmlir_runner_utils.* | head -1) | FileCheck %s
 //
 // The theory is mlnix-kif's @kb of the two files (its module's first and last lines cut, so it and this file are one
 // module).  The numbers are sumo.nix's, from its own evaluation (test/kif/taxonomy-oracle.nix):
@@ -10,7 +10,8 @@
 //   [[30,13,12,49,3,3,9],[5,2,5,2,6,6,9,4,1,5,1,3]]
 // forms, classes, withParent, ancestorLinks, things, relations, Human's ancestors; then each class with a parent, by name
 // (?C Animal Canine CognitiveAgent Dog Hominid Human Mammal Organism Primate SentientAgent Vertebrate): its ancestors.
-// On sumo.full (78 files), the same query against sumo-bench's onto.nix: see docs/PRELOAD-DIALECTS.md step 6.
+// scripts/sumo-trikeshed.sh runs this query, compiled, on sumo.full's 78 files against the same oracle (PRELOAD-DIALECTS
+// step 6).
 
 // TABLES-NOT: kif.theory
 // TABLES-DAG: memref.global "private" constant @__kif_kb_tag : memref<75xi8>
@@ -21,6 +22,7 @@
 
 // CHECK: [30,  13,  12,  49,  3,  3,  9]
 // CHECK: [5,  2,  5,  2,  6,  6,  9,  4,  1,  5,  1,  3]
+// CHECK: 0
 
 !s8 = !trikeshed.series<i8>
 !s32 = !trikeshed.series<i32>
@@ -198,7 +200,7 @@ func.func private @lower_bound(%xs: !s32, %v: i32) -> i32 {
 
 // sumo.nix over the theory @kb, counted as onto.nix counts it: forms, classes, withParent, ancestorLinks, things,
 // relations, humanAncestors.
-func.func @main() {
+func.func @main() -> i32 {
   %terms, %kid, %text = kif.terms @kb : !terms, !s32, !s8
   %facts = kif.facts @kb : !facts
   %rules = kif.rules @kb : !rules
@@ -380,5 +382,6 @@ func.func @main() {
   %pcEnd = trikeshed.drain %perClass, %pc : !s32, memref<?xi32> -> index
   %pcu = memref.cast %pc : memref<?xi32> to memref<*xi32>
   func.call @printMemrefI32(%pcu) : (memref<*xi32>) -> ()
-  return
+  %ok = arith.constant 0 : i32
+  return %ok : i32
 }

@@ -467,11 +467,13 @@ def TS_ClosureOp : TS_Op<"closure", [Pure]> {
   }];
   let hasVerifier = 1;
   let description = [{
-    collections/bits/ClosureIndex.kt's build, over nodes 0 ..< size(parents): node k's parents are
-    above[first(k) ..< first(k) + count(k)], where parents[k] is the TwinPacked (first, count), the shape Confix's
+    collections/bits/ClosureIndex.kt's ancestor sets (`ancestorNodes`), over nodes 0 ..< size(parents): node k's parents
+    are above[first(k) ..< first(k) + count(k)], where parents[k] is the TwinPacked (first, count), the shape Confix's
     DirectChildren has.  The result has the same shape: ancestors[k] is (first, count) into members, the nodes k reaches by
-    one or more parent edges, k itself not among them, each once, in the order the walk first meets them (k's parents,
-    then theirs).  A node met again is not walked again, so a cycle is cut where it is met.
+    one or more parent edges, k itself not among them (a self edge adds nothing, as ClosureIndex skips p == n), each once,
+    in the order the walk first meets them (k's parents, then theirs) where ClosureIndex orders a set by preorder id.  A
+    node met again is not walked again, so a cycle is cut where it is met.  The preorder numbering and the descendant
+    sets ClosureIndex also keeps are not built here.
     Laws: on a graph without cycles a is among k's ancestors iff a path k -> ... -> a of parent edges exists (sumo-nix's
     sumo.nix `ancestors`); the ancestors of k are those of its parents and the parents themselves.
   }];
