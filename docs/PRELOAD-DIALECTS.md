@@ -137,26 +137,32 @@ Steps:
      nodes (and, not, equal, exists, instance, pattern) under a RootNode; identical to datalog.nix on the same three cases.
    - sumo-nix's tables over TrikeShed (built, branch confix-trikeshed).  `kif.terms`, `kif.facts` and `kif.rules` give a
      theory as TrikeShed forms: the terms a cursor (tag, name, kids) in the shape of Confix's index, with the kid series and
-     the names text; the facts (term, file); the rules (antecedent, consequent, file).  `kif-to-trikeshed` lays the tables
-     out as constant buffers seen as those series and cursors and removes the theory, so a query over it is trikeshed ops
-     that `trikeshed-lower-cursors` takes to loops.  `trikeshed.closure` is ClosureIndex.kt's ancestor sets in the
-     DirectChildren shape (first, count) on both sides.  test/mlir/kif-trikeshed.mlir writes sumo.nix's `parents`,
-     `ancestors`, `classOf` and `domains` in those ops and checks them against sumo.nix's own evaluation of the same KIF
-     (test/kif/taxonomy-oracle.nix through `mlnix eval`).  `scripts/sumo-trikeshed.sh` runs the query, compiled, on
-     sumo.full's 78 files (Kali, each step in a 4 GB cgroup without swap, load 9.5 on 8 cores): identical to sumo.nix in
-     201,007 forms, 9,045 classes, 9,040 with a parent, 90,404 ancestor links, 21,691 things, 1,765 relations, Human's 17
-     ancestors, and the ancestor count of each of the 9,040 classes in name order.
+     the names text; the facts (term, file); the rules (antecedent, consequent, file); `kif.atom_row` an atom's row.
+     `kif-to-trikeshed` lays the tables out as constant buffers seen as those series and cursors (an atom's row a constant)
+     and removes the theory, so a query over it is trikeshed and sumo ops that `trikeshed-lower-cursors` takes to loops.
+     Each relation is a cursor of rows: `sumo.relation` is SumoClassifier.kt's taxonomy projection (`subclassEdges`,
+     `instanceEdges`, the domain slots) with sumo.nix's reading of an argument (anything but a list: SumoClassifier also
+     drops variables, string literals and a position that is not an integer), lowered below TrikeShed through
+     CursorLoweringInterface as confix's ops are.  `trikeshed.adjacency` is the counting sort of ClosureIndex.build and
+     SumoClassifier.of (edges to each node's (first, count)), and `trikeshed.closure` ClosureIndex's ancestor sets in that
+     DirectChildren shape.  test/mlir/kif-trikeshed.mlir is sumo.nix's `parents`, `ancestors`, `classOf` and `domains` in
+     those ops, checked against sumo.nix's own evaluation of the same KIF (test/kif/taxonomy-oracle.nix through `mlnix
+     eval`); test/mlir/closure.mlir checks adjacency and closure on a cycle and a self edge.  `scripts/sumo-trikeshed.sh`
+     runs the query, compiled, on sumo.full's 78 files (Kali, each step in a 4 GB cgroup without swap, load 6-8 on 8
+     cores): identical to sumo.nix in 201,007 forms, 9,045 classes, 9,040 with a parent, 90,404 ancestor links, 21,691
+     things, 1,765 relations, Human's 17 ancestors, and the ancestor count of each of the 9,040 classes in name order.
      | step | time | peak RSS |
-     | sumo.nix on `mlnix eval` (kif.nix's parse, then the tables, forced) | 3.86 s | 902 MB |
-     | mlnix-kif, the text into kif IR, printed (31 MB of MLIR) | 2.80 s | 249 MB |
-     | mlnix-opt: that text parsed again, kif-to-trikeshed, trikeshed-lower-cursors | 4.09 s | 327 MB |
-     | mlir-opt to the LLVM dialect; mlir-translate; clang -O2 | 0.53 + 1.63 + 2.52 s | 188-235 MB |
-     | the compiled query (17 MB, the tables inside) | 0.09 s | 79 MB |
-     kif-to-nix does not track sumo.nix better: it lowers a theory to a nix.expr of its facts and rules, which is sumo.nix's
-     input, so its tables would still be sumo.nix evaluated by Nix (the first row above).  Not done: the tables straight
-     from mlnix-kif (most of the 11.6 s before the query runs is printing the theory as text and parsing it again); sumo's
-     relations as ops (`sumo.parents @kb` and the like, a cursor each) in place of the query's hand-written selections;
-     tq.nix's queries over the closure.
+     | sumo.nix on `mlnix eval` (kif.nix's parse, then the tables, forced) | 3.00 s | 902 MB |
+     | mlnix-kif, the text into kif IR, printed (31 MB of MLIR) | 2.64 s | 249 MB |
+     | mlnix-opt: that text parsed again, kif-to-trikeshed, trikeshed-lower-cursors | 3.96 s | 332 MB |
+     | mlir-opt to the LLVM dialect; mlir-translate; clang -O2 | 0.52 + 1.59 + 2.20 s | 188-235 MB |
+     | the compiled query (17 MB, the tables inside) | 0.07 s | 78 MB |
+     (The first version, with the selections written by hand in trikeshed ops, ran in 0.09 s: it found each relation's
+     atom by a scan of the terms.)  kif-to-nix does not track sumo.nix better: it lowers a theory to a nix.expr of its
+     facts and rules, which is sumo.nix's input, so its tables would still be sumo.nix evaluated by Nix (the first row).
+     Not done: the tables straight from mlnix-kif (most of the 10.9 s before the query runs is printing the theory as text
+     and parsing it again); tq.nix's queries and SumoClassifier's other masks (instance types closed upward, disjointness)
+     over the closure.
    - Memory, measured on Kali only (each case in a cgroup of 12 GB, no swap: an OOM kill is the result), sumo.full whole through
      kif.nix (78 files, 201,007 forms):
      | engine | result | time | peak RSS |
