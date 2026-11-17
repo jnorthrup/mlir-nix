@@ -95,6 +95,7 @@ The current code orders synthetic records between those boundaries:
 | `trikeshed.cluster_order` -- stable row indices from one bounded cluster | kernel and native lowering; coroutine execution checked on Mac and Kali |
 | `composite::Funnel` -- a table whose buckets are clusters; a full bucket reroutes one level down | built, `include/Composite/Funnel.h`, checked by `scripts/funnel-check.cc` on Mac and Kali |
 | the sea-of-nodes client: dense bucket vs sparse hash, decided per window | not built; the Nix evaluator does not use this heap |
+| the cluster at differing scales: shapes 7+4 to 63+32, floods, windows, and the op's 1-23 keys | measured, [CLUSTER-SCALES.md](CLUSTER-SCALES.md): a counting dense bucket orders a block 2.3x-2.7x faster than the best cluster shape; pegs past 8 want a sorted drain |
 | the btrfs leaf adapter (25 B headers -> records) and the delta emit into the zstd trie envelope | not started |
 
 ## Native cluster path
