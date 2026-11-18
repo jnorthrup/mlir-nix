@@ -33,7 +33,8 @@ path bypasses TrikeShed's ops, fill and drain included ([docs/PRELOAD-DIALECTS.m
 - `mlnix` (`MlnixControl.td`) is the control surface of the utility: its flags, `MLNIX_*` variables and settings in one place.
 - `son` is the sea of nodes' schedule. A lambda body is minted on its first call (`MLNIX_DEFER=1`). The must-force set is
   what a frame forces before it returns, and `son.release` states the Graal arm's one lifecycle rule in the IR: when a call
-  returns, its frame keeps what its unforced cells can read and lets go of the rest
+  returns, its frame keeps what its unforced cells can read and lets go of the rest. `arg_forced` on a body says it forces
+  its argument, so the Graal arm computes that argument before the call and makes no cell over its own frame for it
   ([docs/SEA-OF-NODES.md](docs/SEA-OF-NODES.md)).
 - `trikeshed` and `confix` are series, cursors and joins as ops, and Confix's index of a JSON text. `trikeshed-lower-cursors`
   lowers them to `scf`, `arith` and `memref` ([docs/PRELOAD-DIALECTS.md](docs/PRELOAD-DIALECTS.md)).
@@ -85,9 +86,9 @@ MLIR ops stay the program: nodes are made from them and read their attributes.
   No pass creates a trikeshed op yet. `trikeshed.append` and `trikeshed.anchor` are used nowhere, and `trikeshed.drain` only
   by tests and mlnixci's query. The evaluator's containers are `composite::MutableSeries`, but whether they are filled and
   then drained was measured once, in October, and nothing checks it now.
-- Lifetimes: the frames `son` still cannot account for are mostly cells a frame gives a callee from outside itself. Only the
-  run time can settle those, so the next step is runtime callee strictness on the Graal arm
-  ([docs/SEA-OF-NODES.md](docs/SEA-OF-NODES.md)).
+- Lifetimes: the Graal arm now reads a callee's strictness at the call (`son.body`'s `arg_forced`); fib's frames stay
+  virtual, 26.3 MB a run down to 3.4 MB. Left on the arm: the later arguments of a curried call and a primop's operands.
+  The native evaluator reads neither `son.release` nor `arg_forced` ([docs/SEA-OF-NODES.md](docs/SEA-OF-NODES.md)).
 - Ordering: a counting dense bucket is 2.3x to 2.7x faster than the best min-max-heap cluster shape at every scale measured
   ([docs/CLUSTER-SCALES.md](docs/CLUSTER-SCALES.md)); which one the block compressor keeps is open
   ([docs/BTRFS-COMPRESSOR.md](docs/BTRFS-COMPRESSOR.md)).

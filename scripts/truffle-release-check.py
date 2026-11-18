@@ -39,7 +39,7 @@ def run(extra):
         exp = open(os.path.join(testdir, "lang", n + ".exp"), encoding="utf-8", errors="replace").read()
         if got is not None and got.replace(testdir, "/pwd") == exp:
             ok += 1
-    check = [l for l in p.stderr.splitlines() if l.startswith("release check:") or l.startswith("release calls:")]
+    check = [l for l in p.stderr.splitlines() if l.startswith(("release check:", "release calls:", "calls:"))]
     return outs, ok, check
 
 
@@ -50,7 +50,8 @@ print(f"{label}eval-okay {len(names)} files: {ok0}/{len(names)} identical to .ex
       f"outputs byte-identical in {same}/{len(names)}")
 for l in check:
     print(f"{label}{l}")
-if save:
-    os.makedirs(save, exist_ok=True)
+if save:  # the plain run's outputs, and under son/ the checked run's (son.release and arg_forced exported)
+    os.makedirs(os.path.join(save, "son"), exist_ok=True)
     for n in names:
         open(os.path.join(save, n + ".out"), "w").write(plain[n] if plain[n] is not None else "<no output>")
+        open(os.path.join(save, "son", n + ".out"), "w").write(checked[n] if checked[n] is not None else "<no output>")

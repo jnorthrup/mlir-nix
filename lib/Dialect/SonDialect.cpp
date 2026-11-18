@@ -403,7 +403,8 @@ struct SonMintPass : PassWrapper<SonMintPass, OperationPass<ModuleOp>> {
 } // namespace
 
 namespace {
-/// son-release: each frame's son.release (Son.td), as the Graal arm keeps a frame (graal/, Nodes.kt): what frameReads finds.
+/// son-release: each frame's son.release (Son.td), as the Graal arm keeps a frame (graal/, Nodes.kt): what frameReads finds; and
+/// each son.body's arg_forced, its argument in its own must-force set (the callee's half, which a caller reads at the call).
 struct SonReleasePass : PassWrapper<SonReleasePass, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SonReleasePass)
   StringRef getArgument() const override { return "son-release"; }
@@ -424,6 +425,13 @@ struct SonReleasePass : PassWrapper<SonReleasePass, OperationPass<ModuleOp>> {
         for (Region &r : o->getRegions())
           for (Block &b : r)
             if (!b.empty() && b.back().hasTrait<OpTrait::IsTerminator>()) frame(b, nixd);
+      if (auto body = dyn_cast<BodyOp>(o); body && !body.getBody().empty()) {
+        Block &b = body.getBody().front();
+        auto lam = dyn_cast_or_null<DictionaryAttr>(body.getLambda());
+        bool forced = lam && lam.get("formals"); // a call checks a pattern's set before the body runs
+        if (!forced) { ForcedOnReturn on = forcedOnReturn(b, nixd); forced = !on.never && on.forced.contains(b.getArguments().back()); }
+        body.setArgForced(forced);
+      }
     });
   }
 };

@@ -53,10 +53,18 @@ def Son_BodyOp : Son_Op<"body", [Symbol, HasParent<"PoolOp">, SingleBlock, Isola
   let description = [{
     The entry block takes `captures` arguments, then the lambda's argument, all `!nix.value`. `lambda` holds the
     properties of the `nix.lambda` it came from (formals, arg_name, name, positions), so `son-mint` restores it exactly.
+
+    `arg_forced`, derived by `son-release` as `son.release` is: the body forces its argument on every path on which it
+    returns, and returns on some path (its must-force set, SonDialect.cpp MustForce); a pattern's body always does, as a
+    call checks the set before the body runs. It is the callee's half of a call's must-force set, the half a caller does
+    not see when the function arrives as a value: a caller that finds it on the body it calls may compute the argument
+    before the call, and make no cell over its own frame for it (the Graal arm, graal/: ApplyNode). An argument whose
+    computation throws is passed as the error, so a callee that throws first still throws its own.
   }];
-  let arguments = (ins SymbolNameAttr:$sym_name, ConfinedAttr<I32Attr, [IntMinValue<0>]>:$captures, AnyAttr:$lambda);
+  let arguments = (ins SymbolNameAttr:$sym_name, ConfinedAttr<I32Attr, [IntMinValue<0>]>:$captures, AnyAttr:$lambda,
+                       UnitAttr:$arg_forced);
   let regions = (region SizedRegion<1>:$body);
-  let assemblyFormat = "$sym_name `captures` $captures `lambda` $lambda attr-dict-with-keyword $body";
+  let assemblyFormat = "$sym_name `captures` $captures `lambda` $lambda (`arg_forced` $arg_forced^)? attr-dict-with-keyword $body";
   let hasVerifier = 1;
 }
 

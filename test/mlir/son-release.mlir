@@ -8,6 +8,8 @@
 // cell, and holds no frame.  Their closure over operands: x "1" a "2" b c v "z" t.  Released at the return: "u", unused,
 // and the attribute set (returned, not passed on).  g passes nothing on and keeps nothing.  The expression keeps all but
 // the list it returns.  On the Graal arm (NIXTRUFFLE_CHECK_RELEASE=1) the release at each return keeps a subset.
+// g forces its argument on every path that returns (it returns y + "!"), so its body is arg_forced; f returns a set and
+// forces x on no path.
 // RUN: mlnix-opt %s --nix-defer --son-release | FileCheck %s
 // RUN: mlnix-opt %s --nix-defer --son-release | mlnix-opt | FileCheck %s
 // RUN: mlnix-opt %s --nix-defer --son-release --son-release | FileCheck %s
@@ -62,12 +64,12 @@ nix.expr @expr1 {
 // CHECK-NEXT:    son.release(%[[F]] : !nix_fn, %[[G]] : !nix_fn, %[[S]] : !nix_string, %[[FS]], %[[V]], %[[H]] : !nix_string, %[[GH]])
 // CHECK-NEXT:    nix.return %[[L]]
 
-// CHECK:       son.body @row0 captures 0 lambda {arg_name = "y", name = "g"
+// CHECK:       son.body @row0 captures 0 lambda {arg_name = "y", name = "g"{{.*}}} arg_forced {{[{]$}}
 // CHECK:         nix.concat_strings
 // CHECK-NEXT:    son.release()
 // CHECK-NEXT:    nix.return
 
-// CHECK:       son.body @row1 captures 0 lambda {arg_name = "x", name = "f"
+// CHECK:       son.body @row1 captures 0 lambda {arg_name = "x", name = "f"{{.*}}} {{[{]$}}
 // CHECK-NEXT:  ^bb0(%[[X:.*]]: !nix.value):
 // CHECK-NEXT:    %[[ONE:.*]] = nix.str "1"
 // CHECK-NEXT:    %[[A:.*]] = nix.concat_strings %[[X]], %[[ONE]]

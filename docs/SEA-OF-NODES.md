@@ -229,7 +229,8 @@ by the run: it must be 0.
     toplevel                4,568,831    1,364,094 29.9%    591,099 12.9%  583,038 12.8%         0
 
 Outputs unchanged (5e8fff66..., f1cfa7cd...). On the native side the must-force set adds little: its cells are attribute
-values and arguments, which a body passes on rather than forces. Why son keeps the frames the run found dead, by the
+values and arguments, which a body passes on rather than forces. (That column was an ablation; MLNIX_STATS dropped it once
+it was measured, as it did the callee breakdown below. Both are in the code at 0253d57.) Why son keeps the frames the run found dead, by the
 worst cell of the body:
 
                             a closure    forced on some path only    a callee son does not see    passed on unforced
@@ -243,7 +244,7 @@ path anyway -- would remove 27,959 of 3,778,193 thunks over a frame on nixpkgs-7
 toplevel (2.2%): too few to trade Nix's order of errors for. A release per path takes at most the second column.
 
 The callee column is a cell given to a function son does not see. Where that function comes from decides what could
-close it (MLNIX_STATS, `the callee gap, by where the callee comes from`, the deciding call of each frame):
+close it (MLNIX_STATS at 0253d57, the deciding call of each frame):
 
     callee gap                                   nixpkgs-73          toplevel
     the call itself is not on every path         303,583  58.8%      270,756  59.8%
@@ -303,6 +304,61 @@ empty makes no cell, so the inline scan folds away when compiled; son's fact sav
 to scan inline (more than 64 slots), where the boundary would be taken. Time falls on leaf, attrs and slots9 (the
 slowest of five JVMs now beats the fastest before); on fib and slots1 it is within the spread between JVMs, which
 reaches 2x (fib with the export: 19.3 ms in one launch, 39.4 ms in another). The allocation does not vary.
+
+## The callee's half: arg_forced, and the argument computed first
+
+The must-force set already reaches into a callee when the callee is a lambda of the same frame: `calleeForcesArg` asks
+whether that body forces its argument. A function that arrives as a value -- an argument, `lib.f`, a call's result -- is
+a callee son does not see, and the native table above puts most of the frames son keeps there. `son-release` now states
+that half on the body itself: `son.body ... arg_forced` when the body forces its argument on every path on which it
+returns and returns on some path, or binds a pattern (a call checks the set before the body runs). It is derived, like
+`son.release`, and `son-mint` drops it with the pool. test/mlir/son-release.mlir checks it both ways: `g = y: y + "!"`
+has it, a body that returns a set does not.
+
+The Graal arm reads it at the call (Nodes.kt, ApplyNode). The guess is the closure that arrives: when its body is
+`arg_forced`, the first argument is computed before the call and passed as a value when it is an op of the caller's body,
+so no cell over the caller's frame is made for it. An argument of the caller's own body (its parameter, a capture) is
+passed on as it came: it is not a cell of this frame, so computing it first saves nothing (it made slots9 10-20% slower).
+Otherwise the call makes its cells as before. Each way is compiled only once a call has gone it
+(CompilationFinal flags, invalidated on first use), so a call site that has met only such callees has no cell path at
+all, and its frame can stay virtual. son.release stays the static bound and the check: the arm keeps no slot outside it.
+
+The order. The value is the same: the callee would have forced the argument on every path on which it returns. An error
+is the same: an argument whose computation throws is passed as the error (`Failed`), which the callee throws where it
+would have forced the cell, so a callee that throws first still throws its own, and `tryEval` catches what it caught.
+What moves: a `builtins.trace` inside the argument prints before the callee's own traces that run before it forces it,
+and on a path on which the callee throws without forcing the argument, the argument was computed for nothing.
+
+    eval-okay, 147 files                     0253d57              now
+    outputs                                  123/147 match .exp   123/147; 147/147 byte-identical to 0253d57's, plain and with son
+    kept outside son.release                 0                    0
+    frames with a cell unforced at return    738                  738
+    calls                                                         11,539: to a body arg_forced 5,194; the argument
+                                                                  computed first (an op of the caller) in 3,628, of which 3 threw
+
+The release counts cannot move: a cell given to a callee that forces it is forced by the time the caller returns. What
+the call saves is the cell, and with it the frame's escape. The microbenchmarks, now the median of the last 30 of 60
+runs over five JVMs (at 20 runs a body can still be interpreted at run 10: the control below first showed fib 13%
+heavier on the new arm, which was its compilation finishing a few runs later):
+
+                    son exported                               no son (the control)
+                    0253d57              now                   0253d57              now
+    fib 24          12.7 ms   26.3 MB    2.2 ms    3.4 MB      12.9 ms   26.3 MB    13.9 ms   26.3 MB
+    attrs           33.2 ms  170.1 MB   30.2 ms  147.2 MB      34.8 ms  170.1 MB    34.9 ms  170.1 MB
+    leaf            21.7 ms  124.7 MB   22.4 ms  117.9 MB      24.7 ms  124.7 MB    24.5 ms  124.7 MB
+    slots1          21.0 ms  111.0 MB   21.9 ms  104.1 MB      25.1 ms  111.0 MB    24.0 ms  111.0 MB
+    slots9          24.1 ms  111.0 MB   23.7 ms  104.1 MB      33.5 ms  111.0 MB    33.5 ms  111.0 MB
+
+fib's frames stay virtual: 26.3 MB a run becomes 3.4 MB (under 25 bytes a call are left) and the run is 5.8x faster.
+Allocation falls on every file with the export, by 5.5% to 87%, and is unchanged on every file without it. Time falls
+with it on fib and attrs (9%); on leaf, slots1 and slots9 it stays within the spread between JVMs. Without the export
+fib takes 13.9 ms against 12.9 (the ranges over five JVMs just touch): the test at each call, when no callee carries
+the flag.
+
+Left on the arm: the second and later arguments of a curried call (`f a b`: the function that takes `b` is known only
+after the first call returns); a primop's operands (PrimNode makes a cell of each; its `nix.strict` ones could be
+computed first, as the native evaluator does); and list elements, attribute values and captures, which escape by
+design. The native evaluator reads neither son.release nor arg_forced.
 
 ## Not built, with the number that gates it
 

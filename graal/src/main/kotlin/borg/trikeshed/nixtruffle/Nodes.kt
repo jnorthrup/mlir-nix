@@ -1,6 +1,7 @@
 package borg.trikeshed.nixtruffle
 
 import com.oracle.truffle.api.CallTarget
+import com.oracle.truffle.api.CompilerDirectives
 import com.oracle.truffle.api.CompilerDirectives.CompilationFinal
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary
 import com.oracle.truffle.api.frame.VirtualFrame
@@ -20,7 +21,8 @@ class Frame(@JvmField val slots: Array<Any?>, @JvmField val ops: Array<OpNode?>)
 // (lazy: a LocalThunk holds it until forced) and into any call that is not inlined.  So no op hands the frame to a boundary: an op
 // reads its operands here, with slot indices that are constants (CompilationFinal arrays, exploded loops), and passes the boundary
 // values; and the release at the return (BodyRoot) takes its boundary only when a cell of the frame is still unforced -- never when
-// son.release keeps nothing.  Small arity only: past EXPLODE operands an op keeps its boundary over the frame (code size).
+// son.release keeps nothing.  A call computes the argument of a callee son says forces it (son.body's arg_forced) before the call,
+// and makes no cell for it (ApplyNode).  Small arity only: past EXPLODE operands an op keeps its boundary over the frame (code size).
 const val EXPLODE = 32
 
 /// A slot no op will compute again: its op ran, the value was dropped when the call returned (BodyRoot.release).
@@ -47,6 +49,10 @@ class LocalThunk(frame: Frame, @JvmField val slot: Int) : Thunk() {
         return v
     }
 }
+
+/// An argument computed before its call (ApplyNode) that threw: the callee gets this cell instead, and forcing it throws the same
+/// error where the callee would have computed it, so a callee that throws before it forces the argument still throws its own.
+class Failed(@JvmField val error: NixError) : Thunk() { override fun force(): Any = throw error }
 
 /// The value of slot `s`, computed now if it is not yet.  From outside the body's graph (a cell forced later): the ops come from the
 /// frame.  An op of the body reads them from itself (OpNode.strict), a constant when compiled.
@@ -188,14 +194,19 @@ object ReleaseCheck {
     @JvmField val on = System.getenv("NIXTRUFFLE_CHECK_RELEASE") == "1"
     var frames = 0L; var slots = 0L; var keptHere = 0L; var namedByIr = 0L; var faults = 0L
     var calls = 0L; var noopCalls = 0L; var noopPending = 0L; var pendingCalls = 0L
+    var applies = 0L; var toForced = 0L; var early = 0L; var earlyFailed = 0L
     val faulty = LinkedHashSet<String>()
     init { if (on) Runtime.getRuntime().addShutdownHook(Thread { System.err.println(
         "release check: $frames frames with an unforced cell at return, $slots slots holding a value: kept $keptHere; " +
         "son.release named $namedByIr; kept outside son.release $faults" + (if (faulty.isEmpty()) "" else " in ${faulty.joinToString()}") +
         "\nrelease calls: $calls returns, $pendingCalls with a cell of the frame unforced; son.release empty (no release at all) in " +
-        "$noopCalls, of which with a cell unforced $noopPending") }) }
+        "$noopCalls, of which with a cell unforced $noopPending" +
+        "\ncalls: $applies, to a body arg_forced $toForced, its argument computed before the call (an op of the caller) in $early, " +
+        "of which it threw in $earlyFailed") }) }
     @TruffleBoundary
     fun call(noop: Boolean, pending: Boolean) { calls++; if (pending) pendingCalls++; if (noop) { noopCalls++; if (pending) noopPending++ } }
+    @TruffleBoundary
+    fun apply(forced: Boolean, computed: Boolean, threw: Boolean) { applies++; if (forced) toForced++; if (computed) early++; if (threw) earlyFailed++ }
     fun frame(label: String, s: Array<Any?>, keep: BooleanArray, keepable: BooleanArray) {
         frames++
         for (i in s.indices) {
@@ -506,7 +517,7 @@ class DeferNode(@JvmField val module: Module, @JvmField val row: String,
     @JvmField val small = captures.size <= EXPLODE
     override fun exec(f: Frame): Any {
         val b = module.body(row)
-        return Closure(b.target, if (small) cellsSmall(f) else cellsLarge(f), b.formals, b.defaults, b.ellipsis, b.name)
+        return Closure(b.target, if (small) cellsSmall(f) else cellsLarge(f), b.formals, b.defaults, b.ellipsis, b.name, b.argForced)
     }
     @ExplodeLoop
     private fun cellsSmall(f: Frame): Array<Any?> { val a = arrayOfNulls<Any?>(captures.size); for (i in captures.indices) a[i] = lazy(f, captures[i]); return a }
@@ -514,13 +525,35 @@ class DeferNode(@JvmField val module: Module, @JvmField val row: String,
     private fun cellsLarge(f: Frame): Array<Any?> = Array(captures.size) { lazy(f, captures[it]) }
 }
 
+/// A call.  The callee's strictness is son's, read off the body that arrives (son.body's arg_forced): a body that forces its argument
+/// on every path on which it returns gets it computed here, before the call, when it is an op of this body: no cell over this frame is
+/// made for it, so the frame can stay virtual.  (An argument of this body is passed on as it came; computing it first would save no cell.)  The guess is the closure that arrives, and each way is compiled only once a call has gone it: a call site that
+/// has met only such callees makes no cell for its first argument.  An argument that throws is passed as the error (Failed).
 class ApplyNode(@JvmField val callee: Int, @field:CompilationFinal(dimensions = 1) @JvmField val args: IntArray) : OpNode() {
     @JvmField val small = args.size <= EXPLODE
-    override fun exec(f: Frame): Any { val fn = strict(f, callee); return Apply.call(fn, if (small) cellsSmall(f) else cellsLarge(f)) }
+    @CompilationFinal @JvmField var sawEarly = false // a callee whose body forces its argument has arrived here
+    @CompilationFinal @JvmField var sawCells = false // a callee son says nothing of has
+    override fun exec(f: Frame): Any {
+        val fn = strict(f, callee)
+        if (args.isNotEmpty() && fn is Closure && fn.argForced) { // (no argument: an apply that only forces its callee)
+            if (!sawEarly) { CompilerDirectives.transferToInterpreterAndInvalidate(); sawEarly = true }
+            val s = args[0]
+            val own = rootOps!![s] != null // an op of this body; an argument of it is passed as it came, the caller's cell, no frame of this call
+            val a = if (!own) lazy(f, s) else try { strict(f, s) } catch (e: NixError) { Failed(e) }
+            if (ReleaseCheck.on) ReleaseCheck.apply(true, own, a is Failed)
+            val r = Apply.one(fn, a)
+            return if (args.size == 1) r else Apply.call(r, if (small) cellsSmall(f, 1) else cellsLarge(f, 1))
+        }
+        if (!sawCells) { CompilerDirectives.transferToInterpreterAndInvalidate(); sawCells = true }
+        if (ReleaseCheck.on) ReleaseCheck.apply(false, false, false)
+        return Apply.call(fn, if (small) cellsSmall(f, 0) else cellsLarge(f, 0))
+    }
     @ExplodeLoop
-    private fun cellsSmall(f: Frame): Array<Any?> { val a = arrayOfNulls<Any?>(args.size); for (i in args.indices) a[i] = lazy(f, args[i]); return a }
+    private fun cellsSmall(f: Frame, from: Int): Array<Any?> {
+        val a = arrayOfNulls<Any?>(args.size - from); for (i in from until args.size) a[i - from] = lazy(f, args[i]); return a
+    }
     @TruffleBoundary
-    private fun cellsLarge(f: Frame): Array<Any?> = Array(args.size) { lazy(f, args[it]) }
+    private fun cellsLarge(f: Frame, from: Int): Array<Any?> = Array(args.size - from) { lazy(f, args[from + it]) }
 }
 
 object Apply {
@@ -573,7 +606,8 @@ class PrimNode(@JvmField val prim: Prim, @field:CompilationFinal(dimensions = 1)
 
 /// One exported file: its expression and its pool of lambda bodies, made into RootNodes the first time each is needed.
 class Module(@JvmField val ops: List<Op>, @JvmField val loader: Loader) {
-    class Body(val target: CallTarget, val formals: Array<String>?, val defaults: BooleanArray?, val ellipsis: Boolean, val name: String?)
+    class Body(val target: CallTarget, val formals: Array<String>?, val defaults: BooleanArray?, val ellipsis: Boolean, val name: String?,
+               val argForced: Boolean)
 
     private val rows = HashMap<String, Op>()
     private val bodies = HashMap<String, Body>()
@@ -598,7 +632,7 @@ class Module(@JvmField val ops: List<Op>, @JvmField val loader: Loader) {
         val formals = (lam["formals"] as List<String>?)?.toTypedArray()
         val defaults = (lam["formal_defaults"] as List<Boolean>?)?.toBooleanArray() ?: formals?.let { BooleanArray(it.size) }
         val root = build((lam["name"] as String?) ?: row, o.regions[0][0], (o.attrs["captures"] as Number).toInt(), true)
-        Body(root.callTarget, formals, defaults, lam["ellipsis"] == true, lam["name"] as String?)
+        Body(root.callTarget, formals, defaults, lam["ellipsis"] == true, lam["name"] as String?, o.attrs["arg_forced"] == true)
     }
 
     private fun build(label: String, block: Block, ncaptures: Int, hasArg: Boolean): BodyRoot {

@@ -55,11 +55,12 @@ class NixAttrs(@JvmField val map: TreeMap<String, Any?>) {
     companion object { @JvmField val EMPTY = NixAttrs(TreeMap()) }
 }
 
-/// A lambda: its body's CallTarget (a son.body), the values it closed over, and the pattern it binds.
+/// A lambda: its body's CallTarget (a son.body), the values it closed over, and the pattern it binds.  `argForced`: son says the
+/// body forces its argument on every path on which it returns (son.body's arg_forced), so a call computes it first (ApplyNode).
 class Closure(
     @JvmField val target: CallTarget, @JvmField val captures: Array<Any?>,
     @JvmField val formals: Array<String>?, @JvmField val defaults: BooleanArray?, @JvmField val ellipsis: Boolean,
-    @JvmField val name: String?,
+    @JvmField val name: String?, @JvmField val argForced: Boolean = false,
 )
 class Prim(@JvmField val key: String, @JvmField val arity: Int, @JvmField val impl: (Array<Any?>) -> Any) {
     val name get() = key.removePrefix("__")
