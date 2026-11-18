@@ -7,9 +7,11 @@ evaluates that IR on demand. It is meant to be a drop-in for `nix-instantiate`; 
 behaves as those. It is held to that: its output is compared with Nix 2.35.4 and Lix 2.91.3, and a faster answer that differs
 is not a result.
 
-Everything here builds to TrikeShed's `PRELOAD.md` as MLIR ([AGENTS.md](AGENTS.md)). TrikeShed's algebra (joins, series,
-cursors, Confix) is the data structure of the C++ (`include/Composite/`), and as the `trikeshed` dialect it is the form the
-other dialects lower to; [docs/PRELOAD-DIALECTS.md](docs/PRELOAD-DIALECTS.md) maps each one and says what is done.
+Everything here is to build to TrikeShed's `PRELOAD.md` as MLIR ([AGENTS.md](AGENTS.md)). TrikeShed's algebra (joins,
+series, cursors, Confix) is the data structure of the C++ (`include/Composite/`), and the `trikeshed` dialect is to be the
+form every other dialect lowers to. Today only confix, kif and sumo lower through it. Nix values carry trikeshed types in the
+IR, but the evaluator runs the `nix` ops as C++ nodes and the JIT lowers them straight to `arith`, `cf` and LLVM, so the Nix
+path bypasses TrikeShed's ops, fill and drain included ([docs/PRELOAD-DIALECTS.md](docs/PRELOAD-DIALECTS.md), steps 2-4).
 
 ## What is here
 
@@ -75,6 +77,14 @@ MLIR ops stay the program: nodes are made from them and read their attributes.
 
 ## Open work
 
+- The Nix path through TrikeShed ([docs/PRELOAD-DIALECTS.md](docs/PRELOAD-DIALECTS.md), steps 2-4):
+  - `son`'s pool rows as `trikeshed.append` and first forces as `trikeshed.anchor`, with the evaluator reading son IR;
+  - the LLVM arm lowering through `trikeshed` instead of straight to `arith` and LLVM;
+  - `//` as `trikeshed.layers`.
+
+  No pass creates a trikeshed op yet. `trikeshed.append` and `trikeshed.anchor` are used nowhere, and `trikeshed.drain` only
+  by tests and mlnixci's query. The evaluator's containers are `composite::MutableSeries`, but whether they are filled and
+  then drained was measured once, in October, and nothing checks it now.
 - Lifetimes: the frames `son` still cannot account for are mostly cells a frame gives a callee from outside itself. Only the
   run time can settle those, so the next step is runtime callee strictness on the Graal arm
   ([docs/SEA-OF-NODES.md](docs/SEA-OF-NODES.md)).
