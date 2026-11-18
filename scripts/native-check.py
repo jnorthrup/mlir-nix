@@ -3,7 +3,7 @@
 TrikeShed) and through `mlnix instantiate --eval --strict`.  A file compiled must print what mlnix prints and exit as it
 does, with the same first line on stderr when it fails.  A file whose first line is `# refused: TEXT` must be refused by
 the emitter (exit 2) with TEXT in its reason; any other refusal is a failure.  Default files: test/native/*.nix and
-graal/bench/*.nix but attrs.nix (sets are not in the first cut).
+graal/bench/*.nix.
 
 Needs mlnix and mlnix-opt (BIN, default build/bin), nix-truffle installed (graal/: ./gradlew installDist), and LLVM's
 mlir-opt, mlir-translate and clang (LLVM_BIN).  Exit 0 when every file is as expected."""
@@ -14,8 +14,7 @@ args = sys.argv[1:]
 keep = None
 if args[:1] == ["--keep"]:
     keep, args = args[1], args[2:]
-files = args or sorted(glob.glob(os.path.join(REPO, "test/native/*.nix"))) + \
-    [f for f in sorted(glob.glob(os.path.join(REPO, "graal/bench/*.nix"))) if not f.endswith("/attrs.nix")]
+files = args or sorted(glob.glob(os.path.join(REPO, "test/native/*.nix"))) + sorted(glob.glob(os.path.join(REPO, "graal/bench/*.nix")))
 out = keep or tempfile.mkdtemp(prefix="native-check-")
 os.makedirs(out, exist_ok=True)
 BIN = os.environ.get("BIN", os.path.join(REPO, "build/bin"))

@@ -125,11 +125,26 @@ Steps:
      - A function made for a recursive body takes its captured integers as parameters; where the body names itself, it is
        the row over those parameters.  A closure it captures must capture only closures, all the way down (the function
        sees none of its caller's values).
-     - Refused, saying what it met: sets, strings, floats, set patterns, recursion over Booleans, and the cases
-       test/native's `# refused:` files name.
-     - `scripts/native-check.py`: 30 of test/native's 37 cases and graal/bench's six (attrs.nix uses sets) print what mlnix
-       prints (stdout, exit code, an error's first line); the other 7 are refused as their first line says.  Two mutants
-       fail it: an `if` computing both branches first, `+` unchecked.  On Linux (mlnix-os, LLVM 22; the modules emitted on
+     - Sets (PRELOAD's attrs, `Join<CSeries<Symbol>, Series<Value>>`): a set is its names joined to its cells, known while
+       writing, as a closure is its row and captures; at run time only the values something reaches exist.  A select, `?`,
+       `//`, `with` and a set pattern are settled while writing (the Graal arm's SelectNode, WithVarNode and Apply.one,
+       in Nix's order), so a set made in one body and read in another (graal/bench/attrs.nix) costs only its values.  A
+       failure known while writing (a missing attribute, a pattern's missing or unexpected argument, `undefined
+       variable`) is written where it is forced; what it leaves is never reached.  Known integers and Booleans are folded
+       while writing, and an `if` on a known condition is only its branch.
+     - Printing is mlnix's `--strict`: everything forced first (forceValueDeep), then printed (printValue): names in byte
+       order, quoted as Source.cpp's printIdentifier quotes them, «repeated» for a non-empty set met again or a non-empty
+       list's cell met again (a select makes its own cell, a variable passes on the one it names).  mlnix forces a set's
+       values in its symbols' order, which puts names it interned before reading the program (`type`, the builtins')
+       first, so a printed set two of whose values may fail is refused: which error comes first is not the program's to
+       say.
+     - Refused, saying what it met: strings, floats, list literals, a set chosen at run time (an `if` of two sets), set
+       equality, names computed at run time, recursion over Booleans or sets, and the cases test/native's `# refused:`
+       files name.
+     - `scripts/native-check.py`: 88 of test/native's 103 cases and graal/bench's seven print what mlnix prints (stdout,
+       exit code, an error's first line); the other 15 are refused as their first line says.  Seven mutants fail it: an
+       `if` computing both branches first, `+` unchecked, an `or` default computed first, a pattern's unexpected argument
+       named before a missing one, `?` forcing its last attribute, no «repeated», `//` keeping the left value.  On Linux (mlnix-os, LLVM 22; the modules emitted on
        the Mac, lowered and compiled there) the 36 programs print what that build of mlnix prints.  The programs link the C
        library alone (libc; libSystem on the Mac): no libstdc++.
      - Speed on the Mac (hyperfine, 20+ runs; the Graal arm's warm runs from its 930aa98/1cbb492 bench, with son):
@@ -142,15 +157,16 @@ Steps:
        | slots1 | 33.3 ms | 378 ms | 15.7 ms | 1.4 ms | 0.26 s |
        | slots9 | 44.4 ms | 385 ms | 19.8 ms | 1.4 ms | 0.27 s |
        | fib | 22.8 ms | 335 ms | 2.2 ms | 1.3 ms | 0.27 s |
+       | attrs (sets) | 41.2 ms | 396 ms | 22.3 ms | 1.4 ms | 0.30 s |
 
        Most of a native run is the process: a program that only prints `<LAMBDA>` takes 1.2 ms.  Peak RSS: leaf 3.5 MB
-       (mlnix 93 MB), fib 1.2 MB (44 MB).  These files are the best case (integer loops, no sets or strings), and the
+       (mlnix 93 MB), fib 1.2 MB (44 MB), attrs 2.7 MB (99 MB).  These files are the best case (integer loops, no sets or strings), and the
        compile costs more than ten mlnix runs, so this pays where a program is compiled once and run many times.
      - Found on the way: the arms' export reader (Graph.kt) read every JSON number as a Double, so an integer past 2^53 lost
        its low bits (`9223372036854775800` read as Long.MAX_VALUE); and mlnix's `+` overflow error printed the wrapped sum
        for the left operand (the upstream test eval-fail-overflowing-add is now exact).
-     - Next: sets as `trikeshed.series2` (attrs.nix), strings as CharSeries, and lazy elements (a series as a view) so
-       length and elemAt need not refuse.
+     - Next: strings as CharSeries, list literals, lazy elements (a series as a view) so length and elemAt need not
+       refuse, and a set chosen at run time as `trikeshed.series2`.
 4. `//` as `trikeshed.layers` for large bases: on nixpkgs-73 the ~800 merges with a side of 4096+ rows copy ~260 MB of the arena's
    311 MB of flat merges (b58d02c chose flat for speed: layering every merge read 2.5-7% slower).  The layer here is only for the
    package set.  Fix the stale `Bindings::Layer` reference in TS_LayersType's description in the same change.

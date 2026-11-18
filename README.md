@@ -72,9 +72,10 @@ rather than through it. On both workloads it was slower than the interpreter (11
 same answers, so it was removed; it is at 3b46257
 ([record](docs/bench/local/jit-removal-20261118/RESULTS.md)). The LLVM arm lowers through `trikeshed` instead: its first cut
 (`scripts/nix-native.sh F OUT`) writes a file's son form as `trikeshed.series`, `fold`, `size` and `at` over checked
-integers, from Kotlin (`nix-truffle --emit-trikeshed`), and lowers it as mlnixci is lowered. Six of the seven Graal bench
+integers, from Kotlin (`nix-truffle --emit-trikeshed`), and lowers it as mlnixci is lowered; a set is its names joined to
+its cells, known while writing, so selects, `//`, `with` and set patterns cost nothing at run time. The seven Graal bench
 files compile to programs that run in 1.3-1.5 ms (mlnix: 23-52 ms) and print what mlnix prints; anything it cannot keep
-lazy, and sets and strings, it refuses ([PRELOAD-DIALECTS.md](docs/PRELOAD-DIALECTS.md) step 3).
+lazy, and strings and list literals, it refuses ([PRELOAD-DIALECTS.md](docs/PRELOAD-DIALECTS.md) step 3).
 
 **The default evaluator** is C++ over nodes. When a body is indexed, each of its SSA values gets a record of its kind, its
 operands, its frame slot and the function that evaluates it; a thunk holds its node, so evaluating is one indirect call. The
@@ -86,7 +87,7 @@ MLIR ops stay the program: nodes are made from them and read their attributes.
   - `son`'s pool rows as `trikeshed.append` and first forces as `trikeshed.anchor`, with the evaluator reading son IR
     (both arms hold the pool in that form: the native FilePool is the Cursor, and the Graal arm's rows are appended
     in son.pool's order with each body an anchor its first call mints; the IR does not write the ops yet);
-  - an LLVM arm that lowers through `trikeshed` (first cut: integers, Booleans, functions and integer lists;
+  - an LLVM arm that lowers through `trikeshed` (so far: integers, Booleans, functions, integer lists and sets;
     `scripts/native-check.py`);
   - `//` as `trikeshed.layers`.
 

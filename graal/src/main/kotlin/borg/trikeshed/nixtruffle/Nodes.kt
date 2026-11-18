@@ -674,12 +674,12 @@ object Apply {
     @TruffleBoundary
     fun one(fn: Any, arg: Any?): Any = when (fn) {
         is Closure -> {
-            if (fn.formals != null) {
+            if (fn.formals != null) { // Nix's order: a missing argument (formals are sorted), then an unexpected one
                 val set = forceAttrs(arg)
-                if (!fn.ellipsis) for (k in set.names) if (k !in fn.formals)
-                    throw NixError("function '${fn.name ?: "anonymous lambda"}' called with unexpected argument '$k'")
                 for ((i, n) in fn.formals.withIndex()) if (!fn.defaults!![i] && set[n] == null)
                     throw NixError("function '${fn.name ?: "anonymous lambda"}' called without required argument '$n'")
+                if (!fn.ellipsis) for (k in set.names) if (k !in fn.formals)
+                    throw NixError("function '${fn.name ?: "anonymous lambda"}' called with unexpected argument '$k'")
             }
             fn.target.call(fn.captures, arg)
         }
