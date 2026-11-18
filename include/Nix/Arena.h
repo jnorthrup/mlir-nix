@@ -46,7 +46,6 @@ struct Prefaulter {
     size_t n;
   };
   void request(char *p, size_t n) {
-    if (disabled) return;
     {
       nixsys::Held g(m);
       queue.append({p, n});
@@ -82,13 +81,14 @@ struct Prefaulter {
     for (size_t off = 0; off < n; off += page)
       __atomic_fetch_add(reinterpret_cast<uint8_t *>(p + off), uint8_t(0), __ATOMIC_RELAXED);
   }
-  const bool disabled = getenv("MLNIX_NO_PREFAULT") != nullptr;
   nixsys::Lock m;
   nixsys::Signal cv;
   composite::MutableSeries<Range> queue; // appended; the helper drains from `head`, a job by value
   uint32_t head = 0;
   bool closed = false;
-  nixsys::Thread worker = disabled ? nixsys::Thread() : nixsys::Thread::start([this] { run(); }); // last: built last, stopped first
+  // last: built last, stopped first.  MLNIX_NO_PREFAULT, which kept it from starting, is gone: its measurement (wall
+  // -2.7% to -4.0% with the helper) is 23e962c's.
+  nixsys::Thread worker = nixsys::Thread::start([this] { run(); });
 };
 
 } // namespace arena_detail

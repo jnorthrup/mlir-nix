@@ -82,10 +82,11 @@ MLIR ops stay the program: nodes are made from them and read their attributes.
   - `//` as `trikeshed.layers`.
 
   No pass creates a trikeshed op yet. `trikeshed.append` and `trikeshed.anchor` are used nowhere, and `trikeshed.drain` only
-  by tests and mlnixci (its columns, the escapes and digits its replies are written with, and the query's whole reply).
+  by tests and mlnixci (its columns, the escapes and digits its replies are written with, and the query's and the
+  report's whole replies).
   Since 18 November `combine` and `combineAll` lower as Combine.kt's views: a drain of one drains its parts in turn,
   its size is its parts' sizes added, and it is a buffer only where something reads it by index or across a call, so
-  the query's reply is one buffer that each piece is drained into once. The evaluator's containers are
+  each of those replies is one buffer that each piece is drained into once. The evaluator's containers are
   `composite::MutableSeries`, but whether they are filled and then drained was measured once, in October, and nothing
   checks it now.
 - Lifetimes: the Graal arm now reads a callee's strictness at the call (`son.body`'s `arg_forced`) and a builtin's from

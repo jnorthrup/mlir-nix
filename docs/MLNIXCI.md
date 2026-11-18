@@ -23,7 +23,7 @@ what-if overlay held in memory is evaluated with it. Nothing is written to the s
   configuration, its edits being what-ifs.
 - **No C++.** The server is MLIR (`src/*.mlir`) lowered to LLVM IR and linked with libc and liburing only. The faceted
   query (`query.mlir`), the JSON index, the columns, the escapes and digits a reply is written with and the query's
-  reply itself (`src/text.mlir`) are TrikeShed's cursor and Confix ops, lowered by `mlnix-opt --trikeshed-lower-cursors`
+  and the report's replies themselves (`src/text.mlir`) are TrikeShed's cursor and Confix ops, lowered by `mlnix-opt --trikeshed-lower-cursors`
   (combine and combineAll as views, drained part by part into one buffer). The rest is hand-written in the
   func/scf/arith/llvm dialects.
 - **Its check.** `make -C utils/mlnixci check` builds it against this checkout. It then runs the facet check, which

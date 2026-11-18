@@ -5,7 +5,8 @@
 // src/columns.mlir read with trikeshed.first and trikeshed.second), the half-open [start, start + length).  Nothing here
 // makes a string.  A piece is read where it lies, compared where it lies, and copied only into the builder, whose buffer
 // can start with room for a reply's head, so that the head is written in front of the body and nothing moves.  What the
-// builder writes besides pieces, a string's escapes and a number's digits, text.mlir makes in TrikeShed's ops.
+// builder writes besides pieces, a string's escapes, text.mlir makes in TrikeShed's ops, as it makes the query's and the
+// report's replies whole.
 
 llvm.func @malloc(i64) -> !llvm.ptr
 llvm.func @realloc(!llvm.ptr, i64) -> !llvm.ptr
@@ -14,11 +15,7 @@ llvm.func @memcpy(!llvm.ptr, !llvm.ptr, i64) -> !llvm.ptr
 llvm.func @memcmp(!llvm.ptr, !llvm.ptr, i64) -> i32
 llvm.func @memchr(!llvm.ptr, i32, i64) -> !llvm.ptr
 llvm.func @memmem(!llvm.ptr, i64, !llvm.ptr, i64) -> !llvm.ptr
-llvm.func @snprintf(!llvm.ptr, i64, !llvm.ptr, ...) -> i32
 llvm.func @_mlir_ciface_json_escape(!llvm.ptr, !llvm.ptr) -> i64
-llvm.func @_mlir_ciface_decimal(i64, !llvm.ptr) -> i64
-
-llvm.mlir.global internal constant @k_f("%f\00") : !llvm.array<3 x i8>
 
 // ---- coordinates
 
@@ -248,8 +245,6 @@ func.func @number(%p: !llvm.ptr, %from: i64, %to: i64) -> i64 {
   return %r : i64
 }
 
-
-
 // ---- the builder: one growing buffer; a reply is taken out of it whole
 
 llvm.mlir.global internal @ob_p() : !llvm.ptr {
@@ -350,28 +345,6 @@ func.func @ob_byte(%c: i8) {
   %end = func.call @ob_room(%c1) : (i64) -> !llvm.ptr
   llvm.store %c, %end : i8, !llvm.ptr
   func.call @ob_used(%c1) : (i64) -> ()
-  return
-}
-
-// v as printf's %ld writes it: text.mlir's decimal, written into the room
-func.func @ob_i64(%v: i64) {
-  %one = arith.constant 1 : i32
-  %c24 = arith.constant 24 : i64
-  %dst = func.call @ob_room(%c24) : (i64) -> !llvm.ptr
-  %into = llvm.alloca %one x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
-  func.call @view(%into, %dst, %c24) : (!llvm.ptr, !llvm.ptr, i64) -> ()
-  %k = llvm.call @_mlir_ciface_decimal(%v, %into) : (i64, !llvm.ptr) -> i64
-  func.call @ob_used(%k) : (i64) -> ()
-  return
-}
-
-func.func @ob_f64(%v: f64) {
-  %room = arith.constant 400 : i64
-  %end = func.call @ob_room(%room) : (i64) -> !llvm.ptr
-  %fmt = llvm.mlir.addressof @k_f : !llvm.ptr
-  %r = llvm.call @snprintf(%end, %room, %fmt, %v) vararg(!llvm.func<i32 (ptr, i64, ptr, ...)>) : (!llvm.ptr, i64, !llvm.ptr, f64) -> i32
-  %k = arith.extsi %r : i32 to i64
-  func.call @ob_used(%k) : (i64) -> ()
   return
 }
 

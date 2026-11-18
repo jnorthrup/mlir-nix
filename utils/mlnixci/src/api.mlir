@@ -14,7 +14,8 @@ llvm.func @open(!llvm.ptr, i32, ...) -> i32
 llvm.func @read(i32, !llvm.ptr, i64) -> i64
 llvm.func @close(i32) -> i32
 llvm.func @unlink(!llvm.ptr) -> i32
-llvm.func @_mlir_ciface_etc_join(!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, !llvm.ptr) -> i64
+llvm.func @_mlir_ciface_etc_join(!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr) -> i64
+llvm.func @_mlir_ciface_report_reply(!llvm.ptr, !llvm.ptr, f64, f64, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr)
 llvm.func @_mlir_ciface_query_text(!llvm.ptr, !llvm.ptr)
 llvm.func @_mlir_ciface_query_reply(!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f64)
 llvm.func @_mlir_ciface_corpus_query(!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr) -> i64
@@ -35,8 +36,6 @@ func.func private @ob_len() -> i64
 func.func private @ob_take() -> !llvm.ptr
 func.func private @ob_bytes(!llvm.ptr, i64)
 func.func private @ob_piece(!llvm.ptr, i64)
-func.func private @ob_i64(i64)
-func.func private @ob_f64(f64)
 func.func private @ob_esc(!llvm.ptr, i64)
 func.func private @cx_scan(!llvm.ptr, i64) -> !llvm.ptr
 func.func private @cx_free(!llvm.ptr)
@@ -95,22 +94,8 @@ llvm.mlir.global internal constant @lit16("select") : !llvm.array<6 x i8>
 llvm.mlir.global internal constant @lit17("q") : !llvm.array<1 x i8>
 llvm.mlir.global internal constant @lit18("offset") : !llvm.array<6 x i8>
 llvm.mlir.global internal constant @lit19("limit") : !llvm.array<5 x i8>
-llvm.mlir.global internal constant @lit24(",") : !llvm.array<1 x i8>
-llvm.mlir.global internal constant @lit25("{\22name\22:\22") : !llvm.array<9 x i8>
-llvm.mlir.global internal constant @lit31("]}") : !llvm.array<2 x i8>
-llvm.mlir.global internal constant @lit35("null") : !llvm.array<4 x i8>
 llvm.mlir.global internal constant @lit40("}") : !llvm.array<1 x i8>
-llvm.mlir.global internal constant @lit41("{\22overlay\22:\22") : !llvm.array<12 x i8>
-llvm.mlir.global internal constant @lit42("\22,\22evalMs\22:{\22base\22:") : !llvm.array<19 x i8>
-llvm.mlir.global internal constant @lit43(",\22whatif\22:") : !llvm.array<10 x i8>
-llvm.mlir.global internal constant @lit44("},\22options\22:[") : !llvm.array<13 x i8>
-llvm.mlir.global internal constant @lit45("{\22path\22:\22") : !llvm.array<9 x i8>
-llvm.mlir.global internal constant @lit46("\22,\22from\22:") : !llvm.array<9 x i8>
-llvm.mlir.global internal constant @lit47(",\22to\22:") : !llvm.array<6 x i8>
-llvm.mlir.global internal constant @lit48(",\22fromState\22:") : !llvm.array<13 x i8>
 llvm.mlir.global internal constant @lit49("\22") : !llvm.array<1 x i8>
-llvm.mlir.global internal constant @lit50(",\22toState\22:\22") : !llvm.array<12 x i8>
-llvm.mlir.global internal constant @lit51("],\22etc\22:[") : !llvm.array<9 x i8>
 llvm.mlir.global internal constant @lit52("mlnix failed") : !llvm.array<12 x i8>
 llvm.mlir.global internal constant @lit53("cannot write ") : !llvm.array<13 x i8>
 llvm.mlir.global internal constant @lit54("path") : !llvm.array<4 x i8>
@@ -950,17 +935,7 @@ func.func @query_run(%bp: !llvm.ptr, %f: !llvm.ptr) {
   %r18 = func.call @dk(%rd, %c18) : (!llvm.ptr, i64) -> !llvm.ptr
   %reply = llvm.alloca %one32 x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
   llvm.call @_mlir_ciface_query_reply(%reply, %r0, %r1, %r2, %d4, %r4, %r5, %r6, %r7, %r8, %r9, %r10, %r11, %r12, %r13, %r14, %r15, %r16, %r17, %r18, %total, %n, %dt) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f64) -> ()
-  %pa = llvm.getelementptr %reply[0, 0] : (!llvm.ptr) -> !llvm.ptr, !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-  %rbuf = llvm.load %pa : !llvm.ptr -> !llvm.ptr
-  %pd = llvm.getelementptr %reply[0, 1] : (!llvm.ptr) -> !llvm.ptr, !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-  %rdata = llvm.load %pd : !llvm.ptr -> !llvm.ptr
-  %po = llvm.getelementptr %reply[0, 2] : (!llvm.ptr) -> !llvm.ptr, !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-  %roff = llvm.load %po : !llvm.ptr -> i64
-  %pn = llvm.getelementptr %reply[0, 3, 0] : (!llvm.ptr) -> !llvm.ptr, !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-  %rlen = llvm.load %pn : !llvm.ptr -> i64
-  %rat = llvm.getelementptr %rdata[%roff] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  func.call @ob_bytes(%rat, %rlen) : (!llvm.ptr, i64) -> ()
-  llvm.call @free(%rbuf) : (!llvm.ptr) -> ()
+  func.call @ob_made(%reply) : (!llvm.ptr) -> ()
   llvm.call @free(%rd) : (!llvm.ptr) -> ()
   llvm.call @free(%selAll) : (!llvm.ptr) -> ()
   llvm.call @free(%cntAll) : (!llvm.ptr) -> ()
@@ -973,186 +948,52 @@ func.func @query_run(%bp: !llvm.ptr, %f: !llvm.ptr) {
   return
 }
 
-// ---- the report: the overlay, then each changed option (its value and state before and after), and each /etc file
-// whose text differs
+// ---- the report: text.mlir's report_reply over the overlay, the options the what-if changed (their values and states
+// before and after) and the /etc files whose text differs (columns.mlir's etc_join), written into the builder
 
 func.func @report() {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
+  %c2 = arith.constant 2 : i64
   %c3 = arith.constant 3 : i64
+  %c4 = arith.constant 4 : i64
   %c5 = arith.constant 5 : i64
   %c6 = arith.constant 6 : i64
   %c7 = arith.constant 7 : i64
   %c8 = arith.constant 8 : i64
+  %c9 = arith.constant 9 : i64
+  %c10 = arith.constant 10 : i64
+  %c11 = arith.constant 11 : i64
+  %c12 = arith.constant 12 : i64
+  %c13 = arith.constant 13 : i64
+  %c14 = arith.constant 14 : i64
   %c15 = arith.constant 15 : i64
+  %c16 = arith.constant 16 : i64
+  %c20 = arith.constant 20 : i64
+  %c25 = arith.constant 25 : i64
   %c26 = arith.constant 26 : i64
   %c28 = arith.constant 28 : i64
-  %m1 = arith.constant -1 : i64
-  %true = arith.constant true
-  %cur = func.call @cur() : () -> !llvm.ptr
-  %bc = func.call @base() : () -> !llvm.ptr
-  %c200 = arith.constant 200 : i64
-  func.call @begin(%c200) : (i64) -> ()
-  %lit31 = llvm.mlir.addressof @lit41 : !llvm.ptr
-  %litn31 = arith.constant 12 : i64
-  func.call @ob_bytes(%lit31, %litn31) : (!llvm.ptr, i64) -> ()
-  %pov = llvm.mlir.addressof @g_ov : !llvm.ptr
-  %ov = llvm.load %pov : !llvm.ptr -> !llvm.ptr
-  %povn = llvm.mlir.addressof @g_ovn : !llvm.ptr
-  %ovn = llvm.load %povn : !llvm.ptr -> i64
-  %ovt = func.call @tw(%c0, %ovn) : (i64, i64) -> i64
-  func.call @ob_esc(%ov, %ovt) : (!llvm.ptr, i64) -> ()
-  %lit32 = llvm.mlir.addressof @lit42 : !llvm.ptr
-  %litn32 = arith.constant 19 : i64
-  func.call @ob_bytes(%lit32, %litn32) : (!llvm.ptr, i64) -> ()
-  %msb = func.call @geti(%bc, %c26) : (!llvm.ptr, i64) -> i64
-  %msbf = arith.bitcast %msb : i64 to f64
-  func.call @ob_f64(%msbf) : (f64) -> ()
-  %lit33 = llvm.mlir.addressof @lit43 : !llvm.ptr
-  %litn33 = arith.constant 10 : i64
-  func.call @ob_bytes(%lit33, %litn33) : (!llvm.ptr, i64) -> ()
-  %msc = func.call @geti(%cur, %c26) : (!llvm.ptr, i64) -> i64
-  %mscf = arith.bitcast %msc : i64 to f64
-  func.call @ob_f64(%mscf) : (f64) -> ()
-  %lit34 = llvm.mlir.addressof @lit44 : !llvm.ptr
-  %litn34 = arith.constant 13 : i64
-  func.call @ob_bytes(%lit34, %litn34) : (!llvm.ptr, i64) -> ()
-  %n = func.call @geti(%cur, %c3) : (!llvm.ptr, i64) -> i64
-  %text = func.call @getp(%cur, %c0) : (!llvm.ptr, i64) -> !llvm.ptr
-  %keys = func.call @getp(%cur, %c7) : (!llvm.ptr, i64) -> !llvm.ptr
-  %key = func.call @getp(%cur, %c8) : (!llvm.ptr, i64) -> !llvm.ptr
-  %val = func.call @getp(%cur, %c5) : (!llvm.ptr, i64) -> !llvm.ptr
-  %st = func.call @getp(%cur, %c6) : (!llvm.ptr, i64) -> !llvm.ptr
-  %whatif = func.call @getp(%cur, %c15) : (!llvm.ptr, i64) -> !llvm.ptr
-  %baseOf = func.call @getp(%cur, %c28) : (!llvm.ptr, i64) -> !llvm.ptr
-  %btext = func.call @getp(%bc, %c0) : (!llvm.ptr, i64) -> !llvm.ptr
-  %bval = func.call @getp(%bc, %c5) : (!llvm.ptr, i64) -> !llvm.ptr
-  %bst = func.call @getp(%bc, %c6) : (!llvm.ptr, i64) -> !llvm.ptr
-  %last = scf.for %r = %c0 to %n step %c1 iter_args(%first = %true) -> (i1) : i64 {
-    %w = func.call @ld32(%whatif, %r) : (!llvm.ptr, i64) -> i64
-    %ch = arith.cmpi ne, %w, %c0 : i64
-    %nf = scf.if %ch -> (i1) {
-      %notFirst = arith.xori %first, %true : i1
-      scf.if %notFirst {
-        %lit35 = llvm.mlir.addressof @lit24 : !llvm.ptr
-        %litn35 = arith.constant 1 : i64
-        func.call @ob_bytes(%lit35, %litn35) : (!llvm.ptr, i64) -> ()
-      }
-      %lit36 = llvm.mlir.addressof @lit45 : !llvm.ptr
-      %litn36 = arith.constant 9 : i64
-      func.call @ob_bytes(%lit36, %litn36) : (!llvm.ptr, i64) -> ()
-      %k = func.call @ld64(%key, %r) : (!llvm.ptr, i64) -> i64
-      func.call @ob_piece(%keys, %k) : (!llvm.ptr, i64) -> ()
-      %lit37 = llvm.mlir.addressof @lit46 : !llvm.ptr
-      %litn37 = arith.constant 9 : i64
-      func.call @ob_bytes(%lit37, %litn37) : (!llvm.ptr, i64) -> ()
-      %b = func.call @ld32(%baseOf, %r) : (!llvm.ptr, i64) -> i64
-      %hasB = arith.cmpi sge, %b, %c0 : i64
-      scf.if %hasB {
-        %vb = func.call @ld64(%bval, %b) : (!llvm.ptr, i64) -> i64
-        %hidden = arith.cmpi eq, %vb, %m1 : i64
-        scf.if %hidden {
-          %lit38 = llvm.mlir.addressof @lit35 : !llvm.ptr
-          %litn38 = arith.constant 4 : i64
-          func.call @ob_bytes(%lit38, %litn38) : (!llvm.ptr, i64) -> ()
-        } else {
-          func.call @ob_piece(%btext, %vb) : (!llvm.ptr, i64) -> ()
-        }
-      } else {
-        %lit39 = llvm.mlir.addressof @lit35 : !llvm.ptr
-        %litn39 = arith.constant 4 : i64
-        func.call @ob_bytes(%lit39, %litn39) : (!llvm.ptr, i64) -> ()
-      }
-      %lit40 = llvm.mlir.addressof @lit47 : !llvm.ptr
-      %litn40 = arith.constant 6 : i64
-      func.call @ob_bytes(%lit40, %litn40) : (!llvm.ptr, i64) -> ()
-      %vc = func.call @ld64(%val, %r) : (!llvm.ptr, i64) -> i64
-      %hiddenC = arith.cmpi eq, %vc, %m1 : i64
-      scf.if %hiddenC {
-        %lit41 = llvm.mlir.addressof @lit35 : !llvm.ptr
-        %litn41 = arith.constant 4 : i64
-        func.call @ob_bytes(%lit41, %litn41) : (!llvm.ptr, i64) -> ()
-      } else {
-        func.call @ob_piece(%text, %vc) : (!llvm.ptr, i64) -> ()
-      }
-      %lit42 = llvm.mlir.addressof @lit48 : !llvm.ptr
-      %litn42 = arith.constant 13 : i64
-      func.call @ob_bytes(%lit42, %litn42) : (!llvm.ptr, i64) -> ()
-      scf.if %hasB {
-        %lit43 = llvm.mlir.addressof @lit49 : !llvm.ptr
-        %litn43 = arith.constant 1 : i64
-        func.call @ob_bytes(%lit43, %litn43) : (!llvm.ptr, i64) -> ()
-        %sb = func.call @ld64(%bst, %b) : (!llvm.ptr, i64) -> i64
-        func.call @ob_piece(%btext, %sb) : (!llvm.ptr, i64) -> ()
-        %lit44 = llvm.mlir.addressof @lit49 : !llvm.ptr
-        %litn44 = arith.constant 1 : i64
-        func.call @ob_bytes(%lit44, %litn44) : (!llvm.ptr, i64) -> ()
-      } else {
-        %lit45 = llvm.mlir.addressof @lit35 : !llvm.ptr
-        %litn45 = arith.constant 4 : i64
-        func.call @ob_bytes(%lit45, %litn45) : (!llvm.ptr, i64) -> ()
-      }
-      %lit46 = llvm.mlir.addressof @lit50 : !llvm.ptr
-      %litn46 = arith.constant 12 : i64
-      func.call @ob_bytes(%lit46, %litn46) : (!llvm.ptr, i64) -> ()
-      %sc = func.call @ld64(%st, %r) : (!llvm.ptr, i64) -> i64
-      func.call @ob_piece(%text, %sc) : (!llvm.ptr, i64) -> ()
-      %lit47 = llvm.mlir.addressof @lit2 : !llvm.ptr
-      %litn47 = arith.constant 2 : i64
-      func.call @ob_bytes(%lit47, %litn47) : (!llvm.ptr, i64) -> ()
-      %false = arith.constant false
-      scf.yield %false : i1
-    } else {
-      scf.yield %first : i1
-    }
-    scf.yield %nf : i1
-  }
-  %lit48 = llvm.mlir.addressof @lit51 : !llvm.ptr
-  %litn48 = arith.constant 9 : i64
-  func.call @ob_bytes(%lit48, %litn48) : (!llvm.ptr, i64) -> ()
-  func.call @etc_diff(%bc, %cur) : (!llvm.ptr, !llvm.ptr) -> ()
-  %lit49 = llvm.mlir.addressof @lit31 : !llvm.ptr
-  %litn49 = arith.constant 2 : i64
-  func.call @ob_bytes(%lit49, %litn49) : (!llvm.ptr, i64) -> ()
-  return
-}
-
-// an /etc file's text as a JSON string: a string as it is written, anything else written into one
-func.func @etc_value(%t: !llvm.ptr, %f: !llvm.ptr, %v: i64) {
-  %c4 = arith.constant 4 : i64
-  %tag = func.call @cx_tag(%f, %v) : (!llvm.ptr, i64) -> i64
-  %raw = func.call @cx_raw(%f, %v) : (!llvm.ptr, i64) -> i64
-  %isStr = arith.cmpi eq, %tag, %c4 : i64
-  scf.if %isStr {
-    func.call @ob_piece(%t, %raw) : (!llvm.ptr, i64) -> ()
-  } else {
-    %lit50 = llvm.mlir.addressof @lit49 : !llvm.ptr
-    %litn50 = arith.constant 1 : i64
-    func.call @ob_bytes(%lit50, %litn50) : (!llvm.ptr, i64) -> ()
-    func.call @ob_esc(%t, %raw) : (!llvm.ptr, i64) -> ()
-    %lit51 = llvm.mlir.addressof @lit49 : !llvm.ptr
-    %litn51 = arith.constant 1 : i64
-    func.call @ob_bytes(%lit51, %litn51) : (!llvm.ptr, i64) -> ()
-  }
-  return
-}
-
-// the /etc files of the two corpora, joined by name: columns.mlir's etc_join gives the files that differ, in name order
-// (entry e < kb: the base's file e, its what-if file other[e] or -1; else the what-if's file e - kb, which the base lacks)
-func.func @etc_diff(%bc: !llvm.ptr, %cur: !llvm.ptr) {
-  %c0 = arith.constant 0 : i64
-  %c1 = arith.constant 1 : i64
-  %c2 = arith.constant 2 : i64
-  %c4 = arith.constant 4 : i64
-  %c25 = arith.constant 25 : i64
+  %c29 = arith.constant 29 : i64
+  %c40 = arith.constant 40 : i64
   %i0 = arith.constant 0 : i32
   %i1 = arith.constant 1 : i32
   %i2 = arith.constant 2 : i32
   %i3 = arith.constant 3 : i32
-  %tb = func.call @getp(%bc, %c0) : (!llvm.ptr, i64) -> !llvm.ptr
+  %cur = func.call @cur() : () -> !llvm.ptr
+  %bc = func.call @base() : () -> !llvm.ptr
+  %c200 = arith.constant 200 : i64
+  func.call @begin(%c200) : (i64) -> ()
+  %pov = llvm.mlir.addressof @g_ov : !llvm.ptr
+  %ov = llvm.load %pov : !llvm.ptr -> !llvm.ptr
+  %povn = llvm.mlir.addressof @g_ovn : !llvm.ptr
+  %ovn = llvm.load %povn : !llvm.ptr -> i64
+  %msb = func.call @geti(%bc, %c26) : (!llvm.ptr, i64) -> i64
+  %msbf = arith.bitcast %msb : i64 to f64
+  %msc = func.call @geti(%cur, %c26) : (!llvm.ptr, i64) -> i64
+  %mscf = arith.bitcast %msc : i64 to f64
+  // the /etc objects of the base (A) and of the what-if (B): their members joined by name, and each member's pieces
   %fb = func.call @getp(%bc, %c2) : (!llvm.ptr, i64) -> !llvm.ptr
   %eb = func.call @geti(%bc, %c25) : (!llvm.ptr, i64) -> i64
-  %tc = func.call @getp(%cur, %c0) : (!llvm.ptr, i64) -> !llvm.ptr
   %fc = func.call @getp(%cur, %c2) : (!llvm.ptr, i64) -> !llvm.ptr
   %ec = func.call @geti(%cur, %c25) : (!llvm.ptr, i64) -> i64
   %hasEb = arith.cmpi sge, %eb, %c0 : i64
@@ -1173,13 +1014,21 @@ func.func @etc_diff(%bc: !llvm.ptr, %cur: !llvm.ptr) {
   }
   %both = arith.addi %kb, %kc : i64
   %room = arith.addi %both, %c1 : i64
+  %kb1 = arith.addi %kb, %c1 : i64
+  %kc1 = arith.addi %kc, %c1 : i64
   %entries = llvm.call @calloc(%room, %c4) : (i64, i64) -> !llvm.ptr
   %other = llvm.call @calloc(%room, %c4) : (i64, i64) -> !llvm.ptr
-  %v = llvm.alloca %i1 x !llvm.array<2 x struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>> : (i32) -> !llvm.ptr
-  %ve = llvm.getelementptr %v[0, 0] : (!llvm.ptr) -> !llvm.ptr, !llvm.array<2 x struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>>
-  %vo = llvm.getelementptr %v[0, 1] : (!llvm.ptr) -> !llvm.ptr, !llvm.array<2 x struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>>
-  func.call @view(%ve, %entries, %both) : (!llvm.ptr, !llvm.ptr, i64) -> ()
-  func.call @view(%vo, %other, %both) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+  %namesA = llvm.call @calloc(%kb1, %c8) : (i64, i64) -> !llvm.ptr
+  %valuesA = llvm.call @calloc(%kb1, %c8) : (i64, i64) -> !llvm.ptr
+  %namesB = llvm.call @calloc(%kc1, %c8) : (i64, i64) -> !llvm.ptr
+  %valuesB = llvm.call @calloc(%kc1, %c8) : (i64, i64) -> !llvm.ptr
+  %rd = llvm.call @calloc(%c20, %c40) : (i64, i64) -> !llvm.ptr
+  func.call @desc(%rd, %c0, %entries, %both) : (!llvm.ptr, i64, !llvm.ptr, i64) -> ()
+  func.call @desc(%rd, %c1, %other, %both) : (!llvm.ptr, i64, !llvm.ptr, i64) -> ()
+  func.call @desc(%rd, %c2, %namesA, %kb) : (!llvm.ptr, i64, !llvm.ptr, i64) -> ()
+  func.call @desc(%rd, %c3, %valuesA, %kb) : (!llvm.ptr, i64, !llvm.ptr, i64) -> ()
+  func.call @desc(%rd, %c4, %namesB, %kc) : (!llvm.ptr, i64, !llvm.ptr, i64) -> ()
+  func.call @desc(%rd, %c5, %valuesB, %kc) : (!llvm.ptr, i64, !llvm.ptr, i64) -> ()
   %a0 = func.call @cx_d(%fb, %i0) : (!llvm.ptr, i32) -> !llvm.ptr
   %a1 = func.call @cx_d(%fb, %i1) : (!llvm.ptr, i32) -> !llvm.ptr
   %a2 = func.call @cx_d(%fb, %i2) : (!llvm.ptr, i32) -> !llvm.ptr
@@ -1190,67 +1039,82 @@ func.func @etc_diff(%bc: !llvm.ptr, %cur: !llvm.ptr) {
   %b2 = func.call @cx_d(%fc, %i2) : (!llvm.ptr, i32) -> !llvm.ptr
   %b3 = func.call @cx_d(%fc, %i3) : (!llvm.ptr, i32) -> !llvm.ptr
   %bt = func.call @cx_text(%fc) : (!llvm.ptr) -> !llvm.ptr
-  %n = llvm.call @_mlir_ciface_etc_join(%a0, %a1, %a2, %a3, %at, %eb, %b0, %b1, %b2, %b3, %bt, %ec, %ve, %vo) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, !llvm.ptr) -> i64
-  scf.for %k = %c0 to %n step %c1 : i64 {
-    %e = func.call @ld32(%entries, %k) : (!llvm.ptr, i64) -> i64
-    %o = func.call @ld32(%other, %k) : (!llvm.ptr, i64) -> i64
-    %more = arith.cmpi sgt, %k, %c0 : i64
-    scf.if %more {
-      %lit52 = llvm.mlir.addressof @lit24 : !llvm.ptr
-      %litn52 = arith.constant 1 : i64
-      func.call @ob_bytes(%lit52, %litn52) : (!llvm.ptr, i64) -> ()
-    }
-    %lit53 = llvm.mlir.addressof @lit25 : !llvm.ptr
-    %litn53 = arith.constant 9 : i64
-    func.call @ob_bytes(%lit53, %litn53) : (!llvm.ptr, i64) -> ()
-    %inA = arith.cmpi slt, %e, %kb : i64
-    %j = arith.subi %e, %kb : i64
-    scf.if %inA {
-      %e2 = arith.muli %e, %c2 : i64
-      %key = func.call @cx_kid(%fb, %eb, %e2) : (!llvm.ptr, i64, i64) -> i64
-      %name = func.call @cx_str(%fb, %key) : (!llvm.ptr, i64) -> i64
-      func.call @ob_piece(%tb, %name) : (!llvm.ptr, i64) -> ()
-    } else {
-      %j2 = arith.muli %j, %c2 : i64
-      %key = func.call @cx_kid(%fc, %ec, %j2) : (!llvm.ptr, i64, i64) -> i64
-      %name = func.call @cx_str(%fc, %key) : (!llvm.ptr, i64) -> i64
-      func.call @ob_piece(%tc, %name) : (!llvm.ptr, i64) -> ()
-    }
-    %lit54 = llvm.mlir.addressof @lit46 : !llvm.ptr
-    %litn54 = arith.constant 9 : i64
-    func.call @ob_bytes(%lit54, %litn54) : (!llvm.ptr, i64) -> ()
-    scf.if %inA {
-      %e2 = arith.muli %e, %c2 : i64
-      %e21 = arith.addi %e2, %c1 : i64
-      %va = func.call @cx_kid(%fb, %eb, %e21) : (!llvm.ptr, i64, i64) -> i64
-      func.call @etc_value(%tb, %fb, %va) : (!llvm.ptr, !llvm.ptr, i64) -> ()
-    } else {
-      %lit55 = llvm.mlir.addressof @lit35 : !llvm.ptr
-      %litn55 = arith.constant 4 : i64
-      func.call @ob_bytes(%lit55, %litn55) : (!llvm.ptr, i64) -> ()
-    }
-    %lit56 = llvm.mlir.addressof @lit47 : !llvm.ptr
-    %litn56 = arith.constant 6 : i64
-    func.call @ob_bytes(%lit56, %litn56) : (!llvm.ptr, i64) -> ()
-    // the what-if's file: other[e] for the base's file e, else file e - kb
-    %w = arith.select %inA, %o, %j : i64
-    %hasW = arith.cmpi sge, %w, %c0 : i64
-    scf.if %hasW {
-      %w2 = arith.muli %w, %c2 : i64
-      %w21 = arith.addi %w2, %c1 : i64
-      %vb = func.call @cx_kid(%fc, %ec, %w21) : (!llvm.ptr, i64, i64) -> i64
-      func.call @etc_value(%tc, %fc, %vb) : (!llvm.ptr, !llvm.ptr, i64) -> ()
-    } else {
-      %lit57 = llvm.mlir.addressof @lit35 : !llvm.ptr
-      %litn57 = arith.constant 4 : i64
-      func.call @ob_bytes(%lit57, %litn57) : (!llvm.ptr, i64) -> ()
-    }
-    %lit58 = llvm.mlir.addressof @lit40 : !llvm.ptr
-    %litn58 = arith.constant 1 : i64
-    func.call @ob_bytes(%lit58, %litn58) : (!llvm.ptr, i64) -> ()
-  }
+  %r0 = func.call @dk(%rd, %c0) : (!llvm.ptr, i64) -> !llvm.ptr
+  %r1 = func.call @dk(%rd, %c1) : (!llvm.ptr, i64) -> !llvm.ptr
+  %r2 = func.call @dk(%rd, %c2) : (!llvm.ptr, i64) -> !llvm.ptr
+  %r3 = func.call @dk(%rd, %c3) : (!llvm.ptr, i64) -> !llvm.ptr
+  %r4 = func.call @dk(%rd, %c4) : (!llvm.ptr, i64) -> !llvm.ptr
+  %r5 = func.call @dk(%rd, %c5) : (!llvm.ptr, i64) -> !llvm.ptr
+  %ne = llvm.call @_mlir_ciface_etc_join(%a0, %a1, %a2, %a3, %at, %eb, %b0, %b1, %b2, %b3, %bt, %ec, %r0, %r1, %r2, %r3, %r4, %r5) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr) -> i64
+  // the entries etc_join found, and the corpus and its base: report_reply's descriptors
+  func.call @desc(%rd, %c0, %entries, %ne) : (!llvm.ptr, i64, !llvm.ptr, i64) -> ()
+  func.call @desc(%rd, %c1, %other, %ne) : (!llvm.ptr, i64, !llvm.ptr, i64) -> ()
+  %n = func.call @geti(%cur, %c3) : (!llvm.ptr, i64) -> i64
+  %text = func.call @getp(%cur, %c0) : (!llvm.ptr, i64) -> !llvm.ptr
+  %len = func.call @geti(%cur, %c1) : (!llvm.ptr, i64) -> i64
+  %tlen = arith.addi %len, %c7 : i64
+  %keys = func.call @getp(%cur, %c7) : (!llvm.ptr, i64) -> !llvm.ptr
+  %klen = func.call @geti(%cur, %c29) : (!llvm.ptr, i64) -> i64
+  %key = func.call @getp(%cur, %c8) : (!llvm.ptr, i64) -> !llvm.ptr
+  %val = func.call @getp(%cur, %c5) : (!llvm.ptr, i64) -> !llvm.ptr
+  %st = func.call @getp(%cur, %c6) : (!llvm.ptr, i64) -> !llvm.ptr
+  %whatif = func.call @getp(%cur, %c15) : (!llvm.ptr, i64) -> !llvm.ptr
+  %baseOf = func.call @getp(%cur, %c28) : (!llvm.ptr, i64) -> !llvm.ptr
+  %btext = func.call @getp(%bc, %c0) : (!llvm.ptr, i64) -> !llvm.ptr
+  %blen = func.call @geti(%bc, %c1) : (!llvm.ptr, i64) -> i64
+  %btlen = arith.addi %blen, %c7 : i64
+  %bn = func.call @geti(%bc, %c3) : (!llvm.ptr, i64) -> i64
+  %bval = func.call @getp(%bc, %c5) : (!llvm.ptr, i64) -> !llvm.ptr
+  %bst = func.call @getp(%bc, %c6) : (!llvm.ptr, i64) -> !llvm.ptr
+  func.call @desc(%rd, %c6, %ov, %ovn) : (!llvm.ptr, i64, !llvm.ptr, i64) -> ()
+  func.call @desc(%rd, %c7, %text, %tlen) : (!llvm.ptr, i64, !llvm.ptr, i64) -> ()
+  func.call @desc(%rd, %c8, %keys, %klen) : (!llvm.ptr, i64, !llvm.ptr, i64) -> ()
+  func.call @desc(%rd, %c9, %key, %n) : (!llvm.ptr, i64, !llvm.ptr, i64) -> ()
+  func.call @desc(%rd, %c10, %val, %n) : (!llvm.ptr, i64, !llvm.ptr, i64) -> ()
+  func.call @desc(%rd, %c11, %st, %n) : (!llvm.ptr, i64, !llvm.ptr, i64) -> ()
+  func.call @desc(%rd, %c12, %whatif, %n) : (!llvm.ptr, i64, !llvm.ptr, i64) -> ()
+  func.call @desc(%rd, %c13, %baseOf, %n) : (!llvm.ptr, i64, !llvm.ptr, i64) -> ()
+  func.call @desc(%rd, %c14, %btext, %btlen) : (!llvm.ptr, i64, !llvm.ptr, i64) -> ()
+  func.call @desc(%rd, %c15, %bval, %bn) : (!llvm.ptr, i64, !llvm.ptr, i64) -> ()
+  func.call @desc(%rd, %c16, %bst, %bn) : (!llvm.ptr, i64, !llvm.ptr, i64) -> ()
+  %r6 = func.call @dk(%rd, %c6) : (!llvm.ptr, i64) -> !llvm.ptr
+  %r7 = func.call @dk(%rd, %c7) : (!llvm.ptr, i64) -> !llvm.ptr
+  %r8 = func.call @dk(%rd, %c8) : (!llvm.ptr, i64) -> !llvm.ptr
+  %r9 = func.call @dk(%rd, %c9) : (!llvm.ptr, i64) -> !llvm.ptr
+  %r10 = func.call @dk(%rd, %c10) : (!llvm.ptr, i64) -> !llvm.ptr
+  %r11 = func.call @dk(%rd, %c11) : (!llvm.ptr, i64) -> !llvm.ptr
+  %r12 = func.call @dk(%rd, %c12) : (!llvm.ptr, i64) -> !llvm.ptr
+  %r13 = func.call @dk(%rd, %c13) : (!llvm.ptr, i64) -> !llvm.ptr
+  %r14 = func.call @dk(%rd, %c14) : (!llvm.ptr, i64) -> !llvm.ptr
+  %r15 = func.call @dk(%rd, %c15) : (!llvm.ptr, i64) -> !llvm.ptr
+  %r16 = func.call @dk(%rd, %c16) : (!llvm.ptr, i64) -> !llvm.ptr
+  %one32 = arith.constant 1 : i32
+  %reply = llvm.alloca %one32 x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
+  llvm.call @_mlir_ciface_report_reply(%reply, %r6, %msbf, %mscf, %r7, %r8, %r9, %r10, %r11, %r12, %r13, %r14, %r15, %r16, %at, %r2, %r3, %bt, %r4, %r5, %r0, %r1) : (!llvm.ptr, !llvm.ptr, f64, f64, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr) -> ()
+  func.call @ob_made(%reply) : (!llvm.ptr) -> ()
+  llvm.call @free(%rd) : (!llvm.ptr) -> ()
   llvm.call @free(%entries) : (!llvm.ptr) -> ()
   llvm.call @free(%other) : (!llvm.ptr) -> ()
+  llvm.call @free(%namesA) : (!llvm.ptr) -> ()
+  llvm.call @free(%valuesA) : (!llvm.ptr) -> ()
+  llvm.call @free(%namesB) : (!llvm.ptr) -> ()
+  llvm.call @free(%valuesB) : (!llvm.ptr) -> ()
+  return
+}
+
+// a text that text.mlir made (a fresh buffer: its descriptor at r), written into the builder, then freed
+func.func @ob_made(%r: !llvm.ptr) {
+  %pa = llvm.getelementptr %r[0, 0] : (!llvm.ptr) -> !llvm.ptr, !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+  %buf = llvm.load %pa : !llvm.ptr -> !llvm.ptr
+  %pd = llvm.getelementptr %r[0, 1] : (!llvm.ptr) -> !llvm.ptr, !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+  %data = llvm.load %pd : !llvm.ptr -> !llvm.ptr
+  %po = llvm.getelementptr %r[0, 2] : (!llvm.ptr) -> !llvm.ptr, !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+  %off = llvm.load %po : !llvm.ptr -> i64
+  %pn = llvm.getelementptr %r[0, 3, 0] : (!llvm.ptr) -> !llvm.ptr, !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+  %len = llvm.load %pn : !llvm.ptr -> i64
+  %at = llvm.getelementptr %data[%off] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+  func.call @ob_bytes(%at, %len) : (!llvm.ptr, i64) -> ()
+  llvm.call @free(%buf) : (!llvm.ptr) -> ()
   return
 }
 

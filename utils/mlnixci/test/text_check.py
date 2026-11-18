@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """text.mlir's texts (built as a shared object) against what the builder wrote before them: a JSON string's inside as
 ob_esc escaped it (" \\ \\n \\r \\t as two bytes, the other bytes below 32 as \\u00XX in lower-case hex), a number as
-printf's %ld writes it, and the query's reply as api.mlir wrote it piece by piece (on random corpora, pages and
-selections).  queryMs is printf's %f but rounded half up at the sixth decimal (%f rounds the exact binary value), so
-the two differ only for a time whose seventh decimal is within a rounding error of 5: the times here are not.
+printf's %ld writes it, and the query's and the report's replies as api.mlir wrote them piece by piece (on random
+corpora, pages, selections, what-ifs and /etc files).  queryMs and evalMs are printf's %f but rounded half up at the
+sixth decimal (%f rounds the exact binary value), so the two differ only for a time whose seventh decimal is within a
+rounding error of 5: the times here are not.
     python3 test/text_check.py BUILD/text.so      exit 0 when every text agrees"""
 import ctypes
 import random
@@ -34,8 +35,6 @@ def escaped(xs):
 
 def written_reply(c):
     """the reply as api.mlir's builder calls wrote it (query_run, before text.mlir's query_reply)"""
-    def piece(t, tp):
-        return t[tp >> 32:(tp >> 32) + (tp & 0xffffffff)]
     names, at = c["names"], c["nameAt"]
     out = b'{"total":%d,"rows":%d,"queryMs":%f,"facets":[' % (c["total"], c["n"], c["ms"])
     start = 0
@@ -112,6 +111,87 @@ def made_reply(fn, c):
     return out
 
 
+def piece(t, tp):
+    return t[tp >> 32:(tp >> 32) + (tp & 0xffffffff)]
+
+
+def written_report(c):
+    """the report as api.mlir's builder calls wrote it (report, etc_diff and etc_value, before text.mlir's report_reply)"""
+    def etc_value(t, p):  # a JSON string as written, anything else written into one
+        raw = piece(t, p)
+        return raw if raw[:1] == b'"' else b'"' + escaped(raw) + b'"'
+    out = b'{"overlay":"' + escaped(c["ov"]) + b'","evalMs":{"base":%f,"whatif":%f},"options":[' % (c["msb"], c["msc"])
+    first = True
+    for r in range(len(c["whatif"])):
+        if not c["whatif"][r]:
+            continue
+        out += b"" if first else b","
+        first = False
+        b = c["baseOf"][r]
+        out += b'{"path":"' + piece(c["keys"], c["key"][r]) + b'","from":'
+        out += piece(c["btext"], c["bval"][b]) if b >= 0 and c["bval"][b] != -1 else b"null"
+        out += b',"to":' + (b"null" if c["val"][r] == -1 else piece(c["text"], c["val"][r]))
+        out += b',"fromState":' + (b'"' + piece(c["btext"], c["bst"][b]) + b'"' if b >= 0 else b"null")
+        out += b',"toState":"' + piece(c["text"], c["st"][r]) + b'"}'
+    out += b'],"etc":['
+    nA = len(c["namesA"])
+    for k, e in enumerate(c["entries"]):
+        inA = e < nA
+        w = c["other"][k] if inA else e - nA
+        out += (b"," if k else b"") + b'{"name":"' + (piece(c["ta"], c["namesA"][e]) if inA else piece(c["tb"], c["namesB"][e - nA]))
+        out += b'","from":' + (etc_value(c["ta"], c["valuesA"][e]) if inA else b"null")
+        out += b',"to":' + (etc_value(c["tb"], c["valuesB"][w]) if w >= 0 else b"null") + b"}"
+    return out + b"]}"
+
+
+def random_report(rnd):
+    """a corpus, its base, an overlay and two /etc objects joined, as report hands them to report_reply"""
+    def text(alphabet, n):
+        return bytes(rnd.choice(alphabet) for _ in range(rnd.randrange(1, n))) + b"?(none)"
+    def tp(t):
+        s = rnd.randrange(len(t)); return s << 32 | rnd.randrange(len(t) - s + 1)
+    def value(t):  # a value's raw text, never empty: a JSON string (it starts with a quote) about half the time
+        quotes = [i for i, b in enumerate(t) if b == 34]
+        s = rnd.choice(quotes) if rnd.random() < 0.5 else rnd.randrange(len(t))
+        return s << 32 | rnd.randrange(1, len(t) - s + 1)
+    txt, btxt = text(b'abc{}[]":,0123456789 \\\n\x01', 400), text(b'xyz"0123456789\t', 300)
+    keys = text(b"abcdefgh.", 200)
+    ta, tb = b'"' + text(b'ab"c\\\n=\x02 ', 300), b'"' + text(b'xy"z\\\r= ', 300)
+    n, bn = rnd.randrange(1, 40), rnd.randrange(1, 40)
+    nA, nB = rnd.randrange(0, 12), rnd.randrange(0, 12)
+    ne = rnd.randrange(0, nA + nB + 1)
+    entries = rnd.sample(range(nA + nB), ne)
+    other = [rnd.randrange(-1, nB) if nB and e < nA else -1 for e in entries]
+    return dict(ov=bytes(rnd.randrange(256) for _ in range(rnd.randrange(0, 200))),
+                msb=rnd.choice([0.0, rnd.random() * 5000, 12.5]), msc=rnd.choice([0.0, rnd.random() * 5000, 3.0]),
+                text=txt, keys=keys, key=[tp(keys) for _ in range(n)], val=[-1 if rnd.random() < 0.3 else tp(txt) for _ in range(n)],
+                st=[tp(txt) for _ in range(n)], whatif=[rnd.randrange(2) for _ in range(n)],
+                baseOf=[rnd.randrange(-1, bn) for _ in range(n)], btext=btxt,
+                bval=[-1 if rnd.random() < 0.3 else tp(btxt) for _ in range(bn)], bst=[tp(btxt) for _ in range(bn)],
+                ta=ta, namesA=[tp(ta) for _ in range(nA)], valuesA=[value(ta) for _ in range(nA)],
+                tb=tb, namesB=[tp(tb) for _ in range(nB)], valuesB=[value(tb) for _ in range(nB)],
+                entries=entries, other=other)
+
+
+def made_report(fn, c):
+    """the report from text.mlir's report_reply"""
+    keep = []
+    def arr(ctype, xs):
+        b = (ctype * max(len(xs), 1))(*xs); keep.append(b); return ctypes.byref(view(b, len(xs)))
+    def txt(t):
+        b = (ctypes.c_char * max(len(t), 1)).from_buffer_copy(t or b"\0"); keep.append(b); return ctypes.byref(view(b, len(t)))
+    i64, i32 = ctypes.c_int64, ctypes.c_int32
+    res = MemRef1()
+    fn(ctypes.byref(res), txt(c["ov"]), ctypes.c_double(c["msb"]), ctypes.c_double(c["msc"]), txt(c["text"]),
+       txt(c["keys"]), arr(i64, c["key"]), arr(i64, c["val"]), arr(i64, c["st"]), arr(i32, c["whatif"]),
+       arr(i32, c["baseOf"]), txt(c["btext"]), arr(i64, c["bval"]), arr(i64, c["bst"]), txt(c["ta"]),
+       arr(i64, c["namesA"]), arr(i64, c["valuesA"]), txt(c["tb"]), arr(i64, c["namesB"]), arr(i64, c["valuesB"]),
+       arr(i32, c["entries"]), arr(i32, c["other"]))
+    out = ctypes.string_at(res.aligned + res.offset, res.size)
+    ctypes.CDLL(None).free(ctypes.c_void_p(res.allocated))
+    return out
+
+
 def main():
     lib = ctypes.CDLL(sys.argv[1])
     esc, dec = lib._mlir_ciface_json_escape, lib._mlir_ciface_decimal
@@ -146,9 +226,12 @@ def main():
     wrong = [v for v in numbers if run_dec(v) != b"%d" % v]
     replies = [random_corpus(rnd) for _ in range(500)]
     off = [c for c in replies if made_reply(lib._mlir_ciface_query_reply, c) != written_reply(c)]
+    reports = [random_report(rnd) for _ in range(500)]
+    roff = [c for c in reports if made_report(lib._mlir_ciface_report_reply, c) != written_report(c)]
     print(f"json_escape: {len(texts) - len(bad)} of {len(texts)} texts as ob_esc wrote them; "
           f"decimal: {len(numbers) - len(wrong)} of {len(numbers)} numbers as %ld writes them; "
-          f"query_reply: {len(replies) - len(off)} of {len(replies)} replies as the builder wrote them")
+          f"query_reply: {len(replies) - len(off)} of {len(replies)} replies as the builder wrote them; "
+          f"report_reply: {len(reports) - len(roff)} of {len(reports)} reports as the builder wrote them")
     for t in bad[:3]:
         print("  escape differs:", t[:40], run_esc(t)[:80], escaped(t)[:80])
     for v in wrong[:3]:
@@ -157,7 +240,11 @@ def main():
         a, b = made_reply(lib._mlir_ciface_query_reply, c), written_reply(c)
         i = next((k for k in range(min(len(a), len(b))) if a[k] != b[k]), min(len(a), len(b)))
         print("  reply differs at byte", i, a[max(0, i - 40):i + 40], b[max(0, i - 40):i + 40])
-    sys.exit(1 if bad or wrong or off else 0)
+    for c in roff[:2]:
+        a, b = made_report(lib._mlir_ciface_report_reply, c), written_report(c)
+        i = next((k for k in range(min(len(a), len(b))) if a[k] != b[k]), min(len(a), len(b)))
+        print("  report differs at byte", i, len(a), len(b), a[max(0, i - 50):i + 50], b[max(0, i - 50):i + 50])
+    sys.exit(1 if bad or wrong or off or roff else 0)
 
 
 if __name__ == "__main__":

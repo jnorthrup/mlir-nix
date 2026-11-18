@@ -9,6 +9,8 @@
 //                rounding error)
 //   query_reply  POST /api/query's reply: the counts, each facet's codes and the page of hits, one combine of the
 //                pieces -- the corpus's own text where a piece is written there, a literal, or a number's digits
+//   report_reply GET /api/report's (and a what-if's): the overlay, the options the what-if changed with their values
+//                and states before and after, and the /etc files that differ (columns.mlir's etc_join)
 // Compiled like columns.mlir, by mlnix-opt --trikeshed-lower-cursors.
 
 !text = !trikeshed.series<i8>
@@ -49,6 +51,19 @@ memref.global "private" constant @q_state : memref<10xi8> = dense<"0x2C227374617
 memref.global "private" constant @q_end_state : memref<2xi8> = dense<"0x227D">  // "}
 memref.global "private" constant @q_brace : memref<1xi8> = dense<"0x7D">  // }
 memref.global "private" constant @q_dot : memref<1xi8> = dense<"0x2E">  // .
+// the report's, as written before it was made here (api.mlir's lit41..lit51)
+memref.global "private" constant @r_overlay : memref<12xi8> = dense<"0x7B226F7665726C6179223A22">  // {"overlay":"
+memref.global "private" constant @r_evalms : memref<19xi8> = dense<"0x222C226576616C4D73223A7B2262617365223A">  // ","evalMs":{"base":
+memref.global "private" constant @r_whatif : memref<10xi8> = dense<"0x2C22776861746966223A">  // ,"whatif":
+memref.global "private" constant @r_options : memref<13xi8> = dense<"0x7D2C226F7074696F6E73223A5B">  // },"options":[
+memref.global "private" constant @r_path : memref<9xi8> = dense<"0x7B2270617468223A22">  // {"path":"
+memref.global "private" constant @r_from : memref<9xi8> = dense<"0x222C2266726F6D223A">  // ","from":
+memref.global "private" constant @r_to : memref<6xi8> = dense<"0x2C22746F223A">  // ,"to":
+memref.global "private" constant @r_fromstate : memref<13xi8> = dense<"0x2C2266726F6D5374617465223A">  // ,"fromState":
+memref.global "private" constant @r_quote : memref<1xi8> = dense<"0x22">  // "
+memref.global "private" constant @r_tostate : memref<12xi8> = dense<"0x2C22746F5374617465223A22">  // ,"toState":"
+memref.global "private" constant @r_endopt : memref<2xi8> = dense<"0x227D">  // "}
+memref.global "private" constant @r_etc : memref<9xi8> = dense<"0x5D2C22657463223A5B">  // ],"etc":[
 
 // xs as the inside of a JSON string, written into `into` (six bytes of room a byte): how many bytes were written
 func.func @json_escape(%xs: !text, %into: memref<?xi8>) -> index attributes {llvm.emit_c_interface} {
@@ -70,6 +85,28 @@ func.func @json_escape(%xs: !text, %into: memref<?xi8>) -> index attributes {llv
   }
   %end = trikeshed.drain %escaped, %into : !text, memref<?xi8> -> index
   return %end : index
+}
+
+// the inside of a JSON string for xs's bytes, as json_escape writes it, made into a buffer of its own (what a reply that
+// combines it with other pieces reads; json_escape drains the same view into the builder's room)
+func.func private @escaped(%xs: !text) -> !text {
+  %six = arith.constant 6 : index
+  %eg = memref.get_global @escapes : memref<1536xi8>
+  %table = trikeshed.text %eg : memref<1536xi8> -> !text
+  %lg = memref.get_global @escape_lengths : memref<256xi8>
+  %lengths = trikeshed.text %lg : memref<256xi8> -> !text
+  %n = trikeshed.size %xs : !text
+  %escaped, %where = trikeshed.combineAll %n : !text, !pieces {
+  ^bb0(%k: index):
+    %b = trikeshed.at %xs[%k] : !text, index -> i8
+    %bi = arith.index_castui %b : i8 to index
+    %l = trikeshed.at %lengths[%bi] : !text, index -> i8
+    %li = arith.index_castui %l : i8 to index
+    %at = arith.muli %bi, %six : index
+    %part = trikeshed.slice %table[%at, %li] : !text -> !text
+    trikeshed.yield %part : !text
+  }
+  return %escaped : !text
 }
 
 // v's digits as printf's %ld writes them
@@ -380,6 +417,241 @@ func.func @query_reply(%text: !text, %spans: !spans, %obj: !s64, %whatif: !s32, 
   %dn = func.call @digits(%n) : (i64) -> !text
   %dms = func.call @fixed6(%ms) : (f64) -> !text
   %reply = trikeshed.combine %Ltotal, %dt, %Lrows, %dn, %Lms, %dms, %Lfacets, %facets, %Lhits, %hits, %Lclose
+    : !text, !text, !text, !text, !text, !text, !text, !text, !text, !text, !text -> !text
+  return %reply : !text
+}
+
+// GET /api/report's reply, and a what-if's, one combine of its pieces:
+//   {"overlay":"<the overlay, escaped>","evalMs":{"base":B,"whatif":W},"options":[{"path":"<key>","from":<value>|null,
+//    "to":<value>|null,"fromState":"<state>"|null,"toState":"<state>"}, ...],"etc":[{"name":"<name>","from":<text>|null,
+//    "to":<text>|null}, ...]}
+// ov: the overlay's text; msb, msc: each evaluation's time.  The options: each row of the corpus (text; its keys' text
+// and each row's key; value, -1 when it is not shown; state) the what-if changed (whatif), and its base row (baseOf, -1
+// for none) in the base (btext, bval, bst).  The /etc files: columns.mlir's etc_join of the base's (ta) and the
+// what-if's (tb) by name, its entries (A's member e < size(namesA), else B's member e - size(namesA)) and each one's
+// other side; namesA, valuesA, namesB, valuesB their members' pieces.  A fresh buffer; the caller frees it.
+func.func @report_reply(%ov: !text, %msb: f64, %msc: f64, %text: !text, %keys: !text, %key: !coords, %val: !coords,
+                        %st: !coords, %whatif: !s32, %baseOf: !s32, %btext: !text, %bval: !coords, %bst: !coords,
+                        %ta: !text, %namesA: !coords, %valuesA: !coords, %tb: !text, %namesB: !coords, %valuesB: !coords,
+                        %entries: !s32, %other: !s32) -> !text attributes {llvm.emit_c_interface} {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c4 = arith.constant 4 : index
+  %z32 = arith.constant 0 : i32
+  %m1 = arith.constant -1 : i32
+  %true = arith.constant true
+  %dq = arith.constant 34 : i8
+  %overlayG = memref.get_global @r_overlay : memref<12xi8>
+  %Roverlay = trikeshed.text %overlayG : memref<12xi8> -> !text
+  %evalmsG = memref.get_global @r_evalms : memref<19xi8>
+  %Revalms = trikeshed.text %evalmsG : memref<19xi8> -> !text
+  %whatifG = memref.get_global @r_whatif : memref<10xi8>
+  %Rwhatif = trikeshed.text %whatifG : memref<10xi8> -> !text
+  %optionsG = memref.get_global @r_options : memref<13xi8>
+  %Roptions = trikeshed.text %optionsG : memref<13xi8> -> !text
+  %pathG = memref.get_global @r_path : memref<9xi8>
+  %Rpath = trikeshed.text %pathG : memref<9xi8> -> !text
+  %fromG = memref.get_global @r_from : memref<9xi8>
+  %Rfrom = trikeshed.text %fromG : memref<9xi8> -> !text
+  %toG = memref.get_global @r_to : memref<6xi8>
+  %Rto = trikeshed.text %toG : memref<6xi8> -> !text
+  %fromstateG = memref.get_global @r_fromstate : memref<13xi8>
+  %Rfromstate = trikeshed.text %fromstateG : memref<13xi8> -> !text
+  %quoteG = memref.get_global @r_quote : memref<1xi8>
+  %Rquote = trikeshed.text %quoteG : memref<1xi8> -> !text
+  %tostateG = memref.get_global @r_tostate : memref<12xi8>
+  %Rtostate = trikeshed.text %tostateG : memref<12xi8> -> !text
+  %endoptG = memref.get_global @r_endopt : memref<2xi8>
+  %Rendopt = trikeshed.text %endoptG : memref<2xi8> -> !text
+  %etcG = memref.get_global @r_etc : memref<9xi8>
+  %Retc = trikeshed.text %etcG : memref<9xi8> -> !text
+  %commaG = memref.get_global @q_comma : memref<1xi8>
+  %Rcomma = trikeshed.text %commaG : memref<1xi8> -> !text
+  %nullG = memref.get_global @q_null : memref<4xi8>
+  %Rnull = trikeshed.text %nullG : memref<4xi8> -> !text
+  %braceG = memref.get_global @q_brace : memref<1xi8>
+  %Rbrace = trikeshed.text %braceG : memref<1xi8> -> !text
+  %closeG = memref.get_global @q_close : memref<2xi8>
+  %Rclose = trikeshed.text %closeG : memref<2xi8> -> !text
+  %nameG = memref.get_global @q_name : memref<9xi8>
+  %Rname = trikeshed.text %nameG : memref<9xi8> -> !text
+  %ovEscaped = func.call @escaped(%ov) : (!text) -> !text
+  %base = func.call @fixed6(%msb) : (f64) -> !text
+  %what = func.call @fixed6(%msc) : (f64) -> !text
+  // the options the what-if changed, in the corpus's order
+  %n = trikeshed.size %whatif : !s32
+  %rows = trikeshed.series %n : !s32 {
+  ^bb0(%i: index):
+    %r = arith.index_cast %i : index to i32
+    trikeshed.yield %r : i32
+  }
+  %changed = trikeshed.where %rows : !s32 -> !s32 {
+  ^bb0(%r: i32):
+    %w = trikeshed.at %whatif[%r] : !s32, i32 -> i32
+    %c = arith.cmpi ne, %w, %z32 : i32
+    trikeshed.yield %c : i1
+  }
+  %nc = trikeshed.size %changed : !s32
+  %options, %optionsAt = trikeshed.combineAll %nc : !text, !pieces {
+  ^bb0(%i: index):
+    %r32 = trikeshed.at %changed[%i] : !s32, index -> i32
+    %r = arith.index_cast %r32 : i32 to index
+    %kp = trikeshed.at %key[%r] : !coords, index -> !tp
+    %ks32 = trikeshed.first %kp : !tp -> i32
+    %kl32 = trikeshed.second %kp : !tp -> i32
+    %ks = arith.index_cast %ks32 : i32 to index
+    %kl = arith.index_cast %kl32 : i32 to index
+    %path = trikeshed.slice %keys[%ks, %kl] : !text -> !text
+    %b32 = trikeshed.at %baseOf[%r] : !s32, index -> i32
+    %hasB = arith.cmpi sge, %b32, %z32 : i32
+    // from and fromState: the base row's value (when it is shown) and state; null without a base row
+    %fromShown, %fs, %fl, %ss, %sl = scf.if %hasB -> (i1, index, index, index, index) {
+      %b = arith.index_cast %b32 : i32 to index
+      %vp = trikeshed.at %bval[%b] : !coords, index -> !tp
+      %vs32 = trikeshed.first %vp : !tp -> i32
+      %vl32 = trikeshed.second %vp : !tp -> i32
+      %shown = arith.cmpi ne, %vs32, %m1 : i32
+      %vs0 = arith.index_cast %vs32 : i32 to index
+      %vl0 = arith.index_cast %vl32 : i32 to index
+      %vs = arith.select %shown, %vs0, %c0 : index
+      %vl = arith.select %shown, %vl0, %c0 : index
+      %sp = trikeshed.at %bst[%b] : !coords, index -> !tp
+      %s32 = trikeshed.first %sp : !tp -> i32
+      %l32 = trikeshed.second %sp : !tp -> i32
+      %sx = arith.index_cast %s32 : i32 to index
+      %lx = arith.index_cast %l32 : i32 to index
+      scf.yield %shown, %vs, %vl, %sx, %lx : i1, index, index, index, index
+    } else {
+      %f = arith.constant false
+      scf.yield %f, %c0, %c0, %c0, %c0 : i1, index, index, index, index
+    }
+    %fromV = trikeshed.slice %btext[%fs, %fl] : !text -> !text
+    %fnl = arith.select %fromShown, %c0, %c4 : index
+    %fromNull = trikeshed.slice %Rnull[%c0, %fnl] : !text -> !text
+    // to: the row's value, or null when it is not shown
+    %tp = trikeshed.at %val[%r] : !coords, index -> !tp
+    %ts32 = trikeshed.first %tp : !tp -> i32
+    %tl32 = trikeshed.second %tp : !tp -> i32
+    %toShown = arith.cmpi ne, %ts32, %m1 : i32
+    %ts0 = arith.index_cast %ts32 : i32 to index
+    %tl0 = arith.index_cast %tl32 : i32 to index
+    %ts = arith.select %toShown, %ts0, %c0 : index
+    %tl = arith.select %toShown, %tl0, %c0 : index
+    %toV = trikeshed.slice %text[%ts, %tl] : !text -> !text
+    %tnl = arith.select %toShown, %c0, %c4 : index
+    %toNull = trikeshed.slice %Rnull[%c0, %tnl] : !text -> !text
+    %ql = arith.select %hasB, %c1, %c0 : index
+    %fsQuote = trikeshed.slice %Rquote[%c0, %ql] : !text -> !text
+    %fsV = trikeshed.slice %btext[%ss, %sl] : !text -> !text
+    %snl = arith.select %hasB, %c0, %c4 : index
+    %fsNull = trikeshed.slice %Rnull[%c0, %snl] : !text -> !text
+    %stp = trikeshed.at %st[%r] : !coords, index -> !tp
+    %sts32 = trikeshed.first %stp : !tp -> i32
+    %stl32 = trikeshed.second %stp : !tp -> i32
+    %sts = arith.index_cast %sts32 : i32 to index
+    %stl = arith.index_cast %stl32 : i32 to index
+    %toState = trikeshed.slice %text[%sts, %stl] : !text -> !text
+    %later = arith.cmpi ugt, %i, %c0 : index
+    %sepl = arith.select %later, %c1, %c0 : index
+    %sep = trikeshed.slice %Rcomma[%c0, %sepl] : !text -> !text
+    %part = trikeshed.combine %sep, %Rpath, %path, %Rfrom, %fromV, %fromNull, %Rto, %toV, %toNull, %Rfromstate, %fsQuote,
+                              %fsV, %fsQuote, %fsNull, %Rtostate, %toState, %Rendopt
+      : !text, !text, !text, !text, !text, !text, !text, !text, !text, !text, !text, !text, !text, !text, !text, !text, !text -> !text
+    trikeshed.yield %part : !text
+  }
+  // the /etc files that differ, in name order: etc_join's entries
+  %ne = trikeshed.size %entries : !s32
+  %nA = trikeshed.size %namesA : !coords
+  %etc, %etcAt = trikeshed.combineAll %ne : !text, !pieces {
+  ^bb0(%k: index):
+    %e32 = trikeshed.at %entries[%k] : !s32, index -> i32
+    %e = arith.index_cast %e32 : i32 to index
+    %inA = arith.cmpi ult, %e, %nA : index
+    %eB = arith.subi %e, %nA : index
+    %o32 = trikeshed.at %other[%k] : !s32, index -> i32
+    %o = arith.index_cast %o32 : i32 to index
+    // the name: A's member e, or B's member e - size(A)
+    %np, %fromP, %w = scf.if %inA -> (!tp, !tp, index) {
+      %x = trikeshed.at %namesA[%e] : !coords, index -> !tp
+      %y = trikeshed.at %valuesA[%e] : !coords, index -> !tp
+      scf.yield %x, %y, %o : !tp, !tp, index
+    } else {
+      %x = trikeshed.at %namesB[%eB] : !coords, index -> !tp
+      scf.yield %x, %x, %eB : !tp, !tp, index
+    }
+    %nameText = arith.select %inA, %ta, %tb : !text
+    %ns32 = trikeshed.first %np : !tp -> i32
+    %nl32 = trikeshed.second %np : !tp -> i32
+    %ns = arith.index_cast %ns32 : i32 to index
+    %nl = arith.index_cast %nl32 : i32 to index
+    %name = trikeshed.slice %nameText[%ns, %nl] : !text -> !text
+    // to: B's member of that name (the entry's own when it is B's), or null
+    %wi = arith.index_cast %w : index to i64
+    %zero = arith.constant 0 : i64
+    %hasW = arith.cmpi sge, %wi, %zero : i64
+    %wAt = arith.select %hasW, %w, %c0 : index
+    %nB = trikeshed.size %namesB : !coords
+    %anyB = arith.cmpi ugt, %nB, %c0 : index
+    %toP = scf.if %anyB -> (!tp) {
+      %y = trikeshed.at %valuesB[%wAt] : !coords, index -> !tp
+      scf.yield %y : !tp
+    } else {
+      scf.yield %np : !tp
+    }
+    // f: the file's text as the report writes it -- a JSON string as written, anything else written into one (its text
+    // escaped, between quotes), or null when there is no such file
+    %fs32 = trikeshed.first %fromP : !tp -> i32
+    %fl32 = trikeshed.second %fromP : !tp -> i32
+    %fs0 = arith.index_cast %fs32 : i32 to index
+    %fl0 = arith.index_cast %fl32 : i32 to index
+    %fs = arith.select %inA, %fs0, %c0 : index
+    %fl = arith.select %inA, %fl0, %c0 : index
+    %fRaw = trikeshed.slice %ta[%fs, %fl] : !text -> !text
+    %fB = trikeshed.at %ta[%fs] : !text, index -> i8
+    %fStr = arith.cmpi eq, %fB, %dq : i8
+    %fNotStr = arith.xori %fStr, %true : i1
+    %fQuoted = arith.andi %inA, %fNotStr : i1
+    %fBody = scf.if %fQuoted -> (!text) {
+      %x = func.call @escaped(%fRaw) : (!text) -> !text
+      scf.yield %x : !text
+    } else {
+      scf.yield %fRaw : !text
+    }
+    %fql = arith.select %fQuoted, %c1, %c0 : index
+    %fQ = trikeshed.slice %Rquote[%c0, %fql] : !text -> !text
+    %fnl = arith.select %inA, %c0, %c4 : index
+    %fNone = trikeshed.slice %Rnull[%c0, %fnl] : !text -> !text
+    // t: the file's text as the report writes it -- a JSON string as written, anything else written into one (its text
+    // escaped, between quotes), or null when there is no such file
+    %ts32 = trikeshed.first %toP : !tp -> i32
+    %tl32 = trikeshed.second %toP : !tp -> i32
+    %ts0 = arith.index_cast %ts32 : i32 to index
+    %tl0 = arith.index_cast %tl32 : i32 to index
+    %ts = arith.select %hasW, %ts0, %c0 : index
+    %tl = arith.select %hasW, %tl0, %c0 : index
+    %tRaw = trikeshed.slice %tb[%ts, %tl] : !text -> !text
+    %tB = trikeshed.at %tb[%ts] : !text, index -> i8
+    %tStr = arith.cmpi eq, %tB, %dq : i8
+    %tNotStr = arith.xori %tStr, %true : i1
+    %tQuoted = arith.andi %hasW, %tNotStr : i1
+    %tBody = scf.if %tQuoted -> (!text) {
+      %x = func.call @escaped(%tRaw) : (!text) -> !text
+      scf.yield %x : !text
+    } else {
+      scf.yield %tRaw : !text
+    }
+    %tql = arith.select %tQuoted, %c1, %c0 : index
+    %tQ = trikeshed.slice %Rquote[%c0, %tql] : !text -> !text
+    %tnl = arith.select %hasW, %c0, %c4 : index
+    %tNone = trikeshed.slice %Rnull[%c0, %tnl] : !text -> !text
+    %later = arith.cmpi ugt, %k, %c0 : index
+    %sepl = arith.select %later, %c1, %c0 : index
+    %sep = trikeshed.slice %Rcomma[%c0, %sepl] : !text -> !text
+    %part = trikeshed.combine %sep, %Rname, %name, %Rfrom, %fQ, %fBody, %fQ, %fNone, %Rto, %tQ, %tBody, %tQ, %tNone, %Rbrace
+      : !text, !text, !text, !text, !text, !text, !text, !text, !text, !text, !text, !text, !text, !text -> !text
+    trikeshed.yield %part : !text
+  }
+  %reply = trikeshed.combine %Roverlay, %ovEscaped, %Revalms, %base, %Rwhatif, %what, %Roptions, %options, %Retc, %etc, %Rclose
     : !text, !text, !text, !text, !text, !text, !text, !text, !text, !text, !text -> !text
   return %reply : !text
 }

@@ -47,6 +47,9 @@ at mkForce priority 50, and the page reports what it changes.
   `fold` over the powers of ten, each digit an element of a `series`).  The query's reply is made there too
   (`query_reply`): one `combine` of the counts, a `combineAll` of the facets (each a `combineAll` of its codes) and a
   `combineAll` of the page of hits, each hit the option's own text in the corpus (a slice) and the what-if's pieces.
+  So is the report (`report_reply`, GET /api/report and every what-if's reply): the overlay escaped, a `combineAll` of
+  the options the what-if changed (`where` over the rows) with their values and states before and after, and a
+  `combineAll` of the /etc files that differ (columns.mlir's `etc_join`, which also drains each side's members' pieces).
   Lowered as Combine.kt's views, a reply is one buffer that each piece is drained into once.
 - `src/*.mlir` is the rest of the server, written in the func/scf/arith/llvm dialects. The stock MLIR pipeline lowers it,
   and it links with libc and liburing-ffi only. There is no C++ and no C++ library.
@@ -59,7 +62,8 @@ at mkForce priority 50, and the page reports what it changes.
     `opt_text`), built once as series.
   - `eval.mlir`: mlnix as a child process (posix_spawn). Its output and errors are read into growing series.
   - `api.mlir`: the routes. An overlay edit is a splice at the coordinates of the overlay's index. The query route
-    counts and pages, then hands the columns to text.mlir's `query_reply` and writes what it made.
+    counts and pages, then hands the columns to text.mlir's `query_reply` and writes what it made; the report hands
+    the corpus, its base and etc_join's entries to `report_reply`.
   - `http.mlir`: HTTP/1.1 on one io_uring ring. SIGTERM, read from the same ring, drains it.
 
 API:
@@ -97,8 +101,8 @@ still builds it from the separate mini-luci repository (`build.sh MLIR-NIX-BRANC
 
 - `make check`: facet-check runs 2,000 random queries, the last over 22,000 rows, and the compiled query agrees with
   the hand count on every one. text-check writes 2,259 texts (every byte, random ones, 100 KB), 10,105 numbers (both
-  ends of i64) and 500 query replies over random corpora with text.mlir and finds them as the builder wrote them
-  before. The e2e test passes 51/51, covering:
+  ends of i64), 500 query replies and 500 reports over random corpora with text.mlir and finds them as the builder
+  wrote them before. The e2e test passes 51/51, covering:
   - facets and counts, selections, text search, and paging;
   - what-if values the module system refuses (strMatching, port range, enum);
   - round-tripping of non-ASCII text, quotes, backslash and `${`;
@@ -122,4 +126,5 @@ still builds it from the separate mini-luci repository (`build.sh MLIR-NIX-BRANC
 - `trikeshed-lower-cursors` does not lower groupBy, pivot or keyed joins. A series is a buffer where it is made unless
   it is drained (combine and combineAll are views, drained part by part; a series drained is stored element by
   element).
-- The rest of the replies (report, what-if, facets) are still written call by call through the builder.
+- The rest of the replies (errors, the facets' answers, the page) are still written through the builder: they are
+  a status line and pieces copied as they are.

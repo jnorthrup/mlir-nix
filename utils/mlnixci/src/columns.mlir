@@ -376,10 +376,13 @@ func.func private @index_into(%ta: !text, %names: !pieces, %tb: !text, %others: 
 // shows, in name order: A's members whose name B lacks or whose value's bytes differ from B's member of that name, and B's
 // members whose name A lacks.  Entry e is A's member e when e < size(A), else B's member e - size(A); other[e] is the
 // other side's member of the same name, or -1.  Both are drained into entries and other (room for size(A) + size(B));
-// the result is how many.  An entry's place is its name's rank among both sides' names (A's member i: i plus the names
+// the result is how many.  Each side's members' names (the inside of their keys' quotes) and values (their text as
+// written), pieces of its text, are drained into namesA/valuesA and namesB/valuesB: what the report writes (text.mlir's
+// report_reply).  An entry's place is its name's rank among both sides' names (A's member i: i plus the names
 // of B below it; B's member j: j plus the names of A below it), the order the merge of the two would give.
 func.func @etc_join(%rowsA: !ix, %kidsA: !s32, %ta: !text, %ea: i64, %rowsB: !ix, %kidsB: !s32, %tb: !text, %eb: i64,
-                    %entries: memref<?xi32>, %other: memref<?xi32>) -> i64 attributes {llvm.emit_c_interface} {
+                    %entries: memref<?xi32>, %other: memref<?xi32>, %namesAOut: memref<?xi64>, %valuesAOut: memref<?xi64>,
+                    %namesBOut: memref<?xi64>, %valuesBOut: memref<?xi64>) -> i64 attributes {llvm.emit_c_interface} {
   %k0 = trikeshed.key 0 : !ik
   %k2 = trikeshed.key 2 : !ik
   %spansA = trikeshed.column %rowsA[%k0] : !ix, !ik -> !trikeshed.series<!tw>
@@ -453,6 +456,10 @@ func.func @etc_join(%rowsA: !ix, %kidsA: !s32, %ta: !text, %ea: i64, %rowsB: !ix
   }
   %n1 = trikeshed.drain %ordered, %entries : !s32, memref<?xi32> -> index
   %n2 = trikeshed.drain %others, %other : !s32, memref<?xi32> -> index
+  %n3 = trikeshed.drain %namesA, %namesAOut : !pieces, memref<?xi64> -> index
+  %n4 = trikeshed.drain %valuesA, %valuesAOut : !pieces, memref<?xi64> -> index
+  %n5 = trikeshed.drain %namesB, %namesBOut : !pieces, memref<?xi64> -> index
+  %n6 = trikeshed.drain %valuesB, %valuesBOut : !pieces, memref<?xi64> -> index
   %count = arith.index_cast %n1 : index to i64
   return %count : i64
 }
