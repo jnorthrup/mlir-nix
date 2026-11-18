@@ -6,7 +6,6 @@ import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.security.MessageDigest
-import java.util.TreeMap
 import java.util.regex.Pattern
 
 // The builtins, keyed as NixPrims.irdl.mlir keys them (`__attrNames`, `map`, ...): one implementation for a primop op and for the
@@ -28,16 +27,25 @@ object Prims {
     }
 
     val builtins: NixAttrs by lazy {
-        val m = TreeMap<String, Any?>()
-        for ((k, p) in byKey) m[k.removePrefix("__")] = p
-        m.putAll(extraGlobals)
-        m["builtins"] = Lazy { builtins }
-        NixAttrs(m)
+        val m = Rows()
+        for ((k, p) in byKey) m.put(k.removePrefix("__"), p)
+        for ((k, v) in extraGlobals) m.put(k, v)
+        m.put("builtins", Lazy { builtins })
+        m.set(last = true)
     }
 
     private fun str(s: String) = NixString(s)
-    private fun attrs(vararg kv: Pair<String, Any?>) = NixAttrs(TreeMap<String, Any?>().apply { for ((k, v) in kv) put(k, v) })
+    private fun attrs(vararg kv: Pair<String, Any?>) = Rows().apply { for ((k, v) in kv) put(k, v) }.set(last = true)
     private fun list(xs: List<Any?>) = NixList(xs.toTypedArray())
+    /// The rows of `s` that `keep` says, in their order: a subset of sorted names is sorted.
+    @Suppress("UNCHECKED_CAST")
+    private fun kept(s: NixAttrs, keep: BooleanArray): NixAttrs {
+        val n = keep.count { it }
+        if (n == s.size) return NixAttrs(s.names, s.cells)
+        val names = arrayOfNulls<String>(n); val cells = arrayOfNulls<Any?>(n); var j = 0
+        for (i in 0 until s.size) if (keep[i]) { names[j] = s.names[i]; cells[j++] = s.cells[i] }
+        return NixAttrs(names as Array<String>, cells)
+    }
     private fun lazyCall(f: Any?, vararg a: Any?): Any? = Lazy { Apply.call(f, arrayOf(*a)) }
     private fun pathOrString(v: Any, s: String, keepPath: Boolean): Any = if (keepPath && v is NixPath) NixPath(s) else NixString(s)
     private fun num(v: Any?): Any = force(v).also { if (it !is Long && it !is Double) throw NixError("expected an integer but found ${showType(it)}") }
@@ -56,7 +64,7 @@ object Prims {
     private fun deep(v0: Any?, seen: java.util.IdentityHashMap<Any, Boolean> = java.util.IdentityHashMap()) {
         when (val v = force(v0)) {
             is NixList -> if (seen.put(v, true) == null) for (x in v.items) deep(x, seen)
-            is NixAttrs -> if (seen.put(v, true) == null) for (x in v.map.values) deep(x, seen)
+            is NixAttrs -> if (seen.put(v, true) == null) for (x in v.cells) deep(x, seen)
             else -> {}
         }
     }
@@ -107,7 +115,7 @@ object Prims {
                 v["outPath"]?.let { toJson(it, out); return }
                 out.append('{')
                 var first = true
-                for ((k, x) in v.map) { if (!first) out.append(','); first = false; json(k, out); out.append(':'); toJson(x, out) }
+                for (i in 0 until v.size) { if (!first) out.append(','); first = false; json(v.names[i], out); out.append(':'); toJson(v.cells[i], out) }
                 out.append('}')
             }
             else -> throw NixError("cannot convert ${showType(v)} to JSON")
@@ -125,7 +133,7 @@ object Prims {
     }
     private fun fromPlain(v: Any?): Any = when (v) {
         null -> NixNull
-        is Map<*, *> -> NixAttrs(TreeMap<String, Any?>().apply { for ((k, x) in v) put(k as String, fromPlain(x)) })
+        is Map<*, *> -> Rows().apply { for ((k, x) in v) put(k as String, fromPlain(x)) }.set(last = true)
         is List<*> -> NixList(Array(v.size) { fromPlain(v[it]) })
         is Int -> v.toLong(); is Long -> v; is Double -> v; is Float -> v.toDouble(); is Boolean -> v; is String -> NixString(v)
         else -> NixString(v.toString())
@@ -202,42 +210,45 @@ object Prims {
         def("break", 1) { force(it[0]) }
         def("__functionArgs", 1) {
             when (val f = force(it[0])) {
-                is Closure -> NixAttrs(TreeMap<String, Any?>().apply { f.formals?.forEachIndexed { i, n -> put(n, f.defaults!![i]) } })
+                is Closure -> Rows().apply { f.formals?.forEachIndexed { i, n -> put(n, f.defaults!![i]) } }.set(last = true)
                 is Prim, is PrimApp -> NixAttrs.EMPTY
                 else -> throw NixError("'functionArgs' requires a function")
             }
         }
 
         // attribute sets
-        def("__attrNames", 1) { list(forceAttrs(it[0]).map.keys.map(::str)) }
-        def("__attrValues", 1) { list(forceAttrs(it[0]).map.values.toList()) }
+        def("__attrNames", 1) { val s = forceAttrs(it[0]); NixList(Array(s.size) { i -> str(s.names[i]) }) }
+        def("__attrValues", 1) { NixList(forceAttrs(it[0]).cells.copyOf()) }
         def("__getAttr", 2) { val n = forceStr(it[0]); force(forceAttrs(it[1])[n] ?: throw NixError("attribute '$n' missing")) }
         def("__hasAttr", 2) { forceAttrs(it[1])[forceStr(it[0])] != null }
         def("removeAttrs", 2) {
-            val m = TreeMap(forceAttrs(it[0]).map)
-            for (n in forceList(it[1]).items) m.remove(forceStr(n))
-            NixAttrs(m)
+            val s = forceAttrs(it[0])
+            val keep = BooleanArray(s.size) { true }
+            for (n in forceList(it[1]).items) { val i = s.indexOf(forceStr(n)); if (i >= 0) keep[i] = false }
+            kept(s, keep)
         }
         def("__intersectAttrs", 2) {
             val a = forceAttrs(it[0]); val b = forceAttrs(it[1])
-            NixAttrs(TreeMap<String, Any?>().apply { for ((k, v) in b.map) if (a.map.containsKey(k)) put(k, v) })
+            kept(b, BooleanArray(b.size) { i -> a.indexOf(b.names[i]) >= 0 })
         }
         def("__listToAttrs", 1) {
-            val m = TreeMap<String, Any?>()
+            val m = Rows(); val seen = HashSet<String>()
             for (e in forceList(it[0]).items) {
                 val s = forceAttrs(e)
                 val n = forceStr(s["name"] ?: throw NixError("attribute 'name' missing"))
-                if (!m.containsKey(n)) m[n] = s["value"] ?: throw NixError("attribute 'value' missing")
+                if (seen.add(n)) m.put(n, s["value"] ?: throw NixError("attribute 'value' missing"))
             }
-            NixAttrs(m)
+            m.set()
         }
         def("__catAttrs", 2) { val n = forceStr(it[0]); list(forceList(it[1]).items.mapNotNull { e -> forceAttrs(e)[n] }) }
-        def("__mapAttrs", 2) { val f = it[0]; NixAttrs(TreeMap<String, Any?>().apply { for ((k, v) in forceAttrs(it[1]).map) put(k, lazyCall(f, str(k), v)) }) }
+        // the set's names kept: its shape is the result's
+        def("__mapAttrs", 2) { val f = it[0]; val s = forceAttrs(it[1]); NixAttrs(s.names, Array(s.size) { i -> lazyCall(f, str(s.names[i]), s.cells[i]) }) }
         def("__zipAttrsWith", 2) {
             val f = it[0]
-            val acc = TreeMap<String, ArrayList<Any?>>()
-            for (s in forceList(it[1]).items) for ((k, v) in forceAttrs(s).map) acc.getOrPut(k) { ArrayList() }.add(v)
-            NixAttrs(TreeMap<String, Any?>().apply { for ((k, vs) in acc) put(k, lazyCall(f, str(k), list(vs))) })
+            val m = Rows()
+            for (s in forceList(it[1]).items) { val a = forceAttrs(s); for (i in 0 until a.size) m.put(a.names[i], a.cells[i]) }
+            val rs = m.runs()
+            NixAttrs(Array(rs.size) { i -> rs[i].first }, Array(rs.size) { i -> lazyCall(f, str(rs[i].first), list(rs[i].second)) })
         }
         def("__unsafeGetAttrPos", 2) { NixNull } // the export drops source positions
 
@@ -280,9 +291,10 @@ object Prims {
             attrs("right" to list(r), "wrong" to list(w))
         }
         def("__groupBy", 2) {
-            val f = it[0]; val acc = TreeMap<String, ArrayList<Any?>>()
-            for (e in forceList(it[1]).items) acc.getOrPut(forceStr(Apply.call(f, arrayOf(e)))) { ArrayList() }.add(e)
-            NixAttrs(TreeMap<String, Any?>().apply { for ((k, v) in acc) put(k, list(v)) })
+            val f = it[0]; val m = Rows()
+            for (e in forceList(it[1]).items) m.put(forceStr(Apply.call(f, arrayOf(e))), e)
+            val rs = m.runs()
+            NixAttrs(Array(rs.size) { i -> rs[i].first }, Array(rs.size) { i -> list(rs[i].second) })
         }
         def("__genericClosure", 1) {
             val args = forceAttrs(it[0])
@@ -384,7 +396,7 @@ object Prims {
         def("__readFileType", 1) { str(readDirType(Path.of(pathOf(it[0])))) }
         def("__readDir", 1) {
             val d = Path.of(pathOf(it[0]))
-            NixAttrs(TreeMap<String, Any?>().apply { Files.list(d).use { s -> s.forEach { p -> put(p.fileName.toString(), str(readDirType(p))) } } })
+            Rows().apply { Files.list(d).use { s -> s.forEach { p -> put(p.fileName.toString(), str(readDirType(p))) } } }.set(last = true)
         }
         def("__getEnv", 1) { str(System.getenv(forceStr(it[0])) ?: "") }
         def("import", 1) { loader.import(pathOf(it[0])) }

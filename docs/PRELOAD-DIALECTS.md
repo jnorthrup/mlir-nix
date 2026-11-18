@@ -100,9 +100,15 @@ Steps:
      postprocessing not run).  Not done: source positions (unsafeGetAttrPos, 3 tests), string context (4), derivations, the
      store, toXML, fromTOML, flake refs, scopedImport, findFile, convertHash (15), and «repeated» where Nix copies a value from
      one cell to another (eval-okay-print).  Graal compiles the bodies (both tiers; forcing a cell is a TruffleBoundary, else
-     strict → force → strict inlines without end).  Speed: a fib/foldl'/`//` mix runs ~75 ms per evaluation once compiled,
-     mlnix ~40 ms for the whole process: apply is a boundary (no callee inlining), each call allocates its frame, sets are
-     TreeMaps.  Next: a DirectCallNode inline cache in ApplyNode, frame slots in the VirtualFrame, sets as sorted arrays.
+     strict → force → strict inlines without end).  Speed at the first cut: a fib/foldl'/`//` mix ran ~75 ms per evaluation
+     once compiled, mlnix ~40 ms for the whole process: apply a boundary (no callee inlining), each call allocating its
+     frame, sets TreeMaps.  Since then: frames stay virtual where nothing escapes (625c9fb, docs/SEA-OF-NODES.md), the
+     pool's bodies are appended rows whose bodies are anchors (930aa98), and a set is TrikeShed's row split in two
+     (cursor/ReifiedSplitSeries2.kt): its sorted names, one array shared by every set a `{ ... }` makes (a cursor's metas),
+     and its cells.  A select, a formal or a `with` keeps where its name lies in the names it met first (a Truffle inline
+     cache) and searches any others; `//` merges the two sorted rows, keeping a side's names when the other's are a subset
+     of them.  graal/bench/attrs.nix: 25.0 -> 22.9 ms with son, 28.1 -> 24.4 ms without, 23 MB a run less; the other six
+     the same.  Next: a DirectCallNode inline cache in ApplyNode.
 4. `//` as `trikeshed.layers` for large bases: on nixpkgs-73 the ~800 merges with a side of 4096+ rows copy ~260 MB of the arena's
    311 MB of flat merges (b58d02c chose flat for speed: layering every merge read 2.5-7% slower).  The layer here is only for the
    package set.  Fix the stale `Bindings::Layer` reference in TS_LayersType's description in the same change.

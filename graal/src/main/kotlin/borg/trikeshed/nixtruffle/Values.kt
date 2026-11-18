@@ -3,14 +3,13 @@ package borg.trikeshed.nixtruffle
 import com.oracle.truffle.api.CallTarget
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary
 import java.util.Locale
-import java.util.TreeMap
 
 // Nix values on the JVM.  Every value is a JVM object made with `new`; nothing is freed by hand (docs/PRELOAD-DIALECTS.md, the
 // splice rules): the collector frees what the program drops.  Scalars are boxed Long, Double, Boolean; null is NixNull.
 //   string  NixString (its characters; string context is not kept)
 //   path    NixPath
 //   list    NixList: an array of lazy cells
-//   set     NixAttrs: names in order to lazy cells
+//   set     NixAttrs: its names, sorted, and their lazy cells (TrikeShed's row, split: two series)
 //   lambda  Closure (a son.body's CallTarget and its captures); a primop Prim, a partly applied one PrimApp
 // A lazy cell is a value or a Thunk; force() makes it a value (weak head normal form).
 
@@ -49,10 +48,49 @@ class NixList private constructor(private var flat: Array<Any?>?, private var le
             if (a.size == 0) b else if (b.size == 0) a else NixList(null, a, b, a.size + b.size)
     }
 }
-class NixAttrs(@JvmField val map: TreeMap<String, Any?>) {
-    operator fun get(k: String): Any? = map[k]
-    val size get() = map.size
-    companion object { @JvmField val EMPTY = NixAttrs(TreeMap()) }
+/// A set: TrikeShed's row in its split form (cursor/ReifiedSplitSeries2.kt: the values one series, the metas another).  `names`
+/// are sorted (String's order, the order of the TreeMap this replaced), so a name is found by binary search (Series.kt's
+/// binarySearch, trikeshed.bisect; Bindings::get natively); `cells` are their values, in the same order.  The sets one `{ ... }`
+/// of static names makes share that op's names, as the rows of one cursor share its metas, so an op that has met those names
+/// keeps where its name lies (Lookup).  Neither array is written once the set is made.
+class NixAttrs(@JvmField val names: Array<String>, @JvmField val cells: Array<Any?>) {
+    operator fun get(k: String): Any? { val i = indexOf(k); return if (i >= 0) cells[i] else null }
+    /// The name's index, or -(where it would go) - 1: trikeshed.bisect's contract.
+    fun indexOf(k: String): Int = java.util.Arrays.binarySearch(names, k)
+    val size get() = names.size
+    companion object { @JvmField val EMPTY = NixAttrs(arrayOf(), arrayOf()) }
+}
+
+/// Rows put in any order, made a set: sorted by name, stably (Series.kt's sortedWith), then each name's run of rows (groupBy's
+/// clusters).  `set` keeps one row of each name, the last put when `last`, else the first; zipAttrsWith and groupBy read the runs.
+class Rows {
+    private var names = arrayOfNulls<String>(8)
+    private var cells = arrayOfNulls<Any?>(8)
+    private var n = 0
+    fun put(k: String, v: Any?): Rows {
+        if (n == names.size) { names = names.copyOf(2 * n); cells = cells.copyOf(2 * n) }
+        names[n] = k; cells[n] = v; n++
+        return this
+    }
+    /// Each name once, in order, with its rows in the order they were put.
+    fun runs(): List<Pair<String, List<Any?>>> {
+        val order = (0 until n).sortedWith { i, j -> names[i]!!.compareTo(names[j]!!) }
+        val out = ArrayList<Pair<String, List<Any?>>>()
+        var i = 0
+        while (i < order.size) {
+            val k = names[order[i]]!!
+            var j = i
+            while (j < order.size && names[order[j]] == k) j++
+            out.add(k to (i until j).map { cells[order[it]] })
+            i = j
+        }
+        return out
+    }
+    @Suppress("UNCHECKED_CAST")
+    fun set(last: Boolean = false): NixAttrs {
+        val rs = runs()
+        return NixAttrs(Array(rs.size) { rs[it].first }, Array(rs.size) { rs[it].second.let { c -> if (last) c.last() else c.first() } })
+    }
 }
 
 /// A lambda: its body's CallTarget (a son.body), the values it closed over, and the pattern it binds.  `argForced`: son says the
@@ -169,7 +207,7 @@ fun printValue(v0: Any?, out: StringBuilder, seen: java.util.IdentityHashMap<Any
         is Double -> out.append(formatG(v))
         is NixAttrs -> if (v.size > 0 && seen.put(v, true) != null) out.append("«repeated»") else {
             out.append("{ ")
-            for ((k, x) in v.map) { out.append(identifier(k)).append(" = "); printValue(x, out, seen); out.append("; ") }
+            for (i in 0 until v.size) { out.append(identifier(v.names[i])).append(" = "); printValue(v.cells[i], out, seen); out.append("; ") }
             out.append('}')
         }
         is NixList -> if (v.size > 0 && seen.put(v, true) != null) out.append("«repeated»") else {
@@ -206,8 +244,7 @@ fun eqValues(a0: Any?, b0: Any?, cells: Boolean = false): Boolean {
             if (b !is NixAttrs) return false
             if (isDerivation(a) && isDerivation(b)) { val i = a["outPath"]; val j = b["outPath"]; if (i != null && j != null) return eqValues(i, j, true) }
             if (a.size != b.size) return false
-            val ia = a.map.entries.iterator(); val ib = b.map.entries.iterator()
-            while (ia.hasNext()) { val x = ia.next(); val y = ib.next(); if (x.key != y.key || !eqValues(x.value, y.value, true)) return false }
+            for (i in 0 until a.size) if (a.names[i] != b.names[i] || !eqValues(a.cells[i], b.cells[i], true)) return false
             true
         }
         else -> false

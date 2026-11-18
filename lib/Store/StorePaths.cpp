@@ -383,9 +383,6 @@ struct Prehash {
 };
 /// The trees by root, filtered or not; built before the helper starts and only read after, so the tries need no lock.
 composite::Patricia<Prehash *> *prehashes = nullptr; // [2]
-/// How the trees were answered (MLNIX_PREFETCH_DEBUG prints it at exit): the helper's hash, a filter that answered otherwise, hashed by the
-/// evaluator because the helper had not begun it.
-uint32_t prehashTaken, prehashRefiltered, prehashClaimed;
 
 char typeOf(std::string_view path) {
   struct stat st;
@@ -413,7 +410,7 @@ Prehash *takePrehash(std::string_view path, bool filtered) {
   if (!pp) return nullptr;
   Prehash *p = *pp;
   uint8_t s = Prehash::Queued;
-  if (p->state.compare_exchange(s, Prehash::Claimed) || s == Prehash::Claimed) return ++prehashClaimed, nullptr;
+  if (p->state.compare_exchange(s, Prehash::Claimed) || s == Prehash::Claimed) return nullptr;
   if (s == Prehash::Hashing) {
     nixsys::Held g(prehashLock);
     prehashDone.waitFor(prehashLock, [p] { return p->state.load(__ATOMIC_ACQUIRE) != Prehash::Hashing; });
@@ -425,8 +422,6 @@ Prehash *takePrehash(std::string_view path, bool filtered) {
 void startPrehash() {
   if (prehashes || nixprefetch::replayHashes.empty()) return;
   prehashes = new composite::Patricia<Prehash *>[2];
-  if (getenv("MLNIX_PREFETCH_DEBUG"))
-    atexit([] { fprintf(stderr, "prehash: %u trees taken, %u filtered otherwise, %u hashed here first\n", prehashTaken, prehashRefiltered, prehashClaimed); });
   composite::MutableSeries<Prehash *> order;
   for (const nixprefetch::ReplayHash &r : nixprefetch::replayHashes) {
     auto &byRoot = prehashes[r.filtered];
@@ -488,15 +483,14 @@ composite::Join<Hash, uint64_t> hashPath(std::string_view path, const PathFilter
   PathFilter answered;
   if (prehashes && algo == HashAlgo::SHA256)
     if (Prehash *p = takePrehash(path, bool(filter))) {
-      if (!filter) return ++prehashTaken, composite::Join<Hash, uint64_t>{p->hash, p->size};
+      if (!filter) return composite::Join<Hash, uint64_t>{p->hash, p->size};
       uint32_t k = 0;
       bool d = false;
       for (; k < p->seen.size(); k++) {
         const Prehash::Seen &s = p->seen[k];
         if ((d = filter(p->path(s), typeName(s.type))) != s.kept) break;
       }
-      if (k == p->seen.size()) return ++prehashTaken, composite::Join<Hash, uint64_t>{p->hash, p->size};
-      ++prehashRefiltered;
+      if (k == p->seen.size()) return composite::Join<Hash, uint64_t>{p->hash, p->size};
       // Entry k is answered otherwise: the tree is walked here.  The entries asked about so far come first in the walk too, and keep
       // their answers, so the filter is asked about each entry once.
       for (uint32_t i = 0; i <= k; i++) {

@@ -8,7 +8,6 @@ import com.oracle.truffle.api.frame.VirtualFrame
 import com.oracle.truffle.api.nodes.ExplodeLoop
 import com.oracle.truffle.api.nodes.Node
 import com.oracle.truffle.api.nodes.RootNode
-import java.util.TreeMap
 
 // The Truffle nodes.  A son.body (and the file's nix.expr) is a RootNode; its ops are its children, one per result.  A graph region
 // reads values before their definition, and Nix is lazy, so a call's values live in a Frame of slots, one per block argument and
@@ -286,64 +285,129 @@ class ConcatListsNode(@JvmField val a: Int, @JvmField val b: Int) : OpNode() {
 class UpdateNode(@JvmField val a: Int, @JvmField val b: Int) : OpNode() {
     override fun exec(f: Frame): Any { val x = forceAttrs(strict(f, a)); val y = forceAttrs(strict(f, b)); return update(x, y) }
     companion object {
+        /// `x // y`: the two sorted rows merged, y's row where a name is in both (a merge join, each side read once).  When every
+        /// name of y is one of x's the set keeps x's names, and when every name of x is one of y's, y's: an op that knows where a
+        /// name lies in those (Lookup) still does.
         @TruffleBoundary
+        @Suppress("UNCHECKED_CAST")
         fun update(x: NixAttrs, y: NixAttrs): Any {
             if (x.size == 0) return y
             if (y.size == 0) return x
-            val m = TreeMap(x.map); m.putAll(y.map)
-            return NixAttrs(m)
+            val xn = x.names; val yn = y.names
+            if (xn === yn) return NixAttrs(yn, y.cells)
+            var i = 0; var j = 0; var n = 0
+            while (i < xn.size && j < yn.size) { val c = xn[i].compareTo(yn[j]); if (c <= 0) i++; if (c >= 0) j++; n++ }
+            n += xn.size - i + yn.size - j
+            if (n == yn.size) return NixAttrs(yn, y.cells)
+            val cells = arrayOfNulls<Any?>(n)
+            if (n == xn.size) {
+                j = 0
+                for (k in xn.indices) cells[k] = if (j < yn.size && xn[k] == yn[j]) y.cells[j++] else x.cells[k]
+                return NixAttrs(xn, cells)
+            }
+            val names = arrayOfNulls<String>(n)
+            i = 0; j = 0
+            for (k in 0 until n) {
+                val c = if (i == xn.size) 1 else if (j == yn.size) -1 else xn[i].compareTo(yn[j])
+                if (c < 0) { names[k] = xn[i]; cells[k] = x.cells[i++] }
+                else { names[k] = yn[j]; cells[k] = y.cells[j++]; if (c == 0) i++ }
+            }
+            return NixAttrs(names as Array<String>, cells)
         }
     }
 }
-class AttrsNode(@field:CompilationFinal(dimensions = 1) @JvmField val names: Array<String>,
-                @field:CompilationFinal(dimensions = 1) @JvmField val values: IntArray,
+/// `{ ... }`: its static names sorted once, when the node is made, and kept: every set it makes without dynamic names has this
+/// array for its names (a cursor's metas, shared by its rows), so only the cells are made per set.
+class AttrsNode(names0: Array<String>, values0: IntArray,
                 @field:CompilationFinal(dimensions = 1) @JvmField val dynNames: IntArray,
                 @field:CompilationFinal(dimensions = 1) @JvmField val dynValues: IntArray) : OpNode() {
+    @field:CompilationFinal(dimensions = 1) @JvmField val names: Array<String>
+    @field:CompilationFinal(dimensions = 1) @JvmField val values: IntArray
+    init {
+        val order = names0.indices.sortedBy { names0[it] }
+        names = Array(order.size) { names0[order[it]] }
+        values = IntArray(order.size) { values0[order[it]] }
+    }
     @JvmField val small = values.size + dynNames.size <= EXPLODE
     override fun exec(f: Frame): Any = if (small) execSmall(f) else execLarge(f)
-    /// The cells and the dynamic names read here; the map built behind boundaries that see values, not the frame.  The order is
-    /// execLarge's: the static cells, then each dynamic name forced, checked and its cell put, in turn.
+    /// The cells and the dynamic names read here; a set with dynamic names made behind a boundary that sees values, not the
+    /// frame.  The order is execLarge's: the static cells, then each dynamic name forced, checked and its cell made, in turn.
     @ExplodeLoop
     private fun execSmall(f: Frame): Any {
         val cells = arrayOfNulls<Any?>(values.size)
         for (i in values.indices) cells[i] = lazy(f, values[i], 2)
-        val m = statics(names, cells)
+        if (dynNames.isEmpty()) return NixAttrs(names, cells)
+        val dk = arrayOfNulls<String>(dynNames.size)
+        val dc = arrayOfNulls<Any?>(dynNames.size)
+        var nd = 0
         for (i in dynNames.indices) {
             val n = strict(f, dynNames[i])
             if (n === NixNull) continue
-            val k = dynKey(m, n)
-            put(m, k, lazy(f, dynValues[i], 2))
+            dk[nd] = dynKey(names, dk, nd, n)
+            dc[nd++] = lazy(f, dynValues[i], 2)
         }
-        return NixAttrs(m)
+        return withDynamic(names, cells, dk, dc, nd)
     }
     companion object {
         @TruffleBoundary
-        fun statics(names: Array<String>, cells: Array<Any?>): TreeMap<String, Any?> {
-            val m = TreeMap<String, Any?>()
-            for (i in names.indices) m[names[i]] = cells[i]
-            return m
-        }
-        @TruffleBoundary
-        fun dynKey(m: TreeMap<String, Any?>, n: Any): String {
+        fun dynKey(names: Array<String>, dk: Array<String?>, nd: Int, n: Any): String {
             val k = (n as? NixString)?.s ?: throw NixError("expected a string but found ${showType(n)}")
-            if (m.containsKey(k)) throw NixError("dynamic attribute '$k' already defined")
+            if (java.util.Arrays.binarySearch(names, k) >= 0 || (0 until nd).any { dk[it] == k })
+                throw NixError("dynamic attribute '$k' already defined")
             return k
         }
+        /// The static rows and the dynamic ones (distinct names) merged into one sorted set.
         @TruffleBoundary
-        fun put(m: TreeMap<String, Any?>, k: String, cell: Any?) { m[k] = cell }
+        fun withDynamic(names: Array<String>, cells: Array<Any?>, dk: Array<String?>, dc: Array<Any?>, nd: Int): NixAttrs {
+            if (nd == 0) return NixAttrs(names, cells)
+            val rows = Rows()
+            for (i in names.indices) rows.put(names[i], cells[i])
+            for (i in 0 until nd) rows.put(dk[i]!!, dc[i])
+            return rows.set()
+        }
     }
     @TruffleBoundary
     private fun execLarge(f: Frame): Any {
-        val m = TreeMap<String, Any?>()
-        for (i in names.indices) m[names[i]] = lazy(f, values[i], 2)
+        val cells = arrayOfNulls<Any?>(values.size)
+        for (i in values.indices) cells[i] = lazy(f, values[i], 2)
+        val dk = arrayOfNulls<String>(dynNames.size)
+        val dc = arrayOfNulls<Any?>(dynNames.size)
+        var nd = 0
         for (i in dynNames.indices) {
             val n = strict(f, dynNames[i])
             if (n === NixNull) continue
-            val k = (n as? NixString)?.s ?: throw NixError("expected a string but found ${showType(n)}")
-            if (m.containsKey(k)) throw NixError("dynamic attribute '$k' already defined")
-            m[k] = lazy(f, dynValues[i], 2)
+            dk[nd] = dynKey(names, dk, nd, n)
+            dc[nd++] = lazy(f, dynValues[i], 2)
         }
-        return NixAttrs(m)
+        return withDynamic(names, cells, dk, dc, nd)
+    }
+}
+
+/// Where an op's constant name lies in the sets it reads: Truffle's inline cache over TrikeShed's shared metas.  The first names
+/// array met is kept with the name's index in it (-1: absent), so a set with those names is read at that index, with no search;
+/// another array is searched (NixAttrs.indexOf, behind a boundary), and once one has been, compiled code searches every array
+/// but the first.
+class Lookup(@JvmField val name: String) {
+    @CompilationFinal @JvmField var names: Array<String>? = null
+    @CompilationFinal @JvmField var index = -1
+    @CompilationFinal @JvmField var more = false
+    /// The name's cell in `v`, null when `v` is not a set or has no such name.
+    fun cell(v: Any): Any? {
+        val a = v as? NixAttrs ?: return null
+        if (a.names === names) return if (index >= 0) a.cells[index] else null
+        if (!more) {
+            CompilerDirectives.transferToInterpreterAndInvalidate()
+            if (names == null) {
+                names = a.names; index = a.indexOf(name)
+                return if (index >= 0) a.cells[index] else null
+            }
+            more = true
+        }
+        return find(a, name)
+    }
+    companion object {
+        @TruffleBoundary
+        fun find(a: NixAttrs, k: String): Any? = a[k]
     }
 }
 
@@ -352,16 +416,20 @@ class SelectNode(@JvmField val base: Int, @field:CompilationFinal(dimensions = 1
                  @field:CompilationFinal(dimensions = 1) @JvmField val keys: IntArray, @JvmField val default: Int,
                  @JvmField val test: Boolean) : OpNode() {
     @JvmField val small = path.size <= EXPLODE
+    /// A constant component's Lookup (null for a dynamic one).
+    @field:CompilationFinal(dimensions = 1) @JvmField val lookups: Array<Lookup?> = Array(path.size) { path[it]?.let(::Lookup) }
     override fun exec(f: Frame): Any = if (small) execSmall(f) else execLarge(f)
-    /// execLarge's walk, with the frame read here and the attribute looked up behind a boundary over values.
+    /// execLarge's walk, with the frame read here: a constant name read where its Lookup says, a dynamic one looked up behind a
+    /// boundary over values.
     @ExplodeLoop
     private fun execSmall(f: Frame): Any {
         var v: Any = strict(f, base)
         var k = 0
         var depth = 0
-        for (p in path) {
+        for (i in path.indices) {
+            val p = path[i]
             val name = p ?: forceStr(strict(f, keys[k++]))
-            val cell = attrOf(v, name)
+            val cell = if (p != null) lookups[i]!!.cell(v) else attrOf(v, name)
             if (cell == null) {
                 if (test) return false
                 if (default >= 0) return strict(f, default)
@@ -404,9 +472,10 @@ class SelectNode(@JvmField val base: Int, @field:CompilationFinal(dimensions = 1
 }
 
 class FormalNode(@JvmField val arg: Int, @JvmField val name: String, @JvmField val default: Int) : OpNode() {
+    @JvmField val lookup = Lookup(name)
     override fun exec(f: Frame): Any {
         val a = forceAttrs(strict(f, arg))
-        val cell = a[name]
+        val cell = lookup.cell(a)
         if (cell != null) return force(cell)
         if (default >= 0) return strict(f, default)
         throw NixError("function called without required argument '$name'")
@@ -415,10 +484,11 @@ class FormalNode(@JvmField val arg: Int, @JvmField val name: String, @JvmField v
 
 class WithVarNode(@JvmField val name: String, @field:CompilationFinal(dimensions = 1) @JvmField val scopes: IntArray) : OpNode() {
     @JvmField val small = scopes.size <= EXPLODE
+    @field:CompilationFinal(dimensions = 1) @JvmField val lookups: Array<Lookup> = Array(scopes.size) { Lookup(name) }
     override fun exec(f: Frame): Any = if (small) execSmall(f) else execLarge(f)
     @ExplodeLoop
     private fun execSmall(f: Frame): Any {
-        for (s in scopes) lookup(forceAttrs(strict(f, s)), name)?.let { return force(it) }
+        for (i in scopes.indices) lookups[i].cell(forceAttrs(strict(f, scopes[i])))?.let { return force(it) }
         undefined(name)
     }
     @TruffleBoundary
@@ -427,8 +497,6 @@ class WithVarNode(@JvmField val name: String, @field:CompilationFinal(dimensions
         undefined(name)
     }
     companion object {
-        @TruffleBoundary
-        fun lookup(set: NixAttrs, name: String): Any? = set[name]
         @TruffleBoundary
         fun undefined(name: String): Nothing = throw NixError("undefined variable '$name'")
     }
@@ -608,7 +676,7 @@ object Apply {
         is Closure -> {
             if (fn.formals != null) {
                 val set = forceAttrs(arg)
-                if (!fn.ellipsis) for (k in set.map.keys) if (k !in fn.formals)
+                if (!fn.ellipsis) for (k in set.names) if (k !in fn.formals)
                     throw NixError("function '${fn.name ?: "anonymous lambda"}' called with unexpected argument '$k'")
                 for ((i, n) in fn.formals.withIndex()) if (!fn.defaults!![i] && set[n] == null)
                     throw NixError("function '${fn.name ?: "anonymous lambda"}' called without required argument '$n'")

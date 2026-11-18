@@ -175,7 +175,6 @@ void warmFiles(const composite::MutableSeries<Entry> &es) {
 #endif
 
 void replay(composite::MutableSeries<Entry> es) {
-  uint64_t t0 = nixsys::monotonicNs();
   composite::MutableSeries<composite::Text> dirs;
   for (const Entry &e : es)
     if (e.kind == 'D') dirs.append(e.path.clone());
@@ -184,8 +183,6 @@ void replay(composite::MutableSeries<Entry> es) {
   warmFiles(es);
 #endif
   dirThread.join();
-  if (getenv("MLNIX_PREFETCH_DEBUG"))
-    fprintf(stderr, "prefetch: %zu entries in %.3f s\n", size_t(es.size()), (nixsys::monotonicNs() - t0) / 1e9);
 }
 
 } // namespace

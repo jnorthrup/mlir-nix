@@ -63,7 +63,9 @@ dialects know nothing about the evaluator, so another consumer can attach its ow
 
 **Dense attribute rows.** An attribute is 16 bytes: a name, a position index and a value pointer. A set is one sorted array of
 them, and `a // b` writes a new array in one pass, as Nix does
-([record](docs/bench/kali/dense-selectors-20261028/RESULTS.md)).
+([record](docs/bench/kali/dense-selectors-20261028/RESULTS.md)). The Graal arm's sets are the same rows split in two, as
+TrikeShed's `ReifiedSplitSeries2` splits a row: the sorted names, one array shared by every set a `{ ... }` makes, and the
+values. A select that has met those names reads its name's place without a search.
 
 **No native tier.** The opt-in JIT (`MLNIX_JIT=1`) lowered hot lambdas straight to `arith`, `cf` and LLVM, beside TrikeShed
 rather than through it. On both workloads it was slower than the interpreter (11-12%) and used more memory (4-7%), with the
