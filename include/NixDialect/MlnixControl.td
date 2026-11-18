@@ -31,8 +31,8 @@ def Mlnix_Dialect : Dialect {
   let cppNamespace = "::mlir::mlnix";
   let summary = "The control surface of the mlnix utility";
   let description = [{
-    Settings of the schedule of the sea of nodes, its pass pipeline, the JIT tier, the prelowering helpers and the
-    census, and the evaluation requests that run under them.  The Nix dialects say what a program is; this one says
+    Settings of the schedule of the sea of nodes, its pass pipeline, the prelowering helpers and the census, and the
+    evaluation requests that run under them.  The Nix dialects say what a program is; this one says
     how the utility runs it.
   }];
   let useDefaultAttributePrinterParser = 1;
@@ -51,14 +51,6 @@ def Mlnix_ScheduleKind : I32EnumAttr<"ScheduleKind", "when a lambda body becomes
   let genSpecializedAttr = 0;
 }
 def Mlnix_ScheduleAttr : EnumAttr<Mlnix_Dialect, Mlnix_ScheduleKind, "schedule">;
-
-def Mlnix_JitOff : I32EnumAttrCase<"Off", 0, "off">;
-def Mlnix_JitScalar : I32EnumAttrCase<"Scalar", 1, "scalar">;
-def Mlnix_JitTier : I32EnumAttr<"JitTier", "the native tier for hot lambdas", [Mlnix_JitOff, Mlnix_JitScalar]> {
-  let cppNamespace = "::mlir::mlnix";
-  let genSpecializedAttr = 0;
-}
-def Mlnix_JitTierAttr : EnumAttr<Mlnix_Dialect, Mlnix_JitTier, "jit_tier">;
 
 def Mlnix_InExpr : I32EnumAttrCase<"Expr", 0, "expr">;
 def Mlnix_InFile : I32EnumAttrCase<"File", 1, "file">;
@@ -86,8 +78,8 @@ def Mlnix_OutputKindAttr : EnumAttr<Mlnix_Dialect, Mlnix_OutputKind, "output_kin
 def Mlnix_SessionOp : Mlnix_Op<"session", [Symbol, SingleBlock, NoTerminator, IsolatedFromAbove]> {
   let summary = "one configured run of the utility";
   let description = [{
-    The body holds at most one each of `mlnix.schedule`, `mlnix.pipeline`, `mlnix.jit`, `mlnix.prelower` and
-    `mlnix.census` (the verifier counts them), and any number of `mlnix.eval` requests, run in order under those
+    The body holds at most one each of `mlnix.schedule`, `mlnix.pipeline`, `mlnix.prelower` and `mlnix.census` (the
+    verifier counts them), and any number of `mlnix.eval` requests, run in order under those
     settings.  `store_root` is MLNIX_STORE_ROOT (tools/mlnix.cpp: the real directory that holds /nix/store) and
     `state_dir` is MLNIX_STATE_DIR.  A setting a session leaves out keeps the utility's default.
   }];
@@ -124,20 +116,6 @@ def Mlnix_PipelineOp : Mlnix_Setting<"pipeline"> {
   }];
   let arguments = (ins StrAttr:$passes);
   let assemblyFormat = "$passes attr-dict";
-}
-
-def Mlnix_JitOp : Mlnix_Setting<"jit"> {
-  let summary = "the native tier for hot lambdas";
-  let description = [{
-    `scalar` is the guarded scalar tier (lib/Eval/ScalarJIT.cpp), on when MLNIX_JIT is 1.  `threshold` is the number
-    of calls after which a lambda is compiled, 1 to 1,000,000, default 1024 (MLNIX_JIT_THRESHOLD) and `opt` the LLVM optimization level, 0 to 3
-    (MLNIX_JIT_OPT).  Both are meaningful only for `scalar`; the verifier refuses them on `off`.
-  }];
-  let arguments = (ins Mlnix_JitTierAttr:$tier,
-                       OptionalAttr<ConfinedAttr<I32Attr, [IntMinValue<1>, IntMaxValue<1000000>]>>:$threshold,
-                       OptionalAttr<ConfinedAttr<I32Attr, [IntMinValue<0>, IntMaxValue<3>]>>:$opt);
-  let assemblyFormat = "$tier (`threshold` $threshold^)? (`opt` $opt^)? attr-dict";
-  let hasVerifier = 1;
 }
 
 def Mlnix_PrelowerOp : Mlnix_Setting<"prelower"> {

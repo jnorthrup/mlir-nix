@@ -30,23 +30,15 @@ void MlnixDialect::initialize() {
 
 /// One setting of each kind at most: two `mlnix.schedule` would leave the order of the settings to decide.
 LogicalResult SessionOp::verify() {
-  unsigned schedules = 0, pipelines = 0, jits = 0, prelowers = 0, censuses = 0;
+  unsigned schedules = 0, pipelines = 0, prelowers = 0, censuses = 0;
   for (Operation &op : getBody().front()) {
     schedules += isa<ScheduleOp>(op);
     pipelines += isa<PipelineOp>(op);
-    jits += isa<JitOp>(op);
     prelowers += isa<PrelowerOp>(op);
     censuses += isa<CensusOp>(op);
   }
-  if (schedules > 1 || pipelines > 1 || jits > 1 || prelowers > 1 || censuses > 1)
-    return emitOpError("holds at most one each of mlnix.schedule, pipeline, jit, prelower and census");
-  return success();
-}
-
-/// The threshold and the optimization level belong to a tier that compiles.
-LogicalResult JitOp::verify() {
-  if (getTier() == JitTier::Off && (getThreshold() || getOpt()))
-    return emitOpError("takes no threshold or opt with tier off");
+  if (schedules > 1 || pipelines > 1 || prelowers > 1 || censuses > 1)
+    return emitOpError("holds at most one each of mlnix.schedule, pipeline, prelower and census");
   return success();
 }
 

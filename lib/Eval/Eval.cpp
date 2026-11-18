@@ -7,7 +7,6 @@
 #include "Nix/Eval.h"
 #include "Nix/Numbers.h"
 #include "Nix/Os.h"
-#include "Nix/ScalarJIT.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Transforms/Passes.h"
@@ -326,7 +325,6 @@ EvalState::EvalState(EvalSettings st, nixstore::Store *store) : settings(std::mo
   instrumented = statsEnabled || recordEdges;
   if (getenv("MLNIX_STATS_IMPORTS")) nixfe::pathLiterals = new cp::TextSet();
   Bindings::countGets = statsEnabled;
-  scalarJIT = ScalarJIT::create();
   settings.mapSources = !getenv("MLNIX_NOMMAP"); // ablation switch: read and copy every file, as before
   composite::todoSink = [](const char *what) { llvm::errs() << "TODO: " << what << "\n"; };
   recycleOn = getenv("MLNIX_RECYCLE") != nullptr; // opt-in: -2 to -3% peak memory, +1 to +4% time on Kali (77de09c:docs/FRAME-BYTES.md)
@@ -385,7 +383,6 @@ template <class Map, class Count> static auto ranked(const Map &m, Count count) 
 }
 
 void EvalState::printStats() {
-  if (scalarJIT) scalarJIT->printStats();
   llvm::errs() << "attribute cells: bytes=" << sizeof(Attr)
                << " position_rows=" << attributePositions.size()
                << " position_bytes=" << attributePositions.capacity() * sizeof(PosPtr) << "\n";
@@ -1103,15 +1100,10 @@ void EvalState::Indexer::index(Region &r) {
   auto newNode = [&] { return ::new (allocate(sizeof(Node), alignof(Node))) Node{}; };
   // A value is found in blockNodes by the ops of its block and of the bodies nested in it that are indexed with it, in this recursion.  A
   // body indexed later (a deferred lambda, minted at its first call) reads the values around it through its lambda's capture list, so the
-  // captures are what goes into the map of every value (below, with the operands); and every value does when a JIT, which reads any value
-  // by its address, is on.  (An op evaluated through the interface model puts its operands there itself: evalOther.)
+  // captures are what goes into the map of every value (below, with the operands).  (An op evaluated through the interface model puts its
+  // operands there itself: evalOther.)
   ++depth;
-  bool everyValue = bool(st.scalarJIT);
-  auto publish = [&](mlir::Value v, Node *n) {
-    void *key = v.getAsOpaquePointer();
-    blockNodes.at(uint64_t(uintptr_t(key))) = n;
-    if (everyValue) st.setNode(key, n);
-  };
+  auto publish = [&](mlir::Value v, Node *n) { blockNodes.at(uint64_t(uintptr_t(v.getAsOpaquePointer()))) = n; };
   for (BlockArgument a : blk.getArguments()) {
     if (stats) { ++st.nSlotsAssigned; if (a.use_empty()) ++st.nSlotsNoRead; }
     Node *n = newNode();
@@ -1187,7 +1179,7 @@ void EvalState::Indexer::index(Region &r) {
     if (op.getNumResults() == 0 || k == 0) continue;
     auto **ops = static_cast<Node **>(allocate(k * sizeof(Node *), alignof(Node *)));
     for (unsigned i = 0; i < k; i++) ops[i] = recordOf(op.getOperand(i));
-    if (auto lam = dyn_cast<nd::LambdaOp>(op); lam && lam.getBodyIndexAttr() && !everyValue)
+    if (auto lam = dyn_cast<nd::LambdaOp>(op); lam && lam.getBodyIndexAttr())
       for (unsigned i = 0; i < k; i++)
         if (ops[i]) { // the captures of a body minted later
           void *key = op.getOperand(i).getAsOpaquePointer();
@@ -1830,9 +1822,7 @@ void EvalState::callLambdaIn(Value &fun, RegionInfo *ri, Value *arg, Value &out,
     if (statsEnabled) [[unlikely]] statReturn(f);
     else if (!f->captured() && recycleOn) recycleFrame(f);  // returned with nothing made over it: nothing can reach it again
   };
-  if (scalarJIT && scalarJIT->accepts(ri->jitEntry))
-    scalarJIT->evaluate(*this, lam, ri->result, fun.thunk.env, *arg, out, pos, ri->jitEntry, interpret);
-  else interpret();
+  interpret();
 }
 
 /// MLNIX_CHECK_KINDS=1: an op whose type fixes a kind (a typed primop: NixPrims.irdl.mlir's `irdl.is`) made a value of that kind.  A
@@ -1989,20 +1979,11 @@ void EvalState::applySelector(unsigned shape, RegionInfo *ri, Value **a, Value &
   if (statsEnabled) ++nSelectorCalls;
 }
 
-/// The opt-in JIT's saturated chain of 2 to 4 unary lambdas: true when native code ran the whole call.  Out of line: the loop that
-/// asks is the evaluator's hottest, and a run without MLNIX_JIT never gets here.
-bool EvalState::jitChain(nd::LambdaOp lambda, RegionInfo *ri, Value &cur, size_t n, Value **args, Value &out, PosPtr pos) {
-  if (!scalarJIT->acceptsSaturated(nullptr) || !scalarJIT->acceptsSaturated(ri->curriedEntry, unsigned(n))) return false;
-  // This outer body is reached by the ordinary call as well. Descendant bodies are only inspected after the interpreter oracle has run them.
-  auto interpret = [&] { callFunction(cur, n, args, out, pos, false); };
-  return scalarJIT->evaluateSaturated(*this, lambda, ri->result, cur.thunk.env, llvm::ArrayRef<Value *>(args, n), out, pos, ri->curriedEntry, interpret);
-}
-
 void EvalState::notAFunction(Value &cur, PosPtr pos) {
   throw EvalError(cp::cat("attempt to call something which is not a function but ", showType(cur), ": ", printValueForTrace(cur)), pos);
 }
 
-void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out, PosPtr pos, bool allowCurried) {
+void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out, PosPtr pos) {
   Value *cur = &fun;
   size_t i = 0;
   Value tmp;
@@ -2021,7 +2002,7 @@ void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out,
     RegionInfo *curRI = nullptr;
     if (cur->type == VType::Lambda) {
       curLam = cast<nd::LambdaOp>(cur->thunk.node->def);
-      curRI = bodyOfNode(cur->thunk.node); // the selector check, the JIT check and the call below all use it
+      curRI = bodyOfNode(cur->thunk.node); // the selector check and the call below both use it
       if (selectorsOn && nargs - i >= 2 && !curRI->hasFormals) {
         if (unsigned shape = curRI->selShape ? curRI->selShape : selectorShape(curLam, curRI); shape >= 2) {
           Value *dest = (i + 2 == nargs) ? &out : allocValue();
@@ -2033,9 +2014,6 @@ void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out,
         }
       }
     }
-    if (allowCurried && scalarJIT && nargs - i >= 2 && nargs - i <= 4 && curRI && !curRI->hasFormals &&
-        jitChain(curLam, curRI, *cur, nargs - i, args + i, out, pos))
-      return;
     Value *res = (i + 1 == nargs) ? &out : cur == &stackCells[0] ? &stackCells[1] : &stackCells[0];
     if (cur->type == VType::Lambda) {
       callLambdaIn(*cur, curRI, args[i], *res, pos);
@@ -3108,8 +3086,8 @@ void EvalState::prelowerLoop() {
           nd::devirtualizePrims(pl->op);
           pl->optimized = true;
           // Indexed here too, while this thread's caches hold the IR it just built: a file reads nothing from outside it.  Not when the
-          // census counts indexing or a JIT reads every value by its address: the evaluator indexes then.
-          if (!statsEnabled && !scalarJIT) {
+          // census counts indexing: the evaluator indexes then.
+          if (!statsEnabled) {
             pl->index = cp::own<Indexer>(*this, true);
             pl->index->index(pl->op.getBody());
           }

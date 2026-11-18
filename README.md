@@ -10,8 +10,8 @@ is not a result.
 Everything here is to build to TrikeShed's `PRELOAD.md` as MLIR ([AGENTS.md](AGENTS.md)). TrikeShed's algebra (joins,
 series, cursors, Confix) is the data structure of the C++ (`include/Composite/`), and the `trikeshed` dialect is to be the
 form every other dialect lowers to. Today only confix, kif and sumo lower through it. Nix values carry trikeshed types in the
-IR, but the evaluator runs the `nix` ops as C++ nodes and the JIT lowers them straight to `arith`, `cf` and LLVM, so the Nix
-path bypasses TrikeShed's ops, fill and drain included ([docs/PRELOAD-DIALECTS.md](docs/PRELOAD-DIALECTS.md), steps 2-4).
+IR, but the evaluator runs the `nix` ops as C++ nodes, so the Nix path bypasses TrikeShed's ops, fill and drain included
+([docs/PRELOAD-DIALECTS.md](docs/PRELOAD-DIALECTS.md), steps 2-4).
 
 ## What is here
 
@@ -65,12 +65,10 @@ dialects know nothing about the evaluator, so another consumer can attach its ow
 them, and `a // b` writes a new array in one pass, as Nix does
 ([record](docs/bench/kali/dense-selectors-20261028/RESULTS.md)).
 
-**Guarded native execution.** `MLNIX_JIT=1` lowers hot integer graphs, lazy selectors and demand graphs through typed MLIR to
-LLVM, guarded against the actual closure. Native code returns a continuation when a value needs forcing, the host forces it
-with the original error context, and unsupported branches return to the interpreter. `MLNIX_JIT_CURRIED=0`,
-`MLNIX_JIT_PROJECTION=0`, `MLNIX_JIT_VALUES=0` and `MLNIX_JIT_LISTS=0` turn its tiers off one at a time. It is opt-in: at its
-last measurement it saved frames and allocations, but not wall time or peak memory
-([record](docs/bench/kali/list-returns-20261028/RESULTS.md)).
+**No native tier.** The opt-in JIT (`MLNIX_JIT=1`) lowered hot lambdas straight to `arith`, `cf` and LLVM, beside TrikeShed
+rather than through it. On both workloads it was slower than the interpreter (11-12%) and used more memory (4-7%), with the
+same answers, so it was removed; it is at 3b46257
+([record](docs/bench/local/jit-removal-20261118/RESULTS.md)). An LLVM arm is to lower through `trikeshed`.
 
 **The default evaluator** is C++ over nodes. When a body is indexed, each of its SSA values gets a record of its kind, its
 operands, its frame slot and the function that evaluates it; a thunk holds its node, so evaluating is one indirect call. The
@@ -80,7 +78,7 @@ MLIR ops stay the program: nodes are made from them and read their attributes.
 
 - The Nix path through TrikeShed ([docs/PRELOAD-DIALECTS.md](docs/PRELOAD-DIALECTS.md), steps 2-4):
   - `son`'s pool rows as `trikeshed.append` and first forces as `trikeshed.anchor`, with the evaluator reading son IR;
-  - the LLVM arm lowering through `trikeshed` instead of straight to `arith` and LLVM;
+  - an LLVM arm that lowers through `trikeshed` (the JIT, which lowered straight to `arith` and LLVM, is removed);
   - `//` as `trikeshed.layers`.
 
   No pass creates a trikeshed op yet. `trikeshed.append` and `trikeshed.anchor` are used nowhere, and `trikeshed.drain` only
@@ -218,7 +216,6 @@ The Graal arm: `cd graal && ./gradlew installDist` (JDK 25 GraalVM; TrikeShed-jv
     python3 scripts/run-mlir-tests.py            # FileCheck tests of the dialects and passes
     python3 scripts/check-prims.py               # every primop is both registered and declared
     python3 scripts/difftest.py                  # the same expressions through mlnix and reference Nix (container "nixref", or --native)
-    python3 scripts/check-jit.py                 # exact JIT/interpreter parity, lazy demands, grace, retirement and compilation limits
     python3 scripts/truffle-lang-tests.py        # the language tests on the Graal arm
     python3 scripts/truffle-release-check.py .   # the Graal arm with son.release on and off: the same outputs, nothing kept outside it
     make -C utils/mlnixci check NIXPKGS_LIB=...  # mlnixci's compiled query against the counted one, then its end-to-end test

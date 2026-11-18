@@ -85,7 +85,6 @@ struct ListExtent {
 struct RegionInfo;
 struct Node;
 struct EvalState;
-class ScalarJIT;
 
 /// Opaque position: a packed source word, an mlir::Location pointer, or null.
 using PosPtr = const void *;
@@ -190,7 +189,7 @@ struct JsonOut {
 
 /// Failed: a thunk whose evaluation threw an evaluation error.  Forcing it again throws a fresh copy of that error as it stands then (the
 /// first throw may still be gathering traces on its way out), not the evaluation again: Nix 2.34's memoised errors.  The tags up to
-/// Blackhole are the cells that are not values yet (isThunk; the JITs test `tag <= Blackhole`).
+/// Blackhole are the cells that are not values yet (isThunk).
 /// AttrApp: `f name value` as mapAttrs and zipAttrsWith make it for each attribute, one cell holding f (app.left), the value (app.right) and
 /// the name's symbol (aux).  The name's string and the application of f to it are made when the cell is forced, not for every attribute
 /// (three cells an attribute were made before, most of them never read).
@@ -271,10 +270,6 @@ struct RegionInfo {
   uint8_t hasFormals = 0, ellipsis = 0;
   uint32_t nFormals = 0;
   const bool *formalDefaults = nullptr;
-  /// Stable entry owned by this evaluator's optional JIT; closure values are resolved at each call.
-  void *jitEntry = nullptr;
-  /// Optional arity-indexed JIT cache, owned by ScalarJIT and never an environment.
-  void *curriedEntry = nullptr;
   uint64_t calls = 0; // MLNIX_STATS: frames made for this region
   uint8_t stackable = 2; // MLNIX_STATS: 1 when no op of the body can make a thunk or closure over the frame, so it could live on the C++ stack; 2 unclassified
   composite::Text shape = {}; // MLNIX_STATS_SHAPES: the name-free canonical form of this lambda and the lambdas it returns (EvalState::shapeOf)
@@ -452,7 +447,6 @@ struct EvalState {
   mlir::OwningOpRef<mlir::ModuleOp> module;
   /// The optimization pipeline (text: settings.pipeline / MLNIX_PIPELINE), built on first use.
   composite::Own<mlir::PassManager> optimizer;
-  composite::Own<ScalarJIT> scalarJIT; // opt-in, guarded native tier; initialized without an MLIR/LLVM context
   Arena alloc;
 
   // Frequently used symbols.
@@ -632,7 +626,7 @@ struct EvalState {
   void copyContext(const Value &v, NixStringContext &ctx);
 
   // -- Calls -----------------------------------------------------------------
-  void callFunction(Value &fun, size_t nargs, Value **args, Value &out, PosPtr pos, bool allowCurried = true);
+  void callFunction(Value &fun, size_t nargs, Value **args, Value &out, PosPtr pos);
   void callFunction(Value &fun, Value &arg, Value &out, PosPtr pos) {
     Value *a = &arg;
     callFunction(fun, 1, &a, out, pos);
@@ -787,7 +781,7 @@ struct EvalState {
   Value *lookup(Frame *f, Node *v) { return lookupImpl(f, v, false); }
   /// The same for a consumer that forces the cell next: one it makes is evaluated now, not a thunk (a cell already there is as it is).
   Value *lookupForced(Frame *f, Node *v) { return lookupImpl(f, v, true); }
-  /// The same from the SSA value: one hash probe to find its record (the JITs, the primop model, the cold paths).
+  /// The same from the SSA value: one hash probe to find its record (the primop model, the cold paths).
   Value *lookup(Frame *f, mlir::Value v) { return lookupImpl(f, nodeOfValue(v), false); }
   Node *nodeOfValue(mlir::Value v) {
     Node *n = nodeOf(v.getAsOpaquePointer());
@@ -864,8 +858,8 @@ struct EvalState {
   Prelowered *newPrelowered(std::string_view path);
   void (*printTrace)(std::string_view) = nullptr; // builtins.trace's line
 
-  // The record of each SSA value, by the value's address: the evaluator reads the records an op's record points at and never asks; the JITs,
-  // the primop model and the cold paths ask here, through a direct-mapped cache in front of the hash map.  A value's address indexed again
+  // The record of each SSA value, by the value's address: the evaluator reads the records an op's record points at and never asks; the
+  // primop model and the cold paths ask here, through a direct-mapped cache in front of the hash map.  A value's address indexed again
   // (an op erased by a pass and its storage reused) gets a new record, and the map and the cache are rewritten, so neither holds a stale one.
   composite::WordTable<Node *> nodeMap; // by the value's address
   struct NodeCacheEntry { void *key = nullptr; Node *node = nullptr; };
@@ -998,7 +992,6 @@ struct EvalState {
   static constexpr size_t kInfoCache = 4096;
   struct InfoSlot { const void *op = nullptr; RegionInfo *ri = nullptr; };
   InfoSlot infoCache[kInfoCache];
-  bool jitChain(mlir::nix::LambdaOp lambda, RegionInfo *ri, Value &cur, size_t n, Value **args, Value &out, PosPtr pos);
   void callLambdaIn(Value &fun, RegionInfo *ri, Value *arg, Value &out, PosPtr pos);
   void applySelector(unsigned shape, RegionInfo *ri, Value **a, Value &dest, PosPtr pos);
   void statTouch(Frame *f, RegionInfo *ri, unsigned idx);

@@ -95,16 +95,10 @@ add_custom_command(OUTPUT ${COREPKGS_INC}
   COMMENT "Corepkgs.inc (embedded Nix sources)")
 set_source_files_properties(Eval/Eval.cpp PROPERTIES OBJECT_DEPENDS ${COREPKGS_INC})
 
-add_library(NixEval STATIC Eval/Eval.cpp Eval/Builtins.cpp Eval/StoreBuiltins.cpp Eval/Formats.cpp Eval/EvalModels.cpp Eval/ScalarJIT.cpp Eval/LazyJIT.cpp)
+add_library(NixEval STATIC Eval/Eval.cpp Eval/Builtins.cpp Eval/StoreBuiltins.cpp Eval/Formats.cpp Eval/EvalModels.cpp)
 target_precompile_headers(NixEval PRIVATE ${PROJECT_SOURCE_DIR}/include/Composite/Hot.h)
 add_dependencies(NixEval MLIRNixOpsIncGen TrikeShedIncGen)
 target_include_directories(NixEval PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 target_link_libraries(NixEval PUBLIC NixFrontend NixStore MLIRNix MLIRIR MLIRParser MLIRPass)
-target_link_libraries(NixEval PRIVATE MLIRArithDialect MLIRControlFlowDialect MLIRFuncDialect MLIRLLVMDialect
-  MLIRArithToLLVM MLIRControlFlowToLLVM MLIRFuncToLLVM MLIRReconcileUnrealizedCasts
-  $<TARGET_FILE:MLIRExecutionEngine> MLIRExecutionEngineUtils
-  MLIRBuiltinToLLVMIRTranslation MLIRLLVMToLLVMIRTranslation)
-# Some MLIR packages export ExecutionEngine with the umbrella MLIR shared library as its dependency. This project
-# links component archives: mixing both creates two MLIR TypeID/uniquer instances. Use the engine archive with its
-# explicit LLVM/translation dependencies, keeping one MLIR runtime in the process.
+target_link_libraries(NixEval PRIVATE MLIRArithDialect MLIRControlFlowDialect MLIRFuncDialect MLIRLLVMDialect)
 llvm_update_compile_flags(NixEval)
