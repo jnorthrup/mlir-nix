@@ -24,8 +24,6 @@
 
 namespace composite {
 
-<<<<<<< HEAD
-<<<<<<< HEAD
 mlir::LogicalResult ClusterOrderOp::verify() {
   for (auto type : {getKeys().getType(), getOrder().getType()}) {
     auto memref = llvm::cast<mlir::MemRefType>(type);
@@ -40,39 +38,6 @@ mlir::LogicalResult ClusterOrderOp::verify() {
   return mlir::success();
 }
 
-<<<<<<< HEAD
-||||||| 46182e5
-=======
-mlir::LogicalResult ClusterOrderOp::verify() {
-  for (auto type : {getKeys().getType(), getOrder().getType()}) {
-    auto memref = llvm::cast<mlir::MemRefType>(type);
-    if (memref.getRank() != 1 || !memref.getElementType().isSignlessInteger(64) ||
-        memref.getMemorySpaceAsInt() != 0)
-      return emitOpError("requires rank-one signless i64 memrefs in host memory");
-  }
-  return mlir::success();
-}
-
->>>>>>> 9d0e6e14b6b1dd0b58a8d3027c242460c21450a1
-||||||| 46182e5
-=======
-mlir::LogicalResult ClusterOrderOp::verify() {
-  for (auto type : {getKeys().getType(), getOrder().getType()}) {
-    auto memref = llvm::cast<mlir::MemRefType>(type);
-    if (memref.getRank() != 1 || !memref.getElementType().isSignlessInteger(64) ||
-        memref.getMemorySpaceAsInt() != 0)
-      return emitOpError("requires rank-one signless i64 memrefs in host memory");
-    mlir::SmallVector<int64_t> strides;
-    int64_t offset;
-    if (mlir::failed(memref.getStridesAndOffset(strides, offset)))
-      return emitOpError("requires strided memrefs");
-  }
-  return mlir::success();
-}
-
->>>>>>> 35fea687ba1ada38fce0ceacb142f01d560d78f4
-||||||| 60130ba
-=======
 mlir::LogicalResult PartsOp::verify() {
   auto s = llvm::dyn_cast<SeriesType>(getSeries().getType());
   if (!s || s.getElement() != getDelimiter().getType() || !s.getElement().isSignlessInteger())
@@ -137,7 +102,6 @@ mlir::LogicalResult ClosureOp::verify() {
   return mlir::success();
 }
 
->>>>>>> a4d0008beac579eb00af4fb266f7ca5956635938
 void TrikeShedDialect::initialize() {
   addTypes<
 #define GET_TYPEDEF_LIST

@@ -34,59 +34,19 @@ target_sources(MLIRNix PRIVATE ${CONFIX_OBJ})
 
 # TrikeShed's kernel as a dialect: Join, MetaSeries, Series, Series2, split, Cursor, α, ↺ and the combinators of
 # borg.trikeshed.lib, generated from include/Composite/TrikeShed.td.
-# The life dialect (docs/LIFE.md): a library of its own, linked by the tools that read it and not by the evaluator,
-# which never meets a life op.
-add_mlir_dialect_library(MLIRLife
-  Dialect/LifeDialect.cpp
-  PARTIAL_SOURCES_INTENDED
-  DEPENDS MLIRNixOpsIncGen
-  LINK_LIBS PUBLIC MLIRIR)
-
 add_mlir_dialect_library(MLIRTrikeShed
   Composite/TrikeShedDialect.cpp
-<<<<<<< HEAD
   Composite/ClusterLowering.cpp
-<<<<<<< HEAD
   Composite/CursorLowering.cpp
-||||||| 46182e5
-=======
-  Composite/ClusterLowering.cpp
->>>>>>> 35fea687ba1ada38fce0ceacb142f01d560d78f4
-||||||| 3ab5025
-=======
-  Composite/CursorLowering.cpp
->>>>>>> 60130ba861aa3cd4ef841127e0b71211f43eed41
   PARTIAL_SOURCES_INTENDED
   DEPENDS TrikeShedIncGen
-<<<<<<< HEAD
-<<<<<<< HEAD
   LINK_LIBS PUBLIC MLIRIR MLIRSideEffectInterfaces MLIRFuncDialect MLIRMemRefDialect MLIRPass
-<<<<<<< HEAD
-                   MLIRArithDialect MLIRSCFDialect MLIRFuncTransforms MLIRTransformUtils)
-||||||| 46182e5
-  LINK_LIBS PUBLIC MLIRIR MLIRSideEffectInterfaces)
-=======
-  LINK_LIBS PUBLIC MLIRIR MLIRSideEffectInterfaces MLIRFuncDialect MLIRMemRefDialect MLIRPass)
-||||||| 3ab5025
-  LINK_LIBS PUBLIC MLIRIR MLIRSideEffectInterfaces MLIRFuncDialect MLIRMemRefDialect MLIRPass)
-=======
-  LINK_LIBS PUBLIC MLIRIR MLIRSideEffectInterfaces MLIRFuncDialect MLIRMemRefDialect MLIRPass
-                   MLIRArithDialect MLIRSCFDialect MLIRFuncTransforms MLIRTransformUtils)
->>>>>>> 60130ba861aa3cd4ef841127e0b71211f43eed41
-
-add_library(TrikeShedRuntime SHARED Composite/ClusterRuntime.cpp)
-set_target_properties(TrikeShedRuntime PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/lib)
->>>>>>> 35fea687ba1ada38fce0ceacb142f01d560d78f4
-||||||| 60130ba
-                   MLIRArithDialect MLIRSCFDialect MLIRFuncTransforms MLIRTransformUtils)
-=======
                    MLIRArithDialect MLIRSCFDialect MLIRSCFTransforms MLIRFuncTransforms MLIRTransformUtils)
->>>>>>> a4d0008beac579eb00af4fb266f7ca5956635938
 
 add_library(TrikeShedRuntime SHARED Composite/ClusterRuntime.cpp)
 set_target_properties(TrikeShedRuntime PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/lib)
 
-add_library(NixStore STATIC Store/Hash.cpp Store/StorePaths.cpp Store/LocalStore.cpp Store/StructuredAttrs.cpp Store/Prefetch.cpp Store/Ed25519.cpp)
+add_library(NixStore STATIC Store/Hash.cpp Store/StorePaths.cpp Store/LocalStore.cpp Store/StructuredAttrs.cpp Store/Prefetch.cpp)
 target_link_libraries(NixStore PUBLIC LLVMSupport)
 # SHA-256: CommonCrypto on macOS; elsewhere libcrypto when there is one (it picks the CPU's SHA extensions or AVX2, the code Nix hashes
 # with), else LLVM's portable C, which costs 8-12% of a run on a machine whose hashing it slows (docs/PERFORMANCE.md).  libcrypto.a is
@@ -126,19 +86,9 @@ target_link_libraries(NixFrontend PUBLIC MLIRNix MLIRIR)
 llvm_update_compile_flags(NixFrontend)
 target_precompile_headers(NixFrontend PRIVATE ${PROJECT_SOURCE_DIR}/include/Composite/Hot.h)
 
-# The Nix sources the evaluator ships (lib/Corepkgs/*.nix: flakes) embedded as <nix/NAME>.
-file(GLOB COREPKGS_NIX CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/Corepkgs/*.nix)
-set(COREPKGS_INC ${CMAKE_CURRENT_BINARY_DIR}/Corepkgs.inc)
-add_custom_command(OUTPUT ${COREPKGS_INC}
-  COMMAND ${CMAKE_COMMAND} -DOUT=${COREPKGS_INC} -DDIR=${CMAKE_CURRENT_SOURCE_DIR}/Corepkgs -P ${CMAKE_CURRENT_SOURCE_DIR}/Corepkgs/Embed.cmake
-  DEPENDS ${COREPKGS_NIX} ${CMAKE_CURRENT_SOURCE_DIR}/Corepkgs/Embed.cmake
-  COMMENT "Corepkgs.inc (embedded Nix sources)")
-set_source_files_properties(Eval/Eval.cpp PROPERTIES OBJECT_DEPENDS ${COREPKGS_INC})
-
 add_library(NixEval STATIC Eval/Eval.cpp Eval/Builtins.cpp Eval/StoreBuiltins.cpp Eval/Formats.cpp Eval/EvalModels.cpp Eval/ScalarJIT.cpp Eval/LazyJIT.cpp)
 target_precompile_headers(NixEval PRIVATE ${PROJECT_SOURCE_DIR}/include/Composite/Hot.h)
 add_dependencies(NixEval MLIRNixOpsIncGen TrikeShedIncGen)
-target_include_directories(NixEval PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 target_link_libraries(NixEval PUBLIC NixFrontend NixStore MLIRNix MLIRIR MLIRParser MLIRPass)
 target_link_libraries(NixEval PRIVATE MLIRArithDialect MLIRControlFlowDialect MLIRFuncDialect MLIRLLVMDialect
   MLIRArithToLLVM MLIRControlFlowToLLVM MLIRFuncToLLVM MLIRReconcileUnrealizedCasts

@@ -1,5 +1,4 @@
 #include "Composite/TrikeShed.h"
-#include "NixDialect/Life.h"
 #include "NixDialect/NixDialect.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Async/IR/Async.h"
@@ -16,7 +15,6 @@ int main(int argc, char **argv) {
   registry.insert<mlir::arith::ArithDialect, mlir::async::AsyncDialect, mlir::cf::ControlFlowDialect,
                   mlir::func::FuncDialect, mlir::memref::MemRefDialect, mlir::scf::SCFDialect>();
   mlir::nix::registerNixDialects(registry);
-  registry.insert<mlir::life::LifeDialect>(); // not the evaluator's: docs/LIFE.md
   composite::registerTrikeShedDialect(registry);
   mlir::registerTransformsPasses();
   mlir::nix::registerNixPasses();
