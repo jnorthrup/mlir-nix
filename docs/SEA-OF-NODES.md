@@ -357,9 +357,10 @@ with it on fib and attrs (9%); on leaf, slots1 and slots9 it stays within the sp
 fib takes 13.9 ms against 12.9 (the ranges over five JVMs just touch): the test at each call, when no callee carries
 the flag.
 
-Left on the arm: the second and later arguments of a curried call (`f a b`: the function that takes `b` is known only
-after the first call returns); a builtin's operands (the next section); and list elements, attribute values and
-captures, which escape by design. The native evaluator reads neither son.release nor arg_forced.
+Left on the arm then: the second and later arguments of a curried call (`f a b`: the function that takes `b` is known
+only after the first call returns; "A curried call's later arguments" below); a builtin's operands (the next section);
+and list elements, attribute values and captures, which escape by design. The native evaluator reads neither
+son.release nor arg_forced.
 
 ## The builtin's half: its declaration's modes
 
@@ -454,6 +455,36 @@ bench.py's workloads in mlnix-os (two rounds of five runs against d0e939d), the 
 MB lower on nixpkgs-73 (1,093-1,094 MB), unchanged on toplevel (1,131-1,132 MB). What is left of the
 builtin door on the arm is 132 cells: operands that no declaration says are forced (the builtins left out above, and
 those not yet read), and builtins applied to fewer operands than they take.
+
+## A curried call's later arguments
+
+`f a b` applies `f` to `a`, then the function that returns to `b`. ApplyNode made a cell over the frame for `b` before
+either call, because the body that takes `b` is known only once `f a` has returned it. It now applies the arguments one
+at a time and reads each later one off the function the application before it returned, as it reads the first: when
+that body is arg_forced and the argument is an op of the caller's body, the argument is computed first and passed as a
+value (as `Failed` if it throws).
+
+    cells made over a frame        3e54d52     d0e939d     e12b56e     now
+    a call's later arguments       1,286       1,286       1,286         580
+    attribute values               1,043       1,043       1,045       1,048
+    list elements                    990         990         990         991
+    a call's first argument          600         600         600         600
+    builtin operands               5,886       1,116         132         133
+    captures                          71          71          71          71
+    all                            9,876       5,106       4,124       3,423
+
+eval-okay, 147 files, son exported: 732 later arguments were computed first, one of which threw. The outputs stay
+byte-identical to 0253d57's, plain and with son, and nothing is kept outside son.release. The run makes 26,113 returns
+where it made 26,111, and five cells more elsewhere: a callee that throws before it forces its argument (caught by
+tryEval) now finds the argument computed anyway, which is the price a computed-first argument always had.
+
+graal/bench/curried.nix measures it: `f = x: add (x * 2) (x + 1)` with `add = a: b: a + b`, under a fold (60 runs, two
+rounds of three JVMs against e12b56e): with son, 47.3 -> 43.3 ms and 225.4 -> 218.6 MB a run; without son, 52.0 -> 49.6
+ms and the same memory. The other files allocate the same, and their times stay within the spread between JVMs. f's
+frame still escapes through `x * 2`: the outer body of `add` only captures `a` for the inner one,
+so it is not arg_forced, and a call's first argument is a cell whenever its body does not force it (the 600 above).
+Each later argument still goes through Apply.call, one at a time. Applying a cell with Apply.one instead made
+curried.nix without son 50% slower (75-84 ms against 50 ms, over three JVMs and two rounds); why is not known.
 
 ## Not built, with the number that gates it
 

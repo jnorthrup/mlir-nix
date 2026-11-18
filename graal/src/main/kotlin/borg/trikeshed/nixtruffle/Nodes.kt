@@ -197,6 +197,7 @@ object ReleaseCheck {
     var frames = 0L; var slots = 0L; var keptHere = 0L; var namedByIr = 0L; var faults = 0L
     var calls = 0L; var noopCalls = 0L; var noopPending = 0L; var pendingCalls = 0L
     var applies = 0L; var toForced = 0L; var early = 0L; var earlyFailed = 0L; var operands = 0L; var operandsFailed = 0L
+    var laterEarly = 0L; var laterFailed = 0L
     /// The cells made over a frame, by the op that passes them on: each one makes its frame escape (it holds the frame until forced).
     val DOORS = arrayOf("other", "list elements", "attribute values", "a call's first argument", "a call's later arguments",
         "captures", "builtin operands")
@@ -208,7 +209,8 @@ object ReleaseCheck {
         "\nrelease calls: $calls returns, $pendingCalls with a cell of the frame unforced; son.release empty (no release at all) in " +
         "$noopCalls, of which with a cell unforced $noopPending" +
         "\ncalls: $applies, to a body arg_forced $toForced, its argument computed before the call (an op of the caller) in $early, " +
-        "of which it threw in $earlyFailed; builtin operands computed first (nix.strict, nix.first) $operands, of which threw $operandsFailed" +
+        "of which it threw in $earlyFailed; a curried call's later arguments computed first (their body arg_forced) $laterEarly, " +
+        "of which threw $laterFailed; builtin operands computed first (nix.strict, nix.first) $operands, of which threw $operandsFailed" +
         "\ncells made over a frame: " + DOORS.indices.joinToString { "${DOORS[it]} ${cells[it]}" }) }) }
     @TruffleBoundary
     fun call(noop: Boolean, pending: Boolean) { calls++; if (pending) pendingCalls++; if (noop) { noopCalls++; if (pending) noopPending++ } }
@@ -216,6 +218,8 @@ object ReleaseCheck {
     fun cell(door: Int) { cells[door]++ }
     @TruffleBoundary
     fun operand(threw: Boolean) { operands++; if (threw) operandsFailed++ }
+    @TruffleBoundary
+    fun later(threw: Boolean) { laterEarly++; if (threw) laterFailed++ }
     @TruffleBoundary
     fun apply(forced: Boolean, computed: Boolean, threw: Boolean) { applies++; if (forced) toForced++; if (computed) early++; if (threw) earlyFailed++ }
     fun frame(label: String, s: Array<Any?>, keep: BooleanArray, keepable: BooleanArray) {
@@ -540,10 +544,13 @@ class DeferNode(@JvmField val module: Module, @JvmField val row: String,
 /// on every path on which it returns gets it computed here, before the call, when it is an op of this body: no cell over this frame is
 /// made for it, so the frame can stay virtual.  (An argument of this body is passed on as it came; computing it first would save no cell.)  The guess is the closure that arrives, and each way is compiled only once a call has gone it: a call site that
 /// has met only such callees makes no cell for its first argument.  An argument that throws is passed as the error (Failed).
+/// A curried call (`f a b`) applies its arguments one at a time and reads each later one the same way, off the function the
+/// application before it returned: the body that takes `b` is known only once `f a` has returned it.
 class ApplyNode(@JvmField val callee: Int, @field:CompilationFinal(dimensions = 1) @JvmField val args: IntArray) : OpNode() {
     @JvmField val small = args.size <= EXPLODE
     @CompilationFinal @JvmField var sawEarly = false // a callee whose body forces its argument has arrived here
     @CompilationFinal @JvmField var sawCells = false // a callee son says nothing of has
+    @CompilationFinal @JvmField var sawLater = false // a later argument has gone to a body that forces it
     override fun exec(f: Frame): Any {
         val fn = strict(f, callee)
         if (args.isNotEmpty() && fn is Closure && fn.argForced) { // (no argument: an apply that only forces its callee)
@@ -553,18 +560,27 @@ class ApplyNode(@JvmField val callee: Int, @field:CompilationFinal(dimensions = 
             val a = if (!own) lazy(f, s, 3) else try { strict(f, s) } catch (e: NixError) { Failed(e) }
             if (ReleaseCheck.on) ReleaseCheck.apply(true, own, a is Failed)
             val r = Apply.one(fn, a)
-            return if (args.size == 1) r else Apply.call(r, if (small) cellsSmall(f, 1) else cellsLarge(f, 1))
+            return if (args.size == 1) r else if (small) laterSmall(f, r) else laterLarge(f, r)
         }
         if (!sawCells) { CompilerDirectives.transferToInterpreterAndInvalidate(); sawCells = true }
         if (ReleaseCheck.on) ReleaseCheck.apply(false, false, false)
-        return Apply.call(fn, if (small) cellsSmall(f, 0) else cellsLarge(f, 0))
+        if (args.size <= 1) return Apply.call(fn, if (args.isEmpty()) arrayOfNulls(0) else arrayOf(lazy(f, args[0], 3)))
+        val r = Apply.one(fn, lazy(f, args[0], 3))
+        return if (small) laterSmall(f, r) else laterLarge(f, r)
     }
+    /// The arguments after the first, each against the function the application before it returned.  Each goes through Apply.call,
+    /// as all of them did before: applied with Apply.one, a cell made curried.nix without son 50% slower (measured, not understood).
     @ExplodeLoop
-    private fun cellsSmall(f: Frame, from: Int): Array<Any?> {
-        val a = arrayOfNulls<Any?>(args.size - from); for (i in from until args.size) a[i - from] = lazy(f, args[i], if (i == 0) 3 else 4); return a
-    }
+    private fun laterSmall(f: Frame, r0: Any): Any { var r = r0; for (i in 1 until args.size) r = Apply.call(r, arrayOf(later(f, r, args[i]))); return r }
     @TruffleBoundary
-    private fun cellsLarge(f: Frame, from: Int): Array<Any?> = Array(args.size - from) { lazy(f, args[from + it], if (from + it == 0) 3 else 4) }
+    private fun laterLarge(f: Frame, r0: Any): Any { var r = r0; for (i in 1 until args.size) r = Apply.call(r, arrayOf(later(f, r, args[i]))); return r }
+    private fun later(f: Frame, fn: Any, s: Int): Any? {
+        if (!(fn is Closure && fn.argForced) || rootOps!![s] == null) return lazy(f, s, 4)
+        if (!sawLater) { CompilerDirectives.transferToInterpreterAndInvalidate(); sawLater = true }
+        val a = try { strict(f, s) } catch (e: NixError) { Failed(e) }
+        if (ReleaseCheck.on) ReleaseCheck.later(a is Failed)
+        return a
+    }
 }
 
 object Apply {
