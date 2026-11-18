@@ -481,10 +481,40 @@ tryEval) now finds the argument computed anyway, which is the price a computed-f
 graal/bench/curried.nix measures it: `f = x: add (x * 2) (x + 1)` with `add = a: b: a + b`, under a fold (60 runs, two
 rounds of three JVMs against e12b56e): with son, 47.3 -> 43.3 ms and 225.4 -> 218.6 MB a run; without son, 52.0 -> 49.6
 ms and the same memory. The other files allocate the same, and their times stay within the spread between JVMs. f's
-frame still escapes through `x * 2`: the outer body of `add` only captures `a` for the inner one,
-so it is not arg_forced, and a call's first argument is a cell whenever its body does not force it (the 600 above).
+frame still escaped through `x * 2`: the outer body of `add` only captures `a` for the inner one, so it is not
+arg_forced, and a call's first argument was a cell whenever its body did not force it (the 600 above; next section).
 Each later argument still goes through Apply.call, one at a time. Applying a cell with Apply.one instead made
 curried.nix without son 50% slower (75-84 ms against 50 ms, over three JVMs and two rounds); why is not known.
+
+### And the first: what the closure a body returns forces
+
+Of the 600 first-argument cells, 483 were a curried call's (`f a b`): the outer body of `a: b: ...` returns the inner
+closure and forces nothing, so it is not arg_forced, though the inner body may force `a` the moment the call applies
+it. son-release now states the rest of the must-force set over a body's block arguments: `forced_captures`, the
+captures, by index, that the body forces on every path on which it returns (Son.td; test/mlir/son-curried.mlir). The
+arm reads the chain off the IR as exported (Module.forcedAfter): a body that returns a closure it makes (`son.defer`)
+over its argument, whose row forces that capture, forces its argument after one more application, and so on up to
+three. A call that applies at least that many more arguments computes the argument first, as it does for an
+arg_forced body; a later argument is read the same way at its own step.
+
+    cells made over a frame             3e54d52     d0e939d     e12b56e     db3a93e     now
+    a curried call's first argument                                             483         113
+    a call's first argument               600         600         600         117         117
+    a call's later arguments            1,286       1,286       1,286         580         508
+    attribute values                    1,043       1,043       1,045       1,048       1,048
+    list elements                         990         990         990         991         991
+    builtin operands                    5,886       1,116         132         133         133
+    captures                               71          71          71          71          71
+    all                                 9,876       5,106       4,124       3,423       2,981
+
+(The census tells the two apart from this change on; the db3a93e column is that commit's arm counted that way.) eval-okay,
+147 files, son exported: of 11,539 calls, 6,167 reach a body that forces the argument (5,203 before), 964 of them
+through the closure it returns; 4,091 arguments were computed first (3,628), 7 of which threw, and 820 later ones
+(732). The outputs stay byte-identical to 0253d57's, plain and with son, and nothing is kept outside son.release.
+
+graal/bench/curried.nix (60 runs, two rounds of three JVMs against db3a93e): with son, 44.4 -> 35.5 ms and 218.6 ->
+204.8 MB a run, and no cell is made over f's frame any more; without son, the same memory, and the time within the
+spread between JVMs (54.1 -> 50.2 ms). The other files allocate the same, and their times stay within the spread.
 
 ## Not built, with the number that gates it
 

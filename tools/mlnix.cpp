@@ -324,7 +324,6 @@ void getDerivations(EvalState &st, Value &vIn, std::string_view prefix, const Au
     if (!done.insert(v.attrs).second) return;
     for (const Attr *a : v.attrs->lexicographicOrder(st.symbols)) {
       composite::Text p2 = prefix.empty() ? composite::Text(st.symbols[a->name]) : composite::cat(prefix, '.', st.symbols[a->name]);
-      st.beginEpoch();
       if (getDerivation(st, *a->value, p2, drvs, done)) {
         if (a->value->type == VType::Attrs) {
           const Attr *r = a->value->attrs->get(st.symbols.create("recurseForDerivations"));

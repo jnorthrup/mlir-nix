@@ -60,11 +60,17 @@ def Son_BodyOp : Son_Op<"body", [Symbol, HasParent<"PoolOp">, SingleBlock, Isola
     not see when the function arrives as a value: a caller that finds it on the body it calls may compute the argument
     before the call, and make no cell over its own frame for it (the Graal arm, graal/: ApplyNode). An argument whose
     computation throws is passed as the error, so a callee that throws first still throws its own.
+
+    `forced_captures`, derived the same way: the captures, by index, that the body forces on every path on which it
+    returns. With `arg_forced` it is the body's must-force set over its block arguments. A body that returns a closure
+    it makes (`son.defer`) over its own argument, whose row forces that capture, forces its argument once the closure is
+    applied: a curried call (`f a b`) applies it at once, so its caller may compute `a` first as well.
   }];
   let arguments = (ins SymbolNameAttr:$sym_name, ConfinedAttr<I32Attr, [IntMinValue<0>]>:$captures, AnyAttr:$lambda,
-                       UnitAttr:$arg_forced);
+                       UnitAttr:$arg_forced, OptionalAttr<DenseI32ArrayAttr>:$forced_captures);
   let regions = (region SizedRegion<1>:$body);
-  let assemblyFormat = "$sym_name `captures` $captures `lambda` $lambda (`arg_forced` $arg_forced^)? attr-dict-with-keyword $body";
+  let assemblyFormat = "$sym_name `captures` $captures `lambda` $lambda (`arg_forced` $arg_forced^)? "
+                       "(`forced_captures` $forced_captures^)? attr-dict-with-keyword $body";
   let hasVerifier = 1;
 }
 

@@ -335,7 +335,7 @@ struct NixDeferPass : PassWrapper<NixDeferPass, OperationPass<ModuleOp>> {
       llvm::SmallString<16> nameBuf;
       (llvm::Twine("row") + llvm::Twine(thisRow)).toVector(nameBuf);
       llvm::StringRef name(nameBuf);
-      auto bodyOp = BodyOp::create(b, lambda.getLoc(), b.getStringAttr(name), captured.size(), props);
+      auto bodyOp = BodyOp::create(b, lambda.getLoc(), name, captured.size(), props, /*arg_forced=*/false, /*forced_captures=*/{});
       Type value = nix::ValueType::get(&getContext());
       SmallVector<Type> types(captured.size() + 1, value);
       SmallVector<Location> locs(captured.size() + 1, lambda.getLoc());
@@ -404,7 +404,8 @@ struct SonMintPass : PassWrapper<SonMintPass, OperationPass<ModuleOp>> {
 
 namespace {
 /// son-release: each frame's son.release (Son.td), as the Graal arm keeps a frame (graal/, Nodes.kt): what frameReads finds; and
-/// each son.body's arg_forced, its argument in its own must-force set (the callee's half, which a caller reads at the call).
+/// each son.body's arg_forced and forced_captures, the block arguments in its own must-force set (the callee's half, which a caller
+/// reads at the call, through the closures a body returns as well).
 struct SonReleasePass : PassWrapper<SonReleasePass, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SonReleasePass)
   StringRef getArgument() const override { return "son-release"; }
@@ -428,9 +429,11 @@ struct SonReleasePass : PassWrapper<SonReleasePass, OperationPass<ModuleOp>> {
       if (auto body = dyn_cast<BodyOp>(o); body && !body.getBody().empty()) {
         Block &b = body.getBody().front();
         auto lam = dyn_cast_or_null<DictionaryAttr>(body.getLambda());
-        bool forced = lam && lam.get("formals"); // a call checks a pattern's set before the body runs
-        if (!forced) { ForcedOnReturn on = forcedOnReturn(b, nixd); forced = !on.never && on.forced.contains(b.getArguments().back()); }
-        body.setArgForced(forced);
+        ForcedOnReturn on = forcedOnReturn(b, nixd);
+        SmallVector<int32_t> caps;
+        for (unsigned i = 0; !on.never && i < body.getCaptures(); ++i) if (on.forced.contains(b.getArgument(i))) caps.push_back(i);
+        body.setArgForced((lam && lam.get("formals")) || (!on.never && on.forced.contains(b.getArguments().back()))); // a call checks a pattern's set first
+        if (caps.empty()) body.removeForcedCapturesAttr(); else body.setForcedCaptures(caps);
       }
     });
   }

@@ -153,7 +153,6 @@ void EvalState::printValueAsJSON(JsonOut &out, Value &v, bool strict, NixStringC
     out.put('[');
     for (size_t i = 0; i < v.listSize(); i++) {
       if (i) out.put(',');
-      if (callDepth <= 2) beginEpoch(); // MLNIX_STATS: an element of the top-level list is an epoch
       try {
         printValueAsJSON(out, *v.list.elems[i], strict, ctx, copyToStore, pos);
       } catch (EvalError &e) {

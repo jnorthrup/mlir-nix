@@ -599,10 +599,10 @@ struct EvalState {
   };
 
   // -- Forcing -------------------------------------------------------------
-  /// A value is already one: the common case is a test, here; a cell that is not a value yet (or any cell, in an instrumented run) is
+  /// A value is already one: the common case is a test, here; a cell that is not a value yet (or any cell, in an MLNIX_STATS run) is
   /// forced out of line, where the exception handling and the census live.
   void forceValue(Value &v, PosPtr pos = nullptr) {
-    if (v.isThunk() || instrumented) forceCell(v, pos);
+    if (v.isThunk() || statsEnabled) forceCell(v, pos);
   }
   void forceCell(Value &v, PosPtr pos);
   /// The cell's evaluation threw this evaluation error, now in flight: the cell keeps it (VType::Failed).
@@ -727,7 +727,6 @@ struct EvalState {
   /// MLNIX_STATS=1: op histogram of every module lowered, printed at exit.
   OpCounts opStats;
   bool statsEnabled = false;
-  bool instrumented = false; // statsEnabled or recordEdges: forceValue always takes the out-of-line path
 
   /// The operand `v` of the op being evaluated in frame `f`, for a consumer that forces it
   /// right away and does not keep the Value (a `strict` operand, see NixModes).  When the
@@ -906,12 +905,6 @@ struct EvalState {
                          // [14] alone counts allocated Value rows, not tag writes
   uint64_t nFrames = 0, nFrameBytes = 0, nFrameSlots = 0; // requested frame storage, excluding arena overhead
   composite::MutableSeries<composite::Join<composite::Text, size_t>> evaluatedFiles; // MLNIX_STATS_IMPORTS: files evalFile'd, with how many path literals had been lowered by then
-  composite::MutableSeries<uint64_t> epochEvals; // MLNIX_STATS: evalOp calls per epoch (one epoch a derivation attribute the driver visits)
-  void beginEpoch() { if (statsEnabled) epochEvals.append(0); }
-  composite::WordTable<uint32_t> forcedBy; // MLNIX_STATS_EDGES: the epoch that first forced a cell, by the cell's address
-  composite::WordTable<char> epochEdges;   // MLNIX_STATS_EDGES, a set: (earlier epoch << 32 | later epoch) when the later one touched a cell the earlier one forced
-  bool recordEdges = false;
-  void epochTouch(const Value &v);
   uint64_t nMaskBytes = 0, nLayerBytes = 0, nMergeBytes = 0, nCtxBytes = 0, nFormalBytes = 0; // MLNIX_STATS: arena bytes the by-use line did not name before
   uint64_t nLookups = 0, nLookupHits = 0, nHopHist[6] = {}; // MLNIX_STATS: lookupImpl calls, those answered by a filled slot, and the frame hops to the defining region (0, 1, 2, 3, 4, 5 or more)
   OpCounts cellsByKind; // MLNIX_STATS: cells lookup made, by defining op: [evaluated at once, left a thunk]

@@ -197,10 +197,10 @@ object ReleaseCheck {
     var frames = 0L; var slots = 0L; var keptHere = 0L; var namedByIr = 0L; var faults = 0L
     var calls = 0L; var noopCalls = 0L; var noopPending = 0L; var pendingCalls = 0L
     var applies = 0L; var toForced = 0L; var early = 0L; var earlyFailed = 0L; var operands = 0L; var operandsFailed = 0L
-    var laterEarly = 0L; var laterFailed = 0L
+    var laterEarly = 0L; var laterFailed = 0L; var throughReturn = 0L
     /// The cells made over a frame, by the op that passes them on: each one makes its frame escape (it holds the frame until forced).
     val DOORS = arrayOf("other", "list elements", "attribute values", "a call's first argument", "a call's later arguments",
-        "captures", "builtin operands")
+        "captures", "builtin operands", "a curried call's first argument")
     val cells = LongArray(DOORS.size)
     val faulty = LinkedHashSet<String>()
     init { if (on) Runtime.getRuntime().addShutdownHook(Thread { System.err.println(
@@ -208,7 +208,8 @@ object ReleaseCheck {
         "son.release named $namedByIr; kept outside son.release $faults" + (if (faulty.isEmpty()) "" else " in ${faulty.joinToString()}") +
         "\nrelease calls: $calls returns, $pendingCalls with a cell of the frame unforced; son.release empty (no release at all) in " +
         "$noopCalls, of which with a cell unforced $noopPending" +
-        "\ncalls: $applies, to a body arg_forced $toForced, its argument computed before the call (an op of the caller) in $early, " +
+        "\ncalls: $applies, to a body arg_forced $toForced (forced by the closure it returns, applied by the call: $throughReturn), " +
+        "its argument computed before the call (an op of the caller) in $early, " +
         "of which it threw in $earlyFailed; a curried call's later arguments computed first (their body arg_forced) $laterEarly, " +
         "of which threw $laterFailed; builtin operands computed first (nix.strict, nix.first) $operands, of which threw $operandsFailed" +
         "\ncells made over a frame: " + DOORS.indices.joinToString { "${DOORS[it]} ${cells[it]}" }) }) }
@@ -221,7 +222,9 @@ object ReleaseCheck {
     @TruffleBoundary
     fun later(threw: Boolean) { laterEarly++; if (threw) laterFailed++ }
     @TruffleBoundary
-    fun apply(forced: Boolean, computed: Boolean, threw: Boolean) { applies++; if (forced) toForced++; if (computed) early++; if (threw) earlyFailed++ }
+    fun apply(forced: Boolean, computed: Boolean, threw: Boolean, through: Boolean = false) {
+        applies++; if (forced) toForced++; if (computed) early++; if (threw) earlyFailed++; if (through) throughReturn++
+    }
     fun frame(label: String, s: Array<Any?>, keep: BooleanArray, keepable: BooleanArray) {
         frames++
         for (i in s.indices) {
@@ -532,7 +535,8 @@ class DeferNode(@JvmField val module: Module, @JvmField val row: String,
     @JvmField val small = captures.size <= EXPLODE
     override fun exec(f: Frame): Any {
         val b = module.body(row)
-        return Closure(b.target, if (small) cellsSmall(f) else cellsLarge(f), b.formals, b.defaults, b.ellipsis, b.name, b.argForced)
+        return Closure(b.target, if (small) cellsSmall(f) else cellsLarge(f), b.formals, b.defaults, b.ellipsis, b.name, b.argForced,
+            b.forcedAfter)
     }
     @ExplodeLoop
     private fun cellsSmall(f: Frame): Array<Any?> { val a = arrayOfNulls<Any?>(captures.size); for (i in captures.indices) a[i] = lazy(f, captures[i], 5); return a }
@@ -553,29 +557,30 @@ class ApplyNode(@JvmField val callee: Int, @field:CompilationFinal(dimensions = 
     @CompilationFinal @JvmField var sawLater = false // a later argument has gone to a body that forces it
     override fun exec(f: Frame): Any {
         val fn = strict(f, callee)
-        if (args.isNotEmpty() && fn is Closure && fn.argForced) { // (no argument: an apply that only forces its callee)
+        if (args.isNotEmpty() && fn is Closure && (fn.argForced || fn.forcedAfter in 1 until args.size)) { // (no argument: an apply that only forces its callee)
             if (!sawEarly) { CompilerDirectives.transferToInterpreterAndInvalidate(); sawEarly = true }
             val s = args[0]
             val own = rootOps!![s] != null // an op of this body; an argument of it is passed as it came, the caller's cell, no frame of this call
             val a = if (!own) lazy(f, s, 3) else try { strict(f, s) } catch (e: NixError) { Failed(e) }
-            if (ReleaseCheck.on) ReleaseCheck.apply(true, own, a is Failed)
+            if (ReleaseCheck.on) ReleaseCheck.apply(true, own, a is Failed, !fn.argForced)
             val r = Apply.one(fn, a)
             return if (args.size == 1) r else if (small) laterSmall(f, r) else laterLarge(f, r)
         }
         if (!sawCells) { CompilerDirectives.transferToInterpreterAndInvalidate(); sawCells = true }
         if (ReleaseCheck.on) ReleaseCheck.apply(false, false, false)
         if (args.size <= 1) return Apply.call(fn, if (args.isEmpty()) arrayOfNulls(0) else arrayOf(lazy(f, args[0], 3)))
-        val r = Apply.one(fn, lazy(f, args[0], 3))
+        val r = Apply.one(fn, lazy(f, args[0], 7))
         return if (small) laterSmall(f, r) else laterLarge(f, r)
     }
     /// The arguments after the first, each against the function the application before it returned.  Each goes through Apply.call,
     /// as all of them did before: applied with Apply.one, a cell made curried.nix without son 50% slower (measured, not understood).
     @ExplodeLoop
-    private fun laterSmall(f: Frame, r0: Any): Any { var r = r0; for (i in 1 until args.size) r = Apply.call(r, arrayOf(later(f, r, args[i]))); return r }
+    private fun laterSmall(f: Frame, r0: Any): Any { var r = r0; for (i in 1 until args.size) r = Apply.call(r, arrayOf(later(f, r, i))); return r }
     @TruffleBoundary
-    private fun laterLarge(f: Frame, r0: Any): Any { var r = r0; for (i in 1 until args.size) r = Apply.call(r, arrayOf(later(f, r, args[i]))); return r }
-    private fun later(f: Frame, fn: Any, s: Int): Any? {
-        if (!(fn is Closure && fn.argForced) || rootOps!![s] == null) return lazy(f, s, 4)
+    private fun laterLarge(f: Frame, r0: Any): Any { var r = r0; for (i in 1 until args.size) r = Apply.call(r, arrayOf(later(f, r, i))); return r }
+    private fun later(f: Frame, fn: Any, i: Int): Any? {
+        val s = args[i]
+        if (!(fn is Closure && (fn.argForced || fn.forcedAfter in 1 until args.size - i)) || rootOps!![s] == null) return lazy(f, s, 4)
         if (!sawLater) { CompilerDirectives.transferToInterpreterAndInvalidate(); sawLater = true }
         val a = try { strict(f, s) } catch (e: NixError) { Failed(e) }
         if (ReleaseCheck.on) ReleaseCheck.later(a is Failed)
@@ -648,7 +653,7 @@ class PrimNode(@JvmField val prim: Prim, @field:CompilationFinal(dimensions = 1)
 /// One exported file: its expression and its pool of lambda bodies, made into RootNodes the first time each is needed.
 class Module(@JvmField val ops: List<Op>, @JvmField val loader: Loader) {
     class Body(val target: CallTarget, val formals: Array<String>?, val defaults: BooleanArray?, val ellipsis: Boolean, val name: String?,
-               val argForced: Boolean)
+               val argForced: Boolean, val forcedAfter: Int)
 
     private val rows = HashMap<String, Op>()
     private val bodies = HashMap<String, Body>()
@@ -672,8 +677,28 @@ class Module(@JvmField val ops: List<Op>, @JvmField val loader: Loader) {
         val lam = o.attrs["lambda"] as Map<String, Any?>
         val formals = (lam["formals"] as List<String>?)?.toTypedArray()
         val defaults = (lam["formal_defaults"] as List<Boolean>?)?.toBooleanArray() ?: formals?.let { BooleanArray(it.size) }
-        val root = build((lam["name"] as String?) ?: row, o.regions[0][0], (o.attrs["captures"] as Number).toInt(), true)
-        Body(root.callTarget, formals, defaults, lam["ellipsis"] == true, lam["name"] as String?, o.attrs["arg_forced"] == true)
+        val ncaptures = (o.attrs["captures"] as Number).toInt()
+        val root = build((lam["name"] as String?) ?: row, o.regions[0][0], ncaptures, true)
+        val argForced = o.attrs["arg_forced"] == true
+        Body(root.callTarget, formals, defaults, lam["ellipsis"] == true, lam["name"] as String?, argForced,
+            if (argForced) -1 else forcedAfter(o, ncaptures, 3))
+    }
+
+    /// How many applications of what the row returns pass before its block argument `arg` is forced, or -1.  0: the body forces it
+    /// itself (son.body's arg_forced for the argument, forced_captures for a capture).  n + 1: the body returns a closure it makes
+    /// (son.defer) over it, and that row forces the capture after n.  Read off the IR as exported; `depth` bounds the chain.
+    @Suppress("UNCHECKED_CAST")
+    private fun forcedAfter(o: Op, arg: Int, depth: Int): Int {
+        val ncaptures = (o.attrs["captures"] as Number).toInt()
+        if (if (arg == ncaptures) o.attrs["arg_forced"] == true else (o.attrs["forced_captures"] as List<Number>?)?.any { it.toInt() == arg } == true)
+            return 0
+        if (depth == 0) return -1
+        val block = o.regions[0][0]
+        val ret = block.ops.lastOrNull { it.name == "nix.return" } ?: return -1
+        val defer = block.ops.firstOrNull { it.name == "son.defer" && it.res.firstOrNull() == ret.ins[0] } ?: return -1
+        val next = rows[(defer.attrs["row"] as List<String>).last()] ?: return -1
+        for ((i, c) in defer.ins.withIndex()) if (c == block.args[arg]) forcedAfter(next, i, depth - 1).let { if (it >= 0) return it + 1 }
+        return -1
     }
 
     private fun build(label: String, block: Block, ncaptures: Int, hasArg: Boolean): BodyRoot {

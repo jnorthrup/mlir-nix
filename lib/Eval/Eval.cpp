@@ -321,8 +321,6 @@ void EvalState::copyContext(const Value &v, NixStringContext &ctx) {
 
 EvalState::EvalState(EvalSettings st, nixstore::Store *store) : settings(std::move(st)), store(store) {
   statsEnabled = getenv("MLNIX_STATS") != nullptr;
-  recordEdges = statsEnabled && getenv("MLNIX_STATS_EDGES");
-  instrumented = statsEnabled || recordEdges;
   if (getenv("MLNIX_STATS_IMPORTS")) nixfe::pathLiterals = new cp::TextSet();
   Bindings::countGets = statsEnabled;
   settings.mapSources = !getenv("MLNIX_NOMMAP"); // ablation switch: read and copy every file, as before
@@ -681,24 +679,6 @@ void EvalState::printStats() {
                  << llvm::format("%.1f", evaluatedFiles.empty() ? 0.0 : 100.0 * pred / evaluatedFiles.size()) << "%); " << nixfe::pathLiterals->size() << " distinct path literals ("
                  << nix << " end in .nix), " << litHit << " of them led to an evaluated file (precision "
                  << llvm::format("%.1f", 100.0 * litHit / cp::max<size_t>(1, nixfe::pathLiterals->size())) << "%, of the .nix ones' neighbours not separated)\n";
-  }
-  if (recordEdges && epochEvals.size() > 1) { // the epochs' work and which later epoch needed what an earlier one forced, for a schedule simulation
-    if (FILE *f = fopen(getenv("MLNIX_STATS_EDGES"), "w")) {
-      for (uint32_t i = 0; i < epochEvals.size(); i++) fprintf(f, "w %u %llu\n", i, (unsigned long long)epochEvals[i]);
-      for (auto &e : epochEdges) fprintf(f, "e %u %u\n", uint32_t(e.k >> 32), uint32_t(e.k));
-      fclose(f);
-    }
-  }
-  if (epochEvals.size() > 1) { // how the work divides among the attributes the driver visited: a serial prefix or a flat spread
-    uint64_t tot = 0, mx = 0;
-    for (uint64_t e : epochEvals) { tot += e; mx = cp::max(mx, e); }
-    composite::MutableSeries<uint64_t> sorted(epochEvals.size()); // the epochs are only read: the sort's first pass is the drain
-    cp::sortRows(epochEvals.data(), sorted.data(), epochEvals.size(), [](uint64_t a, uint64_t b) { return a < b; });
-    auto share = [&](size_t n) { uint64_t c = 0; for (size_t i = 0; i < n && i < epochEvals.size(); i++) c += epochEvals[i]; return 100.0 * c / tot; };
-    llvm::errs() << "== epochs (attributes visited): " << epochEvals.size() << ", " << tot << " evalOp calls; median " << sorted[sorted.size() / 2] << ", p90 " << sorted[sorted.size() * 9 / 10]
-                 << ", max " << mx << " (" << llvm::format("%.1f", 100.0 * mx / tot) << "%); share of the work in the first 1 / 10 / 100 / 10% of the epochs: "
-                 << llvm::format("%.1f", share(1)) << "% / " << llvm::format("%.1f", share(10)) << "% / " << llvm::format("%.1f", share(100)) << "% / "
-                 << llvm::format("%.1f", share(epochEvals.size() / 10)) << "%\n";
   }
   llvm::errs() << "== symbols: " << symbols.creates << " interning calls, " << symbols.size() << " symbols\n";
   llvm::errs() << "== nodeOf: " << nSlotMisses << " answered by the hash map (" << nodeMap.size() << " values indexed), not its cache\n";
@@ -1459,14 +1439,6 @@ struct DepthGuard {
 };
 } // namespace
 
-void EvalState::epochTouch(const Value &v) {
-  uint32_t cur = epochEvals.size() - 1;
-  uint64_t cell = uint64_t(uintptr_t(&v));
-  if (v.type == VType::Thunk || v.type == VType::App || v.type == VType::AttrApp) { forcedBy.at(cell) = cur; return; } // about to be forced here
-  const uint32_t *by = forcedBy.find(cell);
-  if (by && *by != cur) epochEdges.insert(uint64_t(*by) << 32 | cur, 1); // two epochs, so never the key 0
-}
-
 void EvalState::evalOpCounted(Node *n, Frame *env, Value &out) {
   statEval(n, env);
   struct Restore {
@@ -1478,7 +1450,6 @@ void EvalState::evalOpCounted(Node *n, Frame *env, Value &out) {
 }
 
 void EvalState::forceCell(Value &v, PosPtr pos) {
-  if (recordEdges && !epochEvals.empty()) [[unlikely]] epochTouch(v);
   if (statsEnabled && lastThunk) [[unlikely]] {
     if (&v == lastThunk && v.type == VType::Thunk) {
       ++nImmediate;
@@ -2273,7 +2244,6 @@ void EvalState::statEval(Node *n, Frame *env) {
   ++countOf(evalsByKind, op->getName()).n[0];
   if (env) {
     ++env->info->nEvals;
-    if (!epochEvals.empty()) ++epochEvals.back();
     if (uint32_t *found = env->info->opIdx.find(uint64_t(uintptr_t(op)))) { env->info->everRan[*found >> 6] |= 1ull << (*found & 63); ++env->info->opEvals[*found]; }
   }
 }
