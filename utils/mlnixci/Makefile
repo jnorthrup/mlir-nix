@@ -1,12 +1,12 @@
 # mini-luci: build inside a Linux machine with mlnix built (MLIR_NIX/build, or MLNIX_BIN).  No C++: the server is MLIR
 # (src/*.mlir and query.mlir) lowered to LLVM IR, with TrikeShed's Confix scanner (mlir-nix lib/Confix/confix.ll), and
-# linked with libc and liburing-ffi only.  It lives in mlir-nix (mlnixci/), so MLIR_NIX defaults to the enclosing
-# checkout, wherever make is run from.
+# linked with libc and liburing-ffi only.  It lives in mlir-nix (utils/mlnixci/), so MLIR_NIX defaults to the
+# enclosing checkout, wherever make is run from.
 #   make MLNIX_BIN=<mlir-nix build>/bin      the server (MLNIX_BIN defaults to the checkout's build/bin)
 #   make facet-check                          the compiled query against the same query counted by hand
 #   make check NIXPKGS_LIB=...               facet-check, then a server on os/ and test/e2e.py against it
 #   sudo make install ...                    /opt/mini-luci and the systemd unit (Debian; NixOS: nixos/module.nix)
-MLIR_NIX ?= $(abspath $(dir $(lastword $(MAKEFILE_LIST)))..)
+MLIR_NIX ?= $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../..)
 MLNIX_BIN ?= $(MLIR_NIX)/build/bin
 MLNIX ?= $(MLNIX_BIN)/mlnix
 MLNIX_OPT ?= $(MLNIX_BIN)/mlnix-opt

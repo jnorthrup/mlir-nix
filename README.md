@@ -21,7 +21,7 @@ other dialects lower to; [docs/PRELOAD-DIALECTS.md](docs/PRELOAD-DIALECTS.md) ma
 | `mlnix-parse` | parses every file of a list in one process, to compare two front ends byte for byte |
 | `mlnix-c` | the C surface of the dialects (`include/mlnix-c/MlnixC.h`), what Kotlin/Native's cinterop links |
 | `graal/` | nix-truffle, the Graal/Truffle arm: it reads the IR that `mlnix-opt --son-export` writes and runs it |
-| `mlnixci/` | mini-luci: a LuCI-like page over a NixOS configuration's options, with its facets written as Nix code, a what-if overlay, the running system's values beside the configured ones, and a server written in MLIR with no C++ ([mlnixci/README.md](mlnixci/README.md)) |
+| `utils/mlnixci/` | mlnix's configuration interface (formerly mini-luci), after OpenWrt's LuCI: a NixOS configuration's options rendered as a manifest, with its facets written as Nix code, a what-if overlay, the running system's values beside the configured ones, and a server written in MLIR with no C++ ([docs/MLNIXCI.md](docs/MLNIXCI.md)) |
 
 ## The dialects
 
@@ -191,7 +191,7 @@ else from LLVM (`-DMLNIX_SHA256=auto|openssl|llvm`).
           -DLLVM_DIR=/usr/lib/llvm-22/lib/cmake/llvm -DMLIR_DIR=/usr/lib/llvm-22/lib/cmake/mlir
     cmake --build build --target mlnix mlnix-opt mlnix-kif TrikeShedRuntime
 
-The Graal arm: `cd graal && ./gradlew installDist` (JDK 25 GraalVM; TrikeShed-jvm from mavenLocal). mlnixci: `make -C mlnixci`
+The Graal arm: `cd graal && ./gradlew installDist` (JDK 25 GraalVM; TrikeShed-jvm from mavenLocal). mlnixci: `make -C utils/mlnixci`
 (it reads `build/bin` and `lib/Confix/confix.ll` from this checkout).
 
 ## Use
@@ -210,7 +210,7 @@ The Graal arm: `cd graal && ./gradlew installDist` (JDK 25 GraalVM; TrikeShed-jv
     python3 scripts/check-jit.py                 # exact JIT/interpreter parity, lazy demands, grace, retirement and compilation limits
     python3 scripts/truffle-lang-tests.py        # the language tests on the Graal arm
     python3 scripts/truffle-release-check.py .   # the Graal arm with son.release on and off: the same outputs, nothing kept outside it
-    make -C mlnixci check NIXPKGS_LIB=...        # mlnixci's compiled query against the counted one, then its end-to-end test
+    make -C utils/mlnixci check NIXPKGS_LIB=...  # mlnixci's compiled query against the counted one, then its end-to-end test
 
 Set `MLNIX_DEFER=1` to run the evaluator's tests on the demand schedule. `scripts/ab.py` times two builds against each other,
 interleaved, and compares the hash of their output.
@@ -219,6 +219,7 @@ interleaved, and compares the hash of their output.
 
 | | |
 |---|---|
+| [MLNIXCI](docs/MLNIXCI.md) | mlnixci, the configuration interface: what it is today, and the direction it is to take |
 | [NIX-CLI](docs/NIX-CLI.md) | the `nix` command, flakes in Nix, binary caches with ed25519 checks, and what running a substituted program needs |
 | [SEA-OF-NODES](docs/SEA-OF-NODES.md) | demand-minted lambda bodies, the must-force set, `son.release`, and escape analysis on the Graal arm |
 | [PRELOAD-DIALECTS](docs/PRELOAD-DIALECTS.md) | each dialect against TrikeShed's PRELOAD: what lowers to `trikeshed`, in what order, and what is done |

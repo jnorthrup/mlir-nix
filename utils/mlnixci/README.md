@@ -1,7 +1,9 @@
 # mlnixci
 
-mini-luci, kept in mlir-nix as `mlnixci/` (the server binary and its service are still called mini-luci). A faceted,
-read-only page over the options of a NixOS-style configuration, evaluated by [mlnix](..) (the MLIR
+mlnix's configuration interface, as LuCI (the Lua Configuration Interface) is OpenWrt's: mini-luci, moved into mlir-nix as
+`utils/mlnixci/` (the server binary and its service are still called mini-luci). [docs/MLNIXCI.md](../../docs/MLNIXCI.md)
+says what it is and where it goes next. A faceted, read-only page over the options of a NixOS-style configuration,
+evaluated by [mlnix](../..) (the MLIR
 Nix evaluator). Nothing is written to the system. A what-if overlay, held in memory, is evaluated with the configuration
 at mkForce priority 50, and the page reports what it changes.
 
@@ -25,7 +27,7 @@ at mkForce priority 50, and the page reports what it changes.
   NixOS configuration (22,008 options on mlnixos).
 - `query.mlir` is the faceted query, written in TrikeShed's cursor ops and lowered by mlnix-opt `--trikeshed-lower-cursors`.
 - `src/index.mlir` is a JSON text's index in TrikeShed's forms, lowered the same way: `confix.index` (this repository's
-  confix dialect) scans the text with TrikeShed's Confix scanner (`../lib/Confix/confix.ll`) into ConfixIndexK's
+  confix dialect) scans the text with TrikeShed's Confix scanner (`../../lib/Confix/confix.ll`) into ConfixIndexK's
   rows (Spans, Tags, DirectChildren) and kids, and every read of it (a tag, a span, a child, KeyToChild) is a trikeshed op.
 - `src/columns.mlir` codes the corpus's columns and orders its rows, in TrikeShed's ops lowered the same way: the rows by
   the bytes of their pieces (`trikeshed.sorted`, its order an unsigned `compare` of two slices: Cursor.ordered), each
@@ -70,12 +72,12 @@ API:
 ## Build and run (in the machine)
 
     # mlnix: this checkout built against apt.llvm.org LLVM/MLIR 22 (llvm-22-dev libmlir-22-dev mlir-22-tools clang-22)
-    cmake -S .. -B ../build -G Ninja -DCMAKE_CXX_COMPILER=clang++-22 \
+    cmake -S ../.. -B ../../build -G Ninja -DCMAKE_CXX_COMPILER=clang++-22 \
       -DLLVM_DIR=/usr/lib/llvm-22/lib/cmake/llvm -DMLIR_DIR=/usr/lib/llvm-22/lib/cmake/mlir \
       -DMLIR_TABLEGEN_EXE=/usr/lib/llvm-22/bin/mlir-tblgen
-    cmake --build ../build --target mlnix mlnix-opt
+    cmake --build ../../build --target mlnix mlnix-opt
 
-    make                                                  # the server (also needs liburing-dev); MLIR_NIX is ..
+    make                                                  # the server (also needs liburing-dev); MLIR_NIX is ../..
     make check NIXPKGS_LIB=/path/to/nixpkgs/lib          # facet-check, then the e2e test on os/
     sudo make install NIXPKGS_LIB=/path/to/nixpkgs/lib
     sudo systemctl enable --now mini-luci                 # http://mlnix-os.orb.local:8080/
