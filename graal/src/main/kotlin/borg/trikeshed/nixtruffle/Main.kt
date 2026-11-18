@@ -7,6 +7,7 @@ import java.io.File
 //   nix-truffle --bin DIR --out OUTDIR F.nix...   each result to OUTDIR/<name>.out (or the error to .err)
 //   nix-truffle --bin DIR --bench N F.nix          N evaluations in one JVM, the time of each (Graal compiles hot bodies)
 //   nix-truffle --bin DIR --kif [--ontology F]... F.kif...   the closure of the theory, as mlnix-kif --chase --dump prints it
+//   nix-truffle --bin DIR --emit-trikeshed F.nix   the LLVM arm's first cut: F as an MLIR module in TrikeShed's ops (Native.kt)
 fun main(args: Array<String>) {
     var bin = "build/bin"; var out: String? = null; var bench = 0
     val files = ArrayList<String>()
@@ -19,6 +20,11 @@ fun main(args: Array<String>) {
             else -> files.add(args[i])
         }
         i++
+    }
+    if (args.contains("--emit-trikeshed")) {
+        val i = args.indexOf("--bin")
+        val f = args.filterIndexed { j, s -> s != "--emit-trikeshed" && j != i && j != i + 1 }.single()
+        kotlin.system.exitProcess(Native.main(File(if (i >= 0) args[i + 1] else "build/bin").absolutePath, f))
     }
     if (args.contains("--kif")) { // the Graal arm of kif-chase (Kif.kt)
         val i = args.indexOf("--bin")

@@ -30,7 +30,29 @@ object Graph {
         }
         IOMemento.IoArray -> { val kids = c.cellKids; List(kids.size) { plain(kids[it]) } }
         IOMemento.IoInt -> (c.reify() as Number).toLong()
+        IOMemento.IoDouble -> integer(c) ?: c.reify()
         else -> c.reify()
+    }
+
+    /// Confix tags every JSON number IoDouble, and reify reads it as a Double: an integer past 2^53 would lose its low bits
+    /// (`9223372036854775800` read as Long.MAX_VALUE).  A number written as an optional minus and digits that fit 64 bits
+    /// is the Long it spells (ConfixColumns.memberTag's rule; the TrikeShed jar the arm builds with predates it).
+    private fun integer(c: ConfixCell): Long? {
+        val src = c.b
+        var i = c.row.open
+        val close = c.row.close
+        val negative = i <= close && src[i].toInt().toChar() == '-'
+        if (negative) i++
+        if (i > close) return null
+        var v = 0L // accumulated negative, so Long.MIN_VALUE fits
+        while (i <= close) {
+            val d = src[i++].toInt().toChar() - '0'
+            if (d < 0 || d > 9 || v < Long.MIN_VALUE / 10) return null
+            v *= 10
+            if (v < Long.MIN_VALUE + d) return null
+            v -= d
+        }
+        return if (negative) v else if (v == Long.MIN_VALUE) null else -v
     }
 
     fun parse(json: ByteArray): Any? {
@@ -46,6 +68,15 @@ object Graph {
         m["op"] as String, ints(m["res"]), ints(m["ins"]), m["types"] as List<String>, m["attrs"] as Map<String, Any?>,
         (m["regions"] as List<List<Map<String, Any?>>>).map { r -> r.map { b -> Block(ints(b["args"]), (b["ops"] as List<Map<String, Any?>>).map(::op)) } },
     )
+
+    /// A file's son-form module: `mlnix emit-mlir F | mlnix-opt --nix-defer PASSES --son-export`.
+    fun export(bin: String, file: String, passes: String): List<Op> {
+        val p = ProcessBuilder("sh", "-c", "'$bin/mlnix' emit-mlir \"$1\" | '$bin/mlnix-opt' --nix-defer $passes --son-export -o /dev/null", "sh", file)
+            .redirectError(ProcessBuilder.Redirect.PIPE).start()
+        val out = p.inputStream.readAllBytes(); val err = p.errorStream.readAllBytes()
+        if (p.waitFor() != 0 || out.isEmpty()) throw NixError("export of $file failed: ${String(err).trim()}")
+        return module(out)
+    }
 
     @Suppress("UNCHECKED_CAST")
     fun module(json: ByteArray): List<Op> = ((parse(json) as Map<String, Any?>)["module"] as List<Map<String, Any?>>).map(::op)

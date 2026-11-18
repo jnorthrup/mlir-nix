@@ -88,7 +88,7 @@ Steps:
      `nix.bool`, `nix.null` and the comparison / test primops (`nixty.is_*`, `less_than`, `length`, ...) would make them.
 2. son typed: the pool's rows (`trikeshed.append`) and first forces (`trikeshed.anchor`) carry step 1's types, and the evaluator
    reads son IR (1547e4a: not built).
-3. The fork.  LLVM: schedule son into blocks, lower with tag checks dropped where a type is known.  Graal: export the node graph
+3. The fork.  LLVM: schedule son into blocks, lower with tag checks dropped where a type is known (first cut below).  Graal: export the node graph
    with the attributes and positions a node now reaches through its `def`.
    - Graal arm, first cut (done): `mlnix-opt --nix-defer --son-export` writes the son-form module as JSON (an op per object, values
      numbered, a primop's `prim_key`, no source positions; test/mlir/son-export.mlir).  `graal/` is a Kotlin Truffle interpreter
@@ -109,6 +109,48 @@ Steps:
      cache) and searches any others; `//` merges the two sorted rows, keeping a side's names when the other's are a subset
      of them.  graal/bench/attrs.nix: 25.0 -> 22.9 ms with son, 28.1 -> 24.4 ms without, 23 MB a run less; the other six
      the same.  Next: a DirectCallNode inline cache in ApplyNode.
+   - LLVM arm, first cut (done): `nix-truffle --emit-trikeshed F.nix` (graal/.../Native.kt) reads the same son-form export
+     and writes F as an MLIR module in TrikeShed's ops; `mlnix-opt --trikeshed-lower-cursors` and the stock lowering mlnixci
+     is built with take it to a native program that prints F's value (`scripts/nix-native.sh F OUT`).  No C++ is added: the
+     emitter is Kotlin over the export, and the lowering is mlnixci's.
+     - The forms: genList is `trikeshed.series n { i -> f i }` (Series.kt's `n j { ... }`), foldl' `trikeshed.fold`, length
+       and elemAt `trikeshed.size` and `trikeshed.at`; an integer or a Boolean is PRELOAD's plain element (i64, i1), each
+       operation checked as Nix checks it, with Nix's messages.  A closure is its row and its captures, known while writing,
+       so an application is the body written in place; a body that calls itself is a func.func.
+     - Laziness: a value is written where it is first needed, inside the region that needs it (an `if`'s branch, the right
+       side of `&&`, `||` or `->`, a fold's step).  It is computed sooner only where son says it may be: a call's argument
+       (son.body's arg_forced), a recursive body's captures (forced_captures), a fold's first accumulator that the step
+       forces.  A series computes a list's elements when the list is made, so a list whose elements may fail is kept only
+       where it is the printed value (`--strict` forces each in order) and refused under length, elemAt and foldl'.
+     - A function made for a recursive body takes its captured integers as parameters; where the body names itself, it is
+       the row over those parameters.  A closure it captures must capture only closures, all the way down (the function
+       sees none of its caller's values).
+     - Refused, saying what it met: sets, strings, floats, set patterns, recursion over Booleans, and the cases
+       test/native's `# refused:` files name.
+     - `scripts/native-check.py`: 30 of test/native's 37 cases and graal/bench's six (attrs.nix uses sets) print what mlnix
+       prints (stdout, exit code, an error's first line); the other 7 are refused as their first line says.  Two mutants
+       fail it: an `if` computing both branches first, `+` unchecked.  On Linux (mlnix-os, LLVM 22; the modules emitted on
+       the Mac, lowered and compiled there) the 36 programs print what that build of mlnix prints.  The programs link the C
+       library alone (libc; libSystem on the Mac): no libstdc++.
+     - Speed on the Mac (hyperfine, 20+ runs; the Graal arm's warm runs from its 930aa98/1cbb492 bench, with son):
+
+       | file | mlnix, process | Graal arm, process | Graal arm, warm run | native, process | compile |
+       |---|---|---|---|---|---|
+       | leaf | 39.2 ms | 369 ms | 18.0 ms | 1.5 ms | 0.43 s |
+       | curried | 51.5 ms | 418 ms | 24.5 ms | 1.5 ms | 0.26 s |
+       | prims | 40.1 ms | 383 ms | 17.7 ms | 1.5 ms | 0.27 s |
+       | slots1 | 33.3 ms | 378 ms | 15.7 ms | 1.4 ms | 0.26 s |
+       | slots9 | 44.4 ms | 385 ms | 19.8 ms | 1.4 ms | 0.27 s |
+       | fib | 22.8 ms | 335 ms | 2.2 ms | 1.3 ms | 0.27 s |
+
+       Most of a native run is the process: a program that only prints `<LAMBDA>` takes 1.2 ms.  Peak RSS: leaf 3.5 MB
+       (mlnix 93 MB), fib 1.2 MB (44 MB).  These files are the best case (integer loops, no sets or strings), and the
+       compile costs more than ten mlnix runs, so this pays where a program is compiled once and run many times.
+     - Found on the way: the arms' export reader (Graph.kt) read every JSON number as a Double, so an integer past 2^53 lost
+       its low bits (`9223372036854775800` read as Long.MAX_VALUE); and mlnix's `+` overflow error printed the wrapped sum
+       for the left operand (the upstream test eval-fail-overflowing-add is now exact).
+     - Next: sets as `trikeshed.series2` (attrs.nix), strings as CharSeries, and lazy elements (a series as a view) so
+       length and elemAt need not refuse.
 4. `//` as `trikeshed.layers` for large bases: on nixpkgs-73 the ~800 merges with a side of 4096+ rows copy ~260 MB of the arena's
    311 MB of flat merges (b58d02c chose flat for speed: layering every merge read 2.5-7% slower).  The layer here is only for the
    package set.  Fix the stale `Bindings::Layer` reference in TS_LayersType's description in the same change.

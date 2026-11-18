@@ -1724,7 +1724,7 @@ void EvalState::evalConcatStrings(Node *node, Frame *env, Value &out) {
     if (first) firstType = v->type;
     if (firstType == VType::Int) {
       if (v->type == VType::Int) {
-        if (__builtin_add_overflow(n, v->integer, &n)) throwIntOverflow(n, v->integer, ppos);
+        if (int64_t s; __builtin_add_overflow(n, v->integer, &s)) throwIntOverflow(n, v->integer, ppos); else n = s;
       } else if (v->type == VType::Float) {
         firstType = VType::Float;
         nf = (double)n;

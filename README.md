@@ -70,7 +70,11 @@ values. A select that has met those names reads its name's place without a searc
 **No native tier.** The opt-in JIT (`MLNIX_JIT=1`) lowered hot lambdas straight to `arith`, `cf` and LLVM, beside TrikeShed
 rather than through it. On both workloads it was slower than the interpreter (11-12%) and used more memory (4-7%), with the
 same answers, so it was removed; it is at 3b46257
-([record](docs/bench/local/jit-removal-20261118/RESULTS.md)). An LLVM arm is to lower through `trikeshed`.
+([record](docs/bench/local/jit-removal-20261118/RESULTS.md)). The LLVM arm lowers through `trikeshed` instead: its first cut
+(`scripts/nix-native.sh F OUT`) writes a file's son form as `trikeshed.series`, `fold`, `size` and `at` over checked
+integers, from Kotlin (`nix-truffle --emit-trikeshed`), and lowers it as mlnixci is lowered. Six of the seven Graal bench
+files compile to programs that run in 1.3-1.5 ms (mlnix: 23-52 ms) and print what mlnix prints; anything it cannot keep
+lazy, and sets and strings, it refuses ([PRELOAD-DIALECTS.md](docs/PRELOAD-DIALECTS.md) step 3).
 
 **The default evaluator** is C++ over nodes. When a body is indexed, each of its SSA values gets a record of its kind, its
 operands, its frame slot and the function that evaluates it; a thunk holds its node, so evaluating is one indirect call. The
@@ -82,10 +86,12 @@ MLIR ops stay the program: nodes are made from them and read their attributes.
   - `son`'s pool rows as `trikeshed.append` and first forces as `trikeshed.anchor`, with the evaluator reading son IR
     (both arms hold the pool in that form: the native FilePool is the Cursor, and the Graal arm's rows are appended
     in son.pool's order with each body an anchor its first call mints; the IR does not write the ops yet);
-  - an LLVM arm that lowers through `trikeshed` (the JIT, which lowered straight to `arith` and LLVM, is removed);
+  - an LLVM arm that lowers through `trikeshed` (first cut: integers, Booleans, functions and integer lists;
+    `scripts/native-check.py`);
   - `//` as `trikeshed.layers`.
 
-  No pass creates a trikeshed op yet. `trikeshed.append` and `trikeshed.anchor` are used nowhere, and `trikeshed.drain` only
+  No pass creates a trikeshed op yet (the LLVM arm's emitter is Kotlin over son-export). `trikeshed.append` and
+  `trikeshed.anchor` are used nowhere, and `trikeshed.drain` only
   by tests and mlnixci (its columns, the escapes and digits its replies are written with, and the query's and the
   report's whole replies).
   Since 18 November `combine` and `combineAll` lower as Combine.kt's views: a drain of one drains its parts in turn,
