@@ -286,14 +286,12 @@ struct RegionInfo {
 };
 
 struct Frame {
-  /// The enclosing frame, with bit 0 set once a thunk or a closure has been made over this frame.  A frame that returns with the bit clear can
-  /// never be reached again, and its storage is recycled (EvalState::newFrame / recycleFrame).
+  /// The enclosing frame.  When a frame dies is son's to say (son.release, sonDead), not the frame's: the run-time capture bit and the recycler
+  /// it fed (MLNIX_RECYCLE: -2 to -3% peak memory, +1 to +4% time on Kali, 77de09c:docs/FRAME-BYTES.md) are gone.
   uintptr_t upBits;
   RegionInfo *info;
   Value *slots[0];
-  Frame *up() const { return reinterpret_cast<Frame *>(upBits & ~uintptr_t(1)); }
-  bool captured() const { return upBits & 1; }
-  void capture() { upBits |= 1; }
+  Frame *up() const { return reinterpret_cast<Frame *>(upBits); }
 };
 
 /// What the dialect promotes a value to (NixDialect::promotionOf): which cell it gets, if any, and what may read it back.
@@ -785,9 +783,9 @@ struct EvalState {
   /// MLNIX_STATS: evalOp with the census.
   void evalOpCounted(Node *n, Frame *env, Value &out);
   RegionInfo *regionInfo(mlir::Region *r);
-  /// A frame of `ri`'s body: its slots empty.  The ordinary case (no census, no recycling) is a bump of the arena, here; the rest out of line.
+  /// A frame of `ri`'s body: its slots empty.  The ordinary case (no census) is a bump of the arena, here; the census's out of line.
   Frame *newFrame(RegionInfo *ri, Frame *up) {
-    if (statsEnabled || recycleOn) [[unlikely]] return newFrameSlow(ri, up);
+    if (statsEnabled) [[unlikely]] return newFrameSlow(ri, up);
     unsigned n = ri->numSlots;
     auto *f = static_cast<Frame *>(alloc.Allocate(sizeof(Frame) + n * sizeof(Value *), alignof(Frame)));
     f->upBits = reinterpret_cast<uintptr_t>(up);
@@ -914,21 +912,9 @@ struct EvalState {
   Value *evalNow(Frame *f, Node *s, Value *nv);
   void statCell(Frame *f, Value *nv);
   uint64_t nEager = 0;   // MLNIX_STATS
-  // Frames that returned uncaptured, by slot count: a stack per size, linked through the frame's own first word.  The newest is reused first, so
-  // a recycled frame is almost always still in L1 (77de09c:docs/FRAME-BYTES.md: 97 to 98% of reuses are within 32 KiB of allocation).
-  static constexpr unsigned kRecycleMax = 64;
-  Frame *freeFrames[kRecycleMax] = {};
   Value sharedNullCell;            // type Null from construction (Value())
   Value sharedShortCells[257];     // "" and each byte, made on first use
   char shortBytes[2 * 257] = {};   // their bytes: one, then a NUL
-  bool recycleOn = false;  // MLNIX_RECYCLE=1 turns it on: it trades a little time for memory (77de09c:docs/FRAME-BYTES.md)
-  void recycleFrame(Frame *f) {
-    unsigned n = f->info->numSlots;
-    if (n >= kRecycleMax) return;
-    f->info = nullptr;  // a stale use of a recycled frame fails at once
-    f->upBits = reinterpret_cast<uintptr_t>(freeFrames[n]);
-    freeFrames[n] = f;
-  }
   void markCaptured(Frame *f);
   void markPinned(Frame *f);
   void statUnref(Frame *f);

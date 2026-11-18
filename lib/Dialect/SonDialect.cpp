@@ -73,7 +73,7 @@ class MustForce {
 public:
   /// `may`: the values forced on some path that returns instead (the arms of an if joined, both sides of and/or/impl).
   MustForce(Block &block, nix::NixDialect *nixd, llvm::DenseMap<Operation *, bool> *argStrict = nullptr, bool may = false)
-      : block(block), nixd(nixd), argStrict(argStrict), may(may) {
+      : nixd(nixd), argStrict(argStrict), may(may) {
     for (BlockArgument a : block.getArguments()) if (index.try_emplace(a, index.size()).second) values.push_back(a);
     for (Operation &o : block)
       for (Value r : o.getResults()) if (index.try_emplace(r, index.size()).second) values.push_back(r);
@@ -97,7 +97,6 @@ public:
   bool neverReturns() const { return never; }
 
 private:
-  Block &block;
   nix::NixDialect *nixd;
   llvm::DenseMap<Operation *, bool> *argStrict; // per son.body: forces its argument (memo, shared across bodies)
   bool may;

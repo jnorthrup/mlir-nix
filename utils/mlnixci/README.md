@@ -44,7 +44,10 @@ at mkForce priority 50, and the page reports what it changes.
 - `src/text.mlir` makes what the reply builder writes besides pieces of a text, in TrikeShed's ops lowered the same way:
   a string's inside as JSON writes it (`json_escape`: `combineAll` of each byte's escape, a slice of one constant table,
   then `drain` into the builder's room) and a number's digits as printf's `%ld` writes them (`decimal`: their count a
-  `fold` over the powers of ten, each digit an element of a `series`).
+  `fold` over the powers of ten, each digit an element of a `series`).  The query's reply is made there too
+  (`query_reply`): one `combine` of the counts, a `combineAll` of the facets (each a `combineAll` of its codes) and a
+  `combineAll` of the page of hits, each hit the option's own text in the corpus (a slice) and the what-if's pieces.
+  Lowered as Combine.kt's views, a reply is one buffer that each piece is drained into once.
 - `src/*.mlir` is the rest of the server, written in the func/scf/arith/llvm dialects. The stock MLIR pipeline lowers it,
   and it links with libc and liburing-ffi only. There is no C++ and no C++ library.
   - `series.mlir`: coordinates into byte series (TrikeShed's TwinPacked: an i64, start << 32 | length, half-open), and
@@ -55,7 +58,8 @@ at mkForce priority 50, and the page reports what it changes.
   - `corpus.mlir`: mlnix's output as six dictionary-coded columns, plus the keys and the search text (columns.mlir's
     `opt_text`), built once as series.
   - `eval.mlir`: mlnix as a child process (posix_spawn). Its output and errors are read into growing series.
-  - `api.mlir`: the routes. An overlay edit is a splice at the coordinates of the overlay's index.
+  - `api.mlir`: the routes. An overlay edit is a splice at the coordinates of the overlay's index. The query route
+    counts and pages, then hands the columns to text.mlir's `query_reply` and writes what it made.
   - `http.mlir`: HTTP/1.1 on one io_uring ring. SIGTERM, read from the same ring, drains it.
 
 API:
@@ -92,15 +96,19 @@ still builds it from the separate mini-luci repository (`build.sh MLIR-NIX-BRANC
 ## Verified (2026-11-16, OrbStack machine `mlnix-os`, Debian trixie arm64, LLVM 22.1.8)
 
 - `make check`: facet-check runs 2,000 random queries, the last over 22,000 rows, and the compiled query agrees with
-  the hand count on every one. text-check writes 2,259 texts (every byte, random ones, 100 KB) and 10,105 numbers
-  (both ends of i64) with text.mlir and finds them as the builder wrote them before. The e2e test passes 51/51,
-  covering:
+  the hand count on every one. text-check writes 2,259 texts (every byte, random ones, 100 KB), 10,105 numbers (both
+  ends of i64) and 500 query replies over random corpora with text.mlir and finds them as the builder wrote them
+  before. The e2e test passes 51/51, covering:
   - facets and counts, selections, text search, and paging;
   - what-if values the module system refuses (strMatching, port range, enum);
   - round-tripping of non-ASCII text, quotes, backslash and `${`;
   - reset, the emptied object dropped, and clear;
   - malformed requests;
   - settings.json left byte for byte as it was.
+- The query's reply from text.mlir (2026-11-18): against the server before it (8b5e99d) on the NixOS corpus (22,008
+  rows), 500 random queries with 100 what-if steps between them answer byte for byte the same but for queryMs, and
+  in the same time (median of 400, alternating: the first page 0.467 -> 0.462 ms, every hit, 1.16 MB, 0.677 -> 0.669
+  ms).
 - `ldd mini-luci`: linux-vdso, liburing-ffi.so.2, libc.so.6 and the loader. The binary is 68,080 bytes stripped. The
   C++ server it replaces was 134,184 bytes and also loaded libstdc++, libm and libgcc_s.
 - SIGTERM drains: the accept is cancelled, admitted connections are answered, and the listener is closed before the ring.
@@ -111,4 +119,7 @@ still builds it from the separate mini-luci repository (`build.sh MLIR-NIX-BRANC
   one is a full mlnix run.
 - The ring waits on each mlnix evaluation (a child process), so other requests wait while one runs.
 - mlnix itself is C++, built on MLIR's C++ API, and loads libstdc++. mini-luci's own code has no C++.
-- `trikeshed-lower-cursors` does not lower groupBy, pivot, keyed joins or lazy series.
+- `trikeshed-lower-cursors` does not lower groupBy, pivot or keyed joins. A series is a buffer where it is made unless
+  it is drained (combine and combineAll are views, drained part by part; a series drained is stored element by
+  element).
+- The rest of the replies (report, what-if, facets) are still written call by call through the builder.

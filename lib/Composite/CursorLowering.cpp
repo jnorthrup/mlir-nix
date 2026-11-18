@@ -24,9 +24,9 @@
 //   j, first, second                shifts of the i64 that a pair of i32 halves is
 //   facet(c, k) {col -> r}          the region with col = column(c, k)
 //   drain(xs, into)                 a loop storing xs into `into`; the result is size(xs)
-//   combine(a, b, ..)               a buffer of the total size, each part copied into it in turn
-//   combineAll(n) {k -> part}       a loop counting each part's size (a copy of the region) and writing its (start,
-//                                   length); a buffer of the total; a loop copying each part (the region again) to its start
+//   combine(a, b, ..)               Combine.kt's view, rewritten before the conversion (Combine.kt's views, below):
+//   combineAll(n) {k -> part}       its size the parts' sizes added, its drain the parts' drains in turn, and a buffer
+//                                   only where something reads it by index
 //   parts(xs, d)                    Series.div: count the delimiters, then each part's (start, length)
 //   text(buffer)                    a constant's 1-D buffer, cast to the series' strided layout
 //   adjacency(from, to, n)          a counting sort: each node's (first, count) into the far ends, in edge order
@@ -52,8 +52,10 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Transforms/Patterns.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "mlir/Transforms/RegionUtils.h"
 
 using namespace mlir;
 
@@ -723,84 +725,140 @@ struct ClosureLowering : Lowering<ClosureOp> {
   }
 };
 
-/// n elements of `from`, stored into `into` from `at` on.
-void copyInto(OpBuilder &b, Location loc, Value from, Value n, Value into, Value at) {
-  OpBuilder::InsertionGuard guard(b);
-  auto loop = scf::ForOp::create(b, loc, cIndex(b, loc, 0), n, cIndex(b, loc, 1));
-  b.setInsertionPoint(loop.getBody()->getTerminator());
-  Value i = loop.getInductionVar();
-  store(b, loc, load(b, loc, from, i), into, arith::AddIOp::create(b, loc, at, i));
+//===-- Combine.kt's views ----------------------------------------------------------------------------------------===//
+// Before the conversion, a combine and a combineAll are what Combine.kt makes them: views, their parts read where the view
+// is read, never a buffer of their own unless something reads one by index.  The laws TrikeShed.td states give the rest:
+//   size(combine(a, b))   size(a) + size(b); a combineAll's, its parts' sizes added by a loop over a copy of its region;
+//                         a slice's, its count; a series', its n; a select's, the select of the two
+//   drain(combine(a, b))  drain(a), then drain(b) where it ended; a combineAll's, its parts drained in turn by a loop over
+//                         a copy of its region; a series' (of the cells' type), its elements stored where they go
+// A view something else reads (at, a call, a return, an scf.yield) is made here: a buffer of its size with the view
+// drained into it, and a combineAll's coordinates, when they are read, each part's (start, length) from a loop over a copy
+// of its region.  So a part is made where it is drained, once, and copied once; a part that is a slice is never made at
+// all.  What the views leave unread is erased before the conversion sees it.
+
+/// The one block of a view's region, cloned at the builder's insertion point with k for its argument: what it yields.
+Value cloneBody(OpBuilder &b, Region &region, Value k) {
+  IRMapping map;
+  map.map(region.getArgument(0), k);
+  for (Operation &op : region.front().without_terminator()) b.clone(op, map);
+  return map.lookupOrDefault(cast<YieldOp>(region.front().getTerminator()).getValues()[0]);
 }
 
-/// combine(a, b, ..): a buffer of the parts' total size, each part copied into it in turn.
-struct CombineLowering : Lowering<CombineOp> {
-  using Lowering::Lowering;
-  LogicalResult matchAndRewrite(CombineOp op, OpAdaptor a, ConversionPatternRewriter &rw) const override {
-    Location loc = op.getLoc();
-    Type element = elementOf(types(), op.getResult().getType());
-    Value total = cIndex(rw, loc, 0);
-    SmallVector<Value> sizes;
-    for (Value part : a.getParts()) {
-      sizes.push_back(length(rw, loc, part));
-      total = arith::AddIOp::create(rw, loc, total, sizes.back());
-    }
-    Value out = newSeriesBuffer(rw, loc, element, total), at = cIndex(rw, loc, 0);
-    for (auto [part, n] : llvm::zip(a.getParts(), sizes)) {
-      copyInto(rw, loc, part, n, out, at);
-      at = arith::AddIOp::create(rw, loc, at, n);
-    }
-    rw.replaceOp(op, out);
-    return success();
-  }
-};
+/// A loop over a combineAll's parts carrying a position from `from`: step(part k, position, k) gives the next.
+Value overParts(OpBuilder &b, Location loc, CombineAllOp all, Value from, function_ref<Value(Value, Value, Value)> step) {
+  auto loop = scf::ForOp::create(b, loc, cIndex(b, loc, 0), all.getCount(), cIndex(b, loc, 1), ValueRange{from});
+  OpBuilder::InsertionGuard guard(b);
+  b.setInsertionPointToEnd(loop.getBody());
+  Value k = loop.getInductionVar();
+  scf::YieldOp::create(b, loc, ValueRange{step(cloneBody(b, all.getPart(), k), loop.getRegionIterArgs()[0], k)});
+  return loop.getResult(0);
+}
 
-/// combineAll(n) {k -> part}: the first loop runs a copy of the region for each k and writes its part's (start, length),
-/// carrying the running start; then a buffer of the total, and the second loop runs the region itself for each k and
-/// copies its part to its start.
-struct CombineAllLowering : Lowering<CombineAllOp> {
-  CombineAllLowering(const TypeConverter &types, MLIRContext *ctx) : Lowering(types, ctx) {
-    // the copy of the region that the first loop runs holds any combineAll nested in it, which this pattern lowers in
-    // turn while it is still being applied: as many times as they are nested in the source, so the recursion ends
-    setHasBoundedRewriteRecursion();
+/// size(xs) by the laws, without making xs.
+Value sizeOf(OpBuilder &b, Location loc, Value xs) {
+  Operation *def = xs.getDefiningOp();
+  if (auto c = dyn_cast_or_null<CombineOp>(def)) {
+    Value total = cIndex(b, loc, 0);
+    for (Value part : c.getParts()) total = arith::AddIOp::create(b, loc, total, sizeOf(b, loc, part));
+    return total;
   }
-  LogicalResult matchAndRewrite(CombineAllOp op, OpAdaptor a, ConversionPatternRewriter &rw) const override {
-    Location loc = op.getLoc();
-    Type element = elementOf(types(), op.getResult().getType());
-    Type i64 = rw.getI64Type(), idx = rw.getIndexType();
-    Value n = a.getCount(), zero = cIndex(rw, loc, 0), one = cIndex(rw, loc, 1);
-    Value c32 = cInt(rw, loc, i64, 32), mask = cInt(rw, loc, i64, 0xffffffff);
-    Value coordinates = newSeriesBuffer(rw, loc, i64, n);
-    auto counting = scf::ForOp::create(rw, loc, zero, n, one, ValueRange{zero});
-    Block *body = counting.getBody();
-    rw.cloneRegionBefore(op.getPart(), counting.getRegion(), counting.getRegion().end());
-    Block *copy = &counting.getRegion().back();
-    auto yield = dyn_cast<YieldOp>(copy->getTerminator());
-    if (!yield || yield.getValues().size() != 1) return rw.notifyMatchFailure(op, "combineAll's region yields one series");
-    Value yielded = yield.getValues()[0];
-    rw.eraseOp(yield);
-    rw.inlineBlockBefore(copy, body, body->end(), ValueRange{counting.getInductionVar()});
-    rw.setInsertionPointToEnd(body);
-    Value part = rw.getRemappedValue(yielded);
-    if (!part) return rw.notifyMatchFailure(op, "the part does not lower to a buffer");
-    Value start = counting.getRegionIterArgs()[0], size = length(rw, loc, part);
-    Value s = arith::IndexCastUIOp::create(rw, loc, i64, start), l = arith::IndexCastUIOp::create(rw, loc, i64, size);
-    store(rw, loc, arith::OrIOp::create(rw, loc, arith::ShLIOp::create(rw, loc, s, c32), arith::AndIOp::create(rw, loc, l, mask)),
-          coordinates, counting.getInductionVar());
-    scf::YieldOp::create(rw, loc, ValueRange{arith::AddIOp::create(rw, loc, start, size).getResult()});
-    rw.setInsertionPointAfter(counting);
-    Value out = newSeriesBuffer(rw, loc, element, counting.getResult(0));
-    auto copying = scf::ForOp::create(rw, loc, zero, n, one);
-    rw.setInsertionPoint(copying.getBody()->getTerminator());
-    Value k = copying.getInductionVar();
-    auto again = inlineBody(rw, types(), op.getPart(), ValueRange{k});
-    if (failed(again) || again->size() != 1) return rw.notifyMatchFailure(op, "combineAll's region yields one series");
-    Value at = arith::IndexCastUIOp::create(rw, loc, idx, arith::ShRUIOp::create(rw, loc, load(rw, loc, coordinates, k), c32));
-    copyInto(rw, loc, (*again)[0], length(rw, loc, (*again)[0]), out, at);
-    rw.setInsertionPointAfter(copying);
-    rw.replaceOp(op, ValueRange{out, coordinates});
-    return success();
+  if (auto all = dyn_cast_or_null<CombineAllOp>(def); all && xs == all.getResult())
+    return overParts(b, loc, all, cIndex(b, loc, 0),
+                     [&](Value part, Value at, Value) -> Value { return arith::AddIOp::create(b, loc, at, sizeOf(b, loc, part)); });
+  if (auto s = dyn_cast_or_null<SliceOp>(def)) return s.getCount();
+  if (auto s = dyn_cast_or_null<SeriesOp>(def)) return s.getSize();
+  if (auto s = dyn_cast_or_null<arith::SelectOp>(def))
+    return arith::SelectOp::create(b, loc, s.getCondition(), sizeOf(b, loc, s.getTrueValue()), sizeOf(b, loc, s.getFalseValue()));
+  return SizeOp::create(b, loc, b.getIndexType(), xs);
+}
+
+/// drain(xs) into `into` from `at` on, by the laws: where it ended.
+Value drainAt(OpBuilder &b, Location loc, Value xs, Value into, Value at) {
+  Operation *def = xs.getDefiningOp();
+  if (auto c = dyn_cast_or_null<CombineOp>(def)) {
+    for (Value part : c.getParts()) at = drainAt(b, loc, part, into, at);
+    return at;
   }
-};
+  if (auto all = dyn_cast_or_null<CombineAllOp>(def); all && xs == all.getResult())
+    return overParts(b, loc, all, at, [&](Value part, Value from, Value) { return drainAt(b, loc, part, into, from); });
+  // a series of the cells' type: each element stored where it goes, never a buffer of its own
+  if (auto s = dyn_cast_or_null<SeriesOp>(def); s && s.getType().getElement() == cast<MemRefType>(into.getType()).getElementType()) {
+    auto loop = scf::ForOp::create(b, loc, cIndex(b, loc, 0), s.getSize(), cIndex(b, loc, 1));
+    b.setInsertionPoint(loop.getBody()->getTerminator());
+    Value k = loop.getInductionVar();
+    store(b, loc, cloneBody(b, s.getAt(), k), into, arith::AddIOp::create(b, loc, at, k));
+    b.setInsertionPointAfter(loop);
+    return arith::AddIOp::create(b, loc, at, s.getSize());
+  }
+  Value rest = arith::SubIOp::create(b, loc, memref::DimOp::create(b, loc, into, 0), at);
+  Value cells = memref::SubViewOp::create(b, loc, into, ArrayRef<OpFoldResult>{at}, ArrayRef<OpFoldResult>{rest},
+                                          ArrayRef<OpFoldResult>{b.getIndexAttr(1)});
+  return arith::AddIOp::create(b, loc, at, DrainOp::create(b, loc, b.getIndexType(), xs, cells));
+}
+
+/// A use of a view by the view it is a part of: an operand of a combine, or what a combineAll's region yields.
+bool partOf(OpOperand &use) {
+  Operation *by = use.getOwner();
+  return isa<CombineOp>(by) || (isa<YieldOp>(by) && isa<CombineAllOp>(by->getParentOp()));
+}
+
+/// A view something else reads, made: a buffer of its size, drained into; a combineAll's coordinates, if they are read.
+/// The view it is a part of, if any, drains that buffer.
+void makeView(Operation *view, const TypeConverter &types) {
+  OpBuilder b(view);
+  Location loc = view->getLoc();
+  Value xs = view->getResult(0);
+  if (!llvm::all_of(xs.getUses(), partOf)) {
+    auto t = cast<SeriesType>(xs.getType());
+    Value buffer = memref::AllocOp::create(b, loc, MemRefType::get({ShapedType::kDynamic}, types.convertType(t.getElement())),
+                                           ValueRange{sizeOf(b, loc, xs)});
+    drainAt(b, loc, xs, buffer, cIndex(b, loc, 0));
+    xs.replaceAllUsesWith(TextOp::create(b, loc, t, buffer).getResult());
+  }
+  auto all = dyn_cast<CombineAllOp>(view);
+  if (!all || all.getCoordinates().use_empty()) return;
+  Type i64 = b.getI64Type();
+  Value coordinates = memref::AllocOp::create(b, loc, MemRefType::get({ShapedType::kDynamic}, i64), ValueRange{all.getCount()});
+  Value c32 = cInt(b, loc, i64, 32), mask = cInt(b, loc, i64, 0xffffffff);
+  overParts(b, loc, all, cIndex(b, loc, 0), [&](Value part, Value at, Value k) -> Value {
+    Value n = sizeOf(b, loc, part);
+    Value s = arith::IndexCastUIOp::create(b, loc, i64, at), l = arith::IndexCastUIOp::create(b, loc, i64, n);
+    store(b, loc, arith::OrIOp::create(b, loc, arith::ShLIOp::create(b, loc, s, c32), arith::AndIOp::create(b, loc, l, mask)),
+          coordinates, k);
+    return arith::AddIOp::create(b, loc, at, n);
+  });
+  all.getCoordinates().replaceAllUsesWith(TextOp::create(b, loc, all.getCoordinates().getType(), coordinates).getResult());
+}
+
+/// The views of f rewritten by the laws until none is left: sizes and drains of views first, then the views something
+/// else still reads made; what is left unread is erased after each.
+void rewriteViews(func::FuncOp f, const TypeConverter &types) {
+  auto isView = [](Value xs) { return isa_and_nonnull<CombineOp, CombineAllOp>(xs.getDefiningOp()); };
+  IRRewriter rw(f.getContext());
+  for (;;) {
+    SmallVector<Operation *> reads, views;
+    f.walk([&](Operation *op) {
+      if (isa<SizeOp>(op) || (isa<DrainOp>(op) && isa<MemRefType>(op->getOperand(1).getType())))
+        if (isView(op->getOperand(0))) reads.push_back(op);
+    });
+    for (Operation *op : reads) {
+      OpBuilder b(op);
+      Location loc = op->getLoc();
+      Value end = isa<SizeOp>(op) ? sizeOf(b, loc, op->getOperand(0)) : drainAt(b, loc, op->getOperand(0), op->getOperand(1), cIndex(b, loc, 0));
+      if (end.getType() != op->getResult(0).getType()) end = arith::IndexCastOp::create(b, loc, op->getResult(0).getType(), end);
+      op->replaceAllUsesWith(ValueRange{end});
+      op->erase();
+    }
+    if (!reads.empty()) (void)runRegionDCE(rw, f->getRegions());
+    f.walk([&](Operation *op) {
+      if (isa<CombineOp, CombineAllOp>(op) && !llvm::all_of(op->getUses(), partOf)) views.push_back(op);
+    });
+    if (views.empty()) return;
+    for (Operation *view : views) makeView(view, types);
+    (void)runRegionDCE(rw, f->getRegions());
+  }
+}
 
 struct DrainLowering : Lowering<DrainOp> {
   using Lowering::Lowering;
@@ -847,10 +905,13 @@ struct LowerCursors : PassWrapper<LowerCursors, OperationPass<ModuleOp>> {
         [&](func::FuncOp f) { return types.isSignatureLegal(f.getFunctionType()) && types.isLegal(&f.getBody()); });
     target.addDynamicallyLegalOp<func::ReturnOp, func::CallOp>([&](Operation *op) { return types.isLegal(op); });
 
+    // combine and combineAll first, by Combine.kt's laws: what is left of them are the drains of their parts
+    getOperation().walk([&](func::FuncOp f) { rewriteViews(f, types); });
+
     RewritePatternSet patterns(ctx);
     patterns.add<ColumnLowering, FacetLowering, SizeLowering, AtLowering, SeriesLowering, AlphaLowering, WhereLowering,
                  ProjectLowering, SliceLowering, FoldLowering, CompareLowering, SortedLowering, BisectLowering, JLowering,
-                 HalfLowering<FirstOp, true>, HalfLowering<SecondOp, false>, DrainLowering, CombineLowering, CombineAllLowering, PartsLowering, AdjacencyLowering, ClosureLowering, TextLowering>(types, ctx);
+                 HalfLowering<FirstOp, true>, HalfLowering<SecondOp, false>, DrainLowering, PartsLowering, AdjacencyLowering, ClosureLowering, TextLowering>(types, ctx);
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, types);
     populateReturnOpTypeConversionPattern(patterns, types);
     populateCallOpTypeConversionPattern(patterns, types);

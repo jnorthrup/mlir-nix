@@ -344,8 +344,9 @@ def TS_CombineOp : TS_Op<"combine", [Pure]> {
   let description = [{
     Combine.kt's `combine(vararg catn)` and `Series.plus` (`a + b`); Series.h `a + b` and `Combine`, where the size is
     counted once in 64 bits and the parts are drained one by one, never indexed (an indexed combine is the staircase
-    `reify` exists to decide about).  Lowered as a series is where it is made: a buffer of the parts' total size, each
-    part copied into it in turn.
+    `reify` exists to decide about).  Lowered as the view it is: its size is the parts' sizes added and a drain of it
+    drains the parts in turn into the cells, so nothing is copied twice; only where something else reads it (by index,
+    or across a call or a return) is it made, a buffer of its size drained into.
     Laws: size(combine(a, b)) = size(a) + size(b); at(combine(a, b), i) = at(a, i) for i < size(a), else
     at(b, i - size(a)); combine is associative and the empty series is its unit.
   }];
@@ -365,8 +366,9 @@ def TS_CombineAllOp : TS_Op<"combineAll", [Pure]> {
     is parts' inverse: the parts of xs at d, combined with d between each two, are xs again).
     Laws: size(result) = the sum of size(part k); slice(result, coordinates[k]) = part k; size(coordinates) = count;
     the starts ascend from 0, each the one before plus its length.
-    Lowered: the region runs twice for each k, once to count its part's size and once to copy it, so a part costs what
-    making it costs, twice.
+    Lowered as a view, like combine: a drain of it runs the region once for each k and drains part k where part k - 1
+    ended, so a part that is a slice is never made; its size, or its coordinates when they are read, is a loop over the
+    region that adds up the parts' sizes (a slice's is its count, a series' its n) without making them.
   }];
 }
 
@@ -375,7 +377,11 @@ def TS_DrainOp : TS_Op<"drain"> {
   let arguments = (ins TS_SeriesType:$series, AnyType:$into);
   let results = (outs AnyType:$end);
   let assemblyFormat = "$series `,` $into attr-dict `:` type($series) `,` type($into) `->` type($end)";
-  let description = [{ Series.h `drain`.  Where a lazy composition stops and cells begin. }];
+  let description = [{
+    Series.h `drain`.  Where a lazy composition stops and cells begin: the drain of a combine or a combineAll is the
+    drains of their parts, each where the one before ended, and a series of the cells' type is stored element by
+    element, so no view between them and the cells is ever a buffer.
+  }];
 }
 
 def TS_SliceOp : TS_Op<"slice", [Pure]> {

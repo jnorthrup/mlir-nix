@@ -291,7 +291,6 @@ void EvalState::copyContext(const Value &v, NixStringContext &ctx) {
 EvalState::EvalState(EvalSettings st, nixstore::Store *store) : settings(std::move(st)), store(store) {
   statsEnabled = getenv("MLNIX_STATS") != nullptr;
   composite::todoSink = [](const char *what) { llvm::errs() << "TODO: " << what << "\n"; };
-  recycleOn = getenv("MLNIX_RECYCLE") != nullptr; // opt-in: -2 to -3% peak memory, +1 to +4% time on Kali (77de09c:docs/FRAME-BYTES.md)
   settings.deferBodies = getenv("MLNIX_DEFER") != nullptr; // sea-of-nodes schedule: mint bodies on first call
   // The evaluator is single-threaded.  With threading enabled every attribute
   // and location is uniqued through sharded, locked, thread-cached tables --
@@ -916,14 +915,6 @@ void EvalState::statReturn(Frame *f) {
 }
 
 Frame *EvalState::newFrameSlow(RegionInfo *ri, Frame *up) {
-  if (unsigned n = ri->numSlots; n < kRecycleMax && freeFrames[n] && !statsEnabled) {
-    Frame *f = freeFrames[n];
-    freeFrames[n] = reinterpret_cast<Frame *>(f->upBits);
-    f->upBits = reinterpret_cast<uintptr_t>(up);
-    f->info = ri;
-    memset(f->slots, 0, n * sizeof(Value *));
-    return f;
-  }
   size_t sz = sizeof(Frame) + ri->numSlots * sizeof(Value *);
   size_t wordBytes = statsEnabled ? 2 * sizeof(uint64_t) : 0; // stats only: frameWords
   auto *f = static_cast<Frame *>(alloc.Allocate(sz + wordBytes, alignof(Frame)));
@@ -981,7 +972,6 @@ Value *EvalState::evalNow(Frame *f, Node *s, Value *nv) {
     nv->type = VType::Thunk;
     nv->thunk.node = s;
     nv->thunk.env = f;
-    if (recycleOn) f->capture();
     throw;
   }
   if (statsEnabled) ++nEager;
@@ -1009,7 +999,6 @@ Value *EvalState::makeCell(Frame *f, Node *s, bool forced) {
   nv->type = s->how == Node::Lambda ? VType::Lambda : VType::Thunk;
   nv->thunk.node = s;
   nv->thunk.env = f;
-  if (recycleOn) f->capture();
   if (statsEnabled) [[unlikely]] statCell(f, nv);
   return slot = nv;
 }
@@ -1021,7 +1010,6 @@ void EvalState::evalDefinition(Node *def, Frame *f, Value &dest) {
     dest.type = VType::Lambda;
     dest.thunk.node = def;
     dest.thunk.env = f;
-    if (recycleOn && f) f->capture();
     if (statsEnabled && f) [[unlikely]] markPinned(f);
   } else {
     evalOp(def, f, dest);
@@ -1357,7 +1345,6 @@ void EvalState::callLambdaIn(Value &fun, RegionInfo *ri, Value *arg, Value &out,
     f->slots[0] = arg;
     evalTail(f, ri->resultNode, out, pos);
     if (statsEnabled) [[unlikely]] statReturn(f);
-    else if (!f->captured() && recycleOn) recycleFrame(f);  // returned with nothing made over it: nothing can reach it again
   };
   interpret();
 }
