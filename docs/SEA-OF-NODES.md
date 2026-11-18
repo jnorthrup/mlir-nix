@@ -356,9 +356,43 @@ fib takes 13.9 ms against 12.9 (the ranges over five JVMs just touch): the test 
 the flag.
 
 Left on the arm: the second and later arguments of a curried call (`f a b`: the function that takes `b` is known only
-after the first call returns); a primop's operands (PrimNode makes a cell of each; its `nix.strict` ones could be
-computed first, as the native evaluator does); and list elements, attribute values and captures, which escape by
-design. The native evaluator reads neither son.release nor arg_forced.
+after the first call returns); a builtin's operands (the next section); and list elements, attribute values and
+captures, which escape by design. The native evaluator reads neither son.release nor arg_forced.
+
+## The builtin's half: its declaration's modes
+
+A census of the cells made over a frame, by the op that passes each one on (NIXTRUFFLE_CHECK_RELEASE=1 prints it;
+eval-okay, 147 files, son exported), put a builtin's operands first by far:
+
+    cells made over a frame        3e54d52     now
+    builtin operands               5,886       1,116
+    a call's later arguments       1,286       1,286
+    attribute values               1,043       1,043
+    list elements                    990         990
+    a call's first argument          600         600
+    captures                          71          71
+    all                            9,876       5,106
+
+A builtin's declaration already says how it forces (NixPrims.irdl.mlir): `nix.strict`, every operand forced before the
+op returns, on 12 of the 122; `nix.first`, the operand it forces before anything else, on 50. son-export now writes both
+with the op (`prim_modes`), and the arm's PrimNode reads them: applied to all its operands, the builtin gets such an
+operand computed when it is an op of the caller's body, so no cell over the frame is made for it. One that throws is
+passed as the error, which the builtin throws where it forces it. The order is the declaration's: a `nix.first` operand
+is the one the builtin forces first anyway. 5,151 operands were computed first, 3 of which threw; the outputs are
+byte-identical to 0253d57's, plain and with son.
+
+graal/bench/prims.nix measures it: `f = x: if builtins.lessThan (x * 2) 7 then 1 else 0` under a fold, where lessThan's
+first operand `x * 2` was a cell over f's frame (60 runs over three JVMs):
+
+                   son exported                             no son
+                   3e54d52              now                 3e54d52              now
+    prims          37.5 ms  138.5 MB    24.8 ms  104.1 MB   39.1 ms  145.3 MB    36.1 ms  111.0 MB
+
+The other files allocate the same (their hot loops run no builtin op), and their times stay within the spread between
+JVMs. What is left of the door is the declarations: lessThan, the arithmetic, elemAt and others force their second
+operand on every path that returns as well, but declare only the first. Making them precise is a change to dialect data
+that the native evaluator's promotion and son's must-force set read too, so it needs the native checks (eval-fail's exact
+error order) as well as the arm's.
 
 ## Not built, with the number that gates it
 

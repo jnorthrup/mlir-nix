@@ -1006,12 +1006,6 @@ struct EvalState {
   composite::Bump keyText;               // the keys of matchMemo and of the census tables keyed by bytes
   uint64_t nSelects = 0, nSelectHits = 0, nSelectDyn = 0, nSelectLayered = 0, nSelectProbes = 0, nSelectSizeLog[18] = {};
   void statSelect(const void *site, const Bindings *b, Symbol key, bool dynamic);
-  // MLNIX_STATS: a recycling allocator for frames, simulated.  A frame that returns with nothing made over it (no thunk, no closure) can never be
-  // reached again, so its storage could serve the next frame of the same slot count; simFree counts those, per slot count.
-  composite::MutableSeries<composite::MutableSeries<uint64_t>> simFree;   // per slot count: the allocation clock at each release (a stack: the newest is reused first)
-  uint64_t allocClock() const { return nFrameBytes + nVT[kAllocated] * sizeof(Value) + nBindingBytes + nListBytes + nStringBytes; }
-  uint64_t nSimReuseDist[5] = {};               // reuse distance in bytes allocated since the release: < 32 KiB, < 256 KiB, < 2 MiB, < 32 MiB, more
-  uint64_t nSimHit = 0, nSimHitBytes = 0, nSimReleased = 0, nSimReleasedBytes = 0, nSimCaptured = 0;
   // MLNIX_STATS: frames at their call's return -- by son's account dead (RegionInfo::sonDead), by the run's dead (no closure over
   // them and every thunk over them, projections too, forced), and son's account wrong (dead by son, not by the run: must be 0)
   uint64_t nSonDead = 0, nSonDeadBytes = 0, nRunDead = 0, nRunDeadBytes = 0, nSonWrong = 0, nReturns = 0, nReturnBytes = 0;

@@ -84,9 +84,11 @@ MLIR ops stay the program: nodes are made from them and read their attributes.
   No pass creates a trikeshed op yet. `trikeshed.append` and `trikeshed.anchor` are used nowhere, and `trikeshed.drain` only
   by tests and mlnixci's query. The evaluator's containers are `composite::MutableSeries`, but whether they are filled and
   then drained was measured once, in October, and nothing checks it now.
-- Lifetimes: the Graal arm now reads a callee's strictness at the call (`son.body`'s `arg_forced`); fib's frames stay
-  virtual, 26.3 MB a run down to 3.4 MB. Left on the arm: the later arguments of a curried call and a primop's operands.
-  The native evaluator reads neither `son.release` nor `arg_forced` ([docs/SEA-OF-NODES.md](docs/SEA-OF-NODES.md)).
+- Lifetimes: the Graal arm now reads a callee's strictness at the call (`son.body`'s `arg_forced`) and a builtin's from
+  its declaration (`nix.strict`, `nix.first`), and computes those values instead of making cells over the frame: fib's
+  frames stay virtual (26.3 MB a run down to 3.4 MB), and the cells made over frames on the language tests fall from 9,876
+  to 5,106. Left: builtin declarations that state less than the builtin forces, and the later arguments of a curried
+  call. The native evaluator reads neither `son.release` nor `arg_forced` ([docs/SEA-OF-NODES.md](docs/SEA-OF-NODES.md)).
 - Ordering: a counting dense bucket is 2.3x to 2.7x faster than the best min-max-heap cluster shape at every scale measured
   ([docs/CLUSTER-SCALES.md](docs/CLUSTER-SCALES.md)); which one the block compressor keeps is open
   ([docs/BTRFS-COMPRESSOR.md](docs/BTRFS-COMPRESSOR.md)).

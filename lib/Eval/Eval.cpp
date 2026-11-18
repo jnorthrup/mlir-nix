@@ -572,9 +572,6 @@ void EvalState::printStats() {
                                  pools.size(), (unsigned long long)bandRows, mb(bandBytes), (unsigned long long)ends, mb(ends * 4), (unsigned long long)openingEntries, mb(openingBytes),
                                  (unsigned long long)poolRows, mb(poolRowBytes), mb(nameBytes), mb(freeBytes), mb(seenBytes));
   }
-  if (nFrames) llvm::errs() << llvm::format("== a recycling allocator for frames (simulated, projection thunks holding no frame): %llu calls returned with their frame captured (kept), %llu uncaptured (%.1f MB released); %llu of %llu new frames (%.1f%%) would reuse released storage, %.1f MB of the %.1f MB of frame storage\n",
-                                          (unsigned long long)nSimCaptured, (unsigned long long)nSimReleased, nSimReleasedBytes / 1048576.0, (unsigned long long)nSimHit, (unsigned long long)nFrames,
-                                          100.0 * nSimHit / nFrames, nSimHitBytes / 1048576.0, nFrameBytes / 1048576.0);
   if (nReturns) llvm::errs() << llvm::format("== son's account of the frames at their return (MLNIX_STATS): %llu of %llu lambda bodies dead at return by son "
                                             "(no closure, every value a use takes lazily forced on every path that returns); of %llu returns (%.1f MB of "
                                             "frames), dead by the run (no closure, every thunk over them forced, projections too) %llu (%.1f%%, %.1f MB), dead "
@@ -596,12 +593,6 @@ void EvalState::printStats() {
     for (size_t i = 0; i < g.size() && i < 10; ++i)
       llvm::errs() << llvm::format(" %.*s %llu/%llu/%llu", int(g[i]->v.name.size()), g[i]->v.name.data(), (unsigned long long)g[i]->v.n[0],
                                    (unsigned long long)g[i]->v.n[1], (unsigned long long)g[i]->v.n[2]);
-    llvm::errs() << "\n";
-  }
-  if (nSimHit) {
-    llvm::errs() << "   reuse distance (bytes allocated between a frame's release and its reuse):";
-    static const char *nm[5] = {"< 32 KiB (Kali L1d)", "< 256 KiB (L2)", "< 2 MiB", "< 32 MiB (L3)", "farther"};
-    for (unsigned i = 0; i < 5; ++i) llvm::errs() << llvm::format("  %s %.1f%%", nm[i], 100.0 * nSimReuseDist[i] / nSimHit);
     llvm::errs() << "\n";
   }
   if (nBuilders) llvm::errs() << llvm::format("== attribute-set builders: %llu, %.1f rows each on average; %llu (%.2f%%) outgrow the 12 inline rows with no room given, holding %.1f%% of all rows built (%.1f MB of rows through a heap series and then copied)\n",
@@ -1275,38 +1266,26 @@ static bool isProjection(mlir::Operation *op) {
   return isa<mlir::BlockArgument>(base) || base.getParentRegion() != op->getParentRegion();
 }
 
-/// MLNIX_STATS: the frame's bookkeeping words, after its slots and read-mask: pinned, unforced thunks over it, state (1 = a call is running in it, 2 =
-/// released), and unforced thunks over it counting projections too (the simulation's word 1 leaves them out; son's account must not).
+/// MLNIX_STATS: the frame's two bookkeeping words, after its slots and read-mask, for son's account of the frames at their return: pinned (a
+/// closure was made over it), and the thunks made over it, projections too, that are not forced yet.
 static inline uint64_t *frameWords(Frame *f) { unsigned n = f->info->numSlots; return reinterpret_cast<uint64_t *>(f->slots + n) + (n + 63) / 64; }
-/// A frame is released to the simulated free list when no call runs in it, nothing pins it (a closure) and every thunk over it has been forced.
-static void trySimRelease(EvalState &st, Frame *f) {
-  uint64_t *w = frameWords(f);
-  if (w[0] || w[1] || (w[2] & 3) != 0) return;   // pinned, thunks left, still running, or already released
-  w[2] |= 2;
-  unsigned n = f->info->numSlots;
-  if (n >= st.simFree.size()) st.simFree.resize(n + 1);
-  st.simFree[n].append(st.allocClock()); ++st.nSimReleased; st.nSimReleasedBytes += sizeof(Frame) + n * sizeof(Value *);
-}
 /// A thunk (or, pinned, a closure) now refers to this frame.
-void EvalState::markCaptured(Frame *f) { uint64_t *w = frameWords(f); ++w[1]; ++w[3]; }
+void EvalState::markCaptured(Frame *f) { ++frameWords(f)[1]; }
 void EvalState::markPinned(Frame *f) { frameWords(f)[0] = 1; }
 /// A thunk over this frame has been forced: it holds its value now, not the frame.
-void EvalState::statUnref(Frame *f) { uint64_t *w = frameWords(f); if (w[1]) --w[1]; if (w[3]) --w[3]; trySimRelease(*this, f); }
+void EvalState::statUnref(Frame *f) { if (uint64_t *w = frameWords(f); w[1]) --w[1]; }
 /// A call has returned.
 void EvalState::statReturn(Frame *f) {
   uint64_t *w = frameWords(f);
-  w[2] &= ~uint64_t(1);
-  if (w[0] || w[1]) ++nSimCaptured;
   uint64_t bytes = sizeof(Frame) + f->info->numSlots * sizeof(Value *);
   ++nReturns; nReturnBytes += bytes;
-  bool runDead = !w[0] && !w[3];
+  bool runDead = !w[0] && !w[1];
   if (runDead) { ++nRunDead; nRunDeadBytes += bytes; }
   if (f->info->sonDead) { ++nSonDead; nSonDeadBytes += bytes; if (!runDead) ++nSonWrong; }
   if (runDead && !f->info->sonDead) {
     ++nSonGap[f->info->sonWhy & 7];
     if (f->info->sonWhyAt && f->info->sonWhy >= 2) ++countOf(sonGapByOp, f->info->sonWhyAt->getName()).n[f->info->sonWhy - 2];
   }
-  trySimRelease(*this, f);
 }
 
 Frame *EvalState::newFrameSlow(RegionInfo *ri, Frame *up) {
@@ -1319,7 +1298,7 @@ Frame *EvalState::newFrameSlow(RegionInfo *ri, Frame *up) {
     return f;
   }
   size_t sz = sizeof(Frame) + ri->numSlots * sizeof(Value *);
-  size_t maskBytes = statsEnabled ? (((ri->numSlots + 63) / 64) + 4) * sizeof(uint64_t) : 0; // stats only: the mask of slots ever read, after the slots
+  size_t maskBytes = statsEnabled ? (((ri->numSlots + 63) / 64) + 2) * sizeof(uint64_t) : 0; // stats only: the mask of slots ever read and frameWords
   if (statsEnabled) nMaskBytes += maskBytes;
   auto *f = static_cast<Frame *>(alloc.Allocate(sz + maskBytes, alignof(Frame)));
   if (statsEnabled) { ++nFrames; nFrameBytes += sz; nFrameSlots += ri->numSlots; ++nFramesBySize[ri->numSlots < 16 ? ri->numSlots : 16];
@@ -1332,16 +1311,7 @@ Frame *EvalState::newFrameSlow(RegionInfo *ri, Frame *up) {
   f->upBits = reinterpret_cast<uintptr_t>(up);
   f->info = ri;
   memset(f->slots, 0, ri->numSlots * sizeof(Value *) + maskBytes);
-  if (statsEnabled) {
-    // a recycled frame, if one of this size was released (the simulation: nothing is reused, only counted)
-    if (ri->numSlots >= simFree.size()) simFree.resize(ri->numSlots + 1);
-    if (!simFree[ri->numSlots].empty()) {
-      uint64_t dist = allocClock() - simFree[ri->numSlots].back();
-      simFree[ri->numSlots].pop(); ++nSimHit; nSimHitBytes += sz;
-      ++nSimReuseDist[dist < (32u << 10) ? 0 : dist < (256u << 10) ? 1 : dist < (2u << 20) ? 2 : dist < (32u << 20) ? 3 : 4];
-    }
-  }
-  if (statsEnabled) { frameWords(f)[2] = 1; if (ri->numSlots) reinterpret_cast<uint64_t *>(f->slots + ri->numSlots)[0] |= 1; } // slot 0 is the argument
+  if (statsEnabled && ri->numSlots) reinterpret_cast<uint64_t *>(f->slots + ri->numSlots)[0] |= 1; // slot 0 is the argument
   return f;
 }
 
@@ -1372,7 +1342,7 @@ void EvalState::statCell(Frame *f, Node *s, Value *nv, bool eager) {
   if (eager || !f) return;
   if (nv->type != VType::Lambda && sonMustNodes.contains(s)) ++nSonMustThunks; // a strict schedule would have made the value, not this thunk
   if (nv->type == VType::Lambda) markPinned(f);
-  else if (isProjection(op)) { ++nProjThunks; ++frameWords(f)[3]; } // in the simulated world this thunk holds (base cell, path), not the frame
+  else if (isProjection(op)) { ++nProjThunks; markCaptured(f); }
   else {
     ++nHardThunks; markCaptured(f); lastThunk = nv; lastThunkFor = statCur;
     OpCount &e = countOf(thunksByOp, op->getName());
@@ -1533,8 +1503,7 @@ void EvalState::forceCell(Value &v, PosPtr pos) {
     try {
       evalOp(n, env, v);
       if (statsEnabled && env) [[unlikely]] {
-        if (!isProjection(n->def)) statUnref(env);
-        else if (uint64_t *w = frameWords(env); w[3]) --w[3]; // the simulation's word 1 never counted it
+        statUnref(env);
       }
     } catch (EvalError &) {
       fail(v);

@@ -440,7 +440,9 @@ struct SonReleasePass : PassWrapper<SonReleasePass, OperationPass<ModuleOp>> {
 /// Truffle interpreter builds its nodes from it).  Generic: every op is {"op", "res", "ins", "types", "attrs", "regions"}, a region a
 /// list of blocks {"args", "ops"}, a value a number unique in the module (a graph region reads values before their definition, so a
 /// number is given at the first sight, use or definition).  `attrs` are the op's properties and attributes as MLIR converts them,
-/// without the packed source positions; a null name (a computed attribute path component) is null.  Run it after nix-defer, with
+/// without the packed source positions; a null name (a computed attribute path component) is null.  A primop's also hold its
+/// builtin, `prim_key`, and how its declaration says it forces, `prim_modes` [nix.strict as a mask of operands, one more than
+/// nix.first] (NixPrims.irdl.mlir; NixBase.td, OperandModes).  Run it after nix-defer, with
 /// `-o /dev/null`: the module text would follow on stdout.
 struct SonExportPass : PassWrapper<SonExportPass, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SonExportPass)
@@ -515,8 +517,11 @@ struct SonExportPass : PassWrapper<SonExportPass, OperationPass<ModuleOp>> {
       for (NamedAttribute n : props) field(n.getName().getValue(), n.getValue());
     for (NamedAttribute n : o->getDiscardableAttrs()) field(n.getName().getValue(), n.getValue());
     if (auto *nixd = o->getContext()->getLoadedDialect<nix::NixDialect>()) // not loaded for a module of other dialects (kif)
-      if (const auto *prim = nixd->primOf(o))                                // a primop: the builtin it runs
+      if (const auto *prim = nixd->primOf(o)) {                              // a primop: the builtin it runs, and its modes
         field("prim_key", StringAttr::get(o->getContext(), prim->key));
+        auto m = nixd->modesOf(o->getName());
+        field("prim_modes", DenseI32ArrayAttr::get(o->getContext(), {int32_t(m.strict), int32_t(m.first)}));
+      }
     os << "},\"regions\":[";
     bool firstRegion = true;
     for (Region &r : o->getRegions()) {

@@ -39,7 +39,7 @@ def run(extra):
         exp = open(os.path.join(testdir, "lang", n + ".exp"), encoding="utf-8", errors="replace").read()
         if got is not None and got.replace(testdir, "/pwd") == exp:
             ok += 1
-    check = [l for l in p.stderr.splitlines() if l.startswith(("release check:", "release calls:", "calls:"))]
+    check = [l for l in p.stderr.splitlines() if l.startswith(("release check:", "release calls:", "calls:", "cells made"))]
     return outs, ok, check
 
 

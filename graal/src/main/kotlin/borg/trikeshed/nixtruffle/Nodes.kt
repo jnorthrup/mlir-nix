@@ -87,13 +87,15 @@ fun strictIn(f: Frame, ops: Array<OpNode?>, s: Int): Any {
 /// Slot `s` as a cell, without forcing it.
 fun lazy(f: Frame, s: Int): Any? = lazyIn(f, f.ops, s)
 
-fun lazyIn(f: Frame, ops: Array<OpNode?>, s: Int): Any? {
+/// `door`: the op that passes the cell on, counted under NIXTRUFFLE_CHECK_RELEASE=1 (ReleaseCheck.DOORS).
+fun lazyIn(f: Frame, ops: Array<OpNode?>, s: Int, door: Int = 0): Any? {
     val v = f.slots[s]
     if (v is LocalThunk && v.value != null) return v.value
     if (v == null || v === Blackhole) {
         val op = ops[s]
         if (op is ConstNode) { f.slots[s] = op.value; return op.value } // a literal is its value: no cell, no frame held (son: fixed)
         val t = LocalThunk(f, s)
+        if (ReleaseCheck.on) ReleaseCheck.cell(door)
         if (v == null) f.slots[s] = t
         return t
     }
@@ -107,7 +109,7 @@ abstract class OpNode : Node() {
     abstract fun exec(f: Frame): Any
     /// strict and lazy of the body's slots, its ops read from this node, not from the frame (strictIn).
     fun strict(f: Frame, s: Int): Any = strictIn(f, rootOps!!, s)
-    fun lazy(f: Frame, s: Int): Any? = lazyIn(f, rootOps!!, s)
+    fun lazy(f: Frame, s: Int, door: Int = 0): Any? = lazyIn(f, rootOps!!, s, door)
 }
 
 class BodyRoot(
@@ -194,7 +196,11 @@ object ReleaseCheck {
     @JvmField val on = System.getenv("NIXTRUFFLE_CHECK_RELEASE") == "1"
     var frames = 0L; var slots = 0L; var keptHere = 0L; var namedByIr = 0L; var faults = 0L
     var calls = 0L; var noopCalls = 0L; var noopPending = 0L; var pendingCalls = 0L
-    var applies = 0L; var toForced = 0L; var early = 0L; var earlyFailed = 0L
+    var applies = 0L; var toForced = 0L; var early = 0L; var earlyFailed = 0L; var operands = 0L; var operandsFailed = 0L
+    /// The cells made over a frame, by the op that passes them on: each one makes its frame escape (it holds the frame until forced).
+    val DOORS = arrayOf("other", "list elements", "attribute values", "a call's first argument", "a call's later arguments",
+        "captures", "builtin operands")
+    val cells = LongArray(DOORS.size)
     val faulty = LinkedHashSet<String>()
     init { if (on) Runtime.getRuntime().addShutdownHook(Thread { System.err.println(
         "release check: $frames frames with an unforced cell at return, $slots slots holding a value: kept $keptHere; " +
@@ -202,9 +208,14 @@ object ReleaseCheck {
         "\nrelease calls: $calls returns, $pendingCalls with a cell of the frame unforced; son.release empty (no release at all) in " +
         "$noopCalls, of which with a cell unforced $noopPending" +
         "\ncalls: $applies, to a body arg_forced $toForced, its argument computed before the call (an op of the caller) in $early, " +
-        "of which it threw in $earlyFailed") }) }
+        "of which it threw in $earlyFailed; builtin operands computed first (nix.strict, nix.first) $operands, of which threw $operandsFailed" +
+        "\ncells made over a frame: " + DOORS.indices.joinToString { "${DOORS[it]} ${cells[it]}" }) }) }
     @TruffleBoundary
     fun call(noop: Boolean, pending: Boolean) { calls++; if (pending) pendingCalls++; if (noop) { noopCalls++; if (pending) noopPending++ } }
+    @TruffleBoundary
+    fun cell(door: Int) { cells[door]++ }
+    @TruffleBoundary
+    fun operand(threw: Boolean) { operands++; if (threw) operandsFailed++ }
     @TruffleBoundary
     fun apply(forced: Boolean, computed: Boolean, threw: Boolean) { applies++; if (forced) toForced++; if (computed) early++; if (threw) earlyFailed++ }
     fun frame(label: String, s: Array<Any?>, keep: BooleanArray, keepable: BooleanArray) {
@@ -256,9 +267,9 @@ class ListNode(@field:CompilationFinal(dimensions = 1) @JvmField val elems: IntA
     @JvmField val small = elems.size <= EXPLODE
     override fun exec(f: Frame): Any = if (small) execSmall(f) else execLarge(f)
     @ExplodeLoop
-    private fun execSmall(f: Frame): Any { val a = arrayOfNulls<Any?>(elems.size); for (i in elems.indices) a[i] = lazy(f, elems[i]); return NixList(a) }
+    private fun execSmall(f: Frame): Any { val a = arrayOfNulls<Any?>(elems.size); for (i in elems.indices) a[i] = lazy(f, elems[i], 1); return NixList(a) }
     @TruffleBoundary
-    private fun execLarge(f: Frame): Any = NixList(Array(elems.size) { lazy(f, elems[it]) })
+    private fun execLarge(f: Frame): Any = NixList(Array(elems.size) { lazy(f, elems[it], 1) })
 }
 class ConcatListsNode(@JvmField val a: Int, @JvmField val b: Int) : OpNode() {
     override fun exec(f: Frame): Any {
@@ -288,13 +299,13 @@ class AttrsNode(@field:CompilationFinal(dimensions = 1) @JvmField val names: Arr
     @ExplodeLoop
     private fun execSmall(f: Frame): Any {
         val cells = arrayOfNulls<Any?>(values.size)
-        for (i in values.indices) cells[i] = lazy(f, values[i])
+        for (i in values.indices) cells[i] = lazy(f, values[i], 2)
         val m = statics(names, cells)
         for (i in dynNames.indices) {
             val n = strict(f, dynNames[i])
             if (n === NixNull) continue
             val k = dynKey(m, n)
-            put(m, k, lazy(f, dynValues[i]))
+            put(m, k, lazy(f, dynValues[i], 2))
         }
         return NixAttrs(m)
     }
@@ -317,13 +328,13 @@ class AttrsNode(@field:CompilationFinal(dimensions = 1) @JvmField val names: Arr
     @TruffleBoundary
     private fun execLarge(f: Frame): Any {
         val m = TreeMap<String, Any?>()
-        for (i in names.indices) m[names[i]] = lazy(f, values[i])
+        for (i in names.indices) m[names[i]] = lazy(f, values[i], 2)
         for (i in dynNames.indices) {
             val n = strict(f, dynNames[i])
             if (n === NixNull) continue
             val k = (n as? NixString)?.s ?: throw NixError("expected a string but found ${showType(n)}")
             if (m.containsKey(k)) throw NixError("dynamic attribute '$k' already defined")
-            m[k] = lazy(f, dynValues[i])
+            m[k] = lazy(f, dynValues[i], 2)
         }
         return NixAttrs(m)
     }
@@ -520,9 +531,9 @@ class DeferNode(@JvmField val module: Module, @JvmField val row: String,
         return Closure(b.target, if (small) cellsSmall(f) else cellsLarge(f), b.formals, b.defaults, b.ellipsis, b.name, b.argForced)
     }
     @ExplodeLoop
-    private fun cellsSmall(f: Frame): Array<Any?> { val a = arrayOfNulls<Any?>(captures.size); for (i in captures.indices) a[i] = lazy(f, captures[i]); return a }
+    private fun cellsSmall(f: Frame): Array<Any?> { val a = arrayOfNulls<Any?>(captures.size); for (i in captures.indices) a[i] = lazy(f, captures[i], 5); return a }
     @TruffleBoundary
-    private fun cellsLarge(f: Frame): Array<Any?> = Array(captures.size) { lazy(f, captures[it]) }
+    private fun cellsLarge(f: Frame): Array<Any?> = Array(captures.size) { lazy(f, captures[it], 5) }
 }
 
 /// A call.  The callee's strictness is son's, read off the body that arrives (son.body's arg_forced): a body that forces its argument
@@ -539,7 +550,7 @@ class ApplyNode(@JvmField val callee: Int, @field:CompilationFinal(dimensions = 
             if (!sawEarly) { CompilerDirectives.transferToInterpreterAndInvalidate(); sawEarly = true }
             val s = args[0]
             val own = rootOps!![s] != null // an op of this body; an argument of it is passed as it came, the caller's cell, no frame of this call
-            val a = if (!own) lazy(f, s) else try { strict(f, s) } catch (e: NixError) { Failed(e) }
+            val a = if (!own) lazy(f, s, 3) else try { strict(f, s) } catch (e: NixError) { Failed(e) }
             if (ReleaseCheck.on) ReleaseCheck.apply(true, own, a is Failed)
             val r = Apply.one(fn, a)
             return if (args.size == 1) r else Apply.call(r, if (small) cellsSmall(f, 1) else cellsLarge(f, 1))
@@ -550,10 +561,10 @@ class ApplyNode(@JvmField val callee: Int, @field:CompilationFinal(dimensions = 
     }
     @ExplodeLoop
     private fun cellsSmall(f: Frame, from: Int): Array<Any?> {
-        val a = arrayOfNulls<Any?>(args.size - from); for (i in from until args.size) a[i - from] = lazy(f, args[i]); return a
+        val a = arrayOfNulls<Any?>(args.size - from); for (i in from until args.size) a[i - from] = lazy(f, args[i], if (i == 0) 3 else 4); return a
     }
     @TruffleBoundary
-    private fun cellsLarge(f: Frame, from: Int): Array<Any?> = Array(args.size - from) { lazy(f, args[from + it]) }
+    private fun cellsLarge(f: Frame, from: Int): Array<Any?> = Array(args.size - from) { lazy(f, args[from + it], if (from + it == 0) 3 else 4) }
 }
 
 object Apply {
@@ -589,17 +600,31 @@ object Apply {
     }
 }
 
-/// A primop op (nix-prims made it from a call): the builtin applied to its operands.
-class PrimNode(@JvmField val prim: Prim, @field:CompilationFinal(dimensions = 1) @JvmField val args: IntArray) : OpNode() {
+/// A primop op (nix-prims made it from a call): the builtin applied to its operands.  `strict` and `first` are its declaration's
+/// modes, exported with the op (NixPrims.irdl.mlir: nix.strict, every operand forced before the op returns; nix.first, the
+/// operand it forces before anything else, one more than its index).  Applied to all its operands, the builtin gets such an
+/// operand computed when it is an op of this body: no cell over this frame is made for it.  One that throws is passed as the
+/// error (Failed), which the builtin throws where it forces it.  The rest are cells, as before.
+class PrimNode(@JvmField val prim: Prim, @field:CompilationFinal(dimensions = 1) @JvmField val args: IntArray,
+               @JvmField val strict: Int, @JvmField val first: Int) : OpNode() {
     @JvmField val small = args.size <= EXPLODE
+    @JvmField val full = args.size == prim.arity
     override fun exec(f: Frame): Any {
         val a = if (small) cellsSmall(f) else cellsLarge(f)
-        return if (a.size == prim.arity) prim.impl(a) else Apply.call(prim, a)
+        return if (full) prim.impl(a) else Apply.call(prim, a)
+    }
+    private fun operand(f: Frame, i: Int): Any? {
+        val s = args[i]
+        val forced = full && (first == i + 1 || i < 32 && ((strict ushr i) and 1) != 0) // on every path on which the builtin returns
+        if (!forced || rootOps!![s] == null) return lazy(f, s, 6)
+        val a = try { strict(f, s) } catch (e: NixError) { Failed(e) }
+        if (ReleaseCheck.on) ReleaseCheck.operand(a is Failed)
+        return a
     }
     @ExplodeLoop
-    private fun cellsSmall(f: Frame): Array<Any?> { val a = arrayOfNulls<Any?>(args.size); for (i in args.indices) a[i] = lazy(f, args[i]); return a }
+    private fun cellsSmall(f: Frame): Array<Any?> { val a = arrayOfNulls<Any?>(args.size); for (i in args.indices) a[i] = operand(f, i); return a }
     @TruffleBoundary
-    private fun cellsLarge(f: Frame): Array<Any?> = Array(args.size) { lazy(f, args[it]) }
+    private fun cellsLarge(f: Frame): Array<Any?> = Array(args.size) { operand(f, it) }
 }
 
 // ── building ────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -654,7 +679,10 @@ class Module(@JvmField val ops: List<Op>, @JvmField val loader: Loader) {
 
     @Suppress("UNCHECKED_CAST")
     private fun node(o: Op, ins: IntArray): OpNode {
-        o.str("prim_key")?.let { return PrimNode(Prims.byKey[it] ?: Prims.missing(it), ins) }
+        o.str("prim_key")?.let {
+            val m = o.attrs["prim_modes"] as List<Number>? // [nix.strict mask, nix.first + 1] of its declaration
+            return PrimNode(Prims.byKey[it] ?: Prims.missing(it), ins, m?.get(0)?.toInt() ?: 0, m?.get(1)?.toInt() ?: 0)
+        }
         val a = o.attrs
         return when (o.name) {
             "nix.int" -> ConstNode((a["value"] as Number).toLong())
