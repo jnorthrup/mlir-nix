@@ -4,7 +4,8 @@
 // in one i64, start << 32 | length (Pack.h's TwInt; !trikeshed.twinpacked<i32>, which src/index.mlir and
 // src/columns.mlir read with trikeshed.first and trikeshed.second), the half-open [start, start + length).  Nothing here
 // makes a string.  A piece is read where it lies, compared where it lies, and copied only into the builder, whose buffer
-// can start with room for a reply's head, so that the head is written in front of the body and nothing moves.
+// can start with room for a reply's head, so that the head is written in front of the body and nothing moves.  What the
+// builder writes besides pieces, a string's escapes and a number's digits, text.mlir makes in TrikeShed's ops.
 
 llvm.func @malloc(i64) -> !llvm.ptr
 llvm.func @realloc(!llvm.ptr, i64) -> !llvm.ptr
@@ -14,10 +15,10 @@ llvm.func @memcmp(!llvm.ptr, !llvm.ptr, i64) -> i32
 llvm.func @memchr(!llvm.ptr, i32, i64) -> !llvm.ptr
 llvm.func @memmem(!llvm.ptr, i64, !llvm.ptr, i64) -> !llvm.ptr
 llvm.func @snprintf(!llvm.ptr, i64, !llvm.ptr, ...) -> i32
+llvm.func @_mlir_ciface_json_escape(!llvm.ptr, !llvm.ptr) -> i64
+llvm.func @_mlir_ciface_decimal(i64, !llvm.ptr) -> i64
 
-llvm.mlir.global internal constant @k_ld("%ld\00") : !llvm.array<4 x i8>
 llvm.mlir.global internal constant @k_f("%f\00") : !llvm.array<3 x i8>
-llvm.mlir.global internal constant @k_hex("0123456789abcdef") : !llvm.array<16 x i8>
 
 // ---- coordinates
 
@@ -352,12 +353,14 @@ func.func @ob_byte(%c: i8) {
   return
 }
 
+// v as printf's %ld writes it: text.mlir's decimal, written into the room
 func.func @ob_i64(%v: i64) {
+  %one = arith.constant 1 : i32
   %c24 = arith.constant 24 : i64
-  %end = func.call @ob_room(%c24) : (i64) -> !llvm.ptr
-  %fmt = llvm.mlir.addressof @k_ld : !llvm.ptr
-  %r = llvm.call @snprintf(%end, %c24, %fmt, %v) vararg(!llvm.func<i32 (ptr, i64, ptr, ...)>) : (!llvm.ptr, i64, !llvm.ptr, i64) -> i32
-  %k = arith.extsi %r : i32 to i64
+  %dst = func.call @ob_room(%c24) : (i64) -> !llvm.ptr
+  %into = llvm.alloca %one x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
+  func.call @view(%into, %dst, %c24) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+  %k = llvm.call @_mlir_ciface_decimal(%v, %into) : (i64, !llvm.ptr) -> i64
   func.call @ob_used(%k) : (i64) -> ()
   return
 }
@@ -372,94 +375,21 @@ func.func @ob_f64(%v: f64) {
   return
 }
 
-// the piece as the inside of a JSON string: " \ and the control bytes escaped
+// the piece as the inside of a JSON string: text.mlir's json_escape, written into the room (six bytes a byte at most)
 func.func @ob_esc(%base: !llvm.ptr, %t: i64) {
-  %c0 = arith.constant 0 : i64
-  %c1 = arith.constant 1 : i64
-  %c2 = arith.constant 2 : i64
-  %c3 = arith.constant 3 : i64
-  %c4 = arith.constant 4 : i64
-  %c5 = arith.constant 5 : i64
+  %one = arith.constant 1 : i32
   %c6 = arith.constant 6 : i64
   %s = func.call @tw_s(%t) : (i64) -> i64
-  %e = func.call @tw_e(%t) : (i64) -> i64
-  %len = arith.subi %e, %s : i64
-  %room = arith.muli %len, %c6 : i64
+  %n = func.call @tw_n(%t) : (i64) -> i64
+  %room = arith.muli %n, %c6 : i64
   %dst = func.call @ob_room(%room) : (i64) -> !llvm.ptr
-  %hex = llvm.mlir.addressof @k_hex : !llvm.ptr
-  %q = arith.constant 34 : i8
-  %bs = arith.constant 92 : i8
-  %nl = arith.constant 10 : i8
-  %cr = arith.constant 13 : i8
-  %tab = arith.constant 9 : i8
-  %sp = arith.constant 32 : i8
-  %ln = arith.constant 110 : i8
-  %lr = arith.constant 114 : i8
-  %lt = arith.constant 116 : i8
-  %lu = arith.constant 117 : i8
-  %d0 = arith.constant 48 : i8
-  %c4i8 = arith.constant 4 : i8
-  %c15 = arith.constant 15 : i8
-  %j = scf.for %i = %s to %e step %c1 iter_args(%j = %c0) -> (i64) : i64 {
-    %x = func.call @at(%base, %i) : (!llvm.ptr, i64) -> i8
-    %isq = arith.cmpi eq, %x, %q : i8
-    %isb = arith.cmpi eq, %x, %bs : i8
-    %isn = arith.cmpi eq, %x, %nl : i8
-    %isr = arith.cmpi eq, %x, %cr : i8
-    %ist = arith.cmpi eq, %x, %tab : i8
-    %ctl = arith.cmpi ult, %x, %sp : i8
-    %qb = arith.ori %isq, %isb : i1
-    %nr = arith.ori %isn, %isr : i1
-    %two0 = arith.ori %qb, %nr : i1
-    %two = arith.ori %two0, %ist : i1
-    %at0 = func.call @off(%dst, %j) : (!llvm.ptr, i64) -> !llvm.ptr
-    %jn = scf.if %two -> (i64) {
-      %y3 = arith.select %isr, %lr, %lt : i8
-      %y2 = arith.select %isn, %ln, %y3 : i8
-      %y1 = arith.select %isb, %bs, %y2 : i8
-      %y = arith.select %isq, %q, %y1 : i8
-      llvm.store %bs, %at0 : i8, !llvm.ptr
-      %j1 = arith.addi %j, %c1 : i64
-      %at1 = func.call @off(%dst, %j1) : (!llvm.ptr, i64) -> !llvm.ptr
-      llvm.store %y, %at1 : i8, !llvm.ptr
-      %j2 = arith.addi %j, %c2 : i64
-      scf.yield %j2 : i64
-    } else {
-      %k = scf.if %ctl -> (i64) {
-        llvm.store %bs, %at0 : i8, !llvm.ptr
-        %j1 = arith.addi %j, %c1 : i64
-        %p1 = func.call @off(%dst, %j1) : (!llvm.ptr, i64) -> !llvm.ptr
-        llvm.store %lu, %p1 : i8, !llvm.ptr
-        %j2 = arith.addi %j, %c2 : i64
-        %p2 = func.call @off(%dst, %j2) : (!llvm.ptr, i64) -> !llvm.ptr
-        llvm.store %d0, %p2 : i8, !llvm.ptr
-        %j3 = arith.addi %j, %c3 : i64
-        %p3 = func.call @off(%dst, %j3) : (!llvm.ptr, i64) -> !llvm.ptr
-        llvm.store %d0, %p3 : i8, !llvm.ptr
-        %hi = arith.shrui %x, %c4i8 : i8
-        %lo = arith.andi %x, %c15 : i8
-        %hiz = arith.extui %hi : i8 to i64
-        %loz = arith.extui %lo : i8 to i64
-        %hx = func.call @at(%hex, %hiz) : (!llvm.ptr, i64) -> i8
-        %lx = func.call @at(%hex, %loz) : (!llvm.ptr, i64) -> i8
-        %j4 = arith.addi %j, %c4 : i64
-        %p4 = func.call @off(%dst, %j4) : (!llvm.ptr, i64) -> !llvm.ptr
-        llvm.store %hx, %p4 : i8, !llvm.ptr
-        %j5 = arith.addi %j, %c5 : i64
-        %p5 = func.call @off(%dst, %j5) : (!llvm.ptr, i64) -> !llvm.ptr
-        llvm.store %lx, %p5 : i8, !llvm.ptr
-        %j6 = arith.addi %j, %c6 : i64
-        scf.yield %j6 : i64
-      } else {
-        llvm.store %x, %at0 : i8, !llvm.ptr
-        %j1 = arith.addi %j, %c1 : i64
-        scf.yield %j1 : i64
-      }
-      scf.yield %k : i64
-    }
-    scf.yield %jn : i64
-  }
-  func.call @ob_used(%j) : (i64) -> ()
+  %src = func.call @off(%base, %s) : (!llvm.ptr, i64) -> !llvm.ptr
+  %from = llvm.alloca %one x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
+  func.call @view(%from, %src, %n) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+  %into = llvm.alloca %one x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
+  func.call @view(%into, %dst, %room) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+  %k = llvm.call @_mlir_ciface_json_escape(%from, %into) : (!llvm.ptr, !llvm.ptr) -> i64
+  func.call @ob_used(%k) : (i64) -> ()
   return
 }
 

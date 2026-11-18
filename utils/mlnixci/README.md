@@ -41,10 +41,14 @@ at mkForce priority 50, and the page reports what it changes.
   combine of a Series<Series<Char>>, each part's coordinates kept), and what a row is searched by, its key and its
   description with their escapes read (`confix.unescape`: KnownSchema.decodeEscaped) and lower-cased (`alpha`), a ' '
   between them (`combine`).
+- `src/text.mlir` makes what the reply builder writes besides pieces of a text, in TrikeShed's ops lowered the same way:
+  a string's inside as JSON writes it (`json_escape`: `combineAll` of each byte's escape, a slice of one constant table,
+  then `drain` into the builder's room) and a number's digits as printf's `%ld` writes them (`decimal`: their count a
+  `fold` over the powers of ten, each digit an element of a `series`).
 - `src/*.mlir` is the rest of the server, written in the func/scf/arith/llvm dialects. The stock MLIR pipeline lowers it,
   and it links with libc and liburing-ffi only. There is no C++ and no C++ library.
   - `series.mlir`: coordinates into byte series (TrikeShed's TwinPacked: an i64, start << 32 | length, half-open), and
-    the reply builder, which leaves room for the head in front of the body.
+    the reply builder, which leaves room for the head in front of the body; its escapes and digits are text.mlir's.
   - `confix.mlir`: the handle of a JSON text's index (index.mlir's buffers, as descriptors) and the calls of index.mlir
     the rest of the server makes with it. A text is never decoded: its strings are coordinates into it, and keys are
     compared where they lie.
@@ -78,7 +82,7 @@ API:
     cmake --build ../../build --target mlnix mlnix-opt
 
     make                                                  # the server (also needs liburing-dev); MLIR_NIX is ../..
-    make check NIXPKGS_LIB=/path/to/nixpkgs/lib          # facet-check, then the e2e test on os/
+    make check NIXPKGS_LIB=/path/to/nixpkgs/lib          # facet-check, text-check, then the e2e test on os/
     sudo make install NIXPKGS_LIB=/path/to/nixpkgs/lib
     sudo systemctl enable --now mini-luci                 # http://mlnix-os.orb.local:8080/
 
@@ -88,7 +92,9 @@ still builds it from the separate mini-luci repository (`build.sh MLIR-NIX-BRANC
 ## Verified (2026-11-16, OrbStack machine `mlnix-os`, Debian trixie arm64, LLVM 22.1.8)
 
 - `make check`: facet-check runs 2,000 random queries, the last over 22,000 rows, and the compiled query agrees with
-  the hand count on every one. The e2e test passes 37/37, covering:
+  the hand count on every one. text-check writes 2,259 texts (every byte, random ones, 100 KB) and 10,105 numbers
+  (both ends of i64) with text.mlir and finds them as the builder wrote them before. The e2e test passes 51/51,
+  covering:
   - facets and counts, selections, text search, and paging;
   - what-if values the module system refuses (strMatching, port range, enum);
   - round-tripping of non-ASCII text, quotes, backslash and `${`;

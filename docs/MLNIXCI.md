@@ -22,10 +22,12 @@ what-if overlay held in memory is evaluated with it. Nothing is written to the s
 - **Two pages.** `www/index.html` is a faceted list. `www/luci.html` renders the corpus as LuCI renders a router's
   configuration, its edits being what-ifs.
 - **No C++.** The server is MLIR (`src/*.mlir`) lowered to LLVM IR and linked with libc and liburing only. The faceted
-  query (`query.mlir`) and the JSON index are TrikeShed's cursor and Confix ops, lowered by
-  `mlnix-opt --trikeshed-lower-cursors`.
+  query (`query.mlir`), the JSON index, the columns and the escapes and digits a reply is written with (`src/text.mlir`)
+  are TrikeShed's cursor and Confix ops, lowered by `mlnix-opt --trikeshed-lower-cursors`. The rest is hand-written in
+  the func/scf/arith/llvm dialects.
 - **Its check.** `make -C utils/mlnixci check` builds it against this checkout. It then runs the facet check, which
-  compares the compiled query with the counted one over 2,000 queries, and the end-to-end test (51 checks).
+  compares the compiled query with the counted one over 2,000 queries, the text check (text.mlir against what the
+  builder wrote before it) and the end-to-end test (51 checks).
 - **Where it runs.** On mlnixos (NixOS-WSL), the list is served on :8080 and the LuCI-style page on :8081.
   - The store still builds both from the separate mini-luci repository.
   - The binary, its services and its NixOS module (`services.miniLuci`) still carry the name mini-luci.

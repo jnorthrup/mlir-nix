@@ -414,8 +414,6 @@ struct EvalSettings {
   /// Sea-of-nodes schedule (MLNIX_DEFER): mint no lambda body at lowering
   /// time; the op carries a pool row and the body is generated on first call.
   bool deferBodies = false;
-  /// Imported files are mapped read-only (nixfe::Source::mapFile) instead of read and copied.
-  bool mapSources = true;
   unsigned maxCallDepth = 10000;
   bool dumpMLIR = false;
   nixfe::Lint lintAbsolutePaths = nixfe::Lint::Ignore, lintShortPaths = nixfe::Lint::Ignore,
@@ -935,13 +933,10 @@ struct EvalState {
   void markPinned(Frame *f);
   void statUnref(Frame *f);
   void statReturn(Frame *f);
-  /// The region of a lambda's body, from a direct-mapped cache keyed by the op's address.  Sound because an entry is made only for a lambda that
-  /// is being called, and nothing erases a called op (the passes that erase run on a body when it is lowered or minted, before any call of it).
-  /// The region of a lambda's body, from a direct-mapped cache keyed by the op: a hit is a load and a compare, where the lookup was a read
-  /// of the op's deferred-body attribute and a hash probe on every call (3.7% of the CPU of a NixOS evaluation on Kali).
-#ifdef MLNIX_NO_LOOKUP_CACHES  // ablation build (77de09c:docs/SELECT-AND-LOOKUP.md): the lookups without the caches in front
-  RegionInfo *infoOf(mlir::nix::LambdaOp lam) { return infoOfSlow(lam); }
-#else
+  /// The region of a lambda's body, from a direct-mapped cache keyed by the op's address: a hit is a load and a compare, where the lookup
+  /// was a read of the op's deferred-body attribute and a hash probe on every call (3.7% of the CPU of a NixOS evaluation on Kali;
+  /// 77de09c:docs/SELECT-AND-LOOKUP.md has the A/B against a build without it).  Sound because an entry is made only for a lambda that is
+  /// being called, and nothing erases a called op (the passes that erase run on a body when it is lowered or minted, before any call of it).
   RegionInfo *infoOf(mlir::nix::LambdaOp lam) {
     const void *k = lam.getOperation();
     InfoSlot &e = infoCache[(reinterpret_cast<uintptr_t>(k) >> 4) & (kInfoCache - 1)];
@@ -950,7 +945,6 @@ struct EvalState {
     e = {k, ri};
     return ri;
   }
-#endif
   RegionInfo *infoOfSlow(mlir::nix::LambdaOp lam);
   /// The body of the lambda whose node a closure holds: found once (infoOf: the body is minted at the first call of a deferred lambda) and
   /// kept in the node, so a call reads one word where it probed a cache keyed by the op.
@@ -973,7 +967,6 @@ struct EvalState {
   uint64_t nSonGap[8] = {};                  // returns dead by the run and not by son, by RegionInfo::sonWhy
   OpCounts sonGapByOp;                       // the same, by the op whose lazy use decides (n[0] path, n[1] callee, n[2] passed on)
   uint64_t nSelectorCalls = 0; // MLNIX_STATS: saturated calls of a recognized selector, made with no frame and no closure
-  bool selectorsOn = true;     // MLNIX_NOSELECTORS turns the recognition off
   unsigned selectorShape(mlir::nix::LambdaOp outerLam, RegionInfo *outer);
   uint64_t nStackCells = 0; // MLNIX_STATS: curried-call intermediates held by value instead of in a heap cell
   uint64_t nEmptyShared = 0; // MLNIX_STATS: empty attribute sets that were the shared constant instead of a fresh 16-byte cell

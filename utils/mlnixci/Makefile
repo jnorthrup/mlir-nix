@@ -4,7 +4,8 @@
 # enclosing checkout, wherever make is run from.
 #   make MLNIX_BIN=<mlir-nix build>/bin      the server (MLNIX_BIN defaults to the checkout's build/bin)
 #   make facet-check                          the compiled query against the same query counted by hand
-#   make check NIXPKGS_LIB=...               facet-check, then a server on os/ and test/e2e.py against it
+#   make text-check                           text.mlir's escapes and digits against what the builder wrote before
+#   make check NIXPKGS_LIB=...               both checks, then a server on os/ and test/e2e.py against it
 #   sudo make install ...                    /opt/mini-luci and the systemd unit (Debian; NixOS: nixos/module.nix)
 MLIR_NIX ?= $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../..)
 MLNIX_BIN ?= $(MLIR_NIX)/build/bin
@@ -29,9 +30,10 @@ LOWER_BUFFERS = --ownership-based-buffer-deallocation --canonicalize --buffer-de
 
 all: $(BUILD)/mini-luci
 
-# Written in TrikeShed's ops (and confix's index): query.mlir (the facets), src/index.mlir (a JSON text's index) and
-# src/columns.mlir (the columns' codes, the rows' order) -> scf/arith/memref (mlnix-opt) -> LLVM dialect -> LLVM IR.
-TRIKESHED = index columns
+# Written in TrikeShed's ops (and confix's index): query.mlir (the facets), src/index.mlir (a JSON text's index),
+# src/columns.mlir (the columns' codes, the rows' order) and src/text.mlir (a string's escapes, a number's digits)
+# -> scf/arith/memref (mlnix-opt) -> LLVM dialect -> LLVM IR.
+TRIKESHED = index columns text
 $(BUILD)/query.ll: query.mlir
 	mkdir -p $(BUILD)
 	$(MLNIX_OPT) $< --trikeshed-lower-cursors > $(BUILD)/query.lowered.mlir
@@ -65,12 +67,19 @@ $(BUILD)/query.so: $(BUILD)/query.ll
 facet-check: $(BUILD)/query.so
 	python3 test/facet_check.py $(BUILD)/query.so
 
+# text.mlir alone, for test/text_check.py
+$(BUILD)/text.so: $(BUILD)/text.ll
+	$(LLVM_BIN)/clang -shared -fPIC -O2 -Wno-override-module $< -o $@
+
+text-check: $(BUILD)/text.so
+	python3 test/text_check.py $(BUILD)/text.so
+
 # linked by the C driver: libc and liburing-ffi (liburing's inline helpers as functions); no C++ library
 $(BUILD)/mini-luci: $(MODULES:%=$(BUILD)/%.o) $(BUILD)/query.o $(TRIKESHED:%=$(BUILD)/%.o) $(BUILD)/confix-scan.o
 	$(LLVM_BIN)/clang -O2 $^ -luring-ffi -o $@
 	! ldd $@ | grep -E 'libstdc\+\+|libc\+\+|libgcc_s'
 
-check: $(BUILD)/mini-luci facet-check
+check: $(BUILD)/mini-luci facet-check text-check
 	$(BUILD)/mini-luci --corpus os/eval.nix --arg lib "import $(NIXPKGS_LIB)" --page www/index.html --mlnix $(MLNIX) \
 	  --state $(BUILD) --port $(CHECK_PORT) & \
 	  pid=$$!; \

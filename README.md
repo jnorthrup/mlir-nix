@@ -82,7 +82,8 @@ MLIR ops stay the program: nodes are made from them and read their attributes.
   - `//` as `trikeshed.layers`.
 
   No pass creates a trikeshed op yet. `trikeshed.append` and `trikeshed.anchor` are used nowhere, and `trikeshed.drain` only
-  by tests and mlnixci's query. The evaluator's containers are `composite::MutableSeries`, but whether they are filled and
+  by tests and mlnixci (its columns, and since 18 November the escapes and digits its replies are written with: a string's
+  escapes are `combineAll` of slices of one constant table, drained into the builder). The evaluator's containers are `composite::MutableSeries`, but whether they are filled and
   then drained was measured once, in October, and nothing checks it now.
 - Lifetimes: the Graal arm now reads a callee's strictness at the call (`son.body`'s `arg_forced`) and a builtin's from
   its declaration (`nix.strict`, `nix.first`), and computes those values instead of making cells over the frame: fib's

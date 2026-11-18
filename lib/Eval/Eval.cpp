@@ -290,10 +290,8 @@ void EvalState::copyContext(const Value &v, NixStringContext &ctx) {
 
 EvalState::EvalState(EvalSettings st, nixstore::Store *store) : settings(std::move(st)), store(store) {
   statsEnabled = getenv("MLNIX_STATS") != nullptr;
-  settings.mapSources = !getenv("MLNIX_NOMMAP"); // ablation switch: read and copy every file, as before
   composite::todoSink = [](const char *what) { llvm::errs() << "TODO: " << what << "\n"; };
   recycleOn = getenv("MLNIX_RECYCLE") != nullptr; // opt-in: -2 to -3% peak memory, +1 to +4% time on Kali (77de09c:docs/FRAME-BYTES.md)
-  selectorsOn = !getenv("MLNIX_NOSELECTORS"); // ablation switch: every curried selector runs as two calls, as before
   settings.deferBodies = getenv("MLNIX_DEFER") != nullptr; // sea-of-nodes schedule: mint bodies on first call
   // The evaluator is single-threaded.  With threading enabled every attribute
   // and location is uniqued through sharded, locked, thread-cached tables --
@@ -1498,7 +1496,7 @@ void EvalState::callFunction(Value &fun, size_t nargs, Value **args, Value &out,
     if (cur->type == VType::Lambda) {
       curLam = cast<nd::LambdaOp>(cur->thunk.node->def);
       curRI = bodyOfNode(cur->thunk.node); // the selector check and the call below both use it
-      if (selectorsOn && nargs - i >= 2 && !curRI->hasFormals) {
+      if (nargs - i >= 2 && !curRI->hasFormals) {
         if (unsigned shape = curRI->selShape ? curRI->selShape : selectorShape(curLam, curRI); shape >= 2) {
           Value *dest = (i + 2 == nargs) ? &out : allocValue();
           applySelector(shape, curRI, args + i, *dest, pos);
@@ -2779,7 +2777,7 @@ Value *EvalState::evalFile(std::string_view pathIn) {
     origin->path = logical.clone();
     origin->baseDir = nixstore::dirOf(logical);
     nixprefetch::note('F', resolved.c_str());
-    origin->text = settings.mapSources ? nixfe::Source::mapFile(resolved) : nullptr;
+    origin->text = nixfe::Source::mapFile(resolved); // mapped read-only (77de09c:docs/IO.md); read and copied when it cannot be
     if (!origin->text) origin->text = nixfe::Source::fromString(readSource(resolved));
     nd::ExprOp adopted;
     if (logical == resolved) {
