@@ -271,14 +271,6 @@ static SortedSet drvReferences(const Derivation &drv) {
   return refs;
 }
 
-composite::Text Store::computeDerivationPath(const Derivation &drv) const {
-  return makeTextPath(settings.storeDir, drv.name + ".drv", drv.hashUnparsed(false), drvReferences(drv));
-}
-
-void Store::cacheDerivation(std::string_view drvPath, const Derivation &drv) {
-  keepDerivation(drvPath, Derivation(drv), true);
-}
-
 composite::Text Store::writeDerivation(Derivation &&drv) {
   // The text's hash names the path; a store that writes keeps the text too, made once, and a read-only one only feeds the hash with it.
   composite::Text text = settings.readOnly ? composite::Text() : drv.unparse(false);

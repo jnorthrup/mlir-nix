@@ -789,13 +789,6 @@ static void appendEscaped(composite::Text &out, std::string_view s) {
   out += '"';
 }
 
-composite::Text escapeATermString(std::string_view s) {
-  composite::Text r;
-  r.reserve(s.size() + 2);
-  appendEscaped(r, s);
-  return r;
-}
-
 namespace {
 /// The ATerm text, made into a Text.
 struct TextOut {

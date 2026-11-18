@@ -1,4 +1,4 @@
-// The faceted query of mini-luci, in TrikeShed's cursor ops.  Compiled when mini-luci is built: trikeshed-lower-cursors
+// The faceted query of mlnixci, in TrikeShed's cursor ops.  Compiled when mlnixci is built: trikeshed-lower-cursors
 // (mlnix-opt) takes it to scf/arith/memref, the stock MLIR pipeline to LLVM, and the object links into the server, which
 // calls it as `_mlir_ciface_corpus_query` (memref descriptors: src/api.mlir, test/facet_check.py).
 //

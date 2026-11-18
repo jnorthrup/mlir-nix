@@ -180,9 +180,8 @@ Hash parseHashAllowEmpty(std::string_view s, composite::Maybe<HashAlgo> algo,
                          composite::Text *warning);
 Hash compressHash(const Hash &h, size_t newSize);
 
-composite::Text base16Encode(const uint8_t *d, size_t n);
-composite::Text nix32Encode(const uint8_t *d, size_t n);
-/// The same, appended to `out` where it is built: a path or a fingerprint is one string, not a string per piece.
+/// Base 16 and Nix's base 32 of n bytes, appended to `out` where it is built: a path or a fingerprint is one string, not a
+/// string per piece.
 void appendBase16(composite::Text &out, const uint8_t *d, size_t n);
 void appendNix32(composite::Text &out, const uint8_t *d, size_t n);
 composite::Text base64Encode(std::string_view s);
@@ -303,7 +302,6 @@ struct Derivation {
 };
 
 Derivation parseDerivation(std::string_view text, composite::Text name);
-composite::Text escapeATermString(std::string_view s);
 
 /// JSON rendering of a derivation in the format of `nix derivation show`.
 composite::Text derivationToJSON(std::string_view storeDir, std::string_view drvPath,
@@ -392,11 +390,8 @@ struct Store {
 
   /// The derivation's path; the derivation moves into the cache (readDerivation hands it back by reference).
   composite::Text writeDerivation(Derivation &&drv);
-  composite::Text computeDerivationPath(const Derivation &drv) const;
   /// The cached derivation, read from the store the first time: by reference, kept as long as the store.
   const Derivation &readDerivation(std::string_view drvPath);
-  /// For derivations we instantiated in read-only mode.
-  void cacheDerivation(std::string_view drvPath, const Derivation &drv);
 
   /// hashDerivationModulo; returns per-output hashes for fixed outputs (key
   /// "out") or a single drv hash (key "").  `inputsOut`, when given, receives the input derivations as the hash saw them (their own

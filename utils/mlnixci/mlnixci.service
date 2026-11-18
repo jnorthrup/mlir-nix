@@ -1,0 +1,16 @@
+[Unit]
+Description=mlnixci: the option tree of the mlnix OS
+After=network.target
+
+[Service]
+ExecStart=/opt/mlnixci/bin/mlnixci --corpus /opt/mlnixci/os/eval.nix --arg lib "import /opt/mlnixci/lib" --page /opt/mlnixci/www/index.html --mlnix /opt/mlnixci/bin/mlnix --port @PORT@
+Restart=on-failure
+DynamicUser=yes
+RuntimeDirectory=mlnixci
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

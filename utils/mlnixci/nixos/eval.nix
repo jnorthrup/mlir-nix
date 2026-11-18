@@ -1,4 +1,4 @@
-# NixOS as a corpus for mini-luci: every visible option of nixpkgs' NixOS modules (corpus.nix), evaluated for one
+# NixOS as a corpus for mlnixci: every visible option of nixpkgs' NixOS modules (corpus.nix), evaluated for one
 # configuration, with an optional what-if `overlay` (JSON) merged in as one more module at mkForce's priority.  Given a
 # `request` (JSON: the facets a page asks for on demand), the same evaluation answers it instead (answer.nix).
 #   configuration   a NixOS configuration (a path or a module): the live system's, as mlnixos runs it
@@ -9,7 +9,7 @@ let
   json = f: { _file = toString f; config = builtins.fromJSON (builtins.readFile f); };
   force = v: if builtins.isAttrs v then builtins.mapAttrs (_: force) v else { _type = "override"; priority = 50; content = v; };
   # named, so that an option's adhesion (answer.nix) says which values the what-if gives
-  forced = f: { _file = "mini-luci what-if"; config = force (builtins.fromJSON (builtins.readFile f)); };
+  forced = f: { _file = "mlnixci what-if"; config = force (builtins.fromJSON (builtins.readFile f)); };
   base =
     if configuration != null then [ configuration ]
     else [

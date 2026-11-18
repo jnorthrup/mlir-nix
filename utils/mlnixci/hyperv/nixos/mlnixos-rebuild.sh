@@ -4,7 +4,7 @@
 #   2  Nix instantiates the same configuration: the oracle, and the writer of the .drv files into this store
 #   3  the two must name the same derivation, or nothing is built
 #   4  Nix realises the derivation mlnix named; `switch` and `boot` set the system profile; then switch-to-configuration,
-#      and mini-luci restarts to read the configuration again
+#      and mlnixci restarts to read the configuration again
 # `eval` stops after step 3.  Environment: MLNIXOS_RUNTIME, MLNIXOS_NIXPKGS, MLNIXOS_CONFIG.
 set -euo pipefail
 ST=/mnt/wsl/mlnixos
@@ -45,6 +45,6 @@ out=$(readlink -f "$log/result")
 say "    $out"
 case $action in switch | boot) nix-env -p /nix/var/nix/profiles/system --set "$out" ;; esac
 "$out/bin/switch-to-configuration" "$action" 2>&1 | tee -a "$log/activate"
-# mini-luci's corpus is this configuration: read it again
-[ "$action" = boot ] || systemctl try-restart mini-luci.service
+# mlnixci's corpus is this configuration: read it again
+[ "$action" = boot ] || systemctl try-restart mlnixci.service
 say "done: $action $out"

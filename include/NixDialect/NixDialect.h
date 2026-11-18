@@ -105,13 +105,6 @@ inline constexpr uintptr_t kOpPosTag = uintptr_t(1) << 62;
 inline const void *posOfOp(Operation *op) {
   return op ? reinterpret_cast<const void *>(reinterpret_cast<uintptr_t>(op) | kOpPosTag) : nullptr;
 }
-/// The position of the value `v`: what `v.getLoc()` was for the operands that report errors.  An op's result
-/// has its op's position; a block argument was made at the position of the lambda it belongs to.
-inline const void *posOfValue(Value v) {
-  if (Operation *def = v.getDefiningOp()) return posOfOp(def);
-  if (auto arg = dyn_cast<BlockArgument>(v)) return posOfOp(arg.getOwner()->getParentOp());
-  return nullptr;
-}
 inline const void *posOfWord(uint64_t word) { return reinterpret_cast<const void *>(word); }
 
 struct SrcPos {

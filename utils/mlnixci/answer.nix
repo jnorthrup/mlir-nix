@@ -1,4 +1,4 @@
-# mini-luci's facets asked for on demand.  The page asks about the options it shows; the server writes the request to a
+# mlnixci's facets asked for on demand.  The page asks about the options it shows; the server writes the request to a
 # file and evaluates the corpus's eval.nix with `--arg request FILE` (and the what-if overlay), which answers here.  The
 # request is {"ask": [{"iface": I, "path": [...]}, ...]}; the answer is {"answers": [...]} in the same order, each
 # {"iface", "path", ...}, or {"iface", "path", "error"} when that one does not evaluate.
@@ -112,7 +112,7 @@ let
     let ls = leaves [ ] ov; in {
       inherit target;
       count = builtins.length ls;
-      text = "# mini-luci's what-if as a module, each value at mkForce as it was evaluated; it adheres where "
+      text = "# mlnixci's what-if as a module, each value at mkForce as it was evaluated; it adheres where "
         + (if target == null then "the configuration" else target) + " imports it (imports = [ ./luci.nix ];)\n"
         + "{ lib, ... }:\n{\n"
         + lib.concatMapStrings (l: "  ${lib.showAttrPath l.path} = lib.mkForce ${lib.generators.toPretty { multiline = false; } l.value};\n") ls

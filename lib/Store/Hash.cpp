@@ -257,12 +257,6 @@ void appendBase16(composite::Text &out, const uint8_t *d, size_t n) {
   }
 }
 
-composite::Text base16Encode(const uint8_t *d, size_t n) {
-  composite::Text s;
-  appendBase16(s, d, n);
-  return s;
-}
-
 void appendNix32(composite::Text &out, const uint8_t *d, size_t n) {
   size_t len = (n * 8 - 1) / 5 + 1, at = out.size();
   out.resize(at + len);
@@ -272,12 +266,6 @@ void appendNix32(composite::Text &out, const uint8_t *d, size_t n) {
     unsigned c = (d[bi] >> bj) | (bi >= n - 1 ? 0 : d[bi + 1] << (8 - bj));
     out[at + len - 1 - i] = nix32Chars[c & 0x1f];
   }
-}
-
-composite::Text nix32Encode(const uint8_t *d, size_t n) {
-  composite::Text s;
-  appendNix32(s, d, n);
-  return s;
 }
 
 composite::Maybe<composite::Text> nix32Decode(std::string_view s, size_t size) {

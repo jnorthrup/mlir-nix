@@ -1,4 +1,4 @@
-# mini-luci's facets of an option, in Nix.  corpus.nix puts these on every row; answer.nix (the facets asked for on
+# mlnixci's facets of an option, in Nix.  corpus.nix puts these on every row; answer.nix (the facets asked for on
 # demand) shares `resolve` and the plain-data test.
 #   widget    what the page edits the option with: toggle, select, knob (an int or float type with both bounds), number,
 #             text, lines, list, records (a list of submodules), sections (an attrsOf submodule: entries made, edited

@@ -87,9 +87,9 @@ llvm.mlir.global internal constant @lit10("\0D\0A") : !llvm.array<2 x i8>
 llvm.mlir.global internal constant @lit11("content-length:") : !llvm.array<15 x i8>
 llvm.mlir.global internal constant @lit12("request too large") : !llvm.array<17 x i8>
 llvm.mlir.global internal constant @lit13("bad request line") : !llvm.array<16 x i8>
-llvm.mlir.global internal constant @lit14("mini-luci: cannot listen on port %ld\0A\00") : !llvm.array<38 x i8>
-llvm.mlir.global internal constant @lit15("mini-luci: http://[::]:%ld/  corpus=%s rows=%ld (mlnix %.0f ms)\0A\00") : !llvm.array<65 x i8>
-llvm.mlir.global internal constant @lit16("mini-luci: drained\0A\00") : !llvm.array<20 x i8>
+llvm.mlir.global internal constant @lit14("mlnixci: cannot listen on port %ld\0A\00") : !llvm.array<36 x i8>
+llvm.mlir.global internal constant @lit15("mlnixci: http://[::]:%ld/  corpus=%s rows=%ld (mlnix %.0f ms)\0A\00") : !llvm.array<63 x i8>
+llvm.mlir.global internal constant @lit16("mlnixci: drained\0A\00") : !llvm.array<18 x i8>
 llvm.mlir.global internal constant @lit17("--arg\00") : !llvm.array<6 x i8>
 llvm.mlir.global internal constant @lit18("--argstr\00") : !llvm.array<9 x i8>
 llvm.mlir.global internal constant @lit19("--corpus\00") : !llvm.array<9 x i8>
@@ -99,12 +99,12 @@ llvm.mlir.global internal constant @lit22("--state\00") : !llvm.array<8 x i8>
 llvm.mlir.global internal constant @lit23("--port\00") : !llvm.array<7 x i8>
 llvm.mlir.global internal constant @lit24("mlnix\00") : !llvm.array<6 x i8>
 llvm.mlir.global internal constant @lit25("/tmp\00") : !llvm.array<5 x i8>
-llvm.mlir.global internal constant @lit26("usage: mini-luci --corpus EVAL.nix --page index.html [--arg NAME EXPR | --argstr NAME STRING]... [--mlnix PATH] [--state DIR] [--port N]\0A\00") : !llvm.array<138 x i8>
+llvm.mlir.global internal constant @lit26("usage: mlnixci --corpus EVAL.nix --page index.html [--arg NAME EXPR | --argstr NAME STRING]... [--mlnix PATH] [--state DIR] [--port N]\0A\00") : !llvm.array<136 x i8>
 llvm.mlir.global internal constant @lit27("RUNTIME_DIRECTORY\00") : !llvm.array<18 x i8>
-llvm.mlir.global internal constant @lit28("/mini-luci-overlay.json\00") : !llvm.array<24 x i8>
-llvm.mlir.global internal constant @lit31("/mini-luci-facet.json\00") : !llvm.array<22 x i8>
-llvm.mlir.global internal constant @lit29("mini-luci: the corpus does not evaluate:\0A%.*s\00") : !llvm.array<46 x i8>
-llvm.mlir.global internal constant @lit30("mini-luci: %.*s\0A\00") : !llvm.array<17 x i8>
+llvm.mlir.global internal constant @lit28("/mlnixci-overlay.json\00") : !llvm.array<22 x i8>
+llvm.mlir.global internal constant @lit31("/mlnixci-facet.json\00") : !llvm.array<20 x i8>
+llvm.mlir.global internal constant @lit29("mlnixci: the corpus does not evaluate:\0A%.*s\00") : !llvm.array<44 x i8>
+llvm.mlir.global internal constant @lit30("mlnixci: %.*s\0A\00") : !llvm.array<15 x i8>
 
 llvm.mlir.global internal @ring() : !llvm.array<1024 x i8> {
   %0 = llvm.mlir.zero : !llvm.array<1024 x i8>
@@ -768,18 +768,18 @@ func.func @main(%argc32: i32, %argv: !llvm.ptr) -> i32 {
     %isTmp = func.call @eq(%state0, %dState) : (!llvm.ptr, !llvm.ptr) -> i1
     %useRt = arith.andi %hasRt, %isTmp : i1
     %state = arith.select %useRt, %rt, %state0 : !llvm.ptr
-    // the overlay file: STATE/mini-luci-overlay.json
+    // the overlay file: STATE/mlnixci-overlay.json
     %kFile = llvm.mlir.addressof @lit28 : !llvm.ptr
-    %kFile_n = arith.constant 24 : i64
+    %kFile_n = arith.constant 22 : i64
     %sl = llvm.call @strlen(%state) : (!llvm.ptr) -> i64
     %fl = arith.addi %sl, %kFile_n : i64
     %ovfile = llvm.call @malloc(%fl) : (i64) -> !llvm.ptr
     %x1 = llvm.call @memcpy(%ovfile, %state, %sl) : (!llvm.ptr, !llvm.ptr, i64) -> !llvm.ptr
     %fe = func.call @off(%ovfile, %sl) : (!llvm.ptr, i64) -> !llvm.ptr
     %x2 = llvm.call @memcpy(%fe, %kFile, %kFile_n) : (!llvm.ptr, !llvm.ptr, i64) -> !llvm.ptr
-    // the request of a facet asked for on demand: STATE/mini-luci-facet.json
+    // the request of a facet asked for on demand: STATE/mlnixci-facet.json
     %kAsk = llvm.mlir.addressof @lit31 : !llvm.ptr
-    %kAsk_n = arith.constant 22 : i64
+    %kAsk_n = arith.constant 20 : i64
     %askl = arith.addi %sl, %kAsk_n : i64
     %askfile = llvm.call @malloc(%askl) : (i64) -> !llvm.ptr
     %x3 = llvm.call @memcpy(%askfile, %state, %sl) : (!llvm.ptr, !llvm.ptr, i64) -> !llvm.ptr

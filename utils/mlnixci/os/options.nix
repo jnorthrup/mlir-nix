@@ -32,10 +32,10 @@ let inherit (lib) mkOption types; in
       default = "mlnix-os";
       description = "Message of the day.";
     };
-    services.miniLuci.port = mkOption {
+    services.mlnixci.port = mkOption {
       type = types.port;
       default = 8080;
-      description = "Port mini-luci listens on.";
+      description = "Port mlnixci listens on.";
     };
   };
 }

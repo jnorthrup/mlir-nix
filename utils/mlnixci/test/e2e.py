@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end check of a running mini-luci on os/: python3 test/e2e.py http://host:port [os-dir]
+"""End-to-end check of a running mlnixci on os/: python3 test/e2e.py http://host:port [os-dir]
 
 The corpus is read only: os/settings.json must be byte for byte what it was.  What changes is the what-if overlay."""
 import hashlib, json, os, sys, urllib.request, urllib.error
@@ -119,7 +119,7 @@ s, b = call("POST", "/api/whatif/set", {"path": ["etc", "zzz-last"], "value": "l
 etc = json.loads(b).get("etc", []) if s == 200 else []
 check("the /etc join: changed, removed and added files, in name order",
       [(e["name"], e["from"] is None, e["to"] is None) for e in etc] == [("aaa-first", True, False),
-      ("mini-luci/firewall.rules", False, False), ("motd", False, True), ("zzz-last", True, False)], (s, etc))
+      ("mlnixci/firewall.rules", False, False), ("motd", False, True), ("zzz-last", True, False)], (s, etc))
 s, b = call("POST", "/api/whatif/clear")
 check("clear again", s == 200 and json.loads(b)["etc"] == [], b[:300])
 
@@ -141,7 +141,7 @@ call("POST", "/api/whatif/set", {"path": ["networking", "hostName"], "value": "e
 s, a = ask(("module", []), ("adhesion", ["networking", "hostName"]), ("live", ["networking", "hostName"]))
 check("facet: the what-if as the module it adheres as", s == 200 and a[0]["count"] == 1
       and '  networking.hostName = lib.mkForce "edge-1";\n' in a[0]["text"], a)
-check("facet: the what-if defines it, at mkForce", s == 200 and a[1]["defined"] == ["mini-luci what-if"]
+check("facet: the what-if defines it, at mkForce", s == 200 and a[1]["defined"] == ["mlnixci what-if"]
       and a[1]["priority"] == 50 and a[2]["configured"] == "edge-1", a)
 call("POST", "/api/whatif/clear")
 s, b = call("POST", "/api/facet", raw=b"[1]")
@@ -162,6 +162,6 @@ check("unknown route 404", s == 404, s)
 for gone in ("/api/commit", "/api/set"):
     check("no " + gone, call("POST", gone)[0] == 404)
 s, b = call("GET", "/")
-check("page", s == 200 and "<title>mini-luci</title>" in b, s)
+check("page", s == 200 and "<title>mlnixci</title>" in b, s)
 check("settings.json untouched", hashlib.sha256(open(os.path.join(OS, "settings.json"), "rb").read()).hexdigest() == settings_hash)
 sys.exit(1 if failures else 0)

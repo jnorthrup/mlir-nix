@@ -1,4 +1,4 @@
-// confix.mlir -- the handle mini-luci passes around for a JSON text's index, and the reads it makes of it.  The index is
+// confix.mlir -- the handle mlnixci passes around for a JSON text's index, and the reads it makes of it.  The index is
 // src/index.mlir's: confix.index's rows (ConfixIndexK's Spans, Tags and DirectChildren) and kids, read with trikeshed ops
 // there.  Here are only the buffers' descriptors behind the handle, and calls of index.mlir's C interfaces with them: no
 // read of an element is made in this file.  An element is a row; its coordinates are its span in the text; an object's

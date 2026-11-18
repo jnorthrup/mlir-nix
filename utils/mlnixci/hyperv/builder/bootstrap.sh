@@ -1,7 +1,7 @@
 #!/bin/sh
-# The builder distro (Debian trixie, WSL2) that builds mlnix and mini-luci into the store for the NixOS distro, mlnixos.
-# Once, as root, from the store's checkout of mini-luci:
-#   wsl -d mlnix-builder -u root -- sh /mnt/wsl/mlnixos/src/mini-luci/hyperv/builder/bootstrap.sh
+# The builder distro (Debian trixie, WSL2) that builds mlnix and mlnixci into the store for the NixOS distro, mlnixos.
+# Once, as root, from the store's checkout of mlir-nix:
+#   wsl -d mlnix-builder -u root -- sh /mnt/wsl/mlnixos/src/mlir-nix/utils/mlnixci/hyperv/builder/bootstrap.sh
 # The toolchain mlnix is built with (LLVM/MLIR 22 from apt.llvm.org), user jim (uid 1000, as on Kali and NixOS, so the
 # store's files are his everywhere), systemd, and the unit that waits for the store.  Takes effect at the distro's next
 # start.

@@ -1258,10 +1258,6 @@ RegionInfo *EvalState::infoOfSlow(nd::LambdaOp lam) {
   return deferred ? bodyOf(nixfe::BodyIndex(uint64_t(deferred.getInt()))) : regionInfo(&lam.getBody());
 }
 
-void EvalState::callLambda(Value &fun, Value *arg, Value &out, PosPtr pos) {
-  callLambdaIn(fun, bodyOfNode(fun.thunk.node), arg, out, pos);
-}
-
 //===----------------------------------------------------------------------===//
 // Error paths: the messages are built here, in functions of their own, and the compiler decides what to inline.
 //===----------------------------------------------------------------------===//
@@ -2138,14 +2134,6 @@ cp::Text EvalState::coerceToPath(Value &v, NixStringContext &ctx, PosPtr pos, st
     throw e;
   }
   return p;
-}
-
-cp::Text EvalState::coerceToStorePath(Value &v, NixStringContext &ctx, PosPtr pos, std::string_view errorCtx) {
-  cp::Text p = coerceToString(v, ctx, false, false, pos, errorCtx);
-  if (nixstore::isInStore(store->storeDir(), p)) return nixstore::toStorePath(store->storeDir(), p);
-  EvalError e(cp::cat("path '", p, "' is not in the Nix store"), pos);
-  if (!errorCtx.empty()) e.addTrace(pos, cp::Text(errorCtx));
-  throw e;
 }
 
 //===----------------------------------------------------------------------===//

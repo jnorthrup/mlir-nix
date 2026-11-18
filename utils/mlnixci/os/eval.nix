@@ -1,4 +1,4 @@
-# A seven-option corpus (options.nix, etc.nix) for mini-luci's tests, in the same row form as nixos/eval.nix; given a
+# A seven-option corpus (options.nix, etc.nix) for mlnixci's tests, in the same row form as nixos/eval.nix; given a
 # `request`, the facets it asks for (answer.nix).
 { lib ? import ./lib, settings ? ./settings.json, overlay ? null, request ? null, ... }:
 let
@@ -6,7 +6,7 @@ let
   # A what-if wins over the configuration: each value of the overlay at mkForce's priority.
   force = v: if builtins.isAttrs v then builtins.mapAttrs (_: force) v else { _type = "override"; priority = 50; content = v; };
   # named, so that an option's adhesion (answer.nix) says which values the what-if gives
-  forced = f: { _file = "mini-luci what-if"; config = force (builtins.fromJSON (builtins.readFile f)); };
+  forced = f: { _file = "mlnixci what-if"; config = force (builtins.fromJSON (builtins.readFile f)); };
   evaluated = lib.evalModules {
     modules = [ ./options.nix ./etc.nix (json settings) ] ++ (if overlay == null then [ ] else [ (forced overlay) ]);
   };

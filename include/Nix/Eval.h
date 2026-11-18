@@ -259,7 +259,7 @@ struct RegionInfo {
   unsigned numSlots;
   mlir::Value result;
   Node *resultNode = nullptr; // the record of `result`
-  /// For a lambda body: the symbols of the lambda's formals (made at its first call, by EvalState::callLambda) and the op
+  /// For a lambda body: the symbols of the lambda's formals (made at its first call, by EvalState::callLambdaIn) and the op
   /// they were made from.
   const Symbol *formalSyms = nullptr;
   mlir::Operation *formalsOf = nullptr;
@@ -342,9 +342,6 @@ struct Node {
   EvalFn eval = nullptr;    // what evaluating the op is
   static constexpr uint8_t kDefault = 1, kDynamic = 1, kForceString = 1;
   bool inPlace() const { return promo == Promotion::InPlace; }
-  /// A value with a cell to read back: its frame cell, or its fixed one.  Not one evaluated in place, whose lookup makes a temporary, nor
-  /// one made by its one use, whose cell the frame does not keep.
-  bool persists() const { return promo != Promotion::InPlace && promo != Promotion::Once; }
   auto args() const { return cp::series(operands, nOperands); }
   /// The op's position; a block argument's is its lambda's (where it was made).
   PosPtr pos() const { return mlir::nix::posOfOp(def); }
@@ -631,7 +628,6 @@ struct EvalState {
                                        std::string_view errorCtx, composite::Text &scratch, bool canonicalizePath = true,
                                        const StringContext **own = nullptr);
   composite::Text coerceToPath(Value &v, NixStringContext &ctx, PosPtr pos, std::string_view errorCtx = "");
-  composite::Text coerceToStorePath(Value &v, NixStringContext &ctx, PosPtr pos, std::string_view errorCtx = "");
   composite::Text copyPathToStore(NixStringContext &ctx, std::string_view path);
   bool isDerivation(Value &v);
   composite::Maybe<composite::Text> tryAttrsToString(Value &v, NixStringContext &ctx, bool coerceMore, bool copyToStore);
@@ -965,7 +961,6 @@ struct EvalState {
   void evalAttrs(Node *n, Frame *env, Value &out);
   RegionInfo *mintLambda(nixfe::FilePool &p, uint32_t row);
   RegionInfo *bodyOf(nixfe::BodyIndex idx);
-  void callLambda(Value &fun, Value *arg, Value &out, PosPtr pos);
 };
 
 /// Render an error the way Nix does ("error: ..." with source excerpt).
@@ -976,7 +971,6 @@ composite::Text formatParseError(const nixfe::ParseError &e, const char *kind = 
 void registerBuiltins(EvalState &state);
 /// Parse JSON into a value (FromJSON in Builtins.cpp).
 void parseJSON(EvalState &state, std::string_view json, Value &v);
-void parseTOML(EvalState &state, std::string_view toml, Value &v);
 
 /// Run `fn` on a thread with a large stack (deep recursion in the evaluator); the thread is joined before this returns.
 int runWithLargeStack(composite::Fn<int()> fn);

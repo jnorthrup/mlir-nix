@@ -1,6 +1,6 @@
 # mlnixci: a configuration interface for Nix
 
-`utils/mlnixci` is mini-luci, moved into this repository. What OpenWrt's LuCI (the Lua Configuration Interface) is to a
+`utils/mlnixci` was mini-luci, a repository of its own; it lives here now, under its own name. What OpenWrt's LuCI (the Lua Configuration Interface) is to a
 router's configuration, mlnixci is to be to a Nix configuration. It renders a corpus of Nix options as a manifest: a
 menu, sections, and a form whose rows are edited with the widget their facets name. `mlnix` evaluates the corpus, and a
 what-if overlay held in memory is evaluated with it. Nothing is written to the system.
@@ -29,16 +29,21 @@ what-if overlay held in memory is evaluated with it. Nothing is written to the s
 - **Its check.** `make -C utils/mlnixci check` builds it against this checkout. It then runs the facet check, which
   compares the compiled query with the counted one over 2,000 queries, the text check (text.mlir against what the
   builder wrote before it) and the end-to-end test (51 checks).
-- **Where it runs.** On mlnixos (NixOS-WSL), the list is served on :8080 and the LuCI-style page on :8081.
-  - The store still builds both from the separate mini-luci repository.
-  - The binary, its services and its NixOS module (`services.miniLuci`) still carry the name mini-luci.
+- **Where it runs.** On mlnixos (NixOS-WSL), mlnixci serves the LuCI-style page on :8082. The store builds it from its
+  clone of this repository (`hyperv/builder/build.sh`) and runs it beside the system's service (`hyperv/nixos/beside.sh`).
+  - The system's own service is still mini-luci, built from the mini-luci repository: the list on :8080, and the
+    LuCI-style page on :8081 beside it.
+  - The program, its units and its NixOS module (`services.mlnixci`, `hyperv/nixos/mlnixci.nix`) carry the name
+    mlnixci.
 
 ## Future direction
 
-None of this is implemented. The order is the order of dependence.
+None of this is implemented but the first item's first half. The order is the order of dependence.
 
-1. **One name, one home.** The binary, its systemd units and its NixOS module take the name mlnixci. The store builds it
-   from this repository (one checkout, one branch) instead of the mini-luci repository, which is then kept as history.
+1. **One name, one home.** Done for mlnixci itself: its name, and the store building it from this repository. Left: the
+   system's service. /etc/nixos/configuration.nix is to import `hyperv/nixos/configuration.nix` from the store's
+   mlir-nix checkout instead of the mini-luci one, so :8080 runs mlnixci, and the mini-luci repository is then kept as
+   history. That changes the running system, so it waits for the owner's go-ahead.
 2. **Facets the corpus declares.** Today the server's columns are fixed: section, kind, state, module and what-if, in
    `src/corpus.mlir` and `src/columns.mlir`. Widget, range and runtime are only fields of a row. A corpus is to name its
    facets, and the server to compile each into the faceted query, with counts, as it compiles the fixed five now.

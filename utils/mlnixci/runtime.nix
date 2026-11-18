@@ -1,6 +1,6 @@
 # The runtime mapping: where an option's value lives in the running system, read by mlnix as text from /proc, /sys and
 # /etc.  It reports and writes nothing.  `apply` is the command that would set the running value; only a privileged
-# helper could run it, and mini-luci runs unprivileged, so the page shows the command and does not run it.
+# helper could run it, and mlnixci runs unprivileged, so the page shows the command and does not run it.
 #   rule loc          null, or how option `loc` maps: { source, live, apply?, range?, agree? } (live is read when
 #                     asked; agree, given the configured value, says whether the running system agrees with it: what
 #                     agreeing means is the option's, e.g. nix.settings.cores = 0 is every core)
@@ -81,7 +81,9 @@ let
     (lib.filter (l: builtins.length (lib.splitString ":" l) >= 7) (rows (read "/etc/passwd"))));
   user = name: { source = "/etc/passwd"; exists = passwd ? ${name}; } // (passwd.${name} or { });
 
-  ports = [ [ "services" "miniLuci" "port" ] [ "networking" "firewall" "allowedTCPPorts" ] [ "services" "openssh" "ports" ] ];
+  # services.miniLuci.port: the port of the system's service while it is still mini-luci's module (the mini-luci repository's)
+  ports = [ [ "services" "mlnixci" "port" ] [ "services" "miniLuci" "port" ] [ "networking" "firewall" "allowedTCPPorts" ]
+    [ "services" "openssh" "ports" ] ];
   sets = {
     "systemd.services" = "/sys/fs/cgroup/system.slice";
     "users.users" = "/etc/passwd";

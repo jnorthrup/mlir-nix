@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>mini-luci</title>
+<title>mlnixci</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   :root { --fg:#1f2733; --mute:#6b7585; --line:#d9dee6; --bg:#eef1f5; --card:#fff; --acc:#2d6cdf; --acc2:#e8f0fd;
@@ -125,7 +125,7 @@
 <body>
 <header>
   <div class="bar">
-    <a class="brand" href="#">mini-luci<small>Nix, faceted</small></a>
+    <a class="brand" href="#">mlnixci<small>Nix, faceted</small></a>
     <input id="q" placeholder="search options" autocomplete="off">
     <a id="changes" href="#changes">no what-if</a>
   </div>
@@ -376,7 +376,7 @@ function renderRow(h, prefixLen) {
       if (w && w.setLive) w.setLive(a.live);
       extra.append(el("div", { class: "note" }, `running system (${a.source}): `, el("span", { class: "mono" }, show(a.live)),
         drift ? el("b", { style: "color:var(--bad)" }, "  — not what the configuration says") : a.agrees === true ? el("span", { style: "color:var(--ok)" }, "  — agrees") : "",
-        a.apply ? el("span", {}, "  ", el("button", { disabled: true, title: `would run: ${a.apply}\nOnly a privileged helper could; mini-luci runs unprivileged and writes nothing.` }, "apply at runtime")) : ""));
+        a.apply ? el("span", {}, "  ", el("button", { disabled: true, title: `would run: ${a.apply}\nOnly a privileged helper could; mlnixci runs unprivileged and writes nothing.` }, "apply at runtime")) : ""));
     },
   };
 }
@@ -580,12 +580,12 @@ async function openEntries(o, box) {
     if (lv) {
       if ("active" in lv) liveCell = el("td", {}, el("span", { class: "dot" + (lv.active ? " on" : "") }), lv.active ? "running" : "not running",
         lv.active && lv.memory !== undefined ? el("div", { class: "note" }, `${(lv.memory / 1048576).toFixed(1)} MiB, ${typeof lv.memoryMax === "number" ? `at most ${(lv.memoryMax / 1048576).toFixed(0)} MiB` : "no memory limit"} · ${lv.tasks} task${lv.tasks === 1 ? "" : "s"}`) : null,
-        lv.apply ? el("div", {}, el("button", { disabled: true, title: `would run: ${lv.apply}\nOnly a privileged helper could; mini-luci runs unprivileged.` }, "set at runtime")) : null);
+        lv.apply ? el("div", {}, el("button", { disabled: true, title: `would run: ${lv.apply}\nOnly a privileged helper could; mlnixci runs unprivileged.` }, "set at runtime")) : null);
       else if ("exists" in lv) liveCell = el("td", {}, el("span", { class: "dot" + (lv.exists ? " on" : "") }), lv.exists ? (lv.uid !== undefined ? `uid ${lv.uid}` : "present") : "absent", el("div", { class: "note" }, lv.source));
       else if ("live" in lv) {
         const drift = e.agrees === false;
         liveCell = el("td", {}, el("span", { class: "b " + (drift ? "drift" : "live"), title: lv.source }, show(lv.live)),
-          lv.apply ? el("div", {}, el("button", { disabled: true, title: `would run: ${lv.apply}\nOnly a privileged helper could; mini-luci runs unprivileged.` }, "apply at runtime")) : null);
+          lv.apply ? el("div", {}, el("button", { disabled: true, title: `would run: ${lv.apply}\nOnly a privileged helper could; mlnixci runs unprivileged.` }, "apply at runtime")) : null);
       }
     }
     const how = { reset: "drop the what-if that made it", disable: "set its enable to false: the module's own way to remove it",

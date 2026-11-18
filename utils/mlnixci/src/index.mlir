@@ -1,7 +1,7 @@
 // index.mlir -- a JSON text's index in TrikeShed's forms (ConfixIndexK): confix.index scans the text into the rows, a
 // cursor of Spans (open, close), Tags and DirectChildren's (first, count), and the kid series those slice; every read
 // below is a trikeshed op on them.  Compiled like query.mlir, by mlnix-opt --trikeshed-lower-cursors.  src/confix.mlir
-// keeps the index's buffers behind the handle the rest of mini-luci passes around, and calls these through their C
+// keeps the index's buffers behind the handle the rest of mlnixci passes around, and calls these through their C
 // interfaces.  An element is a row; an object's children are its keys and values, alternating; nothing is decoded.
 
 !text = !trikeshed.series<i8>

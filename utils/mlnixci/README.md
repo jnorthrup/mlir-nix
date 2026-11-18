@@ -1,8 +1,8 @@
 # mlnixci
 
-mlnix's configuration interface, as LuCI (the Lua Configuration Interface) is OpenWrt's: mini-luci, moved into mlir-nix as
-`utils/mlnixci/` (the server binary and its service are still called mini-luci). [docs/MLNIXCI.md](../../docs/MLNIXCI.md)
-says what it is and where it goes next. A faceted, read-only page over the options of a NixOS-style configuration,
+mlnix's configuration interface, as LuCI (the Lua Configuration Interface) is OpenWrt's. It was mini-luci, a repository of
+its own (kept as history); it lives here, and its program, units and NixOS module are named mlnixci.
+[docs/MLNIXCI.md](../../docs/MLNIXCI.md) says what it is and where it goes next. A faceted, read-only page over the options of a NixOS-style configuration,
 evaluated by [mlnix](../..) (the MLIR
 Nix evaluator). Nothing is written to the system. A what-if overlay, held in memory, is evaluated with the configuration
 at mkForce priority 50, and the page reports what it changes.
@@ -76,7 +76,7 @@ API:
   `POST /api/whatif/clear` edit the overlay. An overlay is kept only if mlnix evaluates it; if the module system refuses
   it, its error is the reply (422).
 - `POST /api/facet {"ask": [{"iface": "adhesion" | "entries" | "live" | "module", "path": [...]}, ...]}` asks for facets
-  on demand. The server writes the request to `STATE/mini-luci-facet.json` and has mlnix evaluate the corpus's eval.nix
+  on demand. The server writes the request to `STATE/mlnixci-facet.json` and has mlnix evaluate the corpus's eval.nix
   with `--arg request FILE` and the overlay, which answers instead of making the corpus (answer.nix). The reply is
   `{"answers": [...]}`, one per ask, each with its own `error` when it does not evaluate. The server knows no facet: a
   new one is Nix code. A body that is not one JSON object is 400; an evaluation that fails is 422.
@@ -92,10 +92,19 @@ API:
     make                                                  # the server (also needs liburing-dev); MLIR_NIX is ../..
     make check NIXPKGS_LIB=/path/to/nixpkgs/lib          # facet-check, text-check, then the e2e test on os/
     sudo make install NIXPKGS_LIB=/path/to/nixpkgs/lib
-    sudo systemctl enable --now mini-luci                 # http://mlnix-os.orb.local:8080/
+    sudo systemctl enable --now mlnixci                   # http://mlnix-os.orb.local:8080/
 
-On mlnixos (NixOS-WSL), `hyperv/builder/build.sh` builds the runtime and `hyperv/nixos/mini-luci.nix` runs it. The store
-still builds it from the separate mini-luci repository (`build.sh MLIR-NIX-BRANCH MINI-LUCI-BRANCH`).
+On mlnixos (NixOS-WSL), the store builds it from its clone of this repository:
+
+    # in the builder distro, as jim: mlnix and mlnixci, mlnixci's checks, and a runtime under runtimes/<stamp>
+    bash /mnt/wsl/mlnixos/src/mlir-nix/utils/mlnixci/hyperv/builder/build.sh [BRANCH]      # prints STAMP=...
+    # in mlnixos, as root: that runtime as the transient unit mlnixci-8082, beside the system's service
+    sh /mnt/wsl/mlnixos/src/mlir-nix/utils/mlnixci/hyperv/nixos/beside.sh STAMP 8082 luci.html
+
+So it runs at http://kali.local:8082/ (the LuCI-style page; `index.html` for the list). `hyperv/nixos/mlnixci.nix` and
+`configuration.nix` make it the system's own service on :8080, which is still mini-luci, built from the mini-luci
+repository: that switch changes the running system and is not made. build.sh leaves the store's `runtime` link alone
+unless asked (`SWITCH=1`), and refuses while the system's service is mini-luci's.
 
 ## Verified (2026-11-16, OrbStack machine `mlnix-os`, Debian trixie arm64, LLVM 22.1.8)
 
@@ -113,7 +122,11 @@ still builds it from the separate mini-luci repository (`build.sh MLIR-NIX-BRANC
   rows), 500 random queries with 100 what-if steps between them answer byte for byte the same but for queryMs, and
   in the same time (median of 400, alternating: the first page 0.467 -> 0.462 ms, every hit, 1.16 MB, 0.677 -> 0.669
   ms).
-- `ldd mini-luci`: linux-vdso, liburing-ffi.so.2, libc.so.6 and the loader. The binary is 68,080 bytes stripped. The
+- On mlnixos's builder distro (x86_64, Debian trixie, LLVM 22, 2026-11-18) the same checks pass, and the server on the
+  system's own configuration (21,954 options, evaluated in 5.3 s) answers 14 fixed requests (queries, the report, a
+  what-if set, refused and cleared) and the on-demand facets as the mini-luci server beside it does, but for the
+  what-if's name (`mlnixci what-if`) where a refusal quotes it.
+- `ldd mlnixci`: linux-vdso, liburing-ffi.so.2, libc.so.6 and the loader. The binary is 68,080 bytes stripped. The
   C++ server it replaces was 134,184 bytes and also loaded libstdc++, libm and libgcc_s.
 - SIGTERM drains: the accept is cancelled, admitted connections are answered, and the listener is closed before the ring.
 
@@ -122,7 +135,7 @@ still builds it from the separate mini-luci repository (`build.sh MLIR-NIX-BRANC
 - No authentication. The page is read-only, but anyone who can reach the port can run what-if evaluations, and each
   one is a full mlnix run.
 - The ring waits on each mlnix evaluation (a child process), so other requests wait while one runs.
-- mlnix itself is C++, built on MLIR's C++ API, and loads libstdc++. mini-luci's own code has no C++.
+- mlnix itself is C++, built on MLIR's C++ API, and loads libstdc++. mlnixci's own code has no C++.
 - `trikeshed-lower-cursors` does not lower groupBy, pivot or keyed joins. A series is a buffer where it is made unless
   it is drained (combine and combineAll are views, drained part by part; a series drained is stored element by
   element).

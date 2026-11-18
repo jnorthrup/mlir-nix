@@ -906,11 +906,6 @@ struct TomlParser {
 };
 } // namespace
 
-void parseTOML(EvalState &state, std::string_view toml, Value &v) {
-  TomlParser P{state, toml, false};
-  P.parse(v);
-}
-
 //===----------------------------------------------------------------------===//
 // Registration
 //===----------------------------------------------------------------------===//
