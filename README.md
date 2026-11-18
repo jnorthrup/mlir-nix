@@ -77,7 +77,9 @@ MLIR ops stay the program: nodes are made from them and read their attributes.
 ## Open work
 
 - The Nix path through TrikeShed ([docs/PRELOAD-DIALECTS.md](docs/PRELOAD-DIALECTS.md), steps 2-4):
-  - `son`'s pool rows as `trikeshed.append` and first forces as `trikeshed.anchor`, with the evaluator reading son IR;
+  - `son`'s pool rows as `trikeshed.append` and first forces as `trikeshed.anchor`, with the evaluator reading son IR
+    (both arms hold the pool in that form: the native FilePool is the Cursor, and the Graal arm's rows are appended
+    in son.pool's order with each body an anchor its first call mints; the IR does not write the ops yet);
   - an LLVM arm that lowers through `trikeshed` (the JIT, which lowered straight to `arith` and LLVM, is removed);
   - `//` as `trikeshed.layers`.
 

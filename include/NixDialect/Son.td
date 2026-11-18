@@ -18,8 +18,10 @@
 //   son.release what a call's frame may keep when it returns: the Graal arm's frame (graal/, BodyRoot.release),
 //               made by son-release from the schedule's must-force set (what is forced on every path that returns)
 //
-// The pool rows are TrikeShed's PoolCol columns (TrikeShed.td); lowering the pool to trikeshed.append and trikeshed.anchor
-// is the next step.
+// The pool rows are TrikeShed's PoolCol columns (TrikeShed.td).  The arms keep the pool in that form: the native
+// evaluator's FilePool is the Cursor, and the Graal arm's Module holds the rows in son.pool's order (a row is its
+// index: trikeshed.append) with each body an anchor (trikeshed.anchor: minted by the first call, a constant after).
+// Writing them as trikeshed ops in this IR waits for a consumer that reads them here.
 //
 //===----------------------------------------------------------------------===//
 

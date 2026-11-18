@@ -516,6 +516,33 @@ graal/bench/curried.nix (60 runs, two rounds of three JVMs against db3a93e): wit
 204.8 MB a run, and no cell is made over f's frame any more; without son, the same memory, and the time within the
 spread between JVMs (54.1 -> 50.2 ms). The other files allocate the same, and their times stay within the spread.
 
+## The pool: appended rows, anchored bodies
+
+TrikeShed.td names the pool's form (PoolCol: a Cursor whose rows are appended as lowering defers a lambda, its Body
+column the anchor a first call mints) and Son.td names it the next step; the native evaluator's FilePool already is
+that Cursor. The arm's was a map from a row's symbol to its op and another to its minted body, and a `son.defer` looked
+its row's body up by name every time it made a closure. Now the pool is the rows in the order son.pool holds them
+(trikeshed.append: a row is its index, what a son.defer refers to once its node is built) and each row's body an anchor
+(trikeshed.anchor; Kotlin's `↺`): Module.body mints it the first time, and the DeferNode keeps the body it got as a
+compilation constant (Graal's @CompilationFinal), so a compiled closure is made with no lookup at all.
+
+eval-okay, 147 files: the outputs byte-identical to 5733d30's arm, plain and with son, and the census the same (2,981
+cells over frames). graal/bench (60 runs, two rounds of three JVMs, the arms alternating, against 5733d30's arm):
+
+                     with son                                  without son
+    attrs.nix        28.10 / 28.10 -> 24.55 / 24.80 ms  -12%   33.55 / 34.25 -> 27.80 / 27.90 ms  -18%
+    curried.nix      35.20 / 35.75 -> 24.80 / 24.25 ms  -31%   51.65 / 51.30 -> 39.55 / 39.00 ms  -24%
+    fib.nix           2.30 /  2.30 ->  2.30 /  2.30 ms         14.10 / 14.60 -> 14.40 / 14.45 ms
+    leaf.nix         21.50 / 20.60 -> 17.70 / 17.60 ms  -16%   22.35 / 24.40 -> 18.90 / 16.85 ms  -24%
+    prims.nix        25.45 / 25.80 -> 18.35 / 18.85 ms  -27%   33.25 / 33.55 -> 17.70 / 20.50 ms  -43%
+    slots1.nix       23.35 / 23.35 -> 16.15 / 16.20 ms  -31%   27.75 / 28.50 -> 19.35 / 17.45 ms  -35%
+    slots9.nix       24.05 / 23.20 -> 18.95 / 16.75 ms  -24%   35.65 / 32.95 -> 18.20 / 18.50 ms  -47%
+
+curried.nix also allocates less (204.8 -> 191.1 MB a run with son, 225.4 -> 211.7 without); the rest allocate the
+same. fib makes no closure in its loop. The gain is more than a map lookup costs, and why is not measured; the likely
+reason is that compiled code no longer goes through the HashMap's code, so the body's fields are constants where the
+closure is made and the code around it compiles as one.
+
 ## Not built, with the number that gates it
 
 Type pools for every node (the whole AST as `Cursor`s of typed instances, Confix mapping a tree to rows)

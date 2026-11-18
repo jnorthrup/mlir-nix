@@ -21,7 +21,6 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "Nix/Os.h"
 #include <cstdint>
-#include <cstdlib>
 #include <sys/mman.h>
 #include <unistd.h>
 

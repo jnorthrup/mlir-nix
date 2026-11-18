@@ -529,14 +529,21 @@ class InterpolateNode(@field:CompilationFinal(dimensions = 1) @JvmField val part
 
 // ── functions ───────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/// son.defer: a lambda over its captures; the body's CallTarget is made on the first call (the module mints rows on demand).
-class DeferNode(@JvmField val module: Module, @JvmField val row: String,
+/// son.defer: a lambda over its captures.  Its row's body is TrikeShed's anchor (trikeshed.anchor, Series.h `anchor`; Kotlin's `↺`): the
+/// first evaluation mints it from the pool (Module.body), and every one after reads the constant that made, a compilation constant here,
+/// so a compiled closure is made with no lookup of its row.
+class DeferNode(@JvmField val module: Module, @JvmField val row: Int,
                 @field:CompilationFinal(dimensions = 1) @JvmField val captures: IntArray) : OpNode() {
     @JvmField val small = captures.size <= EXPLODE
+    @CompilationFinal @JvmField var body: Module.Body? = null
     override fun exec(f: Frame): Any {
-        val b = module.body(row)
+        val b = body ?: anchor()
         return Closure(b.target, if (small) cellsSmall(f) else cellsLarge(f), b.formals, b.defaults, b.ellipsis, b.name, b.argForced,
             b.forcedAfter)
+    }
+    private fun anchor(): Module.Body {
+        CompilerDirectives.transferToInterpreterAndInvalidate()
+        return module.body(row).also { body = it }
     }
     @ExplodeLoop
     private fun cellsSmall(f: Frame): Array<Any?> { val a = arrayOfNulls<Any?>(captures.size); for (i in captures.indices) a[i] = lazy(f, captures[i], 5); return a }
@@ -650,37 +657,51 @@ class PrimNode(@JvmField val prim: Prim, @field:CompilationFinal(dimensions = 1)
 
 // ── building ────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/// One exported file: its expression and its pool of lambda bodies, made into RootNodes the first time each is needed.
+/// One exported file: its expression and its pool of lambda bodies.  The pool is TrikeShed's (TrikeShed.td PoolCol, Series.h's
+/// Cursor): its rows appended in the order son.pool holds them (trikeshed.append: a row is its index, what a son.defer refers to), each
+/// row's body anchored (trikeshed.anchor): made into a RootNode the first time it is needed, and that body from then on.
 class Module(@JvmField val ops: List<Op>, @JvmField val loader: Loader) {
     class Body(val target: CallTarget, val formals: Array<String>?, val defaults: BooleanArray?, val ellipsis: Boolean, val name: String?,
                val argForced: Boolean, val forcedAfter: Int)
 
-    private val rows = HashMap<String, Op>()
-    private val bodies = HashMap<String, Body>()
+    private val rows: Array<Op>
+    private val bodies: Array<Body?>
+    private val rowOf = HashMap<String, Int>() // a son.defer's symbol, read once when its node is built
     @JvmField val expr: Op
 
     init {
         var e: Op? = null
+        var pool: List<Op> = emptyList()
         for (o in ops) when (o.name) {
             "nix.expr" -> e = o
-            "son.pool" -> for (b in o.regions[0][0].ops) rows[b.str("sym_name")!!] = b
+            "son.pool" -> pool = o.regions[0][0].ops
         }
+        rows = pool.toTypedArray()
+        for ((i, b) in rows.withIndex()) rowOf[b.str("sym_name")!!] = i
+        bodies = arrayOfNulls(rows.size)
         expr = e ?: throw NixError("son-export: no nix.expr")
     }
+
+    /// The row a son.defer's symbol names.
+    fun row(sym: String): Int = rowOf[sym] ?: throw NixError("son-export: no row $sym")
 
     val baseDir: String get() = expr.str("base_dir") ?: "/"
     val exprTarget: CallTarget by lazy { build("expr", expr.regions[0][0], 0, false).callTarget }
 
+    /// Row i's body: the anchor's mint the first time, the constant after.
+    fun body(i: Int): Body = bodies[i] ?: mint(i).also { bodies[i] = it }
+
     @Suppress("UNCHECKED_CAST")
-    fun body(row: String): Body = bodies.getOrPut(row) {
-        val o = rows[row] ?: throw NixError("son-export: no row $row")
+    private fun mint(i: Int): Body {
+        val o = rows[i]
+        val row = o.str("sym_name")!!
         val lam = o.attrs["lambda"] as Map<String, Any?>
         val formals = (lam["formals"] as List<String>?)?.toTypedArray()
         val defaults = (lam["formal_defaults"] as List<Boolean>?)?.toBooleanArray() ?: formals?.let { BooleanArray(it.size) }
         val ncaptures = (o.attrs["captures"] as Number).toInt()
         val root = build((lam["name"] as String?) ?: row, o.regions[0][0], ncaptures, true)
         val argForced = o.attrs["arg_forced"] == true
-        Body(root.callTarget, formals, defaults, lam["ellipsis"] == true, lam["name"] as String?, argForced,
+        return Body(root.callTarget, formals, defaults, lam["ellipsis"] == true, lam["name"] as String?, argForced,
             if (argForced) -1 else forcedAfter(o, ncaptures, 3))
     }
 
@@ -696,7 +717,7 @@ class Module(@JvmField val ops: List<Op>, @JvmField val loader: Loader) {
         val block = o.regions[0][0]
         val ret = block.ops.lastOrNull { it.name == "nix.return" } ?: return -1
         val defer = block.ops.firstOrNull { it.name == "son.defer" && it.res.firstOrNull() == ret.ins[0] } ?: return -1
-        val next = rows[(defer.attrs["row"] as List<String>).last()] ?: return -1
+        val next = rows[rowOf[(defer.attrs["row"] as List<String>).last()] ?: return -1]
         for ((i, c) in defer.ins.withIndex()) if (c == block.args[arg]) forcedAfter(next, i, depth - 1).let { if (it >= 0) return it + 1 }
         return -1
     }
@@ -760,7 +781,7 @@ class Module(@JvmField val ops: List<Op>, @JvmField val loader: Loader) {
             "nix.formal" -> FormalNode(ins[0], a["name"] as String, if (ins.size > 1) ins[1] else -1)
             "nix.with_var" -> WithVarNode(a["name"] as String, ins)
             "nix.apply" -> ApplyNode(ins[0], ins.copyOfRange(1, ins.size))
-            "son.defer" -> DeferNode(this, (a["row"] as List<String>).last(), ins)
+            "son.defer" -> DeferNode(this, row((a["row"] as List<String>).last()), ins)
             else -> throw Unsupported("op ${o.name}")
         }
     }
