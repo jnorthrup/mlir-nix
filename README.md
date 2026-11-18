@@ -213,7 +213,9 @@ The Graal arm: `cd graal && ./gradlew installDist` (JDK 25 GraalVM; TrikeShed-jv
     build/bin/mlnix instantiate --eval --strict -E '1 + 2'
     MLNIX_DEFER=1 build/bin/mlnix instantiate --readonly-mode --eval --strict test/nixos-toplevel.nix --arg nixpkgs ./.cache/nixpkgs
 
-`MLNIX_STATS=1` prints what the run did (the dynamic mix of ops, the call ladder, allocation).
+`MLNIX_STATS=1` prints what the run did (the dynamic mix of ops, the call ladder, allocation) and son's account of the
+frames at their return. The research counters it carried until 18 November, with their last answers, are in
+[docs/bench/local/stats-20261118](docs/bench/local/stats-20261118/RESULTS.md).
 
 ## Tests
 

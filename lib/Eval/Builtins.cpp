@@ -550,12 +550,6 @@ void registerBuiltins(EvalState &state) {
     composite::Text scratch;
     auto s = composite::view(st.coerceToWindow(*args[1], ctx, false, true, pos, "while evaluating the second argument passed to builtins.match", scratch));
     composite::Text &key = st.matchKey; // built in a buffer that is reused
-    if (st.statsEnabled) [[unlikely]] {
-      ++st.nMatchCalls;
-      key.clear();
-      key.put(re.data(), uint32_t(re.size())).put('\0').put(s.data(), uint32_t(s.size())); // the regex, a 0 byte, the input
-      ++st.matchPairs.at(key.data(), key.size(), [&] { return st.keyText.copy(key.data(), key.size()); });
-    }
     // The answer is a function of the pattern's bytes and the input's, and it is a value nothing writes (null, or a list of strings with no
     // context): a pair met before is answered from the memo, keyed by its content (more than half of the calls of a NixOS evaluation repeat
     // a pair).  The key is the pattern's length, the pattern and the input: no two pairs share one.

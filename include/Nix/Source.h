@@ -18,8 +18,6 @@
 #include "Nix/Name.h"
 
 namespace nixfe {
-/// MLNIX_STATS_IMPORTS: when set, the parser adds every path literal it lowers (canonical text) to this set.
-extern composite::TextSet *pathLiterals;
 
 
 struct Pos {

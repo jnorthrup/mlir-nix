@@ -36,7 +36,6 @@
 #include <variant>
 
 namespace nixfe {
-composite::TextSet *pathLiterals = nullptr;
 using composite::α;
 
 namespace {
@@ -669,10 +668,8 @@ struct Parser {
     // read out of the columns, by value: the pool grows while the body mints
     uint32_t at = pool.rows.col<PoolCol::At>()[row];
     Pos pos = pool.rows.col<PoolCol::AtPos>()[row];
-    mlir::Operation *op = pool.rows.col<PoolCol::Op>()[row];
     uint32_t withs = pool.rows.col<PoolCol::Withs>()[row];
     ::join::TwInt names = pool.rows.col<PoolCol::Names>()[row];
-    nixev::RegionInfo *anchor = pool.rows.col<PoolCol::Body>()[row];
     Scope lex;
     for (uint32_t i = 0; i < names.second(); i++) bindTo(lex, Name::of(pool.nameCol[names.first() + i]), caps[withs + i]);
     // `with` never binds lexically and a lexical binding beats every `with`, so the flat map plus the with-chain
@@ -2383,7 +2380,6 @@ struct Parser {
       if (lit.size() > 1 && lit.back() == '/') path.put('/');
     }
     if (mode == Mode::Show) return text(path.clone(), K_EXPR, pos);
-    if (pathLiterals && mode == Mode::Gen) pathLiterals->insert(path.data(), path.size());
     return mk(K_EXPR, pos, mode == Mode::Gen ? Value(nd::PathOp::create(b, noLoc(), composite::SeriesType::get(b.getContext(), b.getIntegerType(8)), Name::persist(llvm::StringRef(path.data(), path.size())))) : Value());
   }
 

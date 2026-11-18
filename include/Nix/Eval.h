@@ -102,8 +102,6 @@ struct Bindings {
   PosPtr pos = nullptr;
   Attr attrs[0];
 
-  static inline bool countGets = false; // MLNIX_STATS: get() calls and binary-search steps by set size (1, 2-3, 4-7, ... 2^k)
-  static inline uint64_t getCalls[16] = {}, getSteps[16] = {}, getMiss[16] = {};
   static inline uint64_t merged = 0, mergedCells = 0; // MLNIX_STATS: flat sets made by mergeBindings, and their cells
 
   /// The rows, in name order: the array itself.  (A `//` merges into one such array: EvalState::updateAttrs.)
@@ -270,13 +268,9 @@ struct RegionInfo {
   uint8_t hasFormals = 0, ellipsis = 0;
   uint32_t nFormals = 0;
   const bool *formalDefaults = nullptr;
-  uint64_t calls = 0; // MLNIX_STATS: frames made for this region
-  uint8_t stackable = 2; // MLNIX_STATS: 1 when no op of the body can make a thunk or closure over the frame, so it could live on the C++ stack; 2 unclassified
-  composite::Text shape = {}; // MLNIX_STATS_SHAPES: the name-free canonical form of this lambda and the lambdas it returns (EvalState::shapeOf)
+  uint8_t stackable = 2; // 1 when no op of the body can make a thunk or closure over the frame, so a call runs on a stack frame; 2 unclassified
   PosPtr selPos = nullptr; // where the recognized selector's `if` is: the position a non-Boolean condition is reported at
   uint8_t selShape = 0; // 0 unclassified, 1 none, 2 `c: x: if c then [x] else []`, 3 `c: x: if c then x else {}` (EvalState::selectorShape)
-  uint8_t chainOuter = 2; // MLNIX_STATS: 1 when the body's result is itself a lambda (a curried chain's outer half), 2 unclassified
-  uint8_t srcClass = 0; // MLNIX_STATS: where the region's code is defined, once classified (EvalState::srcClassOf); 0 unclassified
   /// MLNIX_STATS: 1 when son says a frame of this lambda body is unreachable once its call returns: the body makes no closure, and
   /// every value of it a lazy use makes a thunk over the frame of is forced on every path that returns (son::forcedOnReturn).
   uint8_t sonDead = 0;
@@ -289,7 +283,6 @@ struct RegionInfo {
   uint64_t nEvals = 0;
   composite::WordTable<uint32_t> opIdx; // by the op's address
   composite::MutableSeries<uint64_t> everRan{};
-  composite::MutableSeries<uint32_t> opEvals{}; // MLNIX_STATS_USES: evalOp calls per op (indexed like everRan's bits)
 };
 
 struct Frame {
@@ -471,7 +464,7 @@ struct EvalState {
 
   // -- Allocation --------------------------------------------------------
   Value *allocValue() {
-    if (statsEnabled) ++nVT[kAllocated];
+    if (statsEnabled) ++nValues;
     return new (alloc.Allocate<Value>()) Value();
   }
   Bindings *allocBindings(size_t n);
@@ -493,10 +486,10 @@ struct EvalState {
   composite::WordTable<PosIdx> attrPositionBases; // by the op's address
 
   // -- Value construction ------------------------------------------------
-  void mkInt(Value &v, int64_t n) { if (statsEnabled) ++nVT[unsigned(VType::Int)];  v.type = VType::Int; v.integer = n; }
-  void mkFloat(Value &v, double d) { if (statsEnabled) ++nVT[unsigned(VType::Float)];  v.type = VType::Float; v.fpoint = d; }
-  void mkBool(Value &v, bool b) { if (statsEnabled) ++nVT[unsigned(VType::Bool)];  v.type = VType::Bool; v.boolean = b; }
-  void mkNull(Value &v) { if (statsEnabled) ++nVT[unsigned(VType::Null)];  v.type = VType::Null; }
+  void mkInt(Value &v, int64_t n) { v.type = VType::Int; v.integer = n; }
+  void mkFloat(Value &v, double d) { v.type = VType::Float; v.fpoint = d; }
+  void mkBool(Value &v, bool b) { v.type = VType::Bool; v.boolean = b; }
+  void mkNull(Value &v) { v.type = VType::Null; }
   void mkString(Value &v, std::string_view s, const NixStringContext &ctx = {});
   /// A store path that is its own context (a copied source, a fixed output, a store path read back): one arena copy is both the string's
   /// bytes and its context's element.
@@ -505,8 +498,7 @@ struct EvalState {
   void mkStringWindow(Value &v, llvm::StringRef r) {
     std::string_view s(r.data(), r.size());
     if (s.size() > UINT32_MAX) throw EvalError("string of 4 GiB or more");
-    v.type = VType::String; if (statsEnabled) ++nVT[unsigned(VType::String)];
-    v.str.s = s.data(); v.aux = static_cast<uint32_t>(s.size()); v.str.ctx = nullptr;
+    v.type = VType::String; v.str.s = s.data(); v.aux = static_cast<uint32_t>(s.size()); v.str.ctx = nullptr;
   }
   /// A string made of pieces (windows over existing bytes), written once into one arena buffer.
   void mkStringOf(Value &v, llvm::ArrayRef<composite::Chars> pieces, const StringContext *ctx);
@@ -521,13 +513,12 @@ struct EvalState {
     mkList(v, size_t(s.size()));
     cp::drain(s, v.list.elems);
   }
-  void mkAttrs(Value &v, Bindings *b) { if (statsEnabled) ++nVT[unsigned(VType::Attrs)];  v.type = VType::Attrs; v.attrs = b; }
-  void mkApp(Value &v, Value *f, Value *x) { if (statsEnabled) ++nVT[unsigned(VType::App)];  v.type = VType::App; v.app.left = f; v.app.right = x; }
+  void mkAttrs(Value &v, Bindings *b) { v.type = VType::Attrs; v.attrs = b; }
+  void mkApp(Value &v, Value *f, Value *x) { v.type = VType::App; v.app.left = f; v.app.right = x; }
   Value *mkAppValue(Value *f, Value *x) { Value *v = allocValue(); mkApp(*v, f, x); return v; }
   /// `f name x`, applied when forced (VType::AttrApp).
   Value *mkAttrAppValue(Value *f, Symbol name, Value *x) {
     Value *v = allocValue();
-    if (statsEnabled) ++nVT[unsigned(VType::AttrApp)];
     v->type = VType::AttrApp;
     v->aux = name;
     v->app.left = f;
@@ -793,9 +784,8 @@ struct EvalState {
     n->eval(*this, n, env, out);
   }
   void statEval(Node *n, Frame *env);
-  /// MLNIX_STATS: evalOp with the census, and the node being evaluated kept in statCur while it runs (the consumer a lookup makes a cell for).
+  /// MLNIX_STATS: evalOp with the census.
   void evalOpCounted(Node *n, Frame *env, Value &out);
-  Node *statCur = nullptr, *lastThunkFor = nullptr;
   RegionInfo *regionInfo(mlir::Region *r);
   /// A frame of `ri`'s body: its slots empty.  The ordinary case (no census, no recycling) is a bump of the arena, here; the rest out of line.
   Frame *newFrame(RegionInfo *ri, Frame *up) {
@@ -867,7 +857,6 @@ struct EvalState {
   Node *nodeOf(void *key) {
     NodeCacheEntry &e = nodeCache[(reinterpret_cast<uintptr_t>(key) >> 4) & (kNodeCache - 1)];
     if (e.key == key) return e.node;
-    if (statsEnabled) [[unlikely]] ++nSlotMisses;
     Node **found = nodeMap.find(uint64_t(uintptr_t(key)));
     if (!found) return nullptr;
     e = {key, *found};
@@ -899,23 +888,10 @@ struct EvalState {
   }
   uint64_t nUpdLayered = 0, nUpdMerged = 0, nUpdBase = 0, nUpdTop = 0; // MLNIX_STATS: `//` as a layer / a flat merge, entries not copied / copied
   uint64_t nDemandMinted = 0; // MLNIX_STATS: lambda bodies minted on first call
-  uint64_t nSlotMisses = 0;   // MLNIX_STATS: nodeOf answered by the hash map, not its cache
-  static constexpr unsigned kAllocated = unsigned(VType::PrimOpApp) + 1; // nVT's last row: cells allocated
-  uint64_t nVT[kAllocated + 1] = {}; // MLNIX_STATS: instrumented tag writes, including stack values and repeated retyping;
-                         // [14] alone counts allocated Value rows, not tag writes
+  uint64_t nValues = 0; // MLNIX_STATS: Value cells allocated
   uint64_t nFrames = 0, nFrameBytes = 0, nFrameSlots = 0; // requested frame storage, excluding arena overhead
-  composite::MutableSeries<composite::Join<composite::Text, size_t>> evaluatedFiles; // MLNIX_STATS_IMPORTS: files evalFile'd, with how many path literals had been lowered by then
   uint64_t nMaskBytes = 0, nLayerBytes = 0, nMergeBytes = 0, nCtxBytes = 0, nFormalBytes = 0; // MLNIX_STATS: arena bytes the by-use line did not name before
-  uint64_t nLookups = 0, nLookupHits = 0, nHopHist[6] = {}; // MLNIX_STATS: lookupImpl calls, those answered by a filled slot, and the frame hops to the defining region (0, 1, 2, 3, 4, 5 or more)
-  OpCounts cellsByKind; // MLNIX_STATS: cells lookup made, by defining op: [evaluated at once, left a thunk]
   OpCounts evalsByKind; // MLNIX_STATS: evalOp calls by op kind
-  uint64_t nTouchAt[17] = {}, nFramesBySize[17] = {}; // MLNIX_STATS: first touches by slot index (16 = 16 or more), frames by slot count
-  static constexpr unsigned kSrcClasses = 5; // 1 nixpkgs lib, 2 nixos modules, 3 pkgs, 4 other
-  uint64_t nClsFrames[kSrcClasses] = {}, nClsSlots[kSrcClasses] = {}, nClsTouched[kSrcClasses] = {};
-  unsigned srcClassOf(RegionInfo *ri);
-  uint64_t nChainOuter = 0, nChainOuterSlots = 0; // MLNIX_STATS: frames (and their slots) that exist only to capture an argument for an inner lambda
-  uint64_t nStackable = 0, nStackableBytes = 0, nStackableOneSlot = 0; // MLNIX_STATS: frames (and their bytes) of bodies that cannot leak their frame
-  uint64_t nTouchedBy[6] = {}; // MLNIX_STATS: slots ever read, by the slot count of their frame (1, 2-3, 4-8, 9-16, 17-64, 65+)
   uint64_t nListExtended = 0; // MLNIX_STATS: cells `++` wrote into a buffer's room (ListExtent) instead of a copy
   uint64_t nBindingBytes = 0, nListBytes = 0, nStringBytes = 0; // MLNIX_STATS: arena bytes by use (values and frames are counted above)
   uint64_t nStackFrames = 0; // MLNIX_STATS: calls run on a stack frame, nothing allocated in the arena
@@ -938,7 +914,7 @@ struct EvalState {
   Value *makeCell(Frame *f, Node *v, bool forced);
   Value *makeFixed(Node *s);
   Value *evalNow(Frame *f, Node *s, Value *nv);
-  void statCell(Frame *f, Node *s, Value *nv, bool eager);
+  void statCell(Frame *f, Value *nv);
   uint64_t nEager = 0;   // MLNIX_STATS
   // Frames that returned uncaptured, by slot count: a stack per size, linked through the frame's own first word.  The newest is reused first, so
   // a recycled frame is almost always still in L1 (77de09c:docs/FRAME-BYTES.md: 97 to 98% of reuses are within 32 KiB of allocation).
@@ -987,38 +963,20 @@ struct EvalState {
   InfoSlot infoCache[kInfoCache];
   void callLambdaIn(Value &fun, RegionInfo *ri, Value *arg, Value &out, PosPtr pos);
   void applySelector(unsigned shape, RegionInfo *ri, Value **a, Value &dest, PosPtr pos);
-  void statTouch(Frame *f, RegionInfo *ri, unsigned idx);
-  void statHops(Frame *f, RegionInfo *ri, bool hit);
-  // MLNIX_STATS: the select census.  A layout signature is the set's size and three sampled names; a site is mono-, few- or megamorphic
-  // by how many distinct signatures it has seen.
-  struct SelSite { uint64_t calls = 0, hits = 0, sameAsLast = 0, last = 0; cp::MutableSeries<uint64_t, cp::Inline<uint64_t, 6>> seen; bool dynamic = false; };
-  composite::WordTable<SelSite> selSites; // by the select op's address
-  uint64_t nMatchCalls = 0; composite::TextTable<uint64_t> matchPairs; // MLNIX_STATS: builtins.match calls, by (regex, input)
   composite::TextTable<Value> matchMemo; // builtins.match's answers, keyed by the pattern's length and bytes, then the input's
   composite::Text matchKey;              // the key of the call at hand, built here so a lookup allocates nothing
-  composite::Bump keyText;               // the keys of matchMemo and of the census tables keyed by bytes
-  uint64_t nSelects = 0, nSelectHits = 0, nSelectDyn = 0, nSelectLayered = 0, nSelectProbes = 0, nSelectSizeLog[18] = {};
-  void statSelect(const void *site, const Bindings *b, Symbol key, bool dynamic);
+  composite::Bump keyText;               // the keys of matchMemo
   // MLNIX_STATS: frames at their call's return -- by son's account dead (RegionInfo::sonDead), by the run's dead (no closure over
   // them and every thunk over them, projections too, forced), and son's account wrong (dead by son, not by the run: must be 0)
   uint64_t nSonDead = 0, nSonDeadBytes = 0, nRunDead = 0, nRunDeadBytes = 0, nSonWrong = 0, nReturns = 0, nReturnBytes = 0;
   uint64_t nSonDeadBodies = 0, nBodies = 0; // lambda bodies indexed, and those son calls dead at return
   uint64_t nSonGap[8] = {};                  // returns dead by the run and not by son, by RegionInfo::sonWhy
   OpCounts sonGapByOp;                       // the same, by the op whose lazy use decides (n[0] path, n[1] callee, n[2] passed on)
-  uint64_t nBuilders = 0, nBuilderRows = 0, nBuildersBig = 0, nBuilderBigRows = 0; // MLNIX_STATS: attribute-set builders, and those past the 12 inline rows (a malloc)
-  OpCounts thunksByOp; // MLNIX_STATS: frame-needing thunks by operation: count, packed operand counts
-  uint64_t nProjThunks = 0, nHardThunks = 0, nImmediate = 0, nImmediateLater = 0; // MLNIX_STATS: frame-needing thunks forced as the very next thing
-  OpCounts immediateByConsumer; // MLNIX_STATS: the same, by the op whose operand the thunk was made for
-  const Value *lastThunk = nullptr;
-  OpCounts immediateByOp; // MLNIX_STATS: thunks made over a frame, projections and the rest
   uint64_t nSelectorCalls = 0; // MLNIX_STATS: saturated calls of a recognized selector, made with no frame and no closure
   bool selectorsOn = true;     // MLNIX_NOSELECTORS turns the recognition off
   unsigned selectorShape(mlir::nix::LambdaOp outerLam, RegionInfo *outer);
-  composite::Text shapeOf(RegionInfo *ri, unsigned depth = 0); // MLNIX_STATS_SHAPES
   uint64_t nStackCells = 0; // MLNIX_STATS: curried-call intermediates held by value instead of in a heap cell
   uint64_t nEmptyShared = 0; // MLNIX_STATS: empty attribute sets that were the shared constant instead of a fresh 16-byte cell
-  uint64_t nSlotsTouched = 0; // MLNIX_STATS: frame slots that were ever read (a cell made on first touch), of nFrameSlots allocated
-  uint64_t nSlotsAssigned = 0, nSlotsNoRead = 0; // MLNIX_STATS: frame cells assigned, and those given to a value with no use at all
   uint64_t nsLower = 0, nsMint = 0; // MLNIX_STATS: time lowering files (analysis of deferred lambdas included) / minting bodies on demand
   composite::WordTable<RegionInfo *> regionInfos; // by the region's address
   void indexRegion(mlir::Region &r);

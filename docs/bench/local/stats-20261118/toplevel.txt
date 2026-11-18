@@ -1,0 +1,357 @@
+attribute cells: bytes=16 position_rows=143365 position_bytes=2097152
+frame allocations: count=4492823 bytes=126051928 slots=6770845 touched=1040956 (15.4% of the slots a frame carries are ever read)
+== frames by slot count / first touches by slot index (index 16: 16 or more):
+    0   frames      2878 (  0.1%)   touches        12 (  0.0%)
+    1   frames   3975311 ( 88.5%)   touches    323025 ( 31.0%)
+    2   frames    105201 (  2.3%)   touches    226932 ( 21.8%)
+    3   frames    120797 (  2.7%)   touches    189275 ( 18.2%)
+    4   frames    100518 (  2.2%)   touches     46630 (  4.5%)
+    5   frames     33017 (  0.7%)   touches     52352 (  5.0%)
+    6   frames     32547 (  0.7%)   touches     24350 (  2.3%)
+    7   frames     12670 (  0.3%)   touches     11870 (  1.1%)
+    8   frames      2333 (  0.1%)   touches     14448 (  1.4%)
+    9   frames      2924 (  0.1%)   touches     11396 (  1.1%)
+   10   frames     52491 (  1.2%)   touches     13617 (  1.3%)
+   11   frames     36190 (  0.8%)   touches      9612 (  0.9%)
+   12   frames       203 (  0.0%)   touches     11869 (  1.1%)
+   13   frames       200 (  0.0%)   touches      6791 (  0.7%)
+   14   frames       120 (  0.0%)   touches     14244 (  1.4%)
+   15   frames        68 (  0.0%)   touches      7602 (  0.7%)
+   16+  frames     15355 (  0.3%)   touches     76931 (  7.4%)
+== frames by the file that defines the lambda:
+   nixpkgs/lib    frames   4064466 ( 90.5%)  slots    5425970 ( 80.1%)  touched  14.1% of its slots
+   nixos/modules  frames     34959 (  0.8%)  slots      71310 (  1.1%)  touched  17.9% of its slots
+   nixpkgs/pkgs   frames    367448 (  8.2%)  slots    1227450 ( 18.1%)  touched  20.0% of its slots
+   other          frames     25950 (  0.6%)  slots      46115 (  0.7%)  touched  44.8% of its slots
+== curried chains: 1656593 frames (36.9%, 24.9% of slots) are the outer half of `a: b: ...`: they exist to capture an argument for an inner lambda
+== the 40 lambdas that make the most frames (calls, slots, where):
+      118430  1 slots  cum   2.6%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/trivial.nix:825:12
+      118430  1 slots  cum   5.3%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/trivial.nix:825:18
+       95136  1 slots  cum   7.4%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/trivial.nix:1023:16
+       93196  1 slots  cum   9.5%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:977:22
+       76439  1 slots  cum  11.2%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/lists.nix:345:14
+       76382  1 slots  cum  12.9%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/lists.nix:345:11
+       74905  1 slots  cum  14.5%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/strings.nix:769:11
+       74904  1 slots  cum  16.2%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/strings.nix:769:5
+       70968  1 slots  cum  17.8%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/attrsets.nix:657:53
+       68506  1 slots  cum  19.3%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:1245:9
+       67501  1 slots  cum  20.8%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:1173:5
+       63140  1 slots  cum  22.2%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/systems/default.nix:46:41
+       54520  1 slots  cum  23.4%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/lists.nix:277:5
+       54520  1 slots  cum  24.6%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/lists.nix:277:9
+       53347  1 slots  cum  25.8%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:802:13
+       53347  1 slots  cum  27.0%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:723:23
+       53347  1 slots  cum  28.2%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:723:26
+       52097 10 slots  cum  29.4%  /Users/jim/work/mlir-nix/.cache/nixpkgs/pkgs/top-level/splice.nix:40:15
+       47112  1 slots  cum  30.4%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:710:35
+       47112  1 slots  cum  31.5%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:795:9
+       47112  4 slots  cum  32.5%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:795:15
+       46588  1 slots  cum  33.5%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:734:11
+       44630  1 slots  cum  34.5%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:1202:5
+       43714  1 slots  cum  35.5%  /Users/jim/work/mlir-nix/.cache/nixpkgs/pkgs/stdenv/generic/make-derivation.nix:388:26
+       43714  1 slots  cum  36.5%  /Users/jim/work/mlir-nix/.cache/nixpkgs/pkgs/stdenv/generic/make-derivation.nix:388:20
+       43142  1 slots  cum  37.4%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:1099:11
+       42864  1 slots  cum  38.4%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:867:15
+       42864  1 slots  cum  39.4%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:867:21
+       42842  1 slots  cum  40.3%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:767:11
+       42820  1 slots  cum  41.3%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:851:19
+       42695  1 slots  cum  42.2%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/lists.nix:345:29
+       37998  1 slots  cum  43.1%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/meta.nix:241:15
+       37040  1 slots  cum  43.9%  /Users/jim/work/mlir-nix/.cache/nixpkgs/pkgs/development/haskell-modules/configuration-common.nix:3316:25
+       37040  1 slots  cum  44.7%  /Users/jim/work/mlir-nix/.cache/nixpkgs/pkgs/development/haskell-modules/configuration-common.nix:3275:22
+       35945 11 slots  cum  45.5%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/options.nix:136:5
+       35077  2 slots  cum  46.3%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:712:11
+       34718  1 slots  cum  47.1%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:754:11
+       34362  1 slots  cum  47.8%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/trivial.nix:524:9
+       34254  1 slots  cum  48.6%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:1246:29
+       34254  1 slots  cum  49.3%  /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:1246:35
+== lambda shapes by the frames they make (1508 shapes, 4492823 frames):
+     1122289 frames in  3526 lambdas  cum  25.0%  (large)   e.g. /Users/jim/work/mlir-nix/.cache/nixpkgs/pkgs/by-name/gn/gnum4/package.nix:1:1
+      118430 frames in     1 lambdas  cum  27.6%  nix.lambda(arg: nix.apply(c,a0') nix.lambda(arg: nix.return(a0') ) nix.if(c,r0',r1') nix.return(r2') ) nix.return(r0)    e.g. /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/trivial.nix:825:12
+      118430 frames in     1 lambdas  cum  30.3%  nix.apply(c,a0) nix.lambda(arg: nix.return(a0') ) nix.if(c,r0,r1) nix.return(r2)    e.g. /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/trivial.nix:825:18
+       95136 frames in     1 lambdas  cum  32.4%  nixty.is_function(a0) nix.has_attr(a0) nix.select(a0) nix.apply(r2,a0) nix.apply(c,r3) nix.and(r1,r4) nix.or(r0,r5) nix.return(r6)    e.g. /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/trivial.nix:1023:16
+       94964 frames in    17 lambdas  cum  34.5%  nix.lambda(arg: nix.select(a0') nix.return(r0') ) nix.return(r0)    e.g. /Users/jim/work/mlir-nix/.cache/nixpkgs/nixos/modules/services/logging/logrotate.nix:62:24
+       93196 frames in     1 lambdas  cum  36.6%  nix.select(c) nix.has_attr(r0,a0) nix.has_attr(c,a0) nix.and(r1,r2) nix.return(r3)    e.g. /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:977:22
+       76439 frames in     1 lambdas  cum  38.3%  nix.lambda(arg: nix.int=1() nix.concat_strings(a0',r0') nixlist.elem_at(c,a0') nix.apply(c,r1',r2') nix.return(r3') ) nixlist.length(a0) nixlistfn.gen_list(r0,r1) nix.return(r2)    e.g. /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/lists.nix:345:14
+       76382 frames in     1 lambdas  cum  40.0%  nix.lambda(arg: nix.lambda(arg: nix.int=1() nix.concat_strings(a0',r0') nixlist.elem_at(c,a0') nix.apply(c,r1',r2') nix.return(r3') ) nixlist.length(a0') nixlistfn.gen_list(r0',r1') nix.return(r2') ) nix.return(r0)    e.g. /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/lists.nix:345:11
+       74905 frames in     1 lambdas  cum  41.6%  nixty.is_path(c) nixstr.to_string(c) nix.str="lib.strings."() nix.str=") is a path "() nix.interpolate(r2,r1,r3) nix.int=0() nixstr.string_length(c) nixstr.substring(r5,r6,a0) nix.eq(r7,c) nix.apply(c,r0,r4,r8) nix.return(r9)    e.g. /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/strings.nix:769:11
+       74904 frames in     1 lambdas  cum  43.3%  nix.lambda(arg: nixty.is_path(c) nixstr.to_string(c) nix.str="lib.strings."() nix.str=") is a path "() nix.interpolate(r2',r1',r3') nix.int=0() nixstr.string_length(c) nixstr.substring(r5',r6',a0') nix.eq(r7',c) nix.apply(c,r0',r4',r8') nix.return(r9') ) nix.return(r0)    e.g. /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/strings.nix:769:5
+       70968 frames in     1 lambdas  cum  44.9%  nix.select(c,a0) nix.apply(c,a0,r0) nix.not(r1) nix.return(r2)    e.g. /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/attrsets.nix:657:53
+       68506 frames in     1 lambdas  cum  46.4%  nix.str=""() nix.select(a0,r0) nix.str="override"() nix.eq(r1,r2) nix.select(a0) nix.if(r3,r4,c) nix.return(r5)    e.g. /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:1245:9
+       63140 frames in     1 lambdas  cum  47.8%  nix.lambda(arg: nix.apply(c,a0') nix.not(r0') nix.return(r1') ) nix.return(r0)    e.g. /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/systems/default.nix:46:41
+       55100 frames in     5 lambdas  cum  49.0%  nix.lambda(arg: nix.return(a0') ) nix.return(r0)    e.g. /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:765:44
+       54520 frames in     1 lambdas  cum  50.2%  nix.lambda(arg: nix.select(c) nix.apply(r0',c,a0') nixctl.seq(a0',r1') nix.return(r2') ) nix.return(r0)    e.g. /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/lists.nix:277:5
+       54520 frames in     1 lambdas  cum  51.5%  nix.select(c) nix.apply(r0,c,a0) nixctl.seq(a0,r1) nix.return(r2)    e.g. /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/lists.nix:277:9
+       53347 frames in     1 lambdas  cum  52.6%  nix.select(a0) nix.has_attr(r0) nix.select(a0) nix.str="option"() nix.eq(r2,r3) nix.select(a0) nix.select(a0) nix.apply(c,c,r5,r6) nix.or(r4,r7) nix.and(r1,r8) nix.return(r9)    e.g. /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:802:13
+       53347 frames in     1 lambdas  cum  53.8%  nix.lambda(arg: nix.select(c) nix.apply(c,c,c) nix.attrs(r0',a0',r1') nix.return(r2') ) nix.return(r0)    e.g. /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:723:23
+       53347 frames in     1 lambdas  cum  55.0%  nix.select(c) nix.apply(c,c,c) nix.attrs(r0,a0,r1) nix.return(r2)    e.g. /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:723:26
+       46588 frames in     1 lambdas  cum  56.1%  nix.select(a0) nix.apply(c,r0) nix.select(a0) nix.select(a0) nix.apply(c,r3) nix.str="."() nix.apply(c,r5,c) nix.str="."() nix.apply(c,r7,c) nix.str="In module `"() nix.str="', you're tr"() nix.str="'
+rather tha"() nix.str="'!
+
+This usu"() nix.str="' has option"() nix.interpolate(r9,r2,r10,r4,r11,r6,r12,r8,r13) nixerr.throw(r14) nix.or(r1,r15) nix.return(r16)    e.g. /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:734:11
+       46588 frames in     2 lambdas  cum  57.1%  nix.select(c) nix.attrs(a0,r0) nix.return(r1)    e.g. /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:699:14
+       45149 frames in     2 lambdas  cum  58.1%  nix.lambda(arg: nix.lambda(arg: nix.select(c) nix.attrs(r0',a0') nix.return(r1') ) nix.return(r0') ) nix.select(a0) nix.apply(c,r0,r1) nix.return(r2)    e.g. /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:767:11
+       44630 frames in     1 lambdas  cum  59.1%  nix.str=""() nix.select(a0,r0) nix.str="merge"() nix.eq(r1,r2) nix.select(a0) nix.apply(c,c,r4) nix.str=""() nix.select(a0,r6) nix.str="if"() nix.eq(r7,r8) nix.select(a0) nix.apply(c,r10) nix.select(a0) nix.select(a0) nix.apply(c,r13) nix.list() nix.if(r12,r14,r15) nix.str="‘mkIf’ c"() nixerr.throw(r17) nix.if(r11,r16,r18) nix.list(a0) nix.if(r9,r19,r20) nix.if(r3,r5,r21) nix.return(r22)    e.g. /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:1202:5
+       43142 frames in     1 lambdas  cum  60.1%  nix.lambda(arg: nix.select(a0',c) nix.str="definition"() nix.eq(r0',r1') nix.select(c) nix.attrs(r3',a0') nix.if(r2',a0',r4') nix.return(r5') ) nix.select(a0) nix.str="while evalua"() nix.str="':"() nix.interpolate(r2,r1,r3) nix.select(a0) nix.apply(c,r5) nix.apply(c,r4,r6) nixlistfn.map(r0,r7) nix.return(r8)    e.g. /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:1099:11
+       42864 frames in     1 lambdas  cum  61.0%  nix.lambda(arg: nix.lambda(arg: nix.list(c) nix.list() nix.select(a0',r1') nix.concat_lists(r0',r2') nix.attrs(r3') nix.update(a0',r4') nix.return(r5') ) nixlistfn.map(r0',a0') nix.return(r1') ) nix.return(r0)    e.g. /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:867:15
+       42864 frames in     1 lambdas  cum  62.0%  nix.lambda(arg: nix.list(c) nix.list() nix.select(a0',r1') nix.concat_lists(r0',r2') nix.attrs(r3') nix.update(a0',r4') nix.return(r5') ) nixlistfn.map(r0,a0) nix.return(r1)    e.g. /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/modules.nix:867:21
+       42695 frames in     1 lambdas  cum  62.9%  nix.int=1() nix.concat_strings(a0,r0) nixlist.elem_at(c,a0) nix.apply(c,r1,r2) nix.return(r3)    e.g. /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/lists.nix:345:29
+       37998 frames in     1 lambdas  cum  63.8%  nixty.is_string(a0) nix.has_attr(c) nix.select(c) nix.eq(a0,r2) nix.and(r1,r3) nix.has_attr(a0) nix.attrs(a0) nix.if(r5,a0,r6) nix.apply(c,r7,c) nix.if(r0,r4,r8) nix.return(r9)    e.g. /Users/jim/work/mlir-nix/.cache/nixpkgs/lib/meta.nix:241:15
+       37040 frames in     1 lambdas  cum  64.6%  nix.select(c) nix.str="amazonka-"() nix.apply(r0,r1,a0) nix.str="amazonka-tes"() nix.neq(a0,r3) nix.and(r2,r4) nix.return(r5)    e.g. /Users/jim/work/mlir-nix/.cache/nixpkgs/pkgs/development/haskell-modules/configuration-common.nix:3316:25
+       37040 frames in     1 lambdas  cum  65.4%  nix.select(c) nix.str="gogol-"() nix.apply(r0,r1,a0) nix.str="gogol-core"() nix.neq(a0,r3) nix.and(r2,r4) nix.return(r5)    e.g. /Users/jim/work/mlir-nix/.cache/nixpkgs/pkgs/development/haskell-modules/configuration-common.nix:3275:22
+== frames that cannot leak (strict ops only, nothing built over the frame): 1 = 0.0% of frames, 0.0 MB of 120.2 MB of frame storage
+== frame storage by slots per frame (bytes of frame headers + slot words):
+   1 slot       frames   3978189 ( 88.5%)      91.0 MB ( 75.7% of frame storage)   slot words   30.3 MB   read   0.0%   dead   30.3 MB
+   2-3 slots    frames    225998 (  5.0%)       7.8 MB (  6.5% of frame storage)   slot words    4.4 MB   read  49.2%   dead    2.2 MB
+   4-8 slots    frames    181085 (  4.0%)       9.4 MB (  7.8% of frame storage)   slot words    6.6 MB   read  58.1%   dead    2.8 MB
+   9-16 slots   frames     96939 (  2.2%)       9.4 MB (  7.8% of frame storage)   slot words    7.9 MB   read   5.7%   dead    7.4 MB
+   17-64 slots  frames     10270 (  0.2%)       2.2 MB (  1.8% of frame storage)   slot words    2.0 MB   read  64.6%   dead    0.7 MB
+   65+ slots    frames       342 (  0.0%)       0.4 MB (  0.3% of frame storage)   slot words    0.4 MB   read  40.9%   dead    0.2 MB
+== arena: 830 MB of slabs; peak RSS 1380 MB. By use: values 239 (10437237 cells), frames 120, attribute rows 92, list cells 15, string bytes 12, other and slack 352 MB
+   "other" named: stats census masks 103 MB (a stats run only), `//` flat merges 165, layer headers 0, string contexts 0, formals 0; still unnamed (slab tails, alignment) 84 MB
+   `++` wrote 3114 cells into a buffer's room (ListExtent) instead of copying its other side
+   of which only the argument slot (no cells at all): 1 = 0.0% of frames
+== selects: 2923610 (86.5% found, 0.0% on a layered set, 5.4% with a dynamic key); mean search 4.5 probes
+   set size at the select (log2 buckets): <2^0:1.0% <2^1:5.0% <2^2:46.9% <2^3:13.0% <2^4:10.7% <2^5:3.7% <2^6:5.6% <2^7:5.7% <2^8:1.9% <2^9:6.2% <2^10:0.0% <2^11:0.1% <2^14:0.0% <2^15:0.1%
+   monomorphic (1 layout)      19956 sites,  43.7% of selects
+   2-4 layouts                  6725 sites,  12.3% of selects
+   5 layouts                      83 sites,   0.4% of selects
+   6+ layouts (megamorphic)      232 sites,  43.5% of selects
+   a one-entry cache per site (same layout as the site's last select) would hit 60.2% of selects
+== thunks that need the frame, by operation (share of those; mean operands, of which defined in the same body):
+   nix.apply                1348498   30.0%  cum  30.0%   2.9 operands
+   nix.select                645074   14.3%  cum  44.3%   1.6 operands
+   nix.attrs                 347633    7.7%  cum  52.0%   2.9 operands
+   nix.formal                276528    6.1%  cum  58.1%   1.9 operands
+   nix.interpolate           263784    5.9%  cum  64.0%   4.0 operands
+   nix.if                    239162    5.3%  cum  69.3%   3.4 operands
+   nix.list                  223938    5.0%  cum  74.3%   1.9 operands
+   nix.concat_lists          209321    4.6%  cum  78.9%   2.2 operands
+   nixlistfn.map             135244    3.0%  cum  81.9%   2.2 operands
+   nixstr.string_length       91158    2.0%  cum  84.0%   1.0 operands
+   nix.update                 89312    2.0%  cum  86.0%   2.2 operands
+   nixty.is_path              88049    2.0%  cum  87.9%   1.0 operands
+   nix.eq                     83319    1.9%  cum  89.8%   2.1 operands
+   nix.concat_strings         67570    1.5%  cum  91.3%   2.1 operands
+values evaluated at their first touch, never a thunk (the caller forces them next): 1310904
+== of the thunks that need their frame, 69688 (1.5%) are forced as the very next thing after they are made: eager evaluation would keep the order and never capture the frame
+   by operation: nix.list 45.8% nix.if 43.7% nix.apply 6.6% nix.formal 2.7% nix.concat_lists 0.4% nix.with_var 0.3% nix.select 0.2% nix.attrs 0.2%
+   by the op whose operand it was made for: nix.attrs 94.0% nix.with_var 2.3% nixerr.add_error_context 2.2% nix.select 0.9% nix.list 0.4% nixjson.to_json 0.1% nixstore.path 0.1% nixload.import 0.0% nixctx.unsafe_discard_string_context 0.0% nixtoml.from_toml 0.0%
+== thunks made over a frame: 5327902, of which 825744 (15.5%) are projections of the body's argument or a captured value (the rest 4502158 need the frame)
+== per-file pools (2891 files): Confix bands 102366 rows (1.7 MB) + 255396 statement ends (1.0 MB) + opening index 101488 entries (2.3 MB); lambda rows 30362 (1.2 MB), names 0.9 MB, free names 0.8 MB, seen 1.5 MB
+== son's account of the frames at their return (MLNIX_STATS): 2877 of 31791 lambda bodies dead at return by son (no closure, every value a use takes lazily forced on every path that returns); of 4489932 returns (120.2 MB of frames), dead by the run (no closure, every thunk over them forced, projections too) 1285195 (28.6%, 32.7 MB), dead by son 596111 (13.3%, 16.5 MB); son wrong (dead by son, not by the run): 0
+   dead by the run, not by son, by why son keeps the frame: the body makes a closure 89203, a value forced on some path that returns only 56940, a value passed to a callee son does not see 459554, a value passed on unforced 83387
+   the op whose lazy use decides (path, callee, passed on): nix.apply 56940/459554/0 nix.attrs 0/0/76930 nix.list 0/0/5966 nixlist.elem 0/0/277 nixlistfn.map 0/0/171 nixctx.unsafe_discard_string_context 0/0/41 nixlistfn.sort 0/0/2
+== attribute-set builders: 1063958, 3.2 rows each on average; 16587 (1.56%) outgrow the 12 inline rows with no room given, holding 18.0% of all rows built (9.2 MB of rows through a heap series and then copied)
+calls run on a stack frame (strict bodies over their one argument): 608508
+selector calls with no frame (lib.optional, lib.optionalAttrs shapes): 144299
+curried intermediates held by value: 1753803 (42091272 bytes of heap cells not allocated)
+empty attribute sets: 66445 shared as one constant (1063120 bytes not allocated)
+value allocations: count=10437237 bytes=250493688
+== instrumented value-tag writes (including stack temporaries; not live heap rows)
+  app            425094
+  attrapp       1093691
+  blackhole     4330665
+  int            514245
+  float              14
+  bool          3817127
+  null             7488
+  string        1425207
+  path             5031
+  attrs         1582298
+  list          1170697
+  lambda        1785881
+  primop            121
+  primopapp      154988
+== sea of nodes: 5811 file regions hold 562915 ops (17.4% ever ran, 258116 evals, 380618 thunk cells); 28871 minted bodies hold 524773 ops (4.5% ever ran, 14887452 evals, 335588 thunk cells).  Finer grain mints a cell: the thunk cells are its rows against lambda grain's 28871
+== Bindings::get: 5733537 calls, 13978852 binary-search steps; by set size:
+  size      1+  calls     415006    7.2%  steps           0  ( 0.0 a call)  misses  95.1%
+  size      2+  calls    2198276   38.3%  steps     2198276  ( 1.0 a call)  misses  23.6%
+  size      4+  calls    1076862   18.8%  steps     2153724  ( 2.0 a call)  misses  37.4%
+  size      8+  calls     765025   13.3%  steps     2295075  ( 3.0 a call)  misses  38.0%
+  size     16+  calls     351529    6.1%  steps     1406116  ( 4.0 a call)  misses  58.9%
+  size     32+  calls     336221    5.9%  steps     1681105  ( 5.0 a call)  misses  23.2%
+  size     64+  calls     292126    5.1%  steps     1752756  ( 6.0 a call)  misses   6.8%
+  size    128+  calls      57840    1.0%  steps      404880  ( 7.0 a call)  misses   0.1%
+  size    256+  calls     207050    3.6%  steps     1656400  ( 8.0 a call)  misses   0.9%
+  size    512+  calls       1534    0.0%  steps       13806  ( 9.0 a call)  misses   0.9%
+  size   1024+  calls       8824    0.2%  steps       88240  (10.0 a call)  misses   0.1%
+  size   8192+  calls       1202    0.0%  steps       15626  (13.0 a call)  misses   1.3%
+  size  16384+  calls      17782    0.3%  steps      248948  (14.0 a call)  misses  11.0%
+  size  32768+  calls       4260    0.1%  steps       63900  (15.0 a call)  misses   0.5%
+== import prediction: 2888 files evaluated, 2554 named by a path literal lowered earlier (recall 88.4%); 15928 distinct path literals (3963 end in .nix), 2562 of them led to an evaluated file (precision 16.1%, of the .nix ones' neighbours not separated)
+== symbols: 323441 interning calls, 68500 symbols
+== nodeOf: 13702 answered by the hash map (13511 values indexed), not its cache
+== lookupImpl: 18900293 calls, 11107623 answered by a filled slot (58.8%); frame hops to the defining region: 0 72.4%  1 13.8%  2 5.2%  3 3.6%  4 2.4%  5+ 2.6%  
+== cells made by lookup, by defining op (7751227 in all): evaluated at once (forced), left as a thunk
+  nix.select                      409321     1405404
+  nix.apply                       343015     1348498
+  nix.lambda                           0     1112421
+  nix.list                        159357      223938
+  nix.attrs                        17451      347633
+  nix.formal                       72929      276528
+  nix.if                           45281      239162
+  nix.interpolate                   6010      263784
+  nix.concat_lists                  3542      209321
+  nixlistfn.map                     6693      135244
+  nix.update                       15147       89312
+  nixstr.string_length              9555       91158
+  nixty.is_path                        0       88049
+  nixlist.length                   86985         559
+== evalOp calls by op kind (15145568 in all)
+  nix.apply                      3214633   21.2%
+  nix.select                     2605635   17.2%
+  nix.if                         1543659   10.2%
+  nix.attrs                      1014417    6.7%
+  nix.eq                          950160    6.3%
+  nix.has_attr                    663053    4.4%
+  nix.list                        608356    4.0%
+  nix.str                         589295    3.9%
+  nix.and                         576500    3.8%
+  nix.or                          443788    2.9%
+  nix.update                      369945    2.4%
+  nix.not                         312132    2.1%
+  nix.formal                      301301    2.0%
+  nixlistfn.map                   241886    1.6%
+  nix.neq                         204372    1.3%
+  nix.concat_lists                153353    1.0%
+== builtins.match: 22558 calls, 10558 distinct (regex, input) pairs over 45 regexes; 12000 calls (53.2%) repeat a pair already matched
+== IR read: 121675 indexed ops ran (of 179.1 MB of indexed operations), 15145568 evaluations; the ops of the hottest 50%: 0.03 MB 90%: 0.20 MB 99%: 2.51 MB (all that ran: 25.8 MB)
+== single-use string/attrs/concat producers -> consumer: same region, nested region, producer evals (ranked by evals)
+  nix.if -> nix.return                              666        0     920303
+  nix.select -> nix.apply                         54583        0     865994
+  nix.select -> nix.eq                             2051        0     625632
+  nix.eq -> nix.if                                  796        0     614610
+  nix.apply -> nix.return                         21274        0     567066
+  nix.str -> nix.eq                                1469        0     539313
+  nix.apply -> nix.apply                           5465        0     413170
+  nix.attrs -> nix.return                          3762        0     393215
+  nix.if -> nix.if                                  861        0     380650
+  nix.apply -> nix.if                              1518        0     354739
+  nix.has_attr -> nix.and                           126        0     347815
+  nix.apply -> nix.attrs                          74997        0     287517
+  nix.and -> nix.return                             157        0     266022
+  nix.apply -> nix.not                              236        0     238961
+  nix.attrs -> nix.update                          1505        0     206449
+  nix.select -> nix.attrs                         50124        0     205000
+  nix.not -> nix.return                             106        0     198684
+  nix.select -> nix.has_attr                        118        0     196851
+  nix.list -> nix.if                                237        0     182097
+  nix.apply -> nixlistfn.map                        217        0     174142
+  nix.apply -> nix.or                               191        0     170885
+  nix.or -> nix.return                               77        0     170120
+  nix.has_attr -> nix.if                             94        0     160468
+  nix.apply -> nix.eq                               147        0     149274
+  nix.attrs -> nix.apply                          80682        0     148456
+  nix.apply -> nix.and                              459        0     146351
+  nix.select -> nix.return                          347        0     143532
+  nixlistfn.map -> nix.return                        57        0     138809
+  nix.attrs -> nix.if                               230        0     137768
+  nix.apply -> nix.update                          1302        0     136882
+== single-use census (one-result ops): kind, ops, no use, one use, several, one-use that ran
+  nix.str                      223410        0   222374     1036      584
+  nix.formal                   209702      338   150059    59305     4799
+  nix.select                   144470        0   136374     8096    23757
+  nix.attrs                    125349        0   125066      283    33158
+  nix.apply                    123017        7   120914     2096    22500
+  nix.list                      62280        0    62166      114     7087
+  nix.with_var                  56687        0    55823      864     7948
+  nix.lambda                    33282        8    31760     1514        0
+  nix.path                      16704        0    16701        3        6
+  nix.interpolate               15177        4    14914      259     1865
+  nix.int                        5393        0     5382       11       36
+  nix.neq                        4078        0     4042       36      750
+  nix.concat_lists               4051        0     3968       83     1596
+  nix.if                         3471        1     3234      236      885
+  nix.bool                       3337        0     1301     2036        0
+  nix.eq                         2876        6     2815       55      585
+  nixstr.to_string               2118        0     2108       10      118
+  nix.update                     2108        0     1997      111      760
+  nix.concat_strings             1922        0     1879       43      601
+  nix.and                        1917        0     1835       82      862
+  nixerr.throw                   1769        0     1768        1        0
+  nix.not                        1755        0     1751        4      699
+  nix.builtin                    1247        0      438      809        0
+  nix.or                         1024        0      983       41      439
+  nix.null                        989        0      119      870        0
+  nixlistfn.map                   812        0      777       35      174
+  nix.has_attr                    530        0      529        1      229
+  nix.impl                        482        0      482        0      156
+  nixload.import                  356        0      339       17      166
+  nix.assert                      334        0      328        6      223
+  nixnum.less_than                296        0      294        2       53
+  nixjson.to_json                 170        0      167        3        9
+  nixstr.placeholder              125        0      125        0       99
+  nixnum.sub                      119        0      114        5       29
+  nixstr.concat_strings_sep        95        0       95        0       19
+  nixattr.remove_attrs             90        0       84        6       47
+  nixlist.length                   86        0       75       11       26
+  nixpath.base_name_of             82        0       77        5       16
+  nixlist.elem                     74        0       74        0       17
+  nix.float                        69        0       69        0        0
+== frame cells: 1084797 assigned, 1528 to a value with no use at all (0.1%) -- a value no one reads still costs a cell in every frame of its region
+== mlnix ops lowered: 1090579
+== `//`: 271682 merges, 10998319 entries copied
+== lowering 584 ms (the analysis of deferred lambdas included), minted on demand 236 ms
+== read plan: 59430 names pooled; 190 lambdas skimmed and not yet reached (17402 free names kept)
+== lambda pools: 2891 files, (at, pos, op, withs, names, body), 30362 rows deferred, 28871 drained (body minted on a first call), 1491 never called
+== scopes (7)
+  core       1083234
+  text          2555
+  ctl           2176
+  coll          1472
+  val            706
+  io             246
+  meta           190
+== continents (12)
+  core       1083234
+  nixstr        2537
+  nixctl        2176
+  nixlist       1166
+  nixnum         461
+  nixattr        306
+  nixty          245
+  nixfmt         190
+  nixpath        187
+  nixstore        39
+  nixhash         20
+  nixctx          18
+== dialects (23)
+  nix        1083234
+  nixstr        2436
+  nixerr        1801
+  nixlistfn      903
+  nixnum         461
+  nixload        356
+  nixattr        288
+  nixlist        263
+  nixty          195
+  nixjson        183
+  nixpath        116
+  nixre           86
+  nixfs           71
+  nixrefl         50
+  nixstore        39
+  nixhash         20
+  nixattrfn       18
+  nixctx          18
+  nixver          15
+  nixctl          10
+  nixtrace         9
+  nixtoml          6
+  nixxml           1
+== top ops
+  nix.str                  223410
+  nix.formal               209702
+  nix.select               144470
+  nix.attrs                125349
+  nix.apply                123017
+  nix.list                  62280
+  nix.with_var              56687
+  nix.return                34682
+  nix.lambda                33282
+  nix.path                  16704
+  nix.interpolate           15177
+  nix.int                    5393
+  nix.neq                    4078
+  nix.concat_lists           4051
