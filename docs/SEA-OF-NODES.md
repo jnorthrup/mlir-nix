@@ -10,7 +10,7 @@ default stays the oracle. Value numbering is not part of it: stock `cse` costs +
 same workloads, because a file is lowered once and evaluated once (F17 in COMBINATORS.md).
 
 The graph is built from a syntax tree here. Sam H. Smith's [talk](https://www.youtube.com/watch?v=NxiKlnUtyio) builds it while parsing
-instead, with no tree, and applies the rewrites as each node is made; [FABRIC.md](FABRIC.md) sets its mechanisms against this tree one by one.
+instead, with no tree, and applies the rewrites as each node is made; [FABRIC.md](https://github.com/jnorthrup/mlir-nix/blob/77de09c/docs/FABRIC.md) sets its mechanisms against this tree one by one.
 
 ## What was built, in PRELOAD's terms
 

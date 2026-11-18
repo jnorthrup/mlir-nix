@@ -1,6 +1,6 @@
 //===- NixSyntax.td - The concentric layers of a Nix source, as a dialect -*- tablegen -*-===//
 //
-// The front end is to build no tree (docs/FABRIC.md, rung 10).  What it can know of a source before it parses
+// The front end is to build no tree (77de09c:docs/FABRIC.md, rung 10).  What it can know of a source before it parses
 // it is a set of concentric layers, each found by a scan no dearer than the lexer, each a view by position over
 // offsets of the source.  This file declares those layers in MLIR's own terms, regions and blocks, so that the
 // layout has one written definition.  The kinds of tokens and bands are generated from it

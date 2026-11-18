@@ -956,13 +956,13 @@ struct EvalState {
   void statCell(Frame *f, Node *s, Value *nv, bool eager);
   uint64_t nEager = 0;   // MLNIX_STATS
   // Frames that returned uncaptured, by slot count: a stack per size, linked through the frame's own first word.  The newest is reused first, so
-  // a recycled frame is almost always still in L1 (docs/FRAME-BYTES.md: 97 to 98% of reuses are within 32 KiB of allocation).
+  // a recycled frame is almost always still in L1 (77de09c:docs/FRAME-BYTES.md: 97 to 98% of reuses are within 32 KiB of allocation).
   static constexpr unsigned kRecycleMax = 64;
   Frame *freeFrames[kRecycleMax] = {};
   Value sharedNullCell;            // type Null from construction (Value())
   Value sharedShortCells[257];     // "" and each byte, made on first use
   char shortBytes[2 * 257] = {};   // their bytes: one, then a NUL
-  bool recycleOn = false;  // MLNIX_RECYCLE=1 turns it on: it trades a little time for memory (docs/FRAME-BYTES.md)
+  bool recycleOn = false;  // MLNIX_RECYCLE=1 turns it on: it trades a little time for memory (77de09c:docs/FRAME-BYTES.md)
   void recycleFrame(Frame *f) {
     unsigned n = f->info->numSlots;
     if (n >= kRecycleMax) return;
@@ -978,7 +978,7 @@ struct EvalState {
   /// is being called, and nothing erases a called op (the passes that erase run on a body when it is lowered or minted, before any call of it).
   /// The region of a lambda's body, from a direct-mapped cache keyed by the op: a hit is a load and a compare, where the lookup was a read
   /// of the op's deferred-body attribute and a hash probe on every call (3.7% of the CPU of a NixOS evaluation on Kali).
-#ifdef MLNIX_NO_LOOKUP_CACHES  // ablation build (docs/SELECT-AND-LOOKUP.md): the lookups without the caches in front
+#ifdef MLNIX_NO_LOOKUP_CACHES  // ablation build (77de09c:docs/SELECT-AND-LOOKUP.md): the lookups without the caches in front
   RegionInfo *infoOf(mlir::nix::LambdaOp lam) { return infoOfSlow(lam); }
 #else
   RegionInfo *infoOf(mlir::nix::LambdaOp lam) {

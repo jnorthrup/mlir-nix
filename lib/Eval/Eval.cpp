@@ -329,7 +329,7 @@ EvalState::EvalState(EvalSettings st, nixstore::Store *store) : settings(std::mo
   scalarJIT = ScalarJIT::create();
   settings.mapSources = !getenv("MLNIX_NOMMAP"); // ablation switch: read and copy every file, as before
   composite::todoSink = [](const char *what) { llvm::errs() << "TODO: " << what << "\n"; };
-  recycleOn = getenv("MLNIX_RECYCLE") != nullptr; // opt-in: -2 to -3% peak memory, +1 to +4% time on Kali (docs/FRAME-BYTES.md)
+  recycleOn = getenv("MLNIX_RECYCLE") != nullptr; // opt-in: -2 to -3% peak memory, +1 to +4% time on Kali (77de09c:docs/FRAME-BYTES.md)
   selectorsOn = !getenv("MLNIX_NOSELECTORS"); // ablation switch: every curried selector runs as two calls, as before
   settings.deferBodies = getenv("MLNIX_DEFER") != nullptr; // sea-of-nodes schedule: mint bodies on first call
   // The evaluator is single-threaded.  With threading enabled every attribute

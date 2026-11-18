@@ -2,111 +2,101 @@
 
 ai: yes, disclosing
 
-A Nix evaluator on MLIR. `mlnix` reads Nix, lowers it to a `nix` dialect, and evaluates that IR on demand. It is meant to be a drop-in for
-`nix-instantiate` (called as `nix-build` or `nix-store`, it behaves as those), and it is held to that: on every change its output is
-compared with Nix 2.35.4 and Lix 2.91.3.
+A Nix evaluator on MLIR, and the dialects and tools grown around it. `mlnix` reads Nix, lowers it to the `nix` dialect and
+evaluates that IR on demand. It is meant to be a drop-in for `nix-instantiate`; called as `nix-build`, `nix-store` or `nix`, it
+behaves as those. It is held to that: its output is compared with Nix 2.35.4 and Lix 2.91.3, and a faster answer that differs
+is not a result.
 
-The project is pragmatic. An idea stays if a measurement says it pays. Each change is timed against the reference evaluators on two real
-workloads, the NixOS system evaluation and 73 nixpkgs packages, with the answer required to be identical. What loses is written down and
-parked, not merged ([docs/FABRIC.md](docs/FABRIC.md), [docs/PERFORMANCE.md](docs/PERFORMANCE.md)).
+Everything here builds to TrikeShed's `PRELOAD.md` as MLIR ([AGENTS.md](AGENTS.md)). TrikeShed's algebra (joins, series,
+cursors, Confix) is the data structure of the C++ (`include/Composite/`), and as the `trikeshed` dialect it is the form the
+other dialects lower to; [docs/PRELOAD-DIALECTS.md](docs/PRELOAD-DIALECTS.md) maps each one and says what is done.
 
-## How it is built
+## What is here
 
-**A sea of nodes, minted on demand.** The IR is a graph of mostly pure ops with explicit use-def edges and no fixed order (Cliff Click's
-sea of nodes; [Sam H. Smith's talk](https://www.youtube.com/watch?v=NxiKlnUtyio) is the clearest hour on building one while parsing, with
-no syntax tree), plus a schedule that decides when a node exists. Of the ops that lowering a file creates, 89-90% are never evaluated (NixOS
-toplevel: 121,687 of 1,095,819 are). So with `MLNIX_DEFER=1` a lambda body is lowered on its first call, not when its file is read. The
-eager schedule is the default and stays the oracle. See [docs/SEA-OF-NODES.md](docs/SEA-OF-NODES.md).
+| | |
+|---|---|
+| `mlnix` | the evaluator; a `nix-instantiate`, `nix-build` and `nix-store` front; and, invoked as `nix`, a `nix` command: `build`, `eval`, `run`, `profile`, flakes, and binary caches whose narinfo signatures are checked with ed25519 ([docs/NIX-CLI.md](docs/NIX-CLI.md)) |
+| `mlnix-opt` | `mlir-opt` with the dialects and passes below |
+| `mlnix-kif` | KIF files (SUMO) into a `kif.theory`; the chase over its Horn fragment, keeping each derived fact's rule and premises (`--chase`); Lean certificates (`--lean`, `--lean-piece`); TPTP (`--tptp`, SigmaKEE's FOF translation) |
+| `mlnix-query` | `mlir-query` over Nix IR |
+| `mlnix-parse` | parses every file of a list in one process, to compare two front ends byte for byte |
+| `mlnix-c` | the C surface of the dialects (`include/mlnix-c/MlnixC.h`), what Kotlin/Native's cinterop links |
+| `graal/` | nix-truffle, the Graal/Truffle arm: it reads the IR that `mlnix-opt --son-export` writes and runs it |
+| `mlnixci/` | mini-luci: a LuCI-like page over a NixOS configuration's options, with its facets written as Nix code, a what-if overlay, the running system's values beside the configured ones, and a server written in MLIR with no C++ ([mlnixci/README.md](mlnixci/README.md)) |
 
-**TrikeShed's algebra.** The data structures follow the kernel of [TrikeShed](https://github.com/jnorthrup/TrikeShed) (`PRELOAD.md`): `a j b`,
-a join of two things; the `Series`, a size and an index function read without bounds checks; the `Cursor`; and the `MutableSeries` that is
-filled and then drained. The C++ side is `include/Composite/`. Tokens are (start, end) spans over an immutable source, a syntax tree is
-regions of series cells in an arena, positions and names are packed words. Some of it is consumed by the evaluator and some is built and
-tested only (the `join` dialect and its densify pass); [docs/COMPOSITE.md](docs/COMPOSITE.md) says which.
+## The dialects
 
-**No `std::string`.** Owning text is `composite::Text` (`include/Composite/Text.h`): chars in a `MutableSeries` with a NUL after the last,
-so `c_str()` costs nothing, and a copy is `clone()`, said out loud. What only reads is a window, `Chars` (`CharSeries.h`) or
-`std::string_view`; a `Text` converts to either, and to `llvm::StringRef`, at no cost. `lib/`, `include/` and `tools/` name no
-`std::string`, `std::to_string`, `std::sto*`, string stream or `<iostream>`; the checks under `scripts/` keep the standard library as the
-oracle `Text` is tested against (`vocab-check.cc`: 60,000 random operations).
+- `nix` (29 ops) is the language. The base environment's primops are declared as 122 ops of 24 IRDL dialects
+  (`include/NixDialect/NixPrims.irdl.mlir`) and defined at load time by a loader that names none of them. `NixSyntax.td`
+  declares the syntax for a front end that builds no tree.
+- `mlnix` (`MlnixControl.td`) is the control surface of the utility: its flags, `MLNIX_*` variables and settings in one place.
+- `son` is the sea of nodes' schedule. A lambda body is minted on its first call (`MLNIX_DEFER=1`). The must-force set is
+  what a frame forces before it returns, and `son.release` states the Graal arm's one lifecycle rule in the IR: when a call
+  returns, its frame keeps what its unforced cells can read and lets go of the rest
+  ([docs/SEA-OF-NODES.md](docs/SEA-OF-NODES.md)).
+- `trikeshed` and `confix` are series, cursors and joins as ops, and Confix's index of a JSON text. `trikeshed-lower-cursors`
+  lowers them to `scf`, `arith` and `memref` ([docs/PRELOAD-DIALECTS.md](docs/PRELOAD-DIALECTS.md)).
+- `kif` and `sumo` are KIF theories and SUMO's taxonomy. `kif-to-trikeshed` lays a theory out as cursors
+  ([docs/REASONING-SPLIT.md](docs/REASONING-SPLIT.md): who reasons over SUMO, with the numbers).
 
-**Abstractions offloaded to MLIR dialects.** The language is the core `nix` dialect (28 ops). All 105 base-environment primops are declared
-as ops of 24 IRDL dialects in `include/NixDialect/NixPrims.irdl.mlir` and defined at load time by a loader that names none of them. Passes
-(`nix-prims`, `nix-fold`, `nix-dce`) and MLIR's own `cse` and `canonicalize` work on the IR because identity and effects are declared on
-the ops. The IR prints, parses, queries (`mlnix-query`) and transforms (`mlnix-opt`) like any other MLIR.
+## How the evaluator works
 
-What the ops mean is attached from outside. Evaluation is one `NixEvalOpInterface` model, effects are `MemoryEffectOpInterface` models
-(which is what makes stock `cse` sound on Nix IR), folding is one generic pattern. The dialects know nothing about the evaluator, so
-another consumer can attach its own model the same way ([docs/FABRIC.md](docs/FABRIC.md)). The optimizer is MLIR pass-pipeline text
+**A sea of nodes, minted on demand.** The IR is a graph of mostly pure ops with explicit use-def edges and no fixed order
+(Cliff Click's sea of nodes; [Sam H. Smith's talk](https://www.youtube.com/watch?v=NxiKlnUtyio) is the clearest hour on
+building one while parsing, with no syntax tree), plus a schedule that decides when a node exists. Of the ops that lowering a
+file creates, 89-90% are never evaluated (nixos-toplevel: 121,687 of 1,095,819 are), so with `MLNIX_DEFER=1` a lambda body is
+lowered on its first call. The eager schedule is the default and stays the oracle.
+
+**TrikeShed's algebra, and no `std::string`.** `a j b` joins two things; a `Series` is a size and an index function read
+without bounds checks; a `Cursor` is a series of rows; a `MutableSeries` is filled and then drained. Tokens are spans over an
+immutable source, and positions and names are packed words. Owning text is `composite::Text` (`include/Composite/Text.h`);
+what only reads is a window (`Chars`, `std::string_view`). `lib/`, `include/` and `tools/` use no `std::string`,
+`std::to_string`, `std::sto*`, string stream or `<iostream>`; the checks under `scripts/` keep the standard library as the
+oracle `Text` is tested against.
+
+**What the ops mean is attached from outside.** Evaluation is one `NixEvalOpInterface` model, effects are
+`MemoryEffectOpInterface` models (which is what makes stock `cse` sound on Nix IR), and folding is one generic pattern. The
+dialects know nothing about the evaluator, so another consumer can attach its own models. The optimizer is pass-pipeline text
 (`MLNIX_PIPELINE`), and the primop set is data: `MLNIX_PRIMS_IRDL=file` swaps the declaration without a rebuild.
 
-**Dense attribute rows.** Each evaluator attribute is 16 bytes: a name, a position index and a Value pointer. Cold source positions
-live in a per-evaluator TrikeShed `MutableSeries`; repeated evaluations of one source definition reuse its position range. The MLIR
-`positions` property is unchanged. Demand-mode RSS fell 5.3% on NixOS and 8.3% on nixpkgs-73 against the saved evaluator;
-timing was mixed across schedules. The [attribute layout report](docs/bench/kali/dense-selectors-20261028/RESULTS.md) records the comparisons.
-A set is one sorted array of these rows. `a // b` writes a new array in one pass, as Nix does. A chain of layers over the base was slower
-to read than the copy it saved.
+**Dense attribute rows.** An attribute is 16 bytes: a name, a position index and a value pointer. A set is one sorted array of
+them, and `a // b` writes a new array in one pass, as Nix does
+([record](docs/bench/kali/dense-selectors-20261028/RESULTS.md)).
 
-**Guarded native execution.** `MLNIX_JIT=1` lowers hot integer graphs, lazy value selectors and demand graphs through typed MLIR to LLVM.
-Demand graphs include short-circuit operators, type predicates, static attribute existence checks and bounded calls guarded
-against the actual closure. Native code inspects persistent
-cells and returns a continuation when an argument or capture needs forcing; the host performs that demand with the original error
-context, then resumes native code. Unsupported branches return to the interpreter. A nonforcing check of already evaluated cells
-delays compilation until a reached path can finish natively. The first three native completions receive interpreter validation without
-forcing an additional branch, and 64 consecutive fallbacks retire an unproductive kernel after active calls return.
-Inlined calls retain the current callee's captures and logical call depth; ordinary entry and return stay in generated control flow.
-Saturated chains with two to four remaining arguments bind their formals directly to persistent cells, eliminating intermediate
-closures and frames. Partial applications retain their ordinary environments, and each curried stage has the original sequential
-call depth. `MLNIX_JIT_CURRIED=0` disables this tier independently. Inline calls accept one to four arguments; lazy one-key
-projections bind selected arguments without allocating temporary thunks. Only a reached consumer demands the key, set and field,
-in that order, preserving traces and errors. `MLNIX_JIT_PROJECTION=0` provides a separate ablation.
-Tail paths can now return existing values or recipes for fresh empty sets, lists and strings through the same checked call scopes.
-Fields and elements stay lazy; grace compares shallow results without additional forcing. `MLNIX_JIT_VALUES=0` disables these returns.
-Lists of one to four persistent handles can also return without forcing any element; `MLNIX_JIT_LISTS=0` disables this extension.
-It saves another 120,304 / 34,274 frames and 60,152 / 17,137 Value allocations on NixOS / nixpkgs-73. Paired wall time changes
-+1.2% / −7.6%, but minima do not support the large package median gain; peak RSS does not fall. Whole-JIT-off/on wall time rises
-6.5% / 4.0%, so the native tier remains opt-in. The
-[current Kali report](docs/bench/kali/list-returns-20261028/RESULTS.md) separates allocation savings from runtime and peak-memory costs,
-and compares with cached Nix/Lix references without rerunning them. Broader projection paths, general escaping closures and
-collection fusion remain future work.
-[docs/JIT.md](docs/JIT.md) describes the guards, resource bounds, retirement and inspectable intermediate representations.
+**Guarded native execution.** `MLNIX_JIT=1` lowers hot integer graphs, lazy selectors and demand graphs through typed MLIR to
+LLVM, guarded against the actual closure. Native code returns a continuation when a value needs forcing, the host forces it
+with the original error context, and unsupported branches return to the interpreter. `MLNIX_JIT_CURRIED=0`,
+`MLNIX_JIT_PROJECTION=0`, `MLNIX_JIT_VALUES=0` and `MLNIX_JIT_LISTS=0` turn its tiers off one at a time. It is opt-in: at its
+last measurement it saved frames and allocations, but not wall time or peak memory
+([record](docs/bench/kali/list-returns-20261028/RESULTS.md)).
 
-**Where it stands, and where it goes.** The default evaluator is hand-written C++ over nodes, with the optional native tier above. When a body
-is indexed, each of its SSA values gets a 64-byte record: its kind, its operands' records, its frame slot and promotion, and the function
-that evaluates its kind. A thunk or closure holds its node, so evaluating is one indirect call. The MLIR ops stay the program: nodes are made
-from them and still read their attributes ([docs/RELEASE-v0.4.0.md](docs/RELEASE-v0.4.0.md)).
-[docs/MLIR.md](docs/MLIR.md) counts what is dialect and what is C++. The aim is to keep moving what the evaluator does by hand
-into dialects, passes, interfaces and declarations ([docs/FABRIC.md](docs/FABRIC.md) tracks what moved and what it bought), and to grow
-dialects, interface models and tools around Nix that do more than evaluate it; evaluating is the first function, and none of the others
-exists yet beyond the query and opt tools. The next steps the measurements support:
+**The default evaluator** is C++ over nodes. When a body is indexed, each of its SSA values gets a record of its kind, its
+operands, its frame slot and the function that evaluates it; a thunk holds its node, so evaluating is one indirect call. The
+MLIR ops stay the program: nodes are made from them and read their attributes.
 
-- Make `nix.lambda` an isolated unit (closure conversion). Until then no pass can run directly on a lambda body and a lambda cannot be
-  loaded lazily from bytecode. The native tier extracts bounded graphs whose captures are resolved
-  by the host on each call; arbitrary calls and local lazy values still need general closure conversion ([docs/MLIR.md](docs/MLIR.md)).
-- Subsume the library code that sits on the border. Of the lambda calls of a NixOS evaluation, 91% run inside nixpkgs' `lib`, which is
-  Nix code over the primops, and 18 small functions of it are 31% of the calls ([docs/LIBRARY.md](docs/LIBRARY.md) has the map, a bound on
-  what moving them across is worth, and the design).
-- Keep the footprint down: `mlnix` still holds about 1.7 times Nix's peak memory (1072 MB against 630 MB on nixos-toplevel, 1161 MB
-  prelowered), and the fill-then-drain containers of the evaluator are mapped in [docs/FILL-DRAIN.md](docs/FILL-DRAIN.md).
-- Collapse the primop set into its declaration: a primop's arity is read from its IRDL declaration (one registered without one stops the
-  evaluator at start-up), but each name is still said twice, in IRDL and where C++ registers it, and `scripts/check-prims.py` checks that the
-  two agree. And give the syntax a dialect of its own (Google's JSIR is the existence proof, [docs/MLIR.md](docs/MLIR.md)).
-- Parse into the IR with no syntax tree, as in [Sam H. Smith's talk](https://www.youtube.com/watch?v=NxiKlnUtyio). The front end builds a
-  tree (5.4 to 5.5 bytes per byte of source, 180 to 190 MB of the NixOS toplevel's footprint) and walks it into ops; the tree, its printer and the
-  walk are 1,185 lines of C++, the largest cut on the table now that the C++ total is ratcheted down (`scripts/cxx-lines.py`).
-  [docs/FABRIC.md](docs/FABRIC.md) sets the talk's mechanisms against this tree one by one.
+## Open work
+
+- Lifetimes: the frames `son` still cannot account for are mostly cells a frame gives a callee from outside itself. Only the
+  run time can settle those, so the next step is runtime callee strictness on the Graal arm
+  ([docs/SEA-OF-NODES.md](docs/SEA-OF-NODES.md)).
+- Ordering: a counting dense bucket is 2.3x to 2.7x faster than the best min-max-heap cluster shape at every scale measured
+  ([docs/CLUSTER-SCALES.md](docs/CLUSTER-SCALES.md)); which one the block compressor keeps is open
+  ([docs/BTRFS-COMPRESSOR.md](docs/BTRFS-COMPRESSOR.md)).
+- Lowerings not done: Depths, KeyToChild for a key known only at run time, YAML, groupBy
+  ([docs/PRELOAD-DIALECTS.md](docs/PRELOAD-DIALECTS.md)).
+- KIF to TPTP: the port does not write the conjectures of two of SigmaKEE's 43 tests, TQC2 and TQROW-BUILTIN, which are
+  higher order ([record](docs/bench/kali/tptp-20261117/README.md)).
+- The front end still builds a syntax tree. Parsing straight into the IR (`NixSyntax.td`) is the larger cut.
 
 ## Benchmarks (kali)
 
-`scripts/vs-nix.py --native --demand` on one machine (an i7-6820HK, 4 cores and 8 threads, Linux under WSL2): the evaluators run in turn,
-interleaved, the first one rotating, and the results are compared byte for byte, so a faster answer that differs is not a comparison. Both
-workloads evaluate the same nixpkgs, the `nixos-25.05` branch tarball with sha256 `9051fdfc3664ff378d0c51fa04fdf93fb43c8a5773c13416a28f85ce9514b73a`
-(`test/nixos-toplevel.nix`, `test/nixpkgs-drvs.nix`). `demand` is `MLNIX_DEFER=1`. The min is the steadier figure here: the host's load moves
-medians by several percent. Each commit is built, gated and timed by `scripts/kali-gen.sh`; the raw output is kept in
-[docs/bench/kali](docs/bench/kali), and the section below is rendered from it by `scripts/readme-bench.py`.
-
-For new iterations against these stable references, add `--reuse-refs`. Only the changed `mlnix` arms run; Nix/Lix timings and their
-output oracle come from accepted same-host records, labeled as cached. No reference startup, RSS or version process is invoked.
+`scripts/vs-nix.py --native --demand` on one machine (an i7-6820HK, 4 cores and 8 threads, Linux under WSL2): the evaluators run
+in turn, interleaved, the first one rotating, and the results are compared byte for byte. Both workloads evaluate the same
+nixpkgs, the `nixos-25.05` branch tarball with sha256 `9051fdfc3664ff378d0c51fa04fdf93fb43c8a5773c13416a28f85ce9514b73a`
+(`test/nixos-toplevel.nix`, `test/nixpkgs-drvs.nix`). `demand` is `MLNIX_DEFER=1`. The min is the steadier figure: the host's
+load moves medians by several percent. Each commit is built, gated and timed by `scripts/kali-gen.sh`; the raw output is kept in
+[docs/bench/kali](docs/bench/kali), and the block below is rendered from it by `scripts/readme-bench.py`. The newest generation
+is from 30 October (commit `ed817cba8`); the work merged since then has not been through the host.
 
 <!-- bench:begin -->
 <!-- generated by scripts/readme-bench.py from docs/bench/kali/; edit those files or the script, not this block -->
@@ -189,21 +179,21 @@ equal attributes is found by its content before it is hashed: 37% of a NixOS eva
 SHA-256 passes. A string's context, the primops and the caches by path also left the standard library for the pure zone: a series of arena
 pointers, plain function pointers, and crit-bit tries.
 
-Older generations and what changed between them: [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+Older generations and what changed between them: [PERFORMANCE.md at 77de09c](https://github.com/jnorthrup/mlir-nix/blob/77de09c/docs/PERFORMANCE.md).
 
 ## Build
 
-LLVM and MLIR with their CMake packages (22 on Linux and 23.1.1 on macOS are what it is built and tested with), CMake 3.20, Ninja, a C++20
-compiler. `-DCMAKE_CXX_STANDARD=23` also builds. SHA-256 comes from CommonCrypto on macOS and from OpenSSL's libcrypto elsewhere when it is
-found, else from LLVM (`-DMLNIX_SHA256=auto|openssl|llvm`).
+LLVM and MLIR with their CMake packages (22 on Linux and 23.1.1 on macOS are what it is built and tested with), CMake 3.20,
+Ninja, a C++20 compiler. SHA-256 comes from CommonCrypto on macOS and from OpenSSL's libcrypto elsewhere when it is found,
+else from LLVM (`-DMLNIX_SHA256=auto|openssl|llvm`).
 
     cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_C_COMPILER=clang-22 -DCMAKE_CXX_COMPILER=clang++-22 \
           -DLLVM_DIR=/usr/lib/llvm-22/lib/cmake/llvm -DMLIR_DIR=/usr/lib/llvm-22/lib/cmake/mlir
-    cmake --build build --target mlnix mlnix-opt
+    cmake --build build --target mlnix mlnix-opt mlnix-kif TrikeShedRuntime
 
-The tools: `mlnix` (the evaluator and a `nix-instantiate`, `nix-build` and `nix-store` front), `mlnix-opt` (`mlir-opt` with the Nix dialects),
-`mlnix-query` (`mlir-query` with them), `mlnix-parse` (parses every file in a list in one process, to compare two front ends byte for byte).
+The Graal arm: `cd graal && ./gradlew installDist` (JDK 25 GraalVM; TrikeShed-jvm from mavenLocal). mlnixci: `make -C mlnixci`
+(it reads `build/bin` and `lib/Confix/confix.ll` from this checkout).
 
 ## Use
 
@@ -214,32 +204,35 @@ The tools: `mlnix` (the evaluator and a `nix-instantiate`, `nix-build` and `nix-
 
 ## Tests
 
-    python3 scripts/run-lang-tests.py     # Nix's functional language tests: semantic = right status and stdout, exact = stderr too
-    python3 scripts/run-mlir-tests.py     # FileCheck tests of the dialects and passes
-    python3 scripts/check-prims.py        # every primop is both registered and declared
-    python3 scripts/difftest.py           # the same expressions through mlnix and reference Nix (container "nixref", or --native)
-    python3 scripts/check-jit.py          # exact JIT/interpreter parity, lazy demands, grace, retirement and compilation limits
+    python3 scripts/run-lang-tests.py            # Nix's language tests: semantic = right status and stdout, exact = stderr too
+    python3 scripts/run-mlir-tests.py            # FileCheck tests of the dialects and passes
+    python3 scripts/check-prims.py               # every primop is both registered and declared
+    python3 scripts/difftest.py                  # the same expressions through mlnix and reference Nix (container "nixref", or --native)
+    python3 scripts/check-jit.py                 # exact JIT/interpreter parity, lazy demands, grace, retirement and compilation limits
+    python3 scripts/truffle-lang-tests.py        # the language tests on the Graal arm
+    python3 scripts/truffle-release-check.py .   # the Graal arm with son.release on and off: the same outputs, nothing kept outside it
+    make -C mlnixci check NIXPKGS_LIB=...        # mlnixci's compiled query against the counted one, then its end-to-end test
 
-Set `MLNIX_DEFER=1` to run any of them on the demand schedule. `scripts/ab.py` times two builds against each other, interleaved, and
-compares the hash of their output.
+Set `MLNIX_DEFER=1` to run the evaluator's tests on the demand schedule. `scripts/ab.py` times two builds against each other,
+interleaved, and compares the hash of their output.
 
 ## Documents
 
 | | |
 |---|---|
-| [RELEASE-v0.4.0](docs/RELEASE-v0.4.0.md) | the evaluator runs nodes: what v0.4.0 changed, why, and what it measured |
-| [SEA-OF-NODES](docs/SEA-OF-NODES.md) | demand-minted lambda bodies |
-| [JIT](docs/JIT.md) | guarded arithmetic, selectors and resumable Boolean/call graphs through MLIR and LLVM |
-| [COMPOSITE](docs/COMPOSITE.md) | TrikeShed's PRELOAD in C++: what is built, what consumes it |
-| [FABRIC](docs/FABRIC.md) | the dialect fabric: logic moved into dialects, what it bought |
-| [MLIR](docs/MLIR.md) | what is MLIR here and what is C++, the dynamic profile, the MLIR survey |
 | [NIX-CLI](docs/NIX-CLI.md) | the `nix` command, flakes in Nix, binary caches with ed25519 checks, and what running a substituted program needs |
-| [PERFORMANCE](docs/PERFORMANCE.md) | the profile, the head-to-head history, the families examined, the failures |
-| [LIBRARY](docs/LIBRARY.md) | where the lambda calls are: nixpkgs' `lib` is the workload, and what moving it across the border is worth |
-| [FILL-DRAIN](docs/FILL-DRAIN.md) | fill-then-drain containers of the evaluator and what translating them is worth |
-| [COMBINATORS](docs/COMBINATORS.md) | declarations as IR, and what failed |
-| [COLLECTIONS](docs/COLLECTIONS.md) | collections: measured, built, failed |
-| [IO](docs/IO.md) | what the evaluator waits for, and what io_uring does about it |
+| [SEA-OF-NODES](docs/SEA-OF-NODES.md) | demand-minted lambda bodies, the must-force set, `son.release`, and escape analysis on the Graal arm |
+| [PRELOAD-DIALECTS](docs/PRELOAD-DIALECTS.md) | each dialect against TrikeShed's PRELOAD: what lowers to `trikeshed`, in what order, and what is done |
+| [REASONING-SPLIT](docs/REASONING-SPLIT.md) | who reasons over SUMO: Nix, the MLIR layers, Vampire, Lean |
+| [BTRFS-COMPRESSOR](docs/BTRFS-COMPRESSOR.md) | the btrfs inode block compressor: ordering in blocks small enough for registers and cache lines |
+| [CLUSTER-SCALES](docs/CLUSTER-SCALES.md) | the ordering cluster (a min-max heap and pegs) at three scales, against a counting bucket |
+| [IPNS-DEMO](docs/IPNS-DEMO.md) | two builds of mlnix, one per host, each published under its own IPNS name |
+| [d3m](docs/d3m) | the D3M integrations: what was merged, each conflict and how it was settled |
+| [bench](docs/bench) | raw benchmark and test records, by host and date |
+
+The documents last changed in October (the JIT, the dialect fabric, the performance history, the frame bytes, the MLIR survey,
+the composite and others) were removed by the D3M integration of 17 November as out of date. They are at
+[77de09c](https://github.com/jnorthrup/mlir-nix/tree/77de09c/docs), and code comments cite them as `77de09c:docs/NAME.md`.
 
 ## License
 

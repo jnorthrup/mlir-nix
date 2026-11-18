@@ -150,7 +150,7 @@ void printPrim(Operation *op, OpAsmPrinter &p, StringRef defaultDialect) {
 /// `irdl::loadDialects` is all-or-nothing: it registers the ops and returns, with
 /// no hook for assembly or folding, and ExtensibleDialect has no lookup of an op's
 /// DynamicOpDefinition.  OperationName::getImpl() is protected; this is the one
-/// place that reaches through it.  (docs/COMBINATORS.md, failure F3.)
+/// place that reaches through it.  (77de09c:docs/COMBINATORS.md, failure F3.)
 struct NameAccess : public OperationName {
   static DynamicOpDefinition *definition(OperationName name) {
     return static_cast<DynamicOpDefinition *>(reinterpret_cast<NameAccess &>(name).getImpl());

@@ -5,7 +5,7 @@
 // a helper thread drives the whole list through one io_uring queue, 64 linked open->read->close
 // chains and statx requests in flight, ahead of the evaluator, so that what the evaluator asks for
 // is already in the page cache.  Cold, the evaluator spent 3 s of 10 s waiting for the disk one
-// request at a time (docs/IO.md).  Replay is Linux with liburing; elsewhere it does nothing.
+// request at a time (77de09c:docs/IO.md).  Replay is Linux with liburing; elsewhere it does nothing.
 //
 // The list is data: one `K path` per line, K = F file read or mapped, L lstat, S stat, D directory
 // listed.

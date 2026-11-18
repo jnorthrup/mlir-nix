@@ -154,7 +154,7 @@ def main():
     ap.add_argument("--budget", type=float, default=0, help="wall-clock cap in seconds for each workload (0: none)")
     ap.add_argument("--workload", action="append", default=[], choices=list(workloads("", "")), help="only this workload (repeatable)")
     ap.add_argument("--demand", action="store_true", help="also run mlnix with MLNIX_DEFER=1")
-    ap.add_argument("--jit", action="store_true", help="also run mlnix with MLNIX_DEFER=1 MLNIX_JIT=1 (the guarded native tier, docs/JIT.md)")
+    ap.add_argument("--jit", action="store_true", help="also run mlnix with MLNIX_DEFER=1 MLNIX_JIT=1 (the guarded native tier, 77de09c:docs/JIT.md)")
     ap.add_argument("--mlnix", default=os.path.join(ROOT, "build", "bin", "mlnix"))
     ap.add_argument("--native", action="store_true", help="reference evaluators run on this machine, not in the container")
     ap.add_argument("--no-copy", action="store_true")

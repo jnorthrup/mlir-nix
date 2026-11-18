@@ -120,7 +120,7 @@ def Mlnix_PipelineOp : Mlnix_Setting<"pipeline"> {
   let description = [{
     A comma-separated list of registered pass names, with no `op(...)` wrapper (it would nest under child ops).
     Read by EvalSettings::pipeline, which MLNIX_PIPELINE overrides.  The default is `nix-prims`; `nix-fold` and
-    `nix-dce` cost more than they save on real workloads (docs/PERFORMANCE.md).
+    `nix-dce` cost more than they save on real workloads (77de09c:docs/PERFORMANCE.md).
   }];
   let arguments = (ins StrAttr:$passes);
   let assemblyFormat = "$passes attr-dict";

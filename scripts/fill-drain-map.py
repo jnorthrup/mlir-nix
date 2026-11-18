@@ -11,7 +11,7 @@ reserves, and which drain it ends in.
 usage: fill-drain-map.py [--md] [--sites]
   default   one line per kind of pair, counted
   --sites   every site: file:line, enclosing function or primop, container, fill ops, drains
-  --md      the sites as a markdown table (docs/FILL-DRAIN.md)
+  --md      the sites as a markdown table (77de09c:docs/FILL-DRAIN.md)
 
 A heuristic scan of text, not a parse: a site is a local declaration inside a function body, its fills and drains are the
 uses of that name before the function's closing brace.  Read the sites before believing a class.

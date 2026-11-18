@@ -370,7 +370,7 @@ int runEvalCommand(Options &o, bool build) {
   if (o.evalOnly && !o.readWrite) o.store.readOnly = true;
   // An evaluation never destroys its state: the process exits right after, and taking a module of a
   // million ops, the attribute uniquer and the arenas apart one object at a time cost 6.6% of a NixOS
-  // evaluation (docs/PERFORMANCE.md).  The one thing the destructor did, printing the statistics, is
+  // evaluation (77de09c:docs/PERFORMANCE.md).  The one thing the destructor did, printing the statistics, is
   // done here.  `build` keeps the ordinary teardown.  The store lives as long as the state.
   nixstore::Store *store = new nixstore::Store(o.store);
   EvalState *stp = new EvalState(std::move(o.eval), store); // the settings are the state's from here on

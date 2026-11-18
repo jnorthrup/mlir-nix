@@ -23,7 +23,7 @@ island rows are addressed by arithmetic and ordered by edge swaps, with no point
 nodes is the graph between the islands. An island only reports (`insert` returns 0, 1 or 2; a lookup returns a row or
 null); it never calls another island. The sea routes the crossings: which island takes a row, and where a full or
 foreign row goes next. The funnel's step to the next level is such a crossing. The evaluator has the same split: a native
-kernel ([JIT.md](JIT.md)) is an island, and its demand, deopt and depth-overflow results are the crossing messages the
+kernel ([JIT.md](https://github.com/jnorthrup/mlir-nix/blob/77de09c/docs/JIT.md)) is an island, and its demand, deopt and depth-overflow results are the crossing messages the
 host's forcing loop, the sea, answers.
 
 ## The shape
@@ -51,7 +51,7 @@ The current code orders synthetic records between those boundaries:
 - Tiny address space, dense buckets. The window's key universe is
   tiny, so the bucket array is addressed by arithmetic on the 96-bit index, not
   hashed: a record's cell is computed, never probed.  Buckets fill by append
-  and drain in key order -- the fill and drain pair that docs/FILL-DRAIN.md
+  and drain in key order -- the fill and drain pair that 77de09c:docs/FILL-DRAIN.md
   maps across the evaluator, doing the dense sort here, locally dispatched per
   bucket. The heap compares keys during fill and drain. Direct bucket
   addressing avoids a hash probe; it does not remove those comparisons.
@@ -79,7 +79,7 @@ The current code orders synthetic records between those boundaries:
   rows, one appender, lock-free readers).  The compressor's output pages are
   the same geometry: sealed pages of sorted fixed-width rows.
 - The fill/drain vocabulary and the cache geometry of both hosts:
-  docs/FILL-DRAIN.md sections 1 and 7.  A fill buffer lives inside L1; the
+  77de09c:docs/FILL-DRAIN.md sections 1 and 7.  A fill buffer lives inside L1; the
   sizes are read once and kept; the Mac's performance cores have 128 KiB L1d
   and 128 B lines, kali 32 KiB and 64 B.
 

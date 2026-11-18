@@ -49,7 +49,7 @@ set_target_properties(TrikeShedRuntime PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${PRO
 add_library(NixStore STATIC Store/Hash.cpp Store/StorePaths.cpp Store/LocalStore.cpp Store/StructuredAttrs.cpp Store/Prefetch.cpp)
 target_link_libraries(NixStore PUBLIC LLVMSupport)
 # SHA-256: CommonCrypto on macOS; elsewhere libcrypto when there is one (it picks the CPU's SHA extensions or AVX2, the code Nix hashes
-# with), else LLVM's portable C, which costs 8-12% of a run on a machine whose hashing it slows (docs/PERFORMANCE.md).  libcrypto.a is
+# with), else LLVM's portable C, which costs 8-12% of a run on a machine whose hashing it slows (77de09c:docs/PERFORMANCE.md).  libcrypto.a is
 # preferred: loading libcrypto.so is 0.6 ms of the 10 ms an `eval -E 1` takes, the static one 0.15 ms.
 set(MLNIX_SHA256 "auto" CACHE STRING "SHA-256 code: auto (CommonCrypto on macOS, else OpenSSL if found, else LLVM's), openssl or llvm")
 if(MLNIX_SHA256 STREQUAL "openssl" OR (MLNIX_SHA256 STREQUAL "auto" AND NOT APPLE))

@@ -1,5 +1,5 @@
 #!/bin/bash
-# The optimizer ladder (docs/OPTIMIZER-LADDER.md): the loop heap against the transform heap, one compiler flag set at a time.
+# The optimizer ladder (77de09c:docs/OPTIMIZER-LADDER.md): the loop heap against the transform heap, one compiler flag set at a time.
 #
 #   bash scripts/optimizer-ladder.sh OLD-INCLUDE-DIR      run from the repository root, on the benchmark host
 #

@@ -16,7 +16,7 @@
 // COMPOSITE_PEDANTIC selects how the kernels below are written; the algorithm, its comparisons and its output are the same.
 //   1  pedantic: every walk is a transform over a Series (fold, foldN, argMin, vec<N>): PRELOAD's form, no loop written.
 //   0  pragmatic: the plain loop each of those transforms replaces, for the optimizer that does better with a loop.
-// The default is pedantic: on Kali (docs/OPTIMIZER-LADDER.md) clang -O3 runs it fastest and g++ runs it faster than the pragmatic form on
+// The default is pedantic: on Kali (77de09c:docs/OPTIMIZER-LADDER.md) clang -O3 runs it fastest and g++ runs it faster than the pragmatic form on
 // every row; pragmatic is the escape hatch (it measured better under clang -O2 and ThinLTO).  -DCOMPOSITE_PEDANTIC=0|1 overrides it.
 // Both are checked by scripts/minmax-check.cc and funnel-check.cc, and compared by scripts/optimizer-ladder.sh.
 #ifndef COMPOSITE_PEDANTIC

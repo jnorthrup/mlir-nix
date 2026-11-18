@@ -10,7 +10,7 @@
 //   %f = son.defer @bodies::@row0(%a, %b)
 //
 //   son.body    a lambda body closed over its captures: IsolatedFromAbove, the captures are the first block
-//               arguments and the lambda's own argument is the last. The idiom docs/MLIR.md names for the gap that
+//               arguments and the lambda's own argument is the last. The idiom 77de09c:docs/MLIR.md names for the gap that
 //               nix.lambda is not isolated: a pass manager can run on a body, on several threads, loaded on demand.
 //   son.defer   the lambda as a node that holds no body, only the row it is minted from and the values it captures.
 //   nix-defer   nix.lambda -> son.defer + son.body   (the demand schedule, as a rewrite)
