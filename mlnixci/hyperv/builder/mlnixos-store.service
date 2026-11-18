@@ -1,0 +1,13 @@
+# The store lives on Kali's disk and is mounted by Kali (hyperv/kali); wait for it, starting kali-linux if it is down.
+[Unit]
+Description=the mlnixos store (/mnt/wsl/mlnixos, on Kali's disk)
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=-/bin/sh -c '[ -d /mnt/wsl/mlnixos/git ] || /mnt/c/Windows/System32/wsl.exe -d kali-linux --exec /bin/true'
+ExecStart=/bin/sh -c 'for i in $(seq 120); do [ -d /mnt/wsl/mlnixos/git ] && [ -f /mnt/wsl/mlnixos/nixpkgs/.version ] && exit 0; sleep 1; done; echo "no store at /mnt/wsl/mlnixos" >&2; exit 1'
+
+[Install]
+WantedBy=multi-user.target

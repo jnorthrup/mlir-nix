@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>mini-luci</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --fg:#1d2330; --mute:#6b7383; --line:#dde1e8; --bg:#f6f7f9; --acc:#2456c7; --chg:#b45309; --bad:#b91c1c; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.4 system-ui, sans-serif; color:var(--fg); background:var(--bg); }
+  header { display:flex; gap:16px; align-items:center; padding:10px 16px; background:#fff; border-bottom:1px solid var(--line); position:sticky; top:0; z-index:2; }
+  header h1 { font-size:17px; margin:0; }
+  header .stat { color:var(--mute); font-size:12px; }
+  #q { flex:1; max-width:480px; padding:6px 9px; border:1px solid var(--line); border-radius:6px; font:inherit; }
+  main { display:grid; grid-template-columns: 260px 1fr 380px; gap:14px; padding:14px; align-items:start; }
+  .panel { background:#fff; border:1px solid var(--line); border-radius:8px; padding:8px 10px; margin-bottom:10px; }
+  .panel h3 { margin:2px 0 6px; font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--mute); display:flex; justify-content:space-between; }
+  .panel h3 a { text-transform:none; letter-spacing:0; cursor:pointer; color:var(--acc); }
+  .fv { display:flex; justify-content:space-between; gap:6px; padding:1px 4px; border-radius:4px; cursor:pointer; white-space:nowrap; }
+  .fv:hover { background:#eef2fb; }
+  .fv.on { background:#dbe5fb; font-weight:600; }
+  .fv.zero { color:#b8bdc7; }
+  .fv span:first-child { overflow:hidden; text-overflow:ellipsis; }
+  .more { color:var(--acc); cursor:pointer; font-size:12px; padding:2px 4px; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:8px; padding:9px 11px; margin-bottom:8px; }
+  .card.changed { border-color:var(--chg); box-shadow: inset 3px 0 0 var(--chg); }
+  .path { font-family: ui-monospace, monospace; font-weight:600; word-break:break-all; }
+  .meta { color:var(--mute); font-size:12px; margin:2px 0 4px; }
+  .badge { display:inline-block; padding:0 6px; border-radius:9px; font-size:11px; background:#eef0f4; margin-right:4px; }
+  .badge.set { background:#dcfce7; } .badge.template { background:#fef3c7; }
+  .desc { font-size:13px; margin:4px 0; max-height:5.6em; overflow:hidden; }
+  pre { margin:4px 0; padding:5px 7px; background:#f3f4f6; border-radius:5px; white-space:pre-wrap; word-break:break-all; font-size:12px; max-height:14em; overflow:auto; }
+  .was { text-decoration: line-through; color:var(--mute); }
+  .edit { display:flex; gap:6px; margin-top:6px; align-items:flex-start; }
+  .edit input, .edit select, .edit textarea { font:12px ui-monospace, monospace; padding:4px 6px; border:1px solid var(--line); border-radius:5px; flex:1; }
+  button { font:inherit; font-size:12px; padding:4px 10px; border:1px solid var(--line); background:#fff; border-radius:5px; cursor:pointer; }
+  button.primary { background:var(--acc); color:#fff; border-color:var(--acc); }
+  .err { color:var(--bad); font-size:12px; white-space:pre-wrap; margin-top:4px; }
+  .pager { display:flex; gap:8px; align-items:center; margin:6px 0 10px; color:var(--mute); }
+  #report h2 { font-size:14px; margin:0 0 6px; }
+  .rline { font-size:12px; margin:3px 0; word-break:break-all; }
+  .diff .del { background:#fee2e2; } .diff .add { background:#dcfce7; }
+  .diff div { font:12px ui-monospace, monospace; white-space:pre-wrap; padding:0 4px; }
+  .empty { color:var(--mute); font-size:13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>mini-luci</h1>
+  <input id="q" placeholder="search option paths and descriptions" autocomplete="off">
+  <span class="stat" id="stat"></span>
+</header>
+<main>
+  <aside id="facets"></aside>
+  <section>
+    <div class="pager" id="pager"></div>
+    <div id="hits"></div>
+  </section>
+  <aside>
+    <div class="panel" id="report"></div>
+  </aside>
+</main>
+<script>
+"use strict";
+// The facets are answered by the server's compiled query (query.mlir); a what-if is evaluated by mlnix and changes only
+// the server's runtime state.
+const LIMIT = 50, SHOW = 12;
+const state = { select: {}, q: "", offset: 0, expanded: {} };
+const $ = (s) => document.querySelector(s);
+const el = (tag, attrs = {}, ...kids) => {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) k === "class" ? (e.className = v) : k.startsWith("on") ? (e[k] = v) : e.setAttribute(k, v);
+  for (const k of kids) if (k != null) e.append(k instanceof Node ? k : String(k));
+  return e;
+};
+const show = (v) => (typeof v === "string" ? v : JSON.stringify(v, null, 2));
+
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? (path.includes("whatif") ? { method: "POST" } : {})
+                                                 : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+
+async function refresh() {
+  const res = await api("/api/query", { select: state.select, q: state.q, offset: state.offset, limit: LIMIT });
+  $("#stat").textContent = `${res.total} of ${res.rows} options · facets in ${res.queryMs.toFixed(2)} ms (query.mlir, compiled)`;
+  renderFacets(res);
+  renderHits(res);
+}
+
+function renderFacets(res) {
+  const box = $("#facets");
+  box.replaceChildren();
+  for (const f of res.facets) {
+    if (f.name === "match" && !state.q) continue;
+    const sel = state.select[f.name] || [];
+    const vals = [...f.values].sort((a, b) => b.on - a.on || b.n - a.n || a.v.localeCompare(b.v));
+    const shown = state.expanded[f.name] ? vals : vals.slice(0, SHOW);
+    const p = el("div", { class: "panel" },
+      el("h3", {}, f.name, sel.length ? el("a", { onclick: () => { delete state.select[f.name]; state.offset = 0; refresh(); } }, "clear") : null));
+    for (const v of shown)
+      p.append(el("div", { class: "fv" + (v.on ? " on" : "") + (v.n === 0 ? " zero" : ""), title: v.v, onclick: () => toggle(f.name, v.v) },
+        el("span", {}, v.v), el("span", {}, v.n)));
+    if (vals.length > SHOW)
+      p.append(el("div", { class: "more", onclick: () => { state.expanded[f.name] = !state.expanded[f.name]; renderFacets(res); } },
+        state.expanded[f.name] ? "fewer" : `all ${vals.length}`));
+    box.append(p);
+  }
+}
+
+function toggle(facet, value) {
+  const s = new Set(state.select[facet] || []);
+  s.has(value) ? s.delete(value) : s.add(value);
+  if (s.size) state.select[facet] = [...s]; else delete state.select[facet];
+  state.offset = 0;
+  refresh();
+}
+
+function renderHits(res) {
+  $("#pager").replaceChildren(
+    el("button", { onclick: () => { state.offset = Math.max(0, state.offset - LIMIT); refresh(); } }, "‹"),
+    `${res.total ? state.offset + 1 : 0}–${Math.min(state.offset + LIMIT, res.total)} of ${res.total}`,
+    el("button", { onclick: () => { if (state.offset + LIMIT < res.total) { state.offset += LIMIT; refresh(); } } }, "›"));
+  const box = $("#hits");
+  box.replaceChildren();
+  if (!res.hits.length) box.append(el("div", { class: "empty" }, "No option passes every facet."));
+  for (const h of res.hits) box.append(card(h));
+}
+
+function card(h) {
+  const o = h.row;
+  const c = el("div", { class: "card" + (h.changed ? " changed" : "") },
+    el("div", { class: "path" }, o.path.join(".")),
+    el("div", { class: "meta" }, el("span", { class: "badge " + o.state }, o.state), el("span", { class: "badge" }, o.type || o.kind),
+      o.readOnly ? el("span", { class: "badge" }, "read-only") : null, (o.declarations || [])[0] || ""),
+    o.description ? el("div", { class: "desc" }, o.description) : null);
+  if (h.changed && h.base) c.append(el("pre", { class: "was" }, h.base.valueShown ? show(h.base.value) : `(${h.base.state})`));
+  if (o.valueShown) c.append(el("pre", {}, show(o.value)));
+  else if (o.default != null) c.append(el("pre", { title: "declared default" }, "default: " + o.default));
+  if (!o.template && !o.readOnly) c.append(editor(o));
+  return c;
+}
+
+/// An input for a what-if value: by the option's kind, or JSON for anything else.
+function editor(o) {
+  const cur = o.valueShown ? o.value : undefined;
+  let input, read;
+  if (o.kind === "bool") {
+    input = el("select", {}, el("option", { value: "true" }, "true"), el("option", { value: "false" }, "false"));
+    input.value = String(cur ?? true);
+    read = () => input.value === "true";
+  } else if (o.choices) {
+    input = el("select", {});
+    for (const ch of o.choices) input.append(el("option", { value: JSON.stringify(ch) }, show(ch)));
+    if (cur !== undefined) input.value = JSON.stringify(cur);
+    read = () => JSON.parse(input.value);
+  } else if (/^(str|string|lines|separatedString|strMatching)/.test(o.kind)) {
+    input = el("textarea", { rows: o.kind === "lines" ? "3" : "1" });
+    input.value = cur ?? "";
+    read = () => input.value;
+  } else {
+    input = el("textarea", { rows: "1", placeholder: "JSON" });
+    input.value = cur === undefined ? "" : JSON.stringify(cur);
+    read = () => JSON.parse(input.value);
+  }
+  const err = el("div", { class: "err" });
+  return el("div", {}, el("div", { class: "edit" }, input,
+    el("button", { class: "primary", onclick: () => { let v; try { v = read(); } catch (e) { err.textContent = e.message; return; }
+                                                      whatIf("/api/whatif/set", { path: o.path, value: v }, err); } }, "what if"),
+    el("button", { onclick: () => whatIf("/api/whatif/reset", { path: o.path }, err) }, "undo")), err);
+}
+
+async function whatIf(route, body, err) {
+  err.textContent = "evaluating with mlnix…";
+  try {
+    renderReport(await api(route, body));
+    err.textContent = "";
+    await refresh();
+  } catch (e) { err.textContent = e.message; }
+}
+
+function lineDiff(a, b) { // LCS over lines: the removed, then the added
+  const x = (a ?? "").split("\n"), y = (b ?? "").split("\n"), n = x.length, m = y.length;
+  const L = Array.from({ length: n + 1 }, () => new Int32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) L[i][j] = x[i] === y[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  const out = el("div", { class: "diff" });
+  let i = 0, j = 0;
+  while (i < n || j < m) {
+    if (i < n && j < m && x[i] === y[j]) { out.append(el("div", {}, "  " + x[i])); i++; j++; }
+    else if (i < n && (j === m || L[i + 1][j] >= L[i][j + 1])) { out.append(el("div", { class: "del" }, "- " + x[i])); i++; }
+    else { out.append(el("div", { class: "add" }, "+ " + y[j])); j++; }
+  }
+  return out;
+}
+
+function renderReport(r) {
+  const box = $("#report");
+  const err = el("div", { class: "err" });
+  box.replaceChildren(el("h2", {}, "What if"),
+    el("div", { class: "meta" }, `mlnix: ${r.evalMs.base.toFixed(0)} ms as configured, ${r.evalMs.whatif.toFixed(0)} ms as shown. Nothing is written to the system.`));
+  if (r.overlay === "{}") { box.append(el("div", { class: "empty" }, "No what-if: every option is as configured. Try a value on any option.")); return; }
+  box.append(el("pre", {}, show(JSON.parse(r.overlay))),
+    el("div", {}, el("button", { onclick: () => whatIf("/api/whatif/clear", undefined, err) }, "clear all"), " ",
+      el("button", { onclick: () => { state.select = { whatif: ["changed"] }; state.offset = 0; refresh(); } }, "show changed")), err,
+    el("h3", {}, `${r.options.length} option${r.options.length === 1 ? "" : "s"} changed`));
+  for (const o of r.options)
+    box.append(el("div", { class: "rline" }, el("b", {}, o.path), " ", o.fromState === o.toState ? "" : `(${o.fromState ?? "new"} → ${o.toState}) `,
+      el("span", { class: "was" }, o.from === null ? "" : show(o.from)), " → ", o.to === null ? "" : show(o.to)));
+  box.append(el("h3", {}, `${r.etc.length} /etc file${r.etc.length === 1 ? "" : "s"} changed`));
+  for (const e of r.etc) box.append(el("div", { class: "rline" }, el("b", {}, "/etc/" + e.name)), lineDiff(e.from, e.to));
+}
+
+let typing;
+$("#q").addEventListener("input", (e) => {
+  clearTimeout(typing);
+  typing = setTimeout(() => { state.q = e.target.value.trim(); state.offset = 0; refresh(); }, 150);
+});
+refresh().catch((e) => ($("#hits").textContent = e.message));
+api("/api/report").then(renderReport).catch(() => {});
+</script>
+</body>
+</html>

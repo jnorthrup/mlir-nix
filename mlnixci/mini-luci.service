@@ -1,0 +1,16 @@
+[Unit]
+Description=mini-luci: the option tree of the mlnix OS
+After=network.target
+
+[Service]
+ExecStart=/opt/mini-luci/bin/mini-luci --corpus /opt/mini-luci/os/eval.nix --arg lib "import /opt/mini-luci/lib" --page /opt/mini-luci/www/index.html --mlnix /opt/mini-luci/bin/mlnix --port @PORT@
+Restart=on-failure
+DynamicUser=yes
+RuntimeDirectory=mini-luci
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

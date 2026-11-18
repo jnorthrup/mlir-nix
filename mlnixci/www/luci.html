@@ -1,0 +1,689 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>mini-luci</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --fg:#1f2733; --mute:#6b7585; --line:#d9dee6; --bg:#eef1f5; --card:#fff; --acc:#2d6cdf; --acc2:#e8f0fd;
+          --chg:#c26a0a; --chgbg:#fff6e8; --bad:#c0262d; --ok:#1f8a4c; --live:#e07b00; --bar:#1e2a36; --bar2:#2a3a4a; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; color:var(--fg); background:var(--bg); }
+  a { color:var(--acc); text-decoration:none; cursor:pointer; }
+  code, pre, .mono { font-family:ui-monospace, SFMono-Regular, Menlo, monospace; }
+  header { position:sticky; top:0; z-index:5; }
+  .bar { display:flex; align-items:center; gap:8px; background:var(--bar); color:#e8edf3; padding:0 14px; height:44px; }
+  .brand { color:#fff; font-weight:700; font-size:17px; margin-right:auto; white-space:nowrap; }
+  .brand small { font-weight:400; color:#9fb0c2; font-size:11px; margin-left:6px; }
+  nav { display:flex; flex-wrap:wrap; background:var(--bar2); padding:0 8px; min-height:36px; }
+  .top { position:relative; }
+  .top > a { display:flex; align-items:center; height:36px; padding:0 11px; color:#d6dee8; white-space:nowrap; font-size:13px; }
+  .top > a:hover, .top.on > a { background:#3a5068; color:#fff; }
+  .top .n { color:#8ea2b6; font-size:11px; margin-left:4px; }
+  .drop { display:none; position:absolute; left:0; top:100%; z-index:6; background:#fff; color:var(--fg); min-width:250px; max-height:70vh;
+          overflow:auto; border:1px solid var(--line); border-top:0; box-shadow:0 8px 24px rgba(0,0,0,.15); padding:4px 0; }
+  .top:hover .drop { display:block; }
+  .drop a { display:flex; justify-content:space-between; gap:12px; padding:5px 14px; color:var(--fg); font-size:13px; }
+  .drop a:hover { background:var(--acc2); }
+  .drop a span:last-child { color:var(--mute); font-size:12px; }
+  #q { width:220px; padding:6px 9px; border-radius:5px; border:1px solid #3c4f63; background:#2b3b4c; color:#fff; font:inherit; font-size:13px; }
+  #q::placeholder { color:#9fb0c2; }
+  #changes { margin-left:10px; padding:5px 11px; border-radius:5px; background:#33475b; color:#dfe7f0; white-space:nowrap; font-size:13px; }
+  #changes.some { background:var(--chg); color:#fff; }
+  .sub { display:flex; align-items:center; gap:10px; background:#fff; border-bottom:1px solid var(--line); padding:7px 18px; font-size:12px; color:var(--mute); }
+  .sub b { color:var(--fg); }
+  #busy { margin-left:auto; color:var(--acc); }
+  main { max-width:1180px; margin:16px auto 60px; padding:0 16px; }
+  h2 { font-size:20px; margin:4px 0 2px; font-weight:600; }
+  .lead { color:var(--mute); margin:0 0 12px; }
+  .cbi-section { background:var(--card); border:1px solid var(--line); border-radius:6px; margin:0 0 14px; }
+  .cbi-section > .head { display:flex; align-items:baseline; gap:10px; padding:9px 14px; border-bottom:1px solid var(--line); background:#f7f9fb;
+                         border-radius:6px 6px 0 0; }
+  .cbi-section > .head h3 { margin:0; font-size:14px; font-family:ui-monospace, monospace; }
+  .cbi-section > .head .n { color:var(--mute); font-size:12px; }
+  .row { display:grid; grid-template-columns: 260px 1fr 150px; gap:12px; padding:10px 14px; border-top:1px solid #eef1f4; align-items:start; }
+  .row:first-of-type { border-top:0; }
+  .row.changed { background:var(--chgbg); box-shadow: inset 3px 0 0 var(--chg); }
+  .row.dirty { box-shadow: inset 3px 0 0 var(--acc); }
+  .label { text-align:right; padding-top:4px; }
+  .label .name { font-weight:600; font-family:ui-monospace, monospace; font-size:13px; word-break:break-all; }
+  .label .kind { color:var(--mute); font-size:11px; margin-top:2px; word-break:break-word; }
+  .field { min-width:0; }
+  .desc { color:var(--mute); font-size:12px; margin-top:5px; max-height:3.1em; overflow:hidden; cursor:pointer; white-space:pre-wrap; }
+  .desc.open { max-height:none; }
+  .acts { display:flex; flex-direction:column; gap:5px; align-items:stretch; }
+  .badges { display:flex; flex-wrap:wrap; gap:4px; margin-top:6px; }
+  .b { display:inline-flex; gap:4px; align-items:center; padding:1px 7px; border-radius:10px; font-size:11px; background:#eef1f5; color:#4a5566; }
+  .b.set { background:#dff3e6; color:#17663a; } .b.default { background:#eef1f5; } .b.template { background:#fdf0cf; color:#7a5a00; }
+  .b.chg { background:var(--chg); color:#fff; } .b.live { background:#fff1e0; color:#9a5200; border:1px solid #f3c58f; }
+  .b.drift { background:#fde4e4; color:var(--bad); border:1px solid #f1b2b2; }
+  .b.rt { background:#fff1e0; color:#9a5200; }
+  .note { font-size:12px; color:var(--mute); margin-top:6px; }
+  .where { font-size:12px; margin-top:6px; padding:6px 8px; background:#f5f7fa; border-radius:5px; }
+  .where code { font-size:11.5px; }
+  .err { color:var(--bad); font-size:12px; white-space:pre-wrap; margin-top:5px; max-height:9em; overflow:auto; }
+  input, select, textarea { font:13px ui-monospace, SFMono-Regular, Menlo, monospace; padding:5px 7px; border:1px solid #c9d0da; border-radius:4px; background:#fff; color:var(--fg); }
+  input[type=text], textarea { width:100%; }
+  textarea { min-height:2.2em; }
+  select { min-width:180px; max-width:100%; }
+  button { font:inherit; font-size:12px; padding:5px 10px; border:1px solid #c9d0da; background:#fff; border-radius:4px; cursor:pointer; white-space:nowrap; }
+  button:hover { background:#f3f6fa; }
+  button.primary { background:var(--acc); color:#fff; border-color:var(--acc); }
+  button.primary:hover { background:#255bc0; }
+  button.warn { color:var(--bad); border-color:#e8b4b4; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .switch { position:relative; display:inline-block; width:42px; height:22px; vertical-align:middle; }
+  .switch input { opacity:0; width:0; height:0; }
+  .switch span { position:absolute; inset:0; background:#c4ccd6; border-radius:22px; transition:.15s; cursor:pointer; }
+  .switch span:before { content:""; position:absolute; width:16px; height:16px; left:3px; top:3px; background:#fff; border-radius:50%; transition:.15s; }
+  .switch input:checked + span { background:var(--ok); }
+  .switch input:checked + span:before { transform:translateX(20px); }
+  .knob { display:flex; align-items:center; gap:12px; }
+  .knob svg { cursor:ns-resize; touch-action:none; user-select:none; flex:none; }
+  .knob .side { display:flex; flex-direction:column; gap:3px; font-size:11px; color:var(--mute); }
+  .knob input { width:130px; }
+  .chips { display:flex; flex-wrap:wrap; gap:5px; align-items:center; }
+  .chip { display:inline-flex; align-items:center; gap:5px; padding:2px 4px 2px 9px; border-radius:12px; background:var(--acc2); font:12px ui-monospace, monospace; }
+  .chip.live-only { background:#fff1e0; }
+  .chip button { border:0; background:transparent; padding:0 4px; color:var(--mute); }
+  .filters { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:8px 0 12px; }
+  .fchip { padding:3px 10px; border-radius:14px; border:1px solid var(--line); background:#fff; font-size:12px; cursor:pointer; }
+  .fchip.on { background:var(--acc); border-color:var(--acc); color:#fff; }
+  .fchip .n { opacity:.7; margin-left:4px; }
+  .pager { display:flex; gap:8px; align-items:center; color:var(--mute); font-size:12px; margin:0 0 10px; }
+  .entries { margin-top:8px; border:1px solid var(--line); border-radius:5px; overflow-x:auto; }
+  .entries td.note { word-break:break-word; max-width:240px; }
+  .entries table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  .entries th { text-align:left; font-weight:600; background:#f5f7fa; padding:6px 8px; border-bottom:1px solid var(--line); font-size:12px; }
+  .entries td { padding:6px 8px; border-top:1px solid #eef1f4; vertical-align:top; }
+  .entries td.nm { font-family:ui-monospace, monospace; font-weight:600; white-space:nowrap; }
+  .entries tr.ov { background:var(--chgbg); }
+  .entries .tools { display:flex; gap:8px; align-items:center; padding:7px 8px; background:#fafbfc; border-top:1px solid var(--line); flex-wrap:wrap; }
+  .kv { display:inline-block; margin:0 6px 2px 0; font-family:ui-monospace, monospace; font-size:11.5px; }
+  .kv i { color:var(--mute); font-style:normal; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:#c4ccd6; margin-right:5px; }
+  .dot.on { background:var(--ok); }
+  .addform { display:grid; grid-template-columns: 180px 1fr; gap:6px 10px; padding:10px; background:#fafbfc; border-top:1px solid var(--line); align-items:center; }
+  .addform label { text-align:right; font:12px ui-monospace, monospace; color:#3d4a5c; }
+  .grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap:12px; }
+  .tile { background:#fff; border:1px solid var(--line); border-radius:6px; padding:10px 12px; }
+  .tile h4 { margin:0 0 6px; display:flex; justify-content:space-between; font-size:14px; }
+  .tile h4 span { color:var(--mute); font-weight:400; font-size:12px; }
+  .tile a { display:inline-block; margin:0 8px 3px 0; font-size:12.5px; }
+  .bars div { display:grid; grid-template-columns: 170px 1fr 60px; gap:8px; align-items:center; font-size:12px; margin:2px 0; }
+  .bars i { display:block; height:8px; background:var(--acc); border-radius:4px; }
+  .bars span:last-child { text-align:right; color:var(--mute); }
+  pre { margin:6px 0; padding:9px 11px; background:#f5f7fa; border:1px solid var(--line); border-radius:5px; white-space:pre-wrap; word-break:break-all; font-size:12px; }
+  .diff div { font:12px ui-monospace, monospace; white-space:pre-wrap; padding:0 6px; }
+  .diff .del { background:#fde4e4; } .diff .add { background:#dff3e6; }
+  .rline { padding:6px 0; border-top:1px solid #eef1f4; display:flex; gap:10px; align-items:baseline; font-size:13px; }
+  .was { text-decoration:line-through; color:var(--mute); }
+  .empty { color:var(--mute); padding:12px 14px; }
+  @media (max-width: 900px) { .row { grid-template-columns: 1fr; } .label { text-align:left; } #q { width:140px; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <a class="brand" href="#">mini-luci<small>Nix, faceted</small></a>
+    <input id="q" placeholder="search options" autocomplete="off">
+    <a id="changes" href="#changes">no what-if</a>
+  </div>
+  <nav id="menu"></nav>
+  <div class="sub"><span id="crumbs"></span><span id="stat"></span><span id="busy"></span></div>
+</header>
+<main id="main"></main>
+<script>
+"use strict";
+// A LuCI-style rendering of an option corpus.  The menu and the counts are the server's compiled facets (query.mlir);
+// each row is edited with the widget its facets name (facets.nix: widget, range, crud); what the page asks about one
+// option -- its entries, its value in the running system, where it adheres -- is answered on demand by Nix
+// (POST /api/facet -> the corpus's eval.nix -> answer.nix).  An edit is a what-if: mlnix evaluates it, nothing is written.
+const LIMIT = 100;
+const S = { rows: 0, modules: [], states: [], overlay: {}, view: null, module: null, q: "", offset: 0, select: {}, templates: false };
+const $ = (s, r = document) => r.querySelector(s);
+function el(tag, attrs = {}, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === undefined || v === null || v === false) continue;
+    if (k === "class") e.className = v;
+    else if (k.startsWith("on")) e[k] = v;
+    else if (k === "value") e.value = v;
+    else if (k === "checked") e.checked = !!v;
+    else e.setAttribute(k, v === true ? "" : v);
+  }
+  for (const c of kids.flat(Infinity)) if (c !== null && c !== undefined && c !== false) e.append(c instanceof Node ? c : String(c));
+  return e;
+}
+function svg(tag, attrs = {}) {
+  const e = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  return e;
+}
+const show = (v) => (v === undefined ? "" : typeof v === "string" ? v : JSON.stringify(v));
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const key = (p) => p.join("\u0000");
+const dotted = (p) => p.map((s) => (/^[A-Za-z_][A-Za-z0-9_'-]*$/.test(s) ? s : JSON.stringify(s))).join(".");
+
+let busyN = 0;
+function busy(on, what) {
+  busyN += on ? 1 : -1;
+  $("#busy").textContent = busyN > 0 ? (what || "working…") : "";
+}
+async function api(path, body) {
+  const init = body === undefined ? (path.startsWith("/api/whatif") ? { method: "POST" } : {})
+                                  : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+  const r = await fetch(path, init);
+  const t = await r.text();
+  let j;
+  try { j = JSON.parse(t); } catch { throw new Error(`${r.status}: ${t.slice(0, 300)}`); }
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+// the facets asked for on demand: one evaluation by mlnix answers every ask
+async function ask(asks, what) {
+  busy(true, what || "asking Nix…");
+  try { return (await api("/api/facet", { ask: asks })).answers; } finally { busy(false); }
+}
+// a what-if: mlnix evaluates the configuration with it; the reply is the report of what it changes
+async function whatIf(route, body, err) {
+  if (err) err.textContent = "evaluating with mlnix…";
+  busy(true, "evaluating with mlnix…");
+  try {
+    const r = await api(route, body);
+    if (err) err.textContent = "";
+    noteReport(r);
+    await route_();
+    return r;
+  } catch (e) { if (err) err.textContent = e.message; else alert(e.message); }
+  finally { busy(false); }
+}
+
+// ---- the what-if overlay: its leaves, for the header and for undo
+function leaves(v, p = [], out = []) {
+  if (v && typeof v === "object" && !Array.isArray(v)) { for (const k of Object.keys(v)) leaves(v[k], p.concat([k]), out); }
+  else out.push({ path: p, value: v });
+  return out;
+}
+function noteReport(r) {
+  S.overlay = JSON.parse(r.overlay || "{}");
+  const n = leaves(S.overlay).filter((l) => l.path.length).length;
+  const a = $("#changes");
+  a.textContent = n ? `${n} what-if${n === 1 ? "" : "s"}` : "no what-if";
+  a.className = n ? "some" : "";
+}
+const inOverlay = (p) => leaves(S.overlay).some((l) => l.path.length >= p.length && same(l.path.slice(0, p.length), p));
+
+// ---- the menu: the module facet's values, grouped by their first segment
+function topOf(v) { return /\.nix$|^\//.test(v) ? "local modules" : v.split("/")[0]; }
+function buildMenu() {
+  const tops = new Map();
+  for (const { v, n } of S.modules) {
+    const t = topOf(v);
+    if (!tops.has(t)) tops.set(t, { name: t, n: 0, subs: [] });
+    const e = tops.get(t); e.n += n; e.subs.push({ v, n });
+  }
+  S.tops = [...tops.values()].sort((a, b) => b.n - a.n);
+  const nav = $("#menu");
+  nav.replaceChildren();
+  const shown = S.tops.slice(0, 8), rest = S.tops.slice(8);
+  const item = (label, n, subs) => {
+    const d = el("div", { class: "top", "data-top": label },
+      el("a", { onclick: () => (subs.length === 1 ? go({ m: subs[0].v }) : null) }, label, el("span", { class: "n" }, n)),
+      el("div", { class: "drop" }, subs.sort((a, b) => b.n - a.n).map((s) =>
+        el("a", { onclick: () => go({ m: s.v }) }, el("span", {}, s.label || s.v), el("span", {}, s.n)))));
+    nav.append(d);
+  };
+  for (const t of shown) item(t.name, t.n, t.subs.map((s) => ({ ...s, label: s.v.includes("/") && t.name !== "local modules" ? s.v.slice(t.name.length + 1) : s.v })));
+  if (rest.length) item("more", rest.reduce((a, t) => a + t.n, 0), rest.flatMap((t) => t.subs));
+}
+
+// ---- routing: #m=module&q=&o=&s= | #q=text | #changes | (overview)
+function go(p) {
+  const h = new URLSearchParams();
+  for (const [k, v] of Object.entries(p)) if (v !== undefined && v !== null && v !== "" && v !== 0) h.set(k, typeof v === "string" ? v : JSON.stringify(v));
+  location.hash = h.toString();
+}
+async function route_() {
+  const h = location.hash.slice(1);
+  document.querySelectorAll(".top").forEach((t) => t.classList.remove("on"));
+  if (h === "changes") return showChanges();
+  const p = new URLSearchParams(h);
+  S.module = p.get("m"); S.q = p.get("q") || ""; S.offset = +(p.get("o") || 0);
+  S.select = p.has("s") ? JSON.parse(p.get("s")) : {};
+  S.templates = p.get("t") === "1";
+  if (S.module) { const t = $(`.top[data-top="${CSS.escape(topOf(S.module))}"]`); if (t) t.classList.add("on"); }
+  if (S.module || S.q) return showPage();
+  return showOverview();
+}
+window.addEventListener("hashchange", () => route_().catch(fail));
+function fail(e) { $("#main").replaceChildren(el("div", { class: "cbi-section" }, el("div", { class: "err", style: "padding:14px" }, e.message || String(e)))); }
+
+// ---- overview: the corpus by its compiled facets
+async function showOverview() {
+  const res = await api("/api/query", { select: {}, q: "", offset: 0, limit: 1 });
+  $("#crumbs").replaceChildren(el("b", {}, "Overview"));
+  $("#stat").textContent = `${res.rows} options · facets in ${res.queryMs.toFixed(2)} ms (query.mlir, compiled)`;
+  const facet = (name) => (res.facets.find((f) => f.name === name) || { values: [] }).values;
+  const bars = (vals, max = 14) => {
+    const top = [...vals].sort((a, b) => b.n - a.n).slice(0, max), m = Math.max(1, ...top.map((v) => v.n));
+    return el("div", { class: "bars" }, top.map((v) => el("div", {}, el("span", { class: "mono" }, v.v), el("i", { style: `width:${(100 * v.n) / m}%` }), el("span", {}, v.n))));
+  };
+  $("#main").replaceChildren(
+    el("h2", {}, "The configuration, as a manifest"),
+    el("p", { class: "lead" }, `${res.rows} options, each rendered by its facets. Pick a category above; edits are what-ifs that mlnix evaluates, and nothing is written to the system.`),
+    el("div", { class: "grid" }, S.tops.map((t) => el("div", { class: "tile" },
+      el("h4", {}, t.name, el("span", {}, `${t.n} options`)),
+      t.subs.sort((a, b) => b.n - a.n).slice(0, 12).map((s) => el("a", { onclick: () => go({ m: s.v }) }, s.v.includes("/") && t.name !== "local modules" ? s.v.slice(t.name.length + 1) : s.v)),
+      t.subs.length > 12 ? el("span", { class: "note" }, ` +${t.subs.length - 12} more in the menu`) : null))),
+    el("div", { class: "grid", style: "margin-top:14px" },
+      el("div", { class: "tile" }, el("h4", {}, "state", el("span", {}, "compiled facet")), bars(facet("state"))),
+      el("div", { class: "tile" }, el("h4", {}, "kind", el("span", {}, "compiled facet")), bars(facet("kind")))));
+}
+
+// ---- a page: the options of one module (or a search), grouped into sections by their path
+async function showPage() {
+  const sel = { ...S.select };
+  if (S.module) sel.module = [S.module];
+  if (!S.templates && !sel.state) sel.state = S.states.filter((v) => v !== "template");
+  const res = await api("/api/query", { select: sel, q: S.q, offset: S.offset, limit: LIMIT });
+  const title = S.module || `search “${S.q}”`;
+  $("#crumbs").replaceChildren(...(S.module ? [el("a", { href: "#" }, "Overview"), " › ", topOf(S.module), " › ", el("b", {}, S.module)] : [el("a", { href: "#" }, "Overview"), " › ", el("b", {}, title)]));
+  $("#stat").textContent = `${res.total} of ${res.rows} options · facets in ${res.queryMs.toFixed(2)} ms (query.mlir, compiled)`;
+  const facet = (name) => (res.facets.find((f) => f.name === name) || { values: [] }).values;
+  const params = (extra) => ({ m: S.module, q: S.q, s: Object.keys(S.select).length ? S.select : undefined, t: S.templates ? "1" : undefined, ...extra });
+  const toggle = (name, v) => {
+    const s = { ...S.select }, cur = new Set(s[name] || []);
+    cur.has(v) ? cur.delete(v) : cur.add(v);
+    if (cur.size) s[name] = [...cur]; else delete s[name];
+    go({ ...params(), s: Object.keys(s).length ? s : undefined, o: 0 });
+  };
+  const chips = (name, label) => facet(name).filter((v) => v.n || v.on).map((v) =>
+    el("span", { class: "fchip" + (v.on ? " on" : ""), onclick: () => toggle(name, v.v), title: `${label}: compiled count` }, `${label} ${v.v}`, el("span", { class: "n" }, v.n)));
+  const tmpl = facet("state").find((v) => v.v === "template");
+  const filters = el("div", { class: "filters" },
+    el("input", { type: "text", placeholder: S.module ? "search in this page" : "search", value: S.q, style: "width:220px",
+      onkeydown: (e) => { if (e.key === "Enter") go({ ...params(), q: e.target.value.trim(), o: 0 }); } }),
+    chips("state", "state"), chips("whatif", "what-if"),
+    el("span", { class: "fchip" + (S.templates ? " on" : ""), onclick: () => go({ ...params(), t: S.templates ? undefined : "1", o: 0 }) },
+      "templates", el("span", { class: "n" }, tmpl ? tmpl.n : 0)));
+  const pager = el("div", { class: "pager" },
+    el("button", { disabled: S.offset === 0, onclick: () => go({ ...params(), o: Math.max(0, S.offset - LIMIT) }) }, "‹"),
+    `${res.total ? S.offset + 1 : 0}–${Math.min(S.offset + LIMIT, res.total)} of ${res.total}`,
+    el("button", { disabled: S.offset + LIMIT >= res.total, onclick: () => go({ ...params(), o: S.offset + LIMIT }) }, "›"));
+  // sections: the hits come in key order, so a path prefix's rows are together
+  const groups = [];
+  for (const h of res.hits) {
+    const p = h.row.path, pre = p.length > 2 ? p.slice(0, 2) : p.slice(0, 1);
+    const g = groups[groups.length - 1];
+    if (g && same(g.pre, pre)) g.hits.push(h); else groups.push({ pre, hits: [h] });
+  }
+  const rows = [];
+  const sections = groups.map((g) => el("div", { class: "cbi-section" },
+    el("div", { class: "head" }, el("h3", {}, dotted(g.pre)), el("span", { class: "n" }, `${g.hits.length} option${g.hits.length === 1 ? "" : "s"}`)),
+    g.hits.map((h) => { const r = renderRow(h, g.pre.length); rows.push(r); return r.el; })));
+  $("#main").replaceChildren(el("h2", {}, title), filters, pager,
+    ...(sections.length ? sections : [el("div", { class: "cbi-section" }, el("div", { class: "empty" }, "No option passes every facet."))]));
+  // the running system's values, for the rows that have a runtime mapping: one evaluation for the page
+  const mapped = rows.filter((r) => r.o.runtime && !["sections", "table"].includes(r.o.widget));
+  if (mapped.length) {
+    const answers = await ask(mapped.map((r) => ({ iface: "live", path: r.o.path })), "reading the running system…");
+    answers.forEach((a, i) => mapped[i].live(a));
+  }
+}
+
+// ---- a row: label, widget, what it may do, and what is asked about it on demand
+function renderRow(h, prefixLen) {
+  const o = h.row;
+  const label = o.path.slice(prefixLen).length ? dotted(o.path.slice(prefixLen)) : dotted(o.path);
+  const err = el("div", { class: "err" });
+  const extra = el("div");
+  const cur = o.valueShown ? o.value : undefined;
+  const w = widgetFor(o, cur);
+  const overlaid = inOverlay(o.path);
+  const badges = el("div", { class: "badges" },
+    el("span", { class: "b " + o.state }, o.state),
+    h.changed ? el("span", { class: "b chg", title: "the what-if changes it" }, "what-if") : null,
+    o.runtime ? el("span", { class: "b rt", title: "runtime.nix maps it to the running system" }, "runtime") : null,
+    o.range ? el("span", { class: "b", title: "the range its type allows" }, `${o.range[0] ?? "−∞"} … ${o.range[1] ?? "∞"}`) : null);
+  const was = h.changed && h.base ? el("div", { class: "note" }, "as configured: ", el("span", { class: "was mono" }, h.base.valueShown ? show(h.base.value) : `(${h.base.state})`)) : null;
+  const field = el("div", { class: "field" });
+  if (w) field.append(w.el);
+  else field.append(el("div", { class: "note", style: "margin-top:4px" }, ...staticView(o)));
+  if (o.widget === "sections" || o.widget === "table") field.append(entriesButton(o, extra));
+  field.append(was || "", o.description ? el("div", { class: "desc", title: "click for all of it", onclick: (e) => e.currentTarget.classList.toggle("open") }, o.description) : "",
+    badges, extra, err);
+  const apply = el("button", { class: "primary", disabled: true, onclick: () => {
+    let v;
+    try { v = w.get(); } catch (e) { err.textContent = e.message; return; }
+    if (v === undefined) { err.textContent = "no value"; return; }
+    whatIf("/api/whatif/set", { path: o.path, value: v }, err);
+  } }, "what if");
+  const acts = el("div", { class: "acts" },
+    w ? apply : null,
+    overlaid ? el("button", { onclick: () => whatIf("/api/whatif/reset", { path: o.path }, err) }, "undo") : null,
+    el("button", { onclick: () => adhesion(o, extra) }, "where"));
+  const row = el("div", { class: "row" + (h.changed ? " changed" : "") },
+    el("div", { class: "label" }, el("div", { class: "name" }, label), el("div", { class: "kind" }, o.type || o.kind)), field, acts);
+  if (w) w.onDirty = () => { row.classList.add("dirty"); apply.disabled = false; };
+  return {
+    el: row, o,
+    live(a) {
+      if (a.error) return;
+      const drift = a.agrees === false;
+      const chip = el("span", { class: "b " + (drift ? "drift" : "live"), title: `read from ${a.source}` }, `live: ${show(a.live)}`);
+      badges.append(chip);
+      if (w && w.setLive) w.setLive(a.live);
+      extra.append(el("div", { class: "note" }, `running system (${a.source}): `, el("span", { class: "mono" }, show(a.live)),
+        drift ? el("b", { style: "color:var(--bad)" }, "  — not what the configuration says") : a.agrees === true ? el("span", { style: "color:var(--ok)" }, "  — agrees") : "",
+        a.apply ? el("span", {}, "  ", el("button", { disabled: true, title: `would run: ${a.apply}\nOnly a privileged helper could; mini-luci runs unprivileged and writes nothing.` }, "apply at runtime")) : ""));
+    },
+  };
+}
+function staticView(o) {
+  const out = [];
+  if (o.widget === "template") out.push("an option of each entry of a set: edit it through the set's entries");
+  else if (o.widget === "readonly") out.push("read-only");
+  else if (o.widget === "group") out.push("a set of options: its options are rows of their own");
+  else if (o.widget === "package") out.push("a package: chosen in Nix code, not here");
+  else if (o.widget === "sections") out.push("a set of entries, each made from the same options");
+  else if (o.widget === "table") out.push("a set of keys and values");
+  if (o.valueShown) out.push(" · ", el("code", {}, show(o.value)));
+  else if (o.default != null) out.push(" · default ", el("code", {}, o.default));
+  return out;
+}
+
+// ---- widgets, by the row's facets
+function widgetFor(o, cur) {
+  if (!o.crud || !o.crud.includes("update") || ["sections", "table", "group", "package", "template", "readonly"].includes(o.widget)) return null;
+  const isInt = /int|port/i.test(o.kind) || /integer/.test(o.type);
+  switch (o.widget) {
+    case "toggle": return toggleW(cur ?? (o.default === "true"));
+    case "select": return selectW(o.choices || [], cur, o.nullable);
+    case "knob": return o.range && o.range[0] !== null && o.range[1] !== null ? knobW(o.range, cur, isInt, o.default) : numberW(o.range, cur, isInt, o.nullable, o.default);
+    case "number": return numberW(o.range, cur, isInt, o.nullable, o.default);
+    case "text": return textW(cur, o.nullable, o.default);
+    case "lines": return linesW(cur, o.default);
+    case "list": return listW(cur, o.range, /integer|port/.test(o.type), o.default);
+    default: return jsonW(cur, o.default);
+  }
+}
+function base(elm, get, set) { const w = { el: elm, get, set, onDirty: null }; w.dirty = () => w.onDirty && w.onDirty(); return w; }
+function toggleW(v) {
+  const i = el("input", { type: "checkbox", checked: !!v });
+  const w = base(el("label", { class: "switch" }, i, el("span")), () => i.checked, (x) => (i.checked = !!x));
+  i.onchange = () => w.dirty();
+  return w;
+}
+function selectW(choices, cur, nullable) {
+  const s = el("select", {}, nullable ? el("option", { value: "null" }, "null") : null,
+    choices.map((c) => el("option", { value: JSON.stringify(c) }, show(c))));
+  if (cur !== undefined) s.value = JSON.stringify(cur);
+  const w = base(s, () => JSON.parse(s.value), (x) => (s.value = JSON.stringify(x)));
+  s.onchange = () => w.dirty();
+  return w;
+}
+function numberW(range, cur, isInt, nullable, dflt) {
+  const i = el("input", { type: "number", step: isInt ? 1 : "any", min: range ? range[0] : null, max: range ? range[1] : null,
+    value: cur ?? "", placeholder: dflt != null ? `default ${dflt}` : nullable ? "null" : "", style: "width:180px" });
+  const w = base(i, () => {
+    if (i.value === "") { if (nullable) return null; throw new Error("a number is required"); }
+    const n = Number(i.value);
+    if (range && ((range[0] !== null && n < range[0]) || (range[1] !== null && n > range[1]))) throw new Error(`outside ${range[0]} … ${range[1]}`);
+    return n;
+  }, (x) => (i.value = x ?? ""));
+  i.oninput = () => w.dirty();
+  return w;
+}
+function textW(cur, nullable, dflt) {
+  const i = el("input", { type: "text", value: cur ?? "", placeholder: dflt != null ? `default ${dflt}` : nullable ? "null" : "" });
+  const w = base(i, () => (i.value === "" && nullable ? null : i.value), (x) => (i.value = x ?? ""));
+  i.oninput = () => w.dirty();
+  return w;
+}
+function linesW(cur, dflt) {
+  const t = el("textarea", { rows: 3, placeholder: dflt != null ? `default ${dflt}` : "" });
+  t.value = cur ?? "";
+  const w = base(t, () => t.value, (x) => (t.value = x ?? ""));
+  t.oninput = () => w.dirty();
+  return w;
+}
+function jsonW(cur, dflt) {
+  const t = el("textarea", { rows: 2, placeholder: dflt != null ? `default ${dflt}` : "JSON" });
+  t.value = cur === undefined ? "" : JSON.stringify(cur);
+  const w = base(t, () => JSON.parse(t.value), (x) => (t.value = JSON.stringify(x)));
+  t.oninput = () => w.dirty();
+  return w;
+}
+function listW(cur, range, numeric, dflt) {
+  let items = Array.isArray(cur) ? cur.slice() : [];
+  let live = null;
+  const box = el("div", { class: "chips" });
+  const add = el("input", { type: numeric ? "number" : "text", placeholder: "add", style: "width:120px",
+    min: range ? range[0] : null, max: range ? range[1] : null,
+    onkeydown: (e) => { if (e.key === "Enter") push(); } });
+  const push = () => {
+    if (add.value === "") return;
+    const v = numeric ? Number(add.value) : add.value;
+    if (numeric && range && ((range[0] !== null && v < range[0]) || (range[1] !== null && v > range[1]))) { add.setCustomValidity("out of range"); add.reportValidity(); return; }
+    items.push(v); add.value = ""; draw(); w.dirty();
+  };
+  const draw = () => {
+    box.replaceChildren(...items.map((v, i) => el("span", { class: "chip", title: live && Array.isArray(live) ? (live.includes(v) ? "live: listening" : "not live") : "" },
+      live && Array.isArray(live) ? el("span", { class: "dot" + (live.includes(v) ? " on" : "") }) : null, show(v),
+      el("button", { title: "remove", onclick: () => { items.splice(i, 1); draw(); w.dirty(); } }, "×"))),
+      add, el("button", { onclick: push }, "add"),
+      items.length || cur !== undefined ? null : el("span", { class: "note" }, dflt != null ? `default ${dflt}` : ""));
+  };
+  const w = base(box, () => items.slice(), (x) => { items = x.slice(); draw(); });
+  w.setLive = (l) => { live = l; draw(); };
+  draw();
+  return w;
+}
+// a dial: drag up or down (shift: finely), scroll, or type; the configured value is the arc, the running system's the
+// orange mark, the declared default the grey one
+function knobW([lo, hi], cur, isInt, dflt) {
+  const d0 = dflt != null && dflt !== "" && !isNaN(Number(dflt)) ? Number(dflt) : null;
+  let v = cur ?? d0 ?? lo;
+  let liveV = null;
+  const R = 26, C = 34, A = 135;
+  const ang = (x) => -A + (2 * A * (Math.min(hi, Math.max(lo, x)) - lo)) / (hi - lo || 1);
+  const pt = (a, r = R) => [C + r * Math.sin((a * Math.PI) / 180), C - r * Math.cos((a * Math.PI) / 180)];
+  const arc = (a0, a1) => { const [x0, y0] = pt(a0), [x1, y1] = pt(a1); return `M${x0} ${y0} A${R} ${R} 0 ${a1 - a0 > 180 ? 1 : 0} 1 ${x1} ${y1}`; };
+  const s = svg("svg", { width: 68, height: 62, viewBox: "0 0 68 62" });
+  const track = svg("path", { d: arc(-A, A), stroke: "#dfe4eb", "stroke-width": 6, fill: "none", "stroke-linecap": "round" });
+  const fill = svg("path", { stroke: "#2d6cdf", "stroke-width": 6, fill: "none", "stroke-linecap": "round" });
+  const hand = svg("line", { stroke: "#1f2733", "stroke-width": 2.5, "stroke-linecap": "round" });
+  const knobC = svg("circle", { cx: C, cy: C, r: 15, fill: "#f7f9fb", stroke: "#c9d0da" });
+  const liveM = svg("circle", { r: 3.6, fill: "#e07b00", stroke: "#fff", "stroke-width": 1, visibility: "hidden" });
+  const defM = svg("circle", { r: 2.4, fill: "#9aa6b5", visibility: d0 === null ? "hidden" : "visible" });
+  s.append(track, fill, knobC, hand, defM, liveM);
+  const num = el("input", { type: "number", min: lo, max: hi, step: isInt ? 1 : "any", value: cur ?? "", placeholder: d0 !== null ? `default ${d0}` : "" });
+  const liveT = el("span", {});
+  const draw = () => {
+    const a = ang(v);
+    fill.setAttribute("d", a > -A ? arc(-A, a) : "");
+    const [x0, y0] = pt(a, 6), [x1, y1] = pt(a, 13);
+    hand.setAttribute("x1", x0); hand.setAttribute("y1", y0); hand.setAttribute("x2", x1); hand.setAttribute("y2", y1);
+    if (d0 !== null) { const [dx, dy] = pt(ang(d0), R + 6); defM.setAttribute("cx", dx); defM.setAttribute("cy", dy); }
+    if (liveV !== null && typeof liveV === "number") {
+      const [lx, ly] = pt(ang(liveV), R + 6); liveM.setAttribute("cx", lx); liveM.setAttribute("cy", ly); liveM.setAttribute("visibility", "visible");
+      liveT.textContent = `live ${liveV}`;
+    }
+  };
+  const set = (x, fromInput) => {
+    v = Math.min(hi, Math.max(lo, isInt ? Math.round(x) : x));
+    if (!fromInput) num.value = v;
+    draw(); w.dirty();
+  };
+  let drag = null;
+  s.addEventListener("pointerdown", (e) => { drag = { y: e.clientY, v }; try { s.setPointerCapture(e.pointerId); } catch {} });
+  s.addEventListener("pointermove", (e) => { if (drag) set(drag.v + ((drag.y - e.clientY) * (hi - lo)) / (e.shiftKey ? 1600 : 160)); });
+  s.addEventListener("pointerup", () => (drag = null));
+  s.addEventListener("wheel", (e) => { e.preventDefault(); set(v + Math.sign(-e.deltaY) * Math.max(isInt ? 1 : 0, (hi - lo) / 100)); }, { passive: false });
+  num.oninput = () => { if (num.value !== "") set(Number(num.value), true); };
+  const wrap = el("div", { class: "knob" }, s, el("div", { class: "side" }, num, el("span", {}, `${lo} … ${hi}`), liveT));
+  const w = base(wrap, () => { if (num.value === "") throw new Error("turn the dial or type a value"); return v; }, (x) => set(x));
+  w.setLive = (l) => { liveV = typeof l === "number" ? l : null; draw(); };
+  draw();
+  return w;
+}
+
+// ---- on demand: where an option adheres
+async function adhesion(o, box) {
+  const [a] = await ask([{ iface: "adhesion", path: o.path }], "asking Nix where it adheres…");
+  const old = box.querySelector(".where"); if (old) old.remove();
+  if (a.error) { box.append(el("div", { class: "where err" }, a.error)); return; }
+  box.append(el("div", { class: "where" },
+    el("div", {}, "declared ", a.declared.map((d, i) => [i ? ", " : "", el("code", {}, d.line ? `${d.file}:${d.line}:${d.column}` : d.file)])),
+    el("div", {}, "defined ", a.defined.length ? a.defined.map((f, i) => [i ? ", " : "", el("code", {}, f)]) : el("i", {}, "nowhere (its default)"),
+      a.priority !== null ? ` · priority ${a.priority}` : ""),
+    el("div", { class: "note" }, `a what-if on it adheres as a mkForce in the module the changes page shows${a.target ? `, imported by ${a.target}` : ""}`)));
+}
+
+// ---- on demand: a set's entries (sections) or keys (table), with what each one allows
+function entriesButton(o, box) {
+  const b = el("button", { style: "margin-top:4px", onclick: async () => { b.disabled = true; try { await openEntries(o, box); } finally { b.disabled = false; } } }, o.widget === "table" ? "keys…" : "entries…");
+  return b;
+}
+async function openEntries(o, box) {
+  const [a] = await ask([{ iface: "entries", path: o.path }], "asking Nix for the entries…");
+  const old = box.querySelector(".entries"); if (old) old.remove();
+  if (a.error) { box.append(el("div", { class: "err" }, a.error)); return; }
+  const err = el("div", { class: "err", style: "padding:0 8px" });
+  const sections = a.kind === "sections";
+  const filter = el("input", { type: "text", placeholder: `filter ${a.entries.length}`, style: "width:200px",
+    oninput: () => { const f = filter.value.toLowerCase(); body.querySelectorAll("tr").forEach((tr) => (tr.style.display = tr.dataset.n.toLowerCase().includes(f) ? "" : "none")); } });
+  const body = el("tbody");
+  for (const e of a.entries) {
+    const p = o.path.concat([e.name]);
+    let valueCell;
+    if (sections) valueCell = el("td", {}, e.enabled === false ? el("span", { class: "b drift" }, "disabled") : null,
+      Object.entries(e.value || {}).map(([k, v]) => el("span", { class: "kv" }, el("i", {}, k, "="), show(v))));
+    else {
+      const range = e.live && e.live.range;
+      // a sysctl knob takes false and true as the 0 and 1 NixOS writes for them
+      const asNumber = typeof e.value === "number" ? e.value : typeof e.value === "boolean" ? Number(e.value)
+        : typeof e.value === "string" && e.value.trim() !== "" && !isNaN(Number(e.value)) ? Number(e.value) : undefined;
+      const w = range ? knobW(range, asNumber, true, null) : textW(e.value === null ? "" : show(e.value), true, null);
+      if (range && w.setLive && e.live) w.setLive(e.live.live);
+      const ap = el("button", { class: "primary", disabled: true, onclick: () => {
+        let v; try { v = w.get(); } catch (x) { err.textContent = x.message; return; }
+        if (!range && v !== null && v !== "" && !isNaN(Number(v))) v = Number(v);
+        whatIf("/api/whatif/set", { path: p, value: v }, err);
+      } }, "what if");
+      w.onDirty = () => (ap.disabled = false);
+      valueCell = el("td", {}, el("div", { style: "display:flex;gap:8px;align-items:center" }, w.el, ap));
+    }
+    const lv = e.live;
+    let liveCell = el("td", { class: "note" }, "—");
+    if (lv) {
+      if ("active" in lv) liveCell = el("td", {}, el("span", { class: "dot" + (lv.active ? " on" : "") }), lv.active ? "running" : "not running",
+        lv.active && lv.memory !== undefined ? el("div", { class: "note" }, `${(lv.memory / 1048576).toFixed(1)} MiB, ${typeof lv.memoryMax === "number" ? `at most ${(lv.memoryMax / 1048576).toFixed(0)} MiB` : "no memory limit"} · ${lv.tasks} task${lv.tasks === 1 ? "" : "s"}`) : null,
+        lv.apply ? el("div", {}, el("button", { disabled: true, title: `would run: ${lv.apply}\nOnly a privileged helper could; mini-luci runs unprivileged.` }, "set at runtime")) : null);
+      else if ("exists" in lv) liveCell = el("td", {}, el("span", { class: "dot" + (lv.exists ? " on" : "") }), lv.exists ? (lv.uid !== undefined ? `uid ${lv.uid}` : "present") : "absent", el("div", { class: "note" }, lv.source));
+      else if ("live" in lv) {
+        const drift = e.agrees === false;
+        liveCell = el("td", {}, el("span", { class: "b " + (drift ? "drift" : "live"), title: lv.source }, show(lv.live)),
+          lv.apply ? el("div", {}, el("button", { disabled: true, title: `would run: ${lv.apply}\nOnly a privileged helper could; mini-luci runs unprivileged.` }, "apply at runtime")) : null);
+      }
+    }
+    const how = { reset: "drop the what-if that made it", disable: "set its enable to false: the module's own way to remove it",
+                  null: "set it to null: this module writes no null key", none: "the module system has no delete, and this module has no switch for it" }[e.remove];
+    const rm = e.remove === "none" ? el("button", { disabled: true, title: how }, "remove")
+      : el("button", { class: "warn", title: how, onclick: () =>
+          e.remove === "reset" ? whatIf("/api/whatif/reset", { path: p }, err)
+          : e.remove === "disable" ? whatIf("/api/whatif/set", { path: p.concat(["enable"]), value: false }, err)
+          : whatIf("/api/whatif/set", { path: p, value: null }, err) }, e.remove === "disable" ? "disable" : "remove");
+    body.append(el("tr", { class: e.overlay ? "ov" : "", "data-n": e.name },
+      el("td", { class: "nm" }, e.name), valueCell, liveCell,
+      el("td", { class: "note" }, e.definedIn.join(", ")), el("td", {}, rm)));
+  }
+  const addForm = el("div", { class: "addform", style: "display:none" });
+  const nameI = el("input", { type: "text", placeholder: sections ? "name of the new entry" : "key" });
+  addForm.append(el("label", {}, sections ? "new entry" : "new key"), nameI);
+  const fields = [];
+  if (sections) for (const f of a.form.sort((x, y) => x.name.localeCompare(y.name))) {
+    const w = widgetFor({ ...f, crud: ["update"], nullable: /^null or/.test(f.type) }, undefined);
+    if (!w) continue;
+    let touched = false;
+    w.onDirty = () => (touched = true);
+    fields.push({ f, w, touched: () => touched });
+    addForm.append(el("label", { title: f.description }, f.name), el("div", {}, w.el, el("div", { class: "note" }, f.type, f.default != null ? ` · default ${f.default}` : "")));
+  } else { const vi = textW("", false, null); fields.push({ f: { name: null }, w: vi, touched: () => true }); addForm.append(el("label", {}, "value"), vi.el); }
+  addForm.append(el("span"), el("div", {}, el("button", { class: "primary", onclick: () => {
+    const name = nameI.value.trim();
+    if (!name) { err.textContent = "a name is required"; return; }
+    let value;
+    try {
+      if (sections) { value = {}; for (const x of fields) if (x.touched()) value[x.f.name] = x.w.get(); }
+      else { value = fields[0].w.get(); if (value !== "" && !isNaN(Number(value))) value = Number(value); }
+    } catch (x) { err.textContent = x.message; return; }
+    whatIf("/api/whatif/set", { path: o.path.concat([name]), value }, err);
+  } }, "what if: add"), " ", el("span", { class: "note" }, sections ? "only the options you touch are given; the module fills in the rest" : "")));
+  box.append(el("div", { class: "entries" },
+    el("div", { class: "tools" }, el("b", {}, `${a.entries.length} ${sections ? "entries" : "keys"}`), filter,
+      el("button", { onclick: () => (addForm.style.display = addForm.style.display === "none" ? "grid" : "none") }, sections ? "add an entry" : "add a key"),
+      sections ? el("span", { class: "note" }, a.canDisable ? "an entry is removed through its enable" : "") : null),
+    el("table", {}, el("thead", {}, el("tr", {}, el("th", {}, sections ? "entry" : "key"), el("th", {}, sections ? "what its modules set" : "value"),
+      el("th", {}, "running system"), el("th", {}, "defined in"), el("th", {}, ""))), body),
+    addForm, err));
+}
+
+// ---- the what-if: what it changes, and the .nix module it would adhere as
+function lineDiff(a, b) {
+  const x = (a ?? "").split("\n"), y = (b ?? "").split("\n"), n = x.length, m = y.length;
+  const L = Array.from({ length: n + 1 }, () => new Int32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) L[i][j] = x[i] === y[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  const out = el("div", { class: "diff" });
+  let i = 0, j = 0;
+  while (i < n || j < m) {
+    if (i < n && j < m && x[i] === y[j]) { out.append(el("div", {}, "  " + x[i])); i++; j++; }
+    else if (i < n && (j === m || L[i + 1][j] >= L[i][j + 1])) { out.append(el("div", { class: "del" }, "- " + x[i])); i++; }
+    else { out.append(el("div", { class: "add" }, "+ " + y[j])); j++; }
+  }
+  return out;
+}
+async function showChanges() {
+  $("#crumbs").replaceChildren(el("a", { href: "#" }, "Overview"), " › ", el("b", {}, "What-if"));
+  const r = await api("/api/report");
+  noteReport(r);
+  $("#stat").textContent = `mlnix: ${r.evalMs.base.toFixed(0)} ms as configured, ${r.evalMs.whatif.toFixed(0)} ms with the what-if`;
+  const err = el("div", { class: "err" });
+  const ls = leaves(S.overlay).filter((l) => l.path.length);
+  if (!ls.length) {
+    $("#main").replaceChildren(el("h2", {}, "What-if"), el("div", { class: "cbi-section" }, el("div", { class: "empty" }, "No what-if: every option is as configured. Edit any option, then come back here.")));
+    return;
+  }
+  const [m] = await ask([{ iface: "module", path: [] }], "asking Nix for the module…");
+  $("#main").replaceChildren(
+    el("h2", {}, "What-if"),
+    el("p", { class: "lead" }, "Each value is evaluated by mlnix with the configuration at mkForce. Nothing is written to the system: below is the module the what-if would adhere as."),
+    el("div", { class: "cbi-section" }, el("div", { class: "head" }, el("h3", {}, "the what-if's values"), el("span", { class: "n" }, `${ls.length}`)),
+      el("div", { style: "padding:4px 14px 10px" }, ls.map((l) => el("div", { class: "rline" }, el("code", {}, dotted(l.path)), "=", el("code", {}, show(l.value)),
+        el("button", { style: "margin-left:auto", onclick: () => whatIf("/api/whatif/reset", { path: l.path }, err) }, "undo"))),
+        el("div", { style: "margin-top:8px" }, el("button", { class: "warn", onclick: () => whatIf("/api/whatif/clear", undefined, err) }, "undo all")), err)),
+    el("div", { class: "cbi-section" }, el("div", { class: "head" }, el("h3", {}, m.target ? `adheres as luci.nix, imported by ${m.target}` : "adheres as luci.nix")),
+      el("div", { style: "padding:4px 14px 10px" }, el("pre", {}, m.text || m.error))),
+    el("div", { class: "cbi-section" }, el("div", { class: "head" }, el("h3", {}, "options it changes"), el("span", { class: "n" }, `${r.options.length}`)),
+      el("div", { style: "padding:4px 14px 10px" }, r.options.map((o) => el("div", { class: "rline" }, el("code", {}, o.path),
+        o.fromState === o.toState ? "" : el("span", { class: "note" }, `${o.fromState ?? "new"} → ${o.toState}`),
+        el("span", { class: "was mono" }, o.from === null ? "" : show(o.from)), "→", el("span", { class: "mono" }, o.to === null ? "" : show(o.to)))))),
+    el("div", { class: "cbi-section" }, el("div", { class: "head" }, el("h3", {}, "/etc files it changes"), el("span", { class: "n" }, `${r.etc.length}`)),
+      el("div", { style: "padding:4px 14px 10px" }, r.etc.length ? r.etc.map((e) => [el("div", { class: "rline" }, el("code", {}, "/etc/" + e.name)), lineDiff(e.from, e.to)]) : el("div", { class: "note" }, "none"))));
+}
+
+// ---- start
+$("#q").addEventListener("keydown", (e) => { if (e.key === "Enter") go({ q: e.target.value.trim() }); });
+(async () => {
+  const res = await api("/api/query", { select: {}, q: "", offset: 0, limit: 1 });
+  S.rows = res.rows;
+  S.modules = (res.facets.find((f) => f.name === "module") || { values: [] }).values;
+  S.states = (res.facets.find((f) => f.name === "state") || { values: [] }).values.map((v) => v.v);
+  buildMenu();
+  noteReport(await api("/api/report"));
+  await route_();
+})().catch(fail);
+</script>
+</body>
+</html>

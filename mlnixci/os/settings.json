@@ -1,0 +1,7 @@
+{
+  "networking": {
+    "hostName": "mlnix-os",
+    "firewall": { "allowedTCPPorts": [22, 8080] }
+  },
+  "services": { "motd": { "text": "mlnix-os: NixOS modules on Debian, evaluated by mlnix" } }
+}

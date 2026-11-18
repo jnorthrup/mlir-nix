@@ -1,0 +1,5 @@
+os/settings.staged.json
+os/settings.probe.json
+os/etc-root/
+*.tmp
+.DS_Store

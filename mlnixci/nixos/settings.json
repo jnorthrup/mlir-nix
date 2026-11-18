@@ -1,0 +1,4 @@
+{
+  "networking": { "hostName": "mlnix-nixos" },
+  "time": { "timeZone": "America/Chicago" }
+}

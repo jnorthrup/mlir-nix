@@ -1,0 +1,14 @@
+# The nixpkgs snapshot mlnix is measured on (25.05, mlir-nix/.cache/nixpkgs), lent to the store read-only.
+[Unit]
+Description=nixpkgs for mlnixos, read-only
+After=systemd-tmpfiles-setup.service
+ConditionPathIsDirectory=/home/jim/work/mlir-nix/.cache/nixpkgs/nixos
+
+[Mount]
+What=/home/jim/work/mlir-nix/.cache/nixpkgs
+Where=/srv/mlnixos/nixpkgs
+Type=none
+Options=bind,ro
+
+[Install]
+WantedBy=multi-user.target

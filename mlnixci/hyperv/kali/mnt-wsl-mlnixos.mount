@@ -1,0 +1,15 @@
+# The store, shown to every distro of the WSL VM: /mnt/wsl is one tmpfs with shared propagation, so a mount under it
+# appears in the other distros' /mnt/wsl.  rbind carries the read-only nixpkgs mount inside it.
+[Unit]
+Description=mlnixos store at /mnt/wsl/mlnixos
+Requires=srv-mlnixos-nixpkgs.mount
+After=srv-mlnixos-nixpkgs.mount
+
+[Mount]
+What=/srv/mlnixos
+Where=/mnt/wsl/mlnixos
+Type=none
+Options=rbind
+
+[Install]
+WantedBy=multi-user.target
