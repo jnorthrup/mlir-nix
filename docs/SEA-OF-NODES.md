@@ -237,11 +237,13 @@ worst cell of the body:
     nixpkgs-73              58,004       23,396                      516,728                      41,139
     toplevel                89,203       58,527                      452,477                      172,788
 
-Passed on unforced is mostly attribute values, then primops whose table entry says less than they force (`__seq`'s
-second operand, `elemAt`'s index, `lessThan`, a throw's message): `nix.strict` there is precision for son and for the
-evaluator's promotion alike. A strict schedule -- make the value, not the thunk, where the body forces it on every
-path anyway -- would remove 27,959 of 3,778,193 thunks over a frame on nixpkgs-73 (0.7%) and 117,089 of 5,327,906 on
-toplevel (2.2%): too few to trade Nix's order of errors for. A release per path takes at most the second column.
+Passed on unforced was mostly attribute values, then builtins whose declaration said less than they force (`__seq`'s
+second operand, `elemAt`'s index, `lessThan`, a throw's message). The declarations now say what each builtin forces
+("The declarations, made precise" below), and the column fell to 21,785 and 83,387. A strict schedule -- make the
+value, not the thunk, where the body forces it on every path anyway -- would remove 66,854 of 3,778,186 thunks over a
+frame on nixpkgs-73 (1.8%) and 210,327 of 5,327,902 on toplevel (3.9%) with the precise declarations (0.7% and 2.2%
+before): still too few to trade Nix's order of errors for. (MLNIX_STATS dropped that count once it was measured; it is
+in the code at d0e939d.) A release per path takes at most the second column.
 
 The callee column is a cell given to a function son does not see. Where that function comes from decides what could
 close it (MLNIX_STATS at 0253d57, the deciding call of each frame):
@@ -374,7 +376,7 @@ eval-okay, 147 files, son exported), put a builtin's operands first by far:
     all                            9,876       5,106
 
 A builtin's declaration already says how it forces (NixPrims.irdl.mlir): `nix.strict`, every operand forced before the
-op returns, on 12 of the 122; `nix.first`, the operand it forces before anything else, on 50. son-export now writes both
+op returns, was on 11 of the 121; `nix.first`, the operand it forces before anything else, on 49. son-export now writes both
 with the op (`prim_modes`), and the arm's PrimNode reads them: applied to all its operands, the builtin gets such an
 operand computed when it is an op of the caller's body, so no cell over the frame is made for it. One that throws is
 passed as the error, which the builtin throws where it forces it. The order is the declaration's: a `nix.first` operand
@@ -389,10 +391,69 @@ first operand `x * 2` was a cell over f's frame (60 runs over three JVMs):
     prims          37.5 ms  138.5 MB    24.8 ms  104.1 MB   39.1 ms  145.3 MB    36.1 ms  111.0 MB
 
 The other files allocate the same (their hot loops run no builtin op), and their times stay within the spread between
-JVMs. What is left of the door is the declarations: lessThan, the arithmetic, elemAt and others force their second
-operand on every path that returns as well, but declare only the first. Making them precise is a change to dialect data
-that the native evaluator's promotion and son's must-force set read too, so it needs the native checks (eval-fail's exact
-error order) as well as the arm's.
+JVMs.
+
+### The declarations, made precise
+
+The declarations said less than the builtins force: lessThan, the arithmetic and elemAt force their second operand on
+every path that returns as well, but declared only the first. Each builtin's declaration now says what its code does
+(lib/Eval/Builtins.cpp, StoreBuiltins.cpp, read one by one), and `nix.strict` is on 56 of the 121, from 11:
+
+- 24 builtins of two or three operands force every operand on every path on which they return and keep none in their
+  result: the arithmetic and `lessThan`, the bit operations, `elemAt`, `getAttr`, `hasAttr`, `catAttrs`,
+  `intersectAttrs`, `removeAttrs`, `unsafeGetAttrPos`, `concatStringsSep`, `replaceStrings`, `substring`,
+  `compareVersions`, `match`, `split`, `appendContext`, `hashString` and `seq`. `nix.first = 0` is added where the
+  builtin's first step forces operand 0 and did not say so (the bit operations, `compareVersions`, `appendContext`,
+  `unsafeGetAttrPos`).
+- 21 one-operand builtins force their operand as their first step and keep none: `typeOf`, `ceil`, `floor`, `throw` and
+  `abort`, and the 16 that said so only as `nix.first`.
+- Left out on purpose: an operand forced only sometimes (`elem`'s element, a higher-order builtin's function), one kept
+  in the result (`map`'s function, `tryEval`'s value), and `trace` and `deepSeq`, where computing the second operand
+  first would reorder what they print or force.
+
+"On every path on which it returns" is what son's must-force set needs; a builtin may still throw before it forces a
+later operand. The arm passes an operand that throws as `Failed`, so its errors keep their order. The native evaluator
+makes only the `nix.first` operand ahead of the builtin; the others stay cells the builtin forces, so its errors do not
+move either: the language tests pass 488/488 on both schedules, 230 of them exact, as before.
+
+On the arm (eval-okay, 147 files, son exported) the outputs stay byte-identical to 0253d57's, plain and with son:
+
+    cells made over a frame        3e54d52     d0e939d     now
+    builtin operands               5,886       1,116         132
+    a call's later arguments       1,286       1,286       1,286
+    attribute values               1,043       1,043       1,045
+    list elements                    990         990         990
+    a call's first argument          600         600         600
+    captures                          71          71          71
+    all                            9,876       5,106       4,124
+
+son.release is empty, no release at all, in 20,666 of the 26,111 returns (18,138 at d0e939d), and nothing is kept
+outside it. On graal/bench (60 runs, two rounds of three JVMs against d0e939d, five for fib and prims) every file
+allocates the same, son exported or not. The times stay within the spread between JVMs, except fib without son: 13.5 ->
+14.3 ms. Its literal operands, now declared strict, take the path that computes an operand first. Passing a literal
+lazily brought fib back to 13.6 ms but made prims with son about 12% slower, so it was not kept.
+
+Natively (MLNIX_DEFER=1 MLNIX_STATS=1), a body whose every op is strict runs on a stack frame (EvalState::stackFrameOK),
+and the precise declarations put more calls there. A cell that a builtin of such a body is given over the frame is
+forced before the builtin returns, or is unreachable once it throws, so none outlives the call. MLNIX_STATS skips the
+bookkeeping words for those frames, which a frame on the stack does not have. The outputs are identical and son is
+never wrong:
+
+                                    nixpkgs-73                toplevel
+                                    d0e939d      now          d0e939d      now
+    calls on a stack frame          449,635      488,967      529,609      608,508
+    returns (heap frames)           2,880,133    2,840,801    4,568,831    4,489,932
+    dead by the run                 1,003,419    964,087      1,364,094    1,285,195
+    dead by son                     364,152      345,009      591,099      596,111
+    gap: passed on unforced         41,139       21,785       172,788      83,387
+    son wrong                       0            0            0            0
+
+A call on a stack frame is dead at its return by son's rule and the run's alike. Counted with them, son finds 833,976
+frames dead at return on nixpkgs-73 (813,787 before) and 1,204,619 on toplevel (1,120,708). It saves little memory: on
+bench.py's workloads in mlnix-os (two rounds of five runs against d0e939d), the times are the same and peak RSS is 1-3
+MB lower on nixpkgs-73 (1,093-1,094 MB), unchanged on toplevel (1,131-1,132 MB). What is left of the
+builtin door on the arm is 132 cells: operands that no declaration says are forced (the builtins left out above, and
+those not yet read), and builtins applied to fewer operands than they take.
 
 ## Not built, with the number that gates it
 

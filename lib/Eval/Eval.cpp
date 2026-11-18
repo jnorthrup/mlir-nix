@@ -583,10 +583,6 @@ void EvalState::printStats() {
                                             "path that returns only %llu, a value passed to a callee son does not see %llu, a value passed on unforced %llu\n",
                                             (unsigned long long)nSonGap[1], (unsigned long long)nSonGap[2], (unsigned long long)nSonGap[3],
                                             (unsigned long long)nSonGap[4]);
-  if (nProjThunks + nHardThunks)
-    llvm::errs() << llvm::format("   thunks made over a frame for a value its body forces on every path that returns (a strict schedule makes the value, "
-                                 "not the thunk): %llu of %llu (%.1f%%)\n", (unsigned long long)nSonMustThunks,
-                                 (unsigned long long)(nProjThunks + nHardThunks), 100.0 * nSonMustThunks / (nProjThunks + nHardThunks));
   if (nSonGap[2] + nSonGap[3] + nSonGap[4]) {
     auto g = ranked(sonGapByOp, [](auto &e) { return e.v.n[0] + e.v.n[1] + e.v.n[2]; });
     llvm::errs() << "   the op whose lazy use decides (path, callee, passed on):";
@@ -1144,12 +1140,6 @@ void EvalState::Indexer::index(Region &r) {
     ri->sonWhy = why;
     ri->sonWhyAt = at;
     ++st.nBodies; st.nSonDeadBodies += ri->sonDead;
-    mlir::son::ForcedOnReturn must = mlir::son::forcedOnReturn(blk, core); // the nodes whose thunks a strict schedule would never make
-    if (!must.never)
-      for (Operation &op : blk)
-        for (mlir::Value v : op.getResults())
-          if (must.forced.contains(v))
-            if (Node **n = blockNodes.find(uint64_t(uintptr_t(v.getAsOpaquePointer())))) st.sonMustNodes.insert(*n);
   }
   // A deferred lambda's region is a shell until its first call; it is indexed when it is minted.
   for (Operation &op : blk) {
@@ -1213,14 +1203,16 @@ unsigned EvalState::srcClassOf(RegionInfo *ri) {
   return ri->srcClass = uint8_t(c);
 }
 
-/// Can a call of this body run on a stack frame?  Yes when nothing in it can make a thunk, a closure, a list or a set over the frame (a
-/// lazy operand is a thunk whose env is the frame, and the callee or the result may keep it) and it holds no cell but its argument: only
-/// strict ops, whose operands are read in place.  Such a call allocates nothing in the never-freed arena.
+/// Can a call of this body run on a stack frame?  Yes when nothing in it can make a thunk, a closure, a list or a set over the frame that
+/// outlives the call (a lazy operand is a thunk whose env is the frame, and the callee or the result may keep it) and it holds no cell but
+/// its argument: only strict ops.  A core op reads its operands in place; a primop is given cells, forces each before it returns and keeps
+/// none (nix.strict), so a cell made over the frame for one is forced, or unreachable, once the call returns.  Such a call puts no frame
+/// in the never-freed arena.
 bool EvalState::classifyStackFrame(RegionInfo *ri) {
   ri->stackable = 0;
   if (ri->numSlots > 1) return false;
   // The rule is the dialect's, not a list of names: an op whose every operand is strict or tail (its NixModes, or nix.strict on a continent
-  // op) reads its operands in place and makes no thunk over the frame; an op without operands may only be a constant.
+  // op) leaves no thunk over the frame once it returns; an op without operands may only be a constant.
   auto *core = ctx.getLoadedDialect<nd::NixDialect>();
   for (mlir::Operation &op : ri->region->front()) {
     bool ok;
@@ -1269,11 +1261,12 @@ static bool isProjection(mlir::Operation *op) {
 /// MLNIX_STATS: the frame's two bookkeeping words, after its slots and read-mask, for son's account of the frames at their return: pinned (a
 /// closure was made over it), and the thunks made over it, projections too, that are not forced yet.
 static inline uint64_t *frameWords(Frame *f) { unsigned n = f->info->numSlots; return reinterpret_cast<uint64_t *>(f->slots + n) + (n + 63) / 64; }
-/// A thunk (or, pinned, a closure) now refers to this frame.
-void EvalState::markCaptured(Frame *f) { ++frameWords(f)[1]; }
+/// A thunk (or, pinned, a closure) now refers to this frame.  A frame on the stack (a stackable body's) has no such words: the cells a
+/// primop of the body is given over it are forced before the primop returns (nix.strict), so none outlives the call.
+void EvalState::markCaptured(Frame *f) { if (f->info->stackable != 1) ++frameWords(f)[1]; }
 void EvalState::markPinned(Frame *f) { frameWords(f)[0] = 1; }
 /// A thunk over this frame has been forced: it holds its value now, not the frame.
-void EvalState::statUnref(Frame *f) { if (uint64_t *w = frameWords(f); w[1]) --w[1]; }
+void EvalState::statUnref(Frame *f) { if (uint64_t *w = frameWords(f); f->info->stackable != 1 && w[1]) --w[1]; }
 /// A call has returned.
 void EvalState::statReturn(Frame *f) {
   uint64_t *w = frameWords(f);
@@ -1340,7 +1333,6 @@ void EvalState::statCell(Frame *f, Node *s, Value *nv, bool eager) {
   Operation *op = s->def;
   ++countOf(cellsByKind, op->getName()).n[eager ? 0 : 1];
   if (eager || !f) return;
-  if (nv->type != VType::Lambda && sonMustNodes.contains(s)) ++nSonMustThunks; // a strict schedule would have made the value, not this thunk
   if (nv->type == VType::Lambda) markPinned(f);
   else if (isProjection(op)) { ++nProjThunks; markCaptured(f); }
   else {

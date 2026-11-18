@@ -1012,8 +1012,6 @@ struct EvalState {
   uint64_t nSonDeadBodies = 0, nBodies = 0; // lambda bodies indexed, and those son calls dead at return
   uint64_t nSonGap[8] = {};                  // returns dead by the run and not by son, by RegionInfo::sonWhy
   OpCounts sonGapByOp;                       // the same, by the op whose lazy use decides (n[0] path, n[1] callee, n[2] passed on)
-  llvm::DenseSet<const Node *> sonMustNodes;  // the values of lambda bodies forced on every path on which the body returns (son::forcedOnReturn)
-  uint64_t nSonMustThunks = 0;               // thunks made over a frame for such a value
   uint64_t nBuilders = 0, nBuilderRows = 0, nBuildersBig = 0, nBuilderBigRows = 0; // MLNIX_STATS: attribute-set builders, and those past the 12 inline rows (a malloc)
   OpCounts thunksByOp; // MLNIX_STATS: frame-needing thunks by operation: count, packed operand counts
   uint64_t nProjThunks = 0, nHardThunks = 0, nImmediate = 0, nImmediateLater = 0; // MLNIX_STATS: frame-needing thunks forced as the very next thing

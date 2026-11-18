@@ -12,8 +12,13 @@
 //             "pure" describes memory effects, not permission to speculate:
 //             primops may still throw, diverge, or force effectful lazy operands.
 //   nix.fold  the primop may be evaluated at compile time on scalar constants
-//   nix.strict every operand is forced before the op returns and none is kept (the NixModes of a core op, for a continent op):
-//             the evaluator's frameless rule (EvalState::stackFrameOK) reads it
+//   nix.strict every operand is forced on every path on which the op returns, and none is kept in its result (the NixModes of a
+//             core op, for a continent op); the op may throw before it forces a later one.  Read by the evaluator's frameless rule
+//             (EvalState::stackFrameOK), son's must-force set (son-release: son.release, son.body arg_forced) and the Graal arm,
+//             which computes such an operand of the op's own body before the op (son-export's prim_modes).  Not declared where an
+//             operand is forced only sometimes (elem's element, a higher-order builtin's function), kept (map's function, tryEval's
+//             value), or forced after something the builtin prints (trace) or after another operand's whole value (deepSeq): an
+//             operand computed first would reorder those
 //   nix.first  the operand the primop forces before anything else it does, every time (an op with one strict operand: that one):
 //             the evaluator makes that operand's cell evaluated instead of a thunk it would force at once
 //   result   `irdl.is <type>` where every result of the primop has one kind (a list, an attribute set, a string, a path);
@@ -35,7 +40,7 @@
 
 // ---- scope val ------------------------------------------------------------
 irdl.dialect @nixnum attributes {nix.summary = "Arithmetic and ordering", nix.scope = "val", nix.continent = "nixnum"} {
-  irdl.operation @add attributes {nix.key = "__add", nix.fx = "pure", nix.fold, nix.first = 0 : i64} {
+  irdl.operation @add attributes {nix.key = "__add", nix.fx = "pure", nix.fold, nix.strict, nix.first = 0 : i64} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -47,7 +52,7 @@ irdl.dialect @nixnum attributes {nix.summary = "Arithmetic and ordering", nix.sc
     irdl.operands(a0: %o0, a1: %o1)
     irdl.results(r: %r)
   }
-  irdl.operation @ceil attributes {nix.key = "__ceil", nix.fx = "pure", nix.fold} {
+  irdl.operation @ceil attributes {nix.key = "__ceil", nix.fx = "pure", nix.fold, nix.strict} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -58,7 +63,7 @@ irdl.dialect @nixnum attributes {nix.summary = "Arithmetic and ordering", nix.sc
     irdl.operands(a0: %o0)
     irdl.results(r: %r)
   }
-  irdl.operation @div attributes {nix.key = "__div", nix.fx = "pure", nix.fold, nix.first = 0 : i64} {
+  irdl.operation @div attributes {nix.key = "__div", nix.fx = "pure", nix.fold, nix.strict, nix.first = 0 : i64} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -70,7 +75,7 @@ irdl.dialect @nixnum attributes {nix.summary = "Arithmetic and ordering", nix.sc
     irdl.operands(a0: %o0, a1: %o1)
     irdl.results(r: %r)
   }
-  irdl.operation @floor attributes {nix.key = "__floor", nix.fx = "pure", nix.fold} {
+  irdl.operation @floor attributes {nix.key = "__floor", nix.fx = "pure", nix.fold, nix.strict} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -81,7 +86,7 @@ irdl.dialect @nixnum attributes {nix.summary = "Arithmetic and ordering", nix.sc
     irdl.operands(a0: %o0)
     irdl.results(r: %r)
   }
-  irdl.operation @less_than attributes {nix.key = "__lessThan", nix.fx = "pure", nix.fold, nix.first = 0 : i64} {
+  irdl.operation @less_than attributes {nix.key = "__lessThan", nix.fx = "pure", nix.fold, nix.strict, nix.first = 0 : i64} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -93,7 +98,7 @@ irdl.dialect @nixnum attributes {nix.summary = "Arithmetic and ordering", nix.sc
     irdl.operands(a0: %o0, a1: %o1)
     irdl.results(r: %r)
   }
-  irdl.operation @mul attributes {nix.key = "__mul", nix.fx = "pure", nix.fold, nix.first = 0 : i64} {
+  irdl.operation @mul attributes {nix.key = "__mul", nix.fx = "pure", nix.fold, nix.strict, nix.first = 0 : i64} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -105,7 +110,7 @@ irdl.dialect @nixnum attributes {nix.summary = "Arithmetic and ordering", nix.sc
     irdl.operands(a0: %o0, a1: %o1)
     irdl.results(r: %r)
   }
-  irdl.operation @sub attributes {nix.key = "__sub", nix.fx = "pure", nix.fold, nix.first = 0 : i64} {
+  irdl.operation @sub attributes {nix.key = "__sub", nix.fx = "pure", nix.fold, nix.strict, nix.first = 0 : i64} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -120,7 +125,7 @@ irdl.dialect @nixnum attributes {nix.summary = "Arithmetic and ordering", nix.sc
 }
 
 irdl.dialect @nixbit attributes {nix.summary = "Bit operations", nix.scope = "val", nix.continent = "nixnum"} {
-  irdl.operation @and attributes {nix.key = "__bitAnd", nix.fx = "pure", nix.fold} {
+  irdl.operation @and attributes {nix.key = "__bitAnd", nix.fx = "pure", nix.fold, nix.strict, nix.first = 0 : i64} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -132,7 +137,7 @@ irdl.dialect @nixbit attributes {nix.summary = "Bit operations", nix.scope = "va
     irdl.operands(a0: %o0, a1: %o1)
     irdl.results(r: %r)
   }
-  irdl.operation @or attributes {nix.key = "__bitOr", nix.fx = "pure", nix.fold} {
+  irdl.operation @or attributes {nix.key = "__bitOr", nix.fx = "pure", nix.fold, nix.strict, nix.first = 0 : i64} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -144,7 +149,7 @@ irdl.dialect @nixbit attributes {nix.summary = "Bit operations", nix.scope = "va
     irdl.operands(a0: %o0, a1: %o1)
     irdl.results(r: %r)
   }
-  irdl.operation @xor attributes {nix.key = "__bitXor", nix.fx = "pure", nix.fold} {
+  irdl.operation @xor attributes {nix.key = "__bitXor", nix.fx = "pure", nix.fold, nix.strict, nix.first = 0 : i64} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -261,7 +266,7 @@ irdl.dialect @nixty attributes {nix.summary = "Type predicates", nix.scope = "va
 }
 
 irdl.dialect @nixrefl attributes {nix.summary = "Reflection: typeOf, functionArgs", nix.scope = "val", nix.continent = "nixty"} {
-  irdl.operation @function_args attributes {nix.key = "__functionArgs", nix.fx = "pure", nix.fresh, nix.first = 0 : i64} {
+  irdl.operation @function_args attributes {nix.key = "__functionArgs", nix.fx = "pure", nix.fresh, nix.strict} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -272,7 +277,7 @@ irdl.dialect @nixrefl attributes {nix.summary = "Reflection: typeOf, functionArg
     irdl.operands(a0: %o0)
     irdl.results(r: %r)
   }
-  irdl.operation @type_of attributes {nix.key = "__typeOf", nix.fx = "pure", nix.fold} {
+  irdl.operation @type_of attributes {nix.key = "__typeOf", nix.fx = "pure", nix.fold, nix.strict} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -287,7 +292,7 @@ irdl.dialect @nixrefl attributes {nix.summary = "Reflection: typeOf, functionArg
 
 // ---- scope coll ------------------------------------------------------------
 irdl.dialect @nixlist attributes {nix.summary = "Lists: structure and access", nix.scope = "coll", nix.continent = "nixlist"} {
-  irdl.operation @concat_lists attributes {nix.key = "__concatLists", nix.fx = "pure", nix.fresh, nix.first = 0 : i64} {
+  irdl.operation @concat_lists attributes {nix.key = "__concatLists", nix.fx = "pure", nix.fresh, nix.strict} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -310,7 +315,7 @@ irdl.dialect @nixlist attributes {nix.summary = "Lists: structure and access", n
     irdl.operands(a0: %o0, a1: %o1)
     irdl.results(r: %r)
   }
-  irdl.operation @elem_at attributes {nix.key = "__elemAt", nix.fx = "pure", nix.first = 0 : i64} {
+  irdl.operation @elem_at attributes {nix.key = "__elemAt", nix.fx = "pure", nix.strict, nix.first = 0 : i64} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -322,7 +327,7 @@ irdl.dialect @nixlist attributes {nix.summary = "Lists: structure and access", n
     irdl.operands(a0: %o0, a1: %o1)
     irdl.results(r: %r)
   }
-  irdl.operation @head attributes {nix.key = "__head", nix.fx = "pure", nix.first = 0 : i64} {
+  irdl.operation @head attributes {nix.key = "__head", nix.fx = "pure", nix.strict} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -344,7 +349,7 @@ irdl.dialect @nixlist attributes {nix.summary = "Lists: structure and access", n
     irdl.operands(a0: %o0)
     irdl.results(r: %r)
   }
-  irdl.operation @tail attributes {nix.key = "__tail", nix.fx = "pure", nix.fresh, nix.first = 0 : i64} {
+  irdl.operation @tail attributes {nix.key = "__tail", nix.fx = "pure", nix.fresh, nix.strict} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -493,7 +498,7 @@ irdl.dialect @nixlistfn attributes {nix.summary = "Lists: higher-order (run user
 }
 
 irdl.dialect @nixattr attributes {nix.summary = "Attribute sets: structure and access", nix.scope = "coll", nix.continent = "nixattr"} {
-  irdl.operation @attr_names attributes {nix.key = "__attrNames", nix.fx = "pure", nix.fresh, nix.first = 0 : i64} {
+  irdl.operation @attr_names attributes {nix.key = "__attrNames", nix.fx = "pure", nix.fresh, nix.strict} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -504,7 +509,7 @@ irdl.dialect @nixattr attributes {nix.summary = "Attribute sets: structure and a
     irdl.operands(a0: %o0)
     irdl.results(r: %r)
   }
-  irdl.operation @attr_values attributes {nix.key = "__attrValues", nix.fx = "pure", nix.fresh, nix.first = 0 : i64} {
+  irdl.operation @attr_values attributes {nix.key = "__attrValues", nix.fx = "pure", nix.fresh, nix.strict} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -515,7 +520,7 @@ irdl.dialect @nixattr attributes {nix.summary = "Attribute sets: structure and a
     irdl.operands(a0: %o0)
     irdl.results(r: %r)
   }
-  irdl.operation @cat_attrs attributes {nix.key = "__catAttrs", nix.fx = "pure", nix.fresh, nix.first = 0 : i64} {
+  irdl.operation @cat_attrs attributes {nix.key = "__catAttrs", nix.fx = "pure", nix.fresh, nix.strict, nix.first = 0 : i64} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -527,7 +532,7 @@ irdl.dialect @nixattr attributes {nix.summary = "Attribute sets: structure and a
     irdl.operands(a0: %o0, a1: %o1)
     irdl.results(r: %r)
   }
-  irdl.operation @get_attr attributes {nix.key = "__getAttr", nix.fx = "pure", nix.first = 0 : i64} {
+  irdl.operation @get_attr attributes {nix.key = "__getAttr", nix.fx = "pure", nix.strict, nix.first = 0 : i64} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -539,7 +544,7 @@ irdl.dialect @nixattr attributes {nix.summary = "Attribute sets: structure and a
     irdl.operands(a0: %o0, a1: %o1)
     irdl.results(r: %r)
   }
-  irdl.operation @has_attr attributes {nix.key = "__hasAttr", nix.fx = "pure", nix.first = 0 : i64} {
+  irdl.operation @has_attr attributes {nix.key = "__hasAttr", nix.fx = "pure", nix.strict, nix.first = 0 : i64} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -551,7 +556,7 @@ irdl.dialect @nixattr attributes {nix.summary = "Attribute sets: structure and a
     irdl.operands(a0: %o0, a1: %o1)
     irdl.results(r: %r)
   }
-  irdl.operation @intersect_attrs attributes {nix.key = "__intersectAttrs", nix.fx = "pure", nix.fresh, nix.first = 0 : i64} {
+  irdl.operation @intersect_attrs attributes {nix.key = "__intersectAttrs", nix.fx = "pure", nix.fresh, nix.strict, nix.first = 0 : i64} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -563,7 +568,7 @@ irdl.dialect @nixattr attributes {nix.summary = "Attribute sets: structure and a
     irdl.operands(a0: %o0, a1: %o1)
     irdl.results(r: %r)
   }
-  irdl.operation @list_to_attrs attributes {nix.key = "__listToAttrs", nix.fx = "pure", nix.fresh, nix.first = 0 : i64} {
+  irdl.operation @list_to_attrs attributes {nix.key = "__listToAttrs", nix.fx = "pure", nix.fresh, nix.strict} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -574,7 +579,7 @@ irdl.dialect @nixattr attributes {nix.summary = "Attribute sets: structure and a
     irdl.operands(a0: %o0)
     irdl.results(r: %r)
   }
-  irdl.operation @remove_attrs attributes {nix.key = "removeAttrs", nix.fx = "pure", nix.fresh, nix.first = 0 : i64} {
+  irdl.operation @remove_attrs attributes {nix.key = "removeAttrs", nix.fx = "pure", nix.fresh, nix.strict, nix.first = 0 : i64} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -586,7 +591,7 @@ irdl.dialect @nixattr attributes {nix.summary = "Attribute sets: structure and a
     irdl.operands(a0: %o0, a1: %o1)
     irdl.results(r: %r)
   }
-  irdl.operation @unsafe_get_attr_pos attributes {nix.key = "__unsafeGetAttrPos", nix.fx = "pure", nix.fresh} {
+  irdl.operation @unsafe_get_attr_pos attributes {nix.key = "__unsafeGetAttrPos", nix.fx = "pure", nix.fresh, nix.strict, nix.first = 0 : i64} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -629,7 +634,7 @@ irdl.dialect @nixattrfn attributes {nix.summary = "Attribute sets: higher-order"
 
 // ---- scope text ------------------------------------------------------------
 irdl.dialect @nixstr attributes {nix.summary = "Strings: slicing, replace, coercion", nix.scope = "text", nix.continent = "nixstr"} {
-  irdl.operation @concat_strings_sep attributes {nix.key = "__concatStringsSep", nix.fx = "pure", nix.first = 0 : i64} {
+  irdl.operation @concat_strings_sep attributes {nix.key = "__concatStringsSep", nix.fx = "pure", nix.strict, nix.first = 0 : i64} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -652,7 +657,7 @@ irdl.dialect @nixstr attributes {nix.summary = "Strings: slicing, replace, coerc
     irdl.operands(a0: %o0)
     irdl.results(r: %r)
   }
-  irdl.operation @replace_strings attributes {nix.key = "__replaceStrings", nix.fx = "pure", nix.first = 0 : i64} {
+  irdl.operation @replace_strings attributes {nix.key = "__replaceStrings", nix.fx = "pure", nix.strict, nix.first = 0 : i64} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -676,7 +681,7 @@ irdl.dialect @nixstr attributes {nix.summary = "Strings: slicing, replace, coerc
     irdl.operands(a0: %o0)
     irdl.results(r: %r)
   }
-  irdl.operation @substring attributes {nix.key = "__substring", nix.fx = "pure", nix.fold, nix.first = 0 : i64} {
+  irdl.operation @substring attributes {nix.key = "__substring", nix.fx = "pure", nix.fold, nix.strict, nix.first = 0 : i64} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -689,7 +694,7 @@ irdl.dialect @nixstr attributes {nix.summary = "Strings: slicing, replace, coerc
     irdl.operands(a0: %o0, a1: %o1, a2: %o2)
     irdl.results(r: %r)
   }
-  irdl.operation @to_string attributes {nix.key = "toString", nix.fx = "pure", nix.fold, nix.first = 0 : i64} {
+  irdl.operation @to_string attributes {nix.key = "toString", nix.fx = "pure", nix.fold, nix.strict} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -703,7 +708,7 @@ irdl.dialect @nixstr attributes {nix.summary = "Strings: slicing, replace, coerc
 }
 
 irdl.dialect @nixver attributes {nix.summary = "Versions and derivation names", nix.scope = "text", nix.continent = "nixstr"} {
-  irdl.operation @compare_versions attributes {nix.key = "__compareVersions", nix.fx = "pure", nix.fold} {
+  irdl.operation @compare_versions attributes {nix.key = "__compareVersions", nix.fx = "pure", nix.fold, nix.strict, nix.first = 0 : i64} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -726,7 +731,7 @@ irdl.dialect @nixver attributes {nix.summary = "Versions and derivation names", 
     irdl.operands(a0: %o0)
     irdl.results(r: %r)
   }
-  irdl.operation @split_version attributes {nix.key = "__splitVersion", nix.fx = "pure", nix.fresh, nix.first = 0 : i64} {
+  irdl.operation @split_version attributes {nix.key = "__splitVersion", nix.fx = "pure", nix.fresh, nix.strict} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -740,7 +745,7 @@ irdl.dialect @nixver attributes {nix.summary = "Versions and derivation names", 
 }
 
 irdl.dialect @nixre attributes {nix.summary = "Regular expressions: match, split", nix.scope = "text", nix.continent = "nixstr"} {
-  irdl.operation @match attributes {nix.key = "__match", nix.fx = "pure", nix.fresh, nix.first = 0 : i64} {
+  irdl.operation @match attributes {nix.key = "__match", nix.fx = "pure", nix.fresh, nix.strict, nix.first = 0 : i64} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -752,7 +757,7 @@ irdl.dialect @nixre attributes {nix.summary = "Regular expressions: match, split
     irdl.operands(a0: %o0, a1: %o1)
     irdl.results(r: %r)
   }
-  irdl.operation @split attributes {nix.key = "__split", nix.fx = "pure", nix.fresh, nix.first = 0 : i64} {
+  irdl.operation @split attributes {nix.key = "__split", nix.fx = "pure", nix.fresh, nix.strict, nix.first = 0 : i64} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -778,7 +783,7 @@ irdl.dialect @nixctx attributes {nix.summary = "String context", nix.scope = "te
     irdl.operands(a0: %o0)
     irdl.results(r: %r)
   }
-  irdl.operation @append_context attributes {nix.key = "__appendContext", nix.fx = "pure"} {
+  irdl.operation @append_context attributes {nix.key = "__appendContext", nix.fx = "pure", nix.strict, nix.first = 0 : i64} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -838,7 +843,7 @@ irdl.dialect @nixctx attributes {nix.summary = "String context", nix.scope = "te
 
 // ---- scope io ------------------------------------------------------------
 irdl.dialect @nixpath attributes {nix.summary = "Paths: pure path manipulation", nix.scope = "io", nix.continent = "nixpath"} {
-  irdl.operation @base_name_of attributes {nix.key = "baseNameOf", nix.fx = "pure", nix.first = 0 : i64} {
+  irdl.operation @base_name_of attributes {nix.key = "baseNameOf", nix.fx = "pure", nix.strict} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -849,7 +854,7 @@ irdl.dialect @nixpath attributes {nix.summary = "Paths: pure path manipulation",
     irdl.operands(a0: %o0)
     irdl.results(r: %r)
   }
-  irdl.operation @dir_of attributes {nix.key = "dirOf", nix.fx = "pure", nix.first = 0 : i64} {
+  irdl.operation @dir_of attributes {nix.key = "dirOf", nix.fx = "pure", nix.strict} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -897,7 +902,7 @@ irdl.dialect @nixfs attributes {nix.summary = "World reads: files and environmen
     irdl.operands(a0: %o0)
     irdl.results(r: %r)
   }
-  irdl.operation @path_exists attributes {nix.key = "__pathExists", nix.fx = "fs", nix.first = 0 : i64} {
+  irdl.operation @path_exists attributes {nix.key = "__pathExists", nix.fx = "fs", nix.strict} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -908,7 +913,7 @@ irdl.dialect @nixfs attributes {nix.summary = "World reads: files and environmen
     irdl.operands(a0: %o0)
     irdl.results(r: %r)
   }
-  irdl.operation @read_dir attributes {nix.key = "__readDir", nix.fx = "fs", nix.fresh, nix.first = 0 : i64} {
+  irdl.operation @read_dir attributes {nix.key = "__readDir", nix.fx = "fs", nix.fresh, nix.strict} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -919,7 +924,7 @@ irdl.dialect @nixfs attributes {nix.summary = "World reads: files and environmen
     irdl.operands(a0: %o0)
     irdl.results(r: %r)
   }
-  irdl.operation @read_file attributes {nix.key = "__readFile", nix.fx = "fs", nix.first = 0 : i64} {
+  irdl.operation @read_file attributes {nix.key = "__readFile", nix.fx = "fs", nix.strict} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -1247,7 +1252,7 @@ irdl.dialect @nixhash attributes {nix.summary = "Hashing", nix.scope = "io", nix
     irdl.operands(a0: %o0, a1: %o1)
     irdl.results(r: %r)
   }
-  irdl.operation @hash_string attributes {nix.key = "__hashString", nix.fx = "pure", nix.fold, nix.first = 0 : i64} {
+  irdl.operation @hash_string attributes {nix.key = "__hashString", nix.fx = "pure", nix.fold, nix.strict, nix.first = 0 : i64} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -1263,7 +1268,7 @@ irdl.dialect @nixhash attributes {nix.summary = "Hashing", nix.scope = "io", nix
 
 // ---- scope meta ------------------------------------------------------------
 irdl.dialect @nixjson attributes {nix.summary = "JSON", nix.scope = "meta", nix.continent = "nixfmt"} {
-  irdl.operation @from_json attributes {nix.key = "__fromJSON", nix.fx = "pure", nix.fresh, nix.first = 0 : i64} {
+  irdl.operation @from_json attributes {nix.key = "__fromJSON", nix.fx = "pure", nix.fresh, nix.strict} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -1365,7 +1370,7 @@ irdl.dialect @nixctl attributes {nix.summary = "Evaluation order and recovery", 
     irdl.operands(a0: %o0, a1: %o1)
     irdl.results(r: %r)
   }
-  irdl.operation @seq attributes {nix.key = "__seq", nix.fx = "pure", nix.first = 0 : i64} {
+  irdl.operation @seq attributes {nix.key = "__seq", nix.fx = "pure", nix.strict, nix.first = 0 : i64} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -1391,7 +1396,7 @@ irdl.dialect @nixctl attributes {nix.summary = "Evaluation order and recovery", 
 }
 
 irdl.dialect @nixerr attributes {nix.summary = "Errors and error context", nix.scope = "ctl", nix.continent = "nixctl"} {
-  irdl.operation @abort attributes {nix.key = "abort", nix.fx = "pure"} {
+  irdl.operation @abort attributes {nix.key = "abort", nix.fx = "pure", nix.strict} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -1414,7 +1419,7 @@ irdl.dialect @nixerr attributes {nix.summary = "Errors and error context", nix.s
     irdl.operands(a0: %o0, a1: %o1)
     irdl.results(r: %r)
   }
-  irdl.operation @throw attributes {nix.key = "throw", nix.fx = "pure"} {
+  irdl.operation @throw attributes {nix.key = "throw", nix.fx = "pure", nix.strict} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
@@ -1467,7 +1472,7 @@ irdl.dialect @nixtrace attributes {nix.summary = "Tracing", nix.scope = "ctl", n
 }
 
 irdl.dialect @nixload attributes {nix.summary = "Loading other Nix files", nix.scope = "ctl", nix.continent = "nixctl"} {
-  irdl.operation @import attributes {nix.key = "import", nix.fx = "import", nix.first = 0 : i64} {
+  irdl.operation @import attributes {nix.key = "import", nix.fx = "import", nix.strict} {
     %n = irdl.base "!nix.value"
     %s = irdl.base "!trikeshed.series"
     %t = irdl.base "!trikeshed.series2"
