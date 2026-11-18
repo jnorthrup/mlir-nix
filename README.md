@@ -25,7 +25,7 @@ other dialects lower to; [docs/PRELOAD-DIALECTS.md](docs/PRELOAD-DIALECTS.md) ma
 
 ## The dialects
 
-- `nix` (29 ops) is the language. The base environment's primops are declared as 122 ops of 24 IRDL dialects
+- `nix` (29 ops) is the language. The base environment's 121 primops are declared as ops of 24 IRDL dialects
   (`include/NixDialect/NixPrims.irdl.mlir`) and defined at load time by a loader that names none of them. `NixSyntax.td`
   declares the syntax for a front end that builds no tree.
 - `mlnix` (`MlnixControl.td`) is the control surface of the utility: its flags, `MLNIX_*` variables and settings in one place.
@@ -183,7 +183,7 @@ Older generations and what changed between them: [PERFORMANCE.md at 77de09c](htt
 ## Build
 
 LLVM and MLIR with their CMake packages (22 on Linux and 23.1.1 on macOS are what it is built and tested with), CMake 3.20,
-Ninja, a C++20 compiler. SHA-256 comes from CommonCrypto on macOS and from OpenSSL's libcrypto elsewhere when it is found,
+Ninja, and clang with C++20 (`-DCMAKE_CXX_STANDARD=23` builds and passes the same tests). SHA-256 comes from CommonCrypto on macOS and from OpenSSL's libcrypto elsewhere when it is found,
 else from LLVM (`-DMLNIX_SHA256=auto|openssl|llvm`).
 
     cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
