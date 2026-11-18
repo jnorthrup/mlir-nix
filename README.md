@@ -18,7 +18,6 @@ other dialects lower to; [docs/PRELOAD-DIALECTS.md](docs/PRELOAD-DIALECTS.md) ma
 | `mlnix` | the evaluator; a `nix-instantiate`, `nix-build` and `nix-store` front; and, invoked as `nix`, a `nix` command: `build`, `eval`, `run`, `profile`, flakes, and binary caches whose narinfo signatures are checked with ed25519 ([docs/NIX-CLI.md](docs/NIX-CLI.md)) |
 | `mlnix-opt` | `mlir-opt` with the dialects and passes below |
 | `mlnix-kif` | KIF files (SUMO) into a `kif.theory`; the chase over its Horn fragment, keeping each derived fact's rule and premises (`--chase`); Lean certificates (`--lean`, `--lean-piece`); TPTP (`--tptp`, SigmaKEE's FOF translation) |
-| `mlnix-query` | `mlir-query` over Nix IR |
 | `mlnix-parse` | parses every file of a list in one process, to compare two front ends byte for byte |
 | `mlnix-c` | the C surface of the dialects (`include/mlnix-c/MlnixC.h`), what Kotlin/Native's cinterop links |
 | `graal/` | nix-truffle, the Graal/Truffle arm: it reads the IR that `mlnix-opt --son-export` writes and runs it |

@@ -15,11 +15,6 @@ add_executable(mlnix-kif mlnix-kif.cpp)
 target_link_libraries(mlnix-kif PRIVATE MLIRNix MLIRTrikeShed MLIRIR MLIRParser MLIRPass MLIRSupport)
 llvm_update_compile_flags(mlnix-kif)
 
-# mlir-query (the matcher-combinator language that ships with MLIR) over Nix IR.
-add_executable(mlnix-query mlnix-query.cpp)
-target_link_libraries(mlnix-query PRIVATE MLIRNix MLIRQueryLib MLIRQueryMatcher MLIRIR MLIRParser MLIRSupport)
-llvm_update_compile_flags(mlnix-query)
-
 # Parse a list of files in one process (scripts/parse-corpus.py compares two builds with it).
 add_executable(mlnix-parse mlnix-parse.cpp)
 target_link_libraries(mlnix-parse PRIVATE NixFrontend)
