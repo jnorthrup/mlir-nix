@@ -263,38 +263,36 @@ int runProgram(std::string_view prog, const composite::MutableSeries<composite::
 //===----------------------------------------------------------------------===//
 
 namespace {
+// The NAR framing (u64 little-endian, pad, the length-prefix + bytes + pad composition, the constant tokens) is in
+// lowered/nixstore/NarFraming.mlir, as trikeshed series/slice/combine/drain over byte series.  The bridges reserve a
+// stack buffer, let the entry fill it and flush it to the sink; the walk below stays here (it is the filesystem I/O).
+extern "C" int64_t mlnix_nar_u64(uint64_t n, char *into);
+extern "C" int64_t mlnix_nar_pad(uint64_t n, char *into);
+extern "C" int64_t mlnix_nar_str(const char *p, size_t n, char *into);
+extern "C" int64_t mlnix_nar_tok(int64_t id, char *into);
+enum NarTok { NT_OPEN, NT_TYPE, NT_REGULAR, NT_EXEC, NT_EMPTY, NT_CONTENTS, NT_DIR, NT_ENTRY, NT_NAME, NT_NODE, NT_SYMLINK, NT_TARGET, NT_CLOSE, NT_MAGIC };
 struct NarWriter {
   const Sink &sink;
   const PathFilter &filter;
   bool noteKept = false; // a recorded run's first walk of a filtered tree: each entry the filter keeps goes into the list
-  void u64(uint64_t n) {
-    char b[8];
-    for (int i = 0; i < 8; i++) b[i] = char((n >> (8 * i)) & 0xff);
-    sink(std::string_view(b, 8));
-  }
-  void pad(uint64_t n) {
-    static const char zeros[8] = {0};
-    if (n % 8) sink(std::string_view(zeros, 8 - n % 8));
-  }
-  void str(std::string_view s) {
-    u64(s.size());
-    sink(s);
-    pad(s.size());
-  }
+  void u64(uint64_t n) { char b[8]; sink(std::string_view(b, size_t(mlnix_nar_u64(n, b)))); }
+  void pad(uint64_t n) { char b[8]; size_t k = size_t(mlnix_nar_pad(n, b)); if (k) sink(std::string_view(b, k)); }
+  void str(std::string_view s) { char b[PATH_MAX + 16]; sink(std::string_view(b, size_t(mlnix_nar_str(s.data(), s.size(), b)))); } // entry names and symlink targets: at most PATH_MAX bytes
+  void tok(NarTok t) { char b[32]; sink(std::string_view(b, size_t(mlnix_nar_tok(t, b)))); }
   void dump(const composite::Text &path) {
     struct stat st;
     nixprefetch::note('L', path.c_str());
     if (lstat(path.c_str(), &st) != 0)
       throw Error(composite::cat("getting attributes of path '", path, "': ", strerror(errno)));
-    str("(");
+    tok(NT_OPEN);
     if (S_ISREG(st.st_mode)) {
-      str("type");
-      str("regular");
+      tok(NT_TYPE);
+      tok(NT_REGULAR);
       if (st.st_mode & S_IXUSR) {
-        str("executable");
-        str("");
+        tok(NT_EXEC);
+        tok(NT_EMPTY);
       }
-      str("contents");
+      tok(NT_CONTENTS);
       u64(st.st_size);
       nixprefetch::note('F', path.c_str());
       int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
@@ -310,8 +308,8 @@ struct NarWriter {
       close(fd);
       pad(st.st_size);
     } else if (S_ISDIR(st.st_mode)) {
-      str("type");
-      str("directory");
+      tok(NT_TYPE);
+      tok(NT_DIR);
       composite::MutableSeries<composite::Text> names;
       nixprefetch::note('D', path.c_str());
       DIR *d = opendir(path.c_str());
@@ -336,18 +334,18 @@ struct NarWriter {
         child += n;
         if (filter && !filter(child, {})) continue;
         if (noteKept) nixprefetch::noteKept(child.c_str());
-        str("entry");
-        str("(");
-        str("name");
+        tok(NT_ENTRY);
+        tok(NT_OPEN);
+        tok(NT_NAME);
         str(n);
-        str("node");
+        tok(NT_NODE);
         dump(child);
-        str(")");
+        tok(NT_CLOSE);
       }
     } else if (S_ISLNK(st.st_mode)) {
-      str("type");
-      str("symlink");
-      str("target");
+      tok(NT_TYPE);
+      tok(NT_SYMLINK);
+      tok(NT_TARGET);
       char buf[PATH_MAX + 1];
       ssize_t n = readlink(path.c_str(), buf, PATH_MAX);
       if (n < 0) throw Error(composite::cat("reading symlink '", path, "'"));
@@ -355,14 +353,14 @@ struct NarWriter {
     } else {
       throw Error(composite::cat("file '", path, "' has an unsupported type"));
     }
-    str(")");
+    tok(NT_CLOSE);
   }
 };
 } // namespace
 
 void dumpPath(std::string_view path, const Sink &sink, const PathFilter &filter) {
   NarWriter w{sink, filter};
-  w.str("nix-archive-1");
+  w.tok(NT_MAGIC);
   w.dump(composite::Text(path));
 }
 
@@ -464,7 +462,7 @@ void startPrehash() {
         Sink sink = update;
         PathFilter keep = keepIt, none;
         NarWriter w{sink, p->filtered ? keep : none};
-        w.str("nix-archive-1");
+        w.tok(NT_MAGIC);
         w.dump(p->root);
         p->size = hs.bytes();
         p->hash = hs.finish();
@@ -511,7 +509,7 @@ composite::Join<Hash, uint64_t> hashPath(std::string_view path, const PathFilter
   NarWriter w{sink, f};
   composite::Text root(path);
   w.noteKept = algo == HashAlgo::SHA256 && nixprefetch::noteRoot(filter ? 'G' : 'H', root.c_str()) && filter;
-  w.str("nix-archive-1");
+  w.tok(NT_MAGIC);
   w.dump(root);
   uint64_t n = hs.bytes();
   return {hs.finish(), n};

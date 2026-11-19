@@ -154,6 +154,10 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/StoreName.mlir StoreName)
 # turn the validity flag into the Maybe, parseRest's error wording stays).  trikeshed.at over the input series<i8>, a
 # constant reverse-alphabet table and guarded byte stores.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/Decoders.mlir Decoders)
+# The NAR framing byte emission of NarWriter (StorePaths.cpp's u64/pad/str bodies are gone; the bridges flush a stack
+# buffer to the Sink, the walk stays).  The little-endian prefix, the pad and the length+bytes+pad composition are
+# trikeshed.series / slice / combine / drain; the constant NAR tokens are a blob + off/len tables read with at.
+mlnix_lower_trikeshed(NixStore lowered/nixstore/NarFraming.mlir NarFraming)
 
 add_library(NixFrontend STATIC Frontend/Parser.cpp Frontend/Source.cpp Frontend/Confix.cpp)
 add_dependencies(NixFrontend MLIRNixOpsIncGen TrikeShedIncGen)
