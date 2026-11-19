@@ -154,6 +154,12 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/StoreName.mlir StoreName)
 # turn the validity flag into the Maybe, parseRest's error wording stays).  trikeshed.at over the input series<i8>, a
 # constant reverse-alphabet table and guarded byte stores.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/Decoders.mlir Decoders)
+# The derivation ATerm writer nixstore::unparseTo (StorePaths.cpp's composition loop, TextOut/HashOut and the
+# escapeInto/appendEscaped helpers are gone; the bridges marshal the Derivation into record arrays, apply maskOutputs
+# and slot __json, size the Text and call this entry).  The whole ATerm composition is trikeshed.combineAll / combine /
+# slice / text / at / drain over series<i8>: one variadic combine of section views, each list a combineAll, each escaped
+# string a combineAll over a constant ATerm escape table, drained once into a pre-sized buffer (fill-drain).
+mlnix_lower_trikeshed(NixStore lowered/nixstore/DrvUnparse.mlir DrvUnparse)
 
 add_library(NixFrontend STATIC Frontend/Parser.cpp Frontend/Source.cpp Frontend/Confix.cpp)
 add_dependencies(NixFrontend MLIRNixOpsIncGen TrikeShedIncGen)
