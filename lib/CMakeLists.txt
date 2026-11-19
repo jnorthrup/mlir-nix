@@ -154,6 +154,11 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/StoreName.mlir StoreName)
 # turn the validity flag into the Maybe, parseRest's error wording stays).  trikeshed.at over the input series<i8>, a
 # constant reverse-alphabet table and guarded byte stores.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/Decoders.mlir Decoders)
+# The .attrs.json serialization of structuredAttrsFiles' dump and nixstore::jsonEscape (StructuredAttrs.cpp's and
+# StorePaths.cpp's loops are gone; the bridges size the Text and call these entries, the DOM stays C++ behind three
+# pure-read callbacks).  The stitching is one lazy combineAll over the children's cells drained once; the escape is
+# a combineAll of slices of one constant table (Nix's JSON rules, as PrintOps.mlir).
+mlnix_lower_trikeshed(NixStore lowered/nixstore/StructuredAttrsOps.mlir StructuredAttrsOps)
 
 add_library(NixFrontend STATIC Frontend/Parser.cpp Frontend/Source.cpp Frontend/Confix.cpp)
 add_dependencies(NixFrontend MLIRNixOpsIncGen TrikeShedIncGen)

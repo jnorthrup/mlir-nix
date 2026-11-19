@@ -127,28 +127,15 @@ composite::Text dirOf(std::string_view p) {
   return t;
 }
 
+// The escape is lowered/nixstore/StructuredAttrsOps.mlir (the same table the .attrs.json composition uses):
+// one combineAll of table slices drained into the Text's own buffer (resize before, truncate after, the PathOps way).
+extern "C" size_t nixstore_ts_escape(const char *p, size_t n, char *into, size_t cap);
+
 composite::Text jsonEscape(std::string_view s) {
-  composite::Text o("\"");
-  for (unsigned char c : s) {
-    switch (c) {
-    case '"': o += "\\\""; break;
-    case '\\': o += "\\\\"; break;
-    case '\b': o += "\\b"; break;
-    case '\f': o += "\\f"; break;
-    case '\n': o += "\\n"; break;
-    case '\r': o += "\\r"; break;
-    case '\t': o += "\\t"; break;
-    default:
-      if (c < 0x20) {
-        char buf[8];
-        snprintf(buf, sizeof buf, "\\u%04x", c);
-        o += buf;
-      } else {
-        o += char(c);
-      }
-    }
-  }
-  o += '"';
+  size_t room = 2 + 6 * s.size();
+  composite::Text o;
+  o.resize(room);
+  o.truncate(nixstore_ts_escape(s.data(), s.size(), o.begin(), room));
   return o;
 }
 

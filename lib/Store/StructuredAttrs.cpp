@@ -159,30 +159,32 @@ struct P {
   }
 };
 
+// The .attrs.json serialization is lowered/nixstore/StructuredAttrsOps.mlir: the bracket/comma/colon stitching is
+// one lazy combineAll over the children's cells, drained once; the escape is its table.  These three pure reads
+// are the DOM side of that composition (combineAll's region may run twice, so they must not write).
+extern "C" size_t nixstore_ts_size(const void *v);
+extern "C" size_t nixstore_ts_dump(const void *v, char *into, size_t cap);
+extern "C" void nixsa_info(const void *p, int64_t *out) {
+  const JV &v = *static_cast<const JV *>(p);
+  out[0] = v.t; out[1] = v.b;
+  out[2] = intptr_t(v.raw.data()); out[3] = v.raw.size();
+  out[4] = v.arr.size(); out[5] = v.obj.size();
+}
+extern "C" const void *nixsa_kid(const void *p, int64_t i, int64_t obj) {
+  const JV &v = *static_cast<const JV *>(p);
+  return obj ? static_cast<const void *>(&v.obj[i].value) : static_cast<const void *>(&v.arr[i]);
+}
+extern "C" void nixsa_key(const void *p, int64_t i, int64_t *out) {
+  const auto &k = static_cast<const JV *>(p)->obj[i].key;
+  out[0] = intptr_t(k.data()); out[1] = k.size();
+}
+
 composite::Text dump(const JV &v) {
-  switch (v.t) {
-  case JV::Null: return "null";
-  case JV::Bool: return v.b ? "true" : "false";
-  case JV::Num: return v.raw.clone();
-  case JV::Str: return jsonEscape(v.raw);
-  case JV::Arr: {
-    composite::Text o = "[";
-    for (size_t i = 0; i < v.arr.size(); i++) o.put(i ? "," : "").put(dump(v.arr[i]));
-    o += ']';
-    return o;
-  }
-  case JV::Obj: {
-    composite::Text o = "{";
-    bool first = true;
-    for (auto &[k, x] : v.obj) {
-      o.put(first ? "" : ",").put(jsonEscape(k)).put(':').put(dump(x));
-      first = false;
-    }
-    o += '}';
-    return o;
-  }
-  }
-  return "null";
+  size_t n = nixstore_ts_size(&v);
+  composite::Text o;
+  o.resize(n);
+  o.truncate(nixstore_ts_dump(&v, o.begin(), n));
+  return o;
 }
 
 composite::Text shellEscape(std::string_view s) {
