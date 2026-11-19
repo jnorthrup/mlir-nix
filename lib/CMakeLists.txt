@@ -105,6 +105,8 @@ function(mlnix_lower_interface target mlir stem)
 endfunction()
 # nixstore::Hash::operator== (lib/Store/Hash.cpp's definition is gone; include/Nix/Store.h keeps the declaration).
 mlnix_lower_interface(NixStore lowered/nixstore/HashEq.mlir HashEq)
+# nixstore::isInStore (lib/Store/StorePaths.cpp's definition is gone; include/Nix/Store.h keeps the declaration).
+mlnix_lower_interface(NixStore lowered/nixstore/IsInStore.mlir IsInStore)
 
 add_library(NixFrontend STATIC Frontend/Parser.cpp Frontend/Source.cpp Frontend/Confix.cpp)
 add_dependencies(NixFrontend MLIRNixOpsIncGen TrikeShedIncGen)

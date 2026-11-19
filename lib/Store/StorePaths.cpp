@@ -674,10 +674,7 @@ composite::Text hashPlaceholder(std::string_view output) {
   return composite::cat("/", h.to_string(HashFormat::Nix32, false));
 }
 
-bool isInStore(std::string_view storeDir, std::string_view path) {
-  return path.size() > storeDir.size() + 1 && path.substr(0, storeDir.size()) == storeDir &&
-         path[storeDir.size()] == '/';
-}
+// nixstore::isInStore is hollowed out to MLIR: lowered/nixstore/IsInStore.mlir, built into NixStore by lib/CMakeLists.txt.
 
 composite::Text toStorePath(std::string_view storeDir, std::string_view path) {
   if (!isInStore(storeDir, path)) throw Error(composite::cat("path '", path, "' is not in the Nix store"));
