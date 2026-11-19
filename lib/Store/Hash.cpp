@@ -248,24 +248,28 @@ Hash hashFile(HashAlgo a, std::string_view path) {
   return sink.finish();
 }
 
+// The byte encoders are hollowed out to the TrikeShed dialect: lowered/nixstore/Encoders.mlir, built into NixStore by
+// lib/CMakeLists.txt.  The bridges only size the Text and call the compiled entries; the encoding algebra (series /
+// at / alpha / drain over the byte series) is in the .mlir.  The entries write into the Text's own buffer, so the
+// output is built where it is appended, as before.
+extern "C" {
+size_t mlnix_base16_encode(const uint8_t *d, size_t n, char *out);
+size_t mlnix_nix32_encode(const uint8_t *d, size_t n, char *out);
+size_t mlnix_base64_encode(const char *d, size_t n, char *out);
+}
+
 void appendBase16(composite::Text &out, const uint8_t *d, size_t n) {
-  static const char hex[] = "0123456789abcdef";
-  out.reserve(out.size() + n * 2);
-  for (size_t i = 0; i < n; i++) {
-    out.put(hex[d[i] >> 4]);
-    out.put(hex[d[i] & 0xf]);
-  }
+  if (!n) return;
+  size_t at = out.size();
+  out.resize(at + n * 2);
+  mlnix_base16_encode(d, n, out.begin() + at);
 }
 
 void appendNix32(composite::Text &out, const uint8_t *d, size_t n) {
-  size_t len = (n * 8 - 1) / 5 + 1, at = out.size();
-  out.resize(at + len);
-  for (int i = (int)len - 1; i >= 0; i--) {
-    unsigned b = i * 5;
-    unsigned bi = b / 8, bj = b % 8;
-    unsigned c = (d[bi] >> bj) | (bi >= n - 1 ? 0 : d[bi + 1] << (8 - bj));
-    out[at + len - 1 - i] = nix32Chars[c & 0x1f];
-  }
+  if (!n) return;
+  size_t at = out.size();
+  out.resize(at + (n * 8 + 4) / 5); // ceil(8n/5), the old (8n-1)/5+1 for n > 0
+  mlnix_nix32_encode(d, n, out.begin() + at);
 }
 
 composite::Maybe<composite::Text> nix32Decode(std::string_view s, size_t size) {
@@ -289,17 +293,10 @@ static const char b64chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuv
 
 composite::Text base64Encode(std::string_view s) {
   composite::Text res;
-  int data = 0, nbits = 0;
-  for (unsigned char c : s) {
-    data = data << 8 | c;
-    nbits += 8;
-    while (nbits >= 6) {
-      nbits -= 6;
-      res.push_back(b64chars[data >> nbits & 0x3f]);
-    }
-  }
-  if (nbits) res.push_back(b64chars[data << (6 - nbits) & 0x3f]);
-  while (res.size() % 4) res.push_back('=');
+  size_t n = s.size();
+  if (!n) return res;
+  res.resize(((n + 2) / 3) * 4);
+  mlnix_base64_encode(s.data(), n, res.begin());
   return res;
 }
 
