@@ -589,24 +589,7 @@ void EvalState::warn(std::string_view msg) {
   if (settings.abortOnWarn) throw EvalError(msg);
 }
 
-const char *EvalState::showType(const Value &v) {
-  switch (v.type) {
-  case VType::Int: return "an integer";
-  case VType::Bool: return "a Boolean";
-  case VType::String: return v.str.ctx ? "a string with context" : "a string";
-  case VType::Path: return "a path";
-  case VType::Null: return "null";
-  case VType::Attrs: return "a set";
-  case VType::List: return "a list";
-  case VType::Lambda: return "a function";
-  case VType::PrimOp: return "a built-in function";
-  case VType::PrimOpApp: return "a partially applied built-in function";
-  case VType::Float: return "a float";
-  case VType::Thunk: case VType::App: case VType::AttrApp: case VType::Failed: return "a thunk";
-  case VType::Blackhole: return "a thunk";
-  }
-  return "?";
-}
+// EvalState::showType is hollowed out to MLIR: lowered/nixeval/ShowType.mlir, built into NixEval by lib/CMakeLists.txt.
 
 const char *EvalState::typeOf(const Value &v) {
   switch (v.type) {

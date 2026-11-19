@@ -128,3 +128,5 @@ target_include_directories(NixEval PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 target_link_libraries(NixEval PUBLIC NixFrontend NixStore MLIRNix MLIRIR MLIRParser MLIRPass)
 target_link_libraries(NixEval PRIVATE MLIRArithDialect MLIRControlFlowDialect MLIRFuncDialect MLIRLLVMDialect)
 llvm_update_compile_flags(NixEval)
+# nixev::EvalState::showType (lib/Eval/Eval.cpp's definition is gone; include/Nix/Eval.h keeps the declaration).
+mlnix_lower_interface(NixEval lowered/nixeval/ShowType.mlir ShowType)
