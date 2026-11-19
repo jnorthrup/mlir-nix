@@ -2162,43 +2162,55 @@ bool EvalState::lessThan(Value &v1, Value &v2, PosPtr pos) {
 /// A cell or set met before, by its address (a set: the WordTable's values say nothing).
 static bool firstTime(cp::WordTable<char> &seen, const void *p) { return seen.insert(uint64_t(uintptr_t(p)), 1); }
 
+// The value printer's fixed bytes are hollowed into lowered/nixeval/PrintValueOps.mlir (trikeshed.slice / text / at /
+// fold / series / combine / drain over a constant word table), lowered by --trikeshed-lower-cursors into NixEval.
+// nixev_ts_pv(kind, a, b, into, cap) drains into room reserved here and returns how many it wrote: kind 0 the fixed
+// word a (a PvWord), kind 1 the integer a in decimal, kind 2 the elision "«a unit elided»" (unit b: 0 byte, 1 attribute,
+// 2 item; singular when a == 1).  The recursion / forcing / seen-table / depth guard and the name sorting stay here.
+extern "C" size_t nixev_ts_pv(int32_t kind, int64_t a, int64_t b, char *into, size_t cap);
+enum PvWord : int32_t { PV_true, PV_false, PV_null, PV_repeated, PV_setOpen, PV_eq, PV_semi, PV_setClose, PV_listOpen, PV_space, PV_listClose,
+  PV_code, PV_infinite, PV_lambda, PV_primop, PV_primopApp, PV_error, PV_guilClose, PV_derivation, PV_setElide, PV_listElide, PV_lambdaTrace,
+  PV_at, PV_primopTrace, PV_primopAppTrace, PV_thunk, PV_semiTrace, PV_guilOpen, PV_elidedTail, PV_question = 35, PV_setOpenTrace, PV_setCloseTrace, PV_listOpenTrace, PV_listCloseTrace };
+static void tsPv(cp::Text &o, int32_t kind, int64_t a, int64_t b, size_t cap) { size_t at = o.size();
+  o.resize(at + cap); o.truncate(at + nixev_ts_pv(kind, a, b, o.begin() + at, cap)); }
+
 void EvalState::printValue(cp::Text &out, Value &v, cp::WordTable<char> *seen, size_t depth) {
   if (depth > settings.maxCallDepth) throw StackOverflowError("stack overflow");
   switch (v.type) {
-  case VType::Int: out.putInt(v.integer); break;
-  case VType::Bool: out.put(v.boolean ? "true" : "false"); break;
+  case VType::Int: tsPv(out, 1, v.integer, 0, 21); break;
+  case VType::Bool: tsPv(out, 0, v.boolean ? PV_true : PV_false, 0, 32); break;
   case VType::String: nixfe::printLiteralString(out, v.sv()); break;
   case VType::Path: out.put(cp::chars(v.pathView())); break;
-  case VType::Null: out.put("null"); break;
+  case VType::Null: tsPv(out, 0, PV_null, 0, 32); break;
   case VType::Attrs:
-    if (seen && !v.attrs->empty() && !firstTime(*seen, v.attrs)) out.put("«repeated»");
+    if (seen && !v.attrs->empty() && !firstTime(*seen, v.attrs)) tsPv(out, 0, PV_repeated, 0, 32);
     else {
-      out.put("{ ");
+      tsPv(out, 0, PV_setOpen, 0, 32);
       for (auto *a : v.attrs->lexicographicOrder(symbols)) {
         nixfe::printIdentifier(out, symbols[a->name]);
-        out.put(" = ");
+        tsPv(out, 0, PV_eq, 0, 32);
         printValue(out, *a->value, seen, depth + 1);
-        out.put("; ");
+        tsPv(out, 0, PV_semi, 0, 32);
       }
-      out.put('}');
+      tsPv(out, 0, PV_setClose, 0, 32);
     }
     break;
   case VType::List:
-    if (seen && v.listSize() && !firstTime(*seen, &v)) out.put("«repeated»");
+    if (seen && v.listSize() && !firstTime(*seen, &v)) tsPv(out, 0, PV_repeated, 0, 32);
     else {
-      out.put("[ ");
+      tsPv(out, 0, PV_listOpen, 0, 32);
       for (size_t i = 0; i < v.listSize(); i++) {
         printValue(out, *v.list.elems[i], seen, depth + 1);
-        out.put(' ');
+        tsPv(out, 0, PV_space, 0, 32);
       }
-      out.put(']');
+      tsPv(out, 0, PV_listClose, 0, 32);
     }
     break;
-  case VType::Thunk: case VType::App: case VType::AttrApp: case VType::Failed: out.put("<CODE>"); break;
-  case VType::Blackhole: out.put("«potential infinite recursion»"); break;
-  case VType::Lambda: out.put("<LAMBDA>"); break;
-  case VType::PrimOp: out.put("<PRIMOP>"); break;
-  case VType::PrimOpApp: out.put("<PRIMOP-APP>"); break;
+  case VType::Thunk: case VType::App: case VType::AttrApp: case VType::Failed: tsPv(out, 0, PV_code, 0, 32); break;
+  case VType::Blackhole: tsPv(out, 0, PV_infinite, 0, 32); break;
+  case VType::Lambda: tsPv(out, 0, PV_lambda, 0, 32); break;
+  case VType::PrimOp: tsPv(out, 0, PV_primop, 0, 32); break;
+  case VType::PrimOpApp: tsPv(out, 0, PV_primopApp, 0, 32); break;
   case VType::Float: nixfe::printFloat(out, v.fpoint); break;
   }
 }
@@ -2213,54 +2225,53 @@ struct TracePrinter {
   cp::WordTable<char> seen;
 
   void put(std::string_view s) { out.put(cp::chars(s)); }
-  void elided(size_t n, const char *one, const char *many) { out.put("«").putUnsigned(n).put(' ').put(n == 1 ? one : many).put(" elided»"); }
   void print(Value &v, size_t depth) {
     if (force) {
       try {
         st.forceValue(v);
       } catch (EvalError &e) {
-        out.put("«error: ");
+        tsPv(out, 0, PV_error, 0, 32);
         put(e.msg);
-        out.put("»");
+        tsPv(out, 0, PV_guilClose, 0, 32);
         return;
       }
     }
     switch (v.type) {
-    case VType::Int: out.putInt(v.integer); break;
+    case VType::Int: tsPv(out, 1, v.integer, 0, 21); break;
     case VType::Float: nixfe::printFloat(out, v.fpoint); break;
-    case VType::Bool: out.put(v.boolean ? "true" : "false"); break;
-    case VType::Null: out.put("null"); break;
+    case VType::Bool: tsPv(out, 0, v.boolean ? PV_true : PV_false, 0, 32); break;
+    case VType::Null: tsPv(out, 0, PV_null, 0, 32); break;
     case VType::Path: put(v.pathView()); break;
     case VType::String: {
       auto s = v.sv();
       if (s.size() > maxStr) {
         nixfe::printLiteralString(out, s.substr(0, maxStr));
-        out.put(' ');
-        elided(s.size() - maxStr, "byte", "bytes");
+        tsPv(out, 0, PV_space, 0, 32);
+        tsPv(out, 2, int64_t(s.size() - maxStr), 0, 48);
       } else {
         nixfe::printLiteralString(out, s);
       }
       break;
     }
     case VType::Attrs: {
-      if (!firstTime(seen, v.attrs)) { out.put("«repeated»"); break; }
+      if (!firstTime(seen, v.attrs)) { tsPv(out, 0, PV_repeated, 0, 32); break; }
       if (force && st.isDerivation(v)) {
-        out.put("«derivation");
+        tsPv(out, 0, PV_derivation, 0, 32);
         if (const Attr *d = v.attrs->get(st.s.drvPath)) {
           try {
             st.forceValue(*d->value);
             if (d->value->type == VType::String) {
-              out.put(' ');
+              tsPv(out, 0, PV_space, 0, 32);
               put(d->value->sv());
             }
           } catch (EvalError &) {
           }
         }
-        out.put("»");
+        tsPv(out, 0, PV_guilClose, 0, 32);
         break;
       }
-      if (depth >= maxDepth) { out.put("{ ... }"); break; }
-      out.put('{');
+      if (depth >= maxDepth) { tsPv(out, 0, PV_setElide, 0, 32); break; }
+      tsPv(out, 0, PV_setOpenTrace, 0, 32);
       composite::MutableSeries<const Attr *> sorted;
       for (auto &a : *v.attrs) sorted.append(&a);
       cp::sortRows(sorted.data(), sorted.size(), [&](const Attr *a, const Attr *b) {
@@ -2271,65 +2282,65 @@ struct TracePrinter {
       });
       size_t cur = 0;
       for (auto *a : sorted) {
-        out.put(' ');
+        tsPv(out, 0, PV_space, 0, 32);
         if (attrsPrinted >= maxAttrs) {
-          elided(sorted.size() - cur, "attribute", "attributes");
+          tsPv(out, 2, int64_t(sorted.size() - cur), 1, 48);
           break;
         }
         auto n = st.symbols[a->name];
         if (nixfe::isValidIdentifier(n)) put(n);
         else nixfe::printLiteralString(out, n);
-        out.put(" = ");
+        tsPv(out, 0, PV_eq, 0, 32);
         print(*a->value, depth + 1);
-        out.put(';');
+        tsPv(out, 0, PV_semiTrace, 0, 32);
         attrsPrinted++;
         cur++;
       }
-      out.put(" }");
+      tsPv(out, 0, PV_setCloseTrace, 0, 32);
       break;
     }
     case VType::List: {
-      if (v.listSize() && !firstTime(seen, &v)) { out.put("«repeated»"); break; }
-      if (depth >= maxDepth) { out.put("[ ... ]"); break; }
-      out.put('[');
+      if (v.listSize() && !firstTime(seen, &v)) { tsPv(out, 0, PV_repeated, 0, 32); break; }
+      if (depth >= maxDepth) { tsPv(out, 0, PV_listElide, 0, 32); break; }
+      tsPv(out, 0, PV_listOpenTrace, 0, 32);
       size_t cur = 0;
       for (size_t i = 0; i < v.listSize(); i++) {
-        out.put(' ');
+        tsPv(out, 0, PV_space, 0, 32);
         if (listPrinted >= maxList) {
-          elided(v.listSize() - cur, "item", "items");
+          tsPv(out, 2, int64_t(v.listSize() - cur), 2, 48);
           break;
         }
         print(*v.list.elems[i], depth + 1);
         listPrinted++;
         cur++;
       }
-      out.put(" ]");
+      tsPv(out, 0, PV_listCloseTrace, 0, 32);
       break;
     }
     case VType::Lambda: {
       auto lam = cast<nd::LambdaOp>(v.thunk.node->def);
-      out.put("«lambda");
+      tsPv(out, 0, PV_lambdaTrace, 0, 32);
       if (auto n = lam.getName()) {
-        out.put(' ');
+        tsPv(out, 0, PV_space, 0, 32);
         put(*n);
       }
-      out.put(" @ ");
+      tsPv(out, 0, PV_at, 0, 32);
       put(st.showPos(nd::posOfOp(lam)));
-      out.put("»");
+      tsPv(out, 0, PV_guilClose, 0, 32);
       break;
     }
-    case VType::PrimOp: out.put("«primop "); put(v.primOp->name); out.put("»"); break;
+    case VType::PrimOp: tsPv(out, 0, PV_primopTrace, 0, 32); put(v.primOp->name); tsPv(out, 0, PV_guilClose, 0, 32); break;
     case VType::PrimOpApp: {
       Value *p = &v;
       while (p->type == VType::PrimOpApp) p = p->app.left;
-      out.put("«partially applied primop ");
+      tsPv(out, 0, PV_primopAppTrace, 0, 32);
       if (p->type == VType::PrimOp) put(p->primOp->name);
-      else out.put('?');
-      out.put("»");
+      else tsPv(out, 0, PV_question, 0, 32);
+      tsPv(out, 0, PV_guilClose, 0, 32);
       break;
     }
-    case VType::Thunk: case VType::App: case VType::AttrApp: case VType::Failed: out.put("«thunk»"); break;
-    case VType::Blackhole: out.put("«potential infinite recursion»"); break;
+    case VType::Thunk: case VType::App: case VType::AttrApp: case VType::Failed: tsPv(out, 0, PV_thunk, 0, 32); break;
+    case VType::Blackhole: tsPv(out, 0, PV_infinite, 0, 32); break;
     }
   }
 };

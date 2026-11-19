@@ -49,18 +49,15 @@ const Source *Source::mapFile(std::string_view path) {
   return retain(s);
 }
 
+// The escaping of a Nix string literal is hollowed into lowered/nixfe/LiteralString.mlir (trikeshed.combineAll /
+// slice / at / text / combine / drain over a constant escape table), lowered by --trikeshed-lower-cursors and linked
+// into NixFrontend (mlnix-parse links it alone).  The entry drains into room reserved here (2 + 2 n: two quotes, at
+// most two bytes a byte) and returns how many it wrote; the count is adopted (resize before, truncate after).
+extern "C" size_t nixfe_ts_litstr(const char *p, size_t n, char *into, size_t cap);
 void printLiteralString(composite::Text &out, std::string_view s) {
-  out.put('"');
-  size_t run = 0; // the start of the bytes written as they are
-  for (size_t i = 0; i < s.size(); i++) {
-    char c = s[i];
-    const char *esc = c == '"' ? "\\\"" : c == '\\' ? "\\\\" : c == '\n' ? "\\n" : c == '\r' ? "\\r" : c == '\t' ? "\\t"
-                      : c == '$' && i + 1 < s.size() && s[i + 1] == '{' ? "\\$" : nullptr;
-    if (!esc) continue;
-    out.put(s.data() + run, uint32_t(i - run)).put(esc);
-    run = i + 1;
-  }
-  out.put(s.data() + run, uint32_t(s.size() - run)).put('"');
+  size_t at = out.size(), room = 2 + 2 * s.size();
+  out.resize(at + room);
+  out.truncate(at + nixfe_ts_litstr(s.data(), s.size(), out.begin() + at, room));
 }
 
 void printFloat(composite::Text &out, double d) {

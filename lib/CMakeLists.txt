@@ -163,6 +163,10 @@ target_precompile_headers(NixFrontend PRIVATE ${PROJECT_SOURCE_DIR}/include/Comp
 # nixfe::canonPath's segment walk (Parser.cpp's body is gone; the bridge sizes the Text and calls this entry).  The walk
 # is trikeshed.at / slice / text / drain over the byte series.  NixFrontend owns it: mlnix-parse links NixFrontend alone.
 mlnix_lower_trikeshed(NixFrontend lowered/nixfe/CanonPath.mlir CanonPath)
+# nixfe::printLiteralString's escaping (Source.cpp's body is gone; the bridge sizes the Text and calls this entry).
+# The quoting and per-byte escaping are trikeshed.combineAll / slice / at / text / combine / drain over a constant
+# escape table.  NixFrontend owns it: mlnix-parse links NixFrontend alone (Parser.cpp prints string literals too).
+mlnix_lower_trikeshed(NixFrontend lowered/nixfe/LiteralString.mlir LiteralString)
 # The Nix delimiter scan (nixfe::confix::Bands): lib/Frontend/Confix.cpp's Scanner is gone; the bridge sizes the Bands and
 # calls confix_scan_nix, the body of the confix dialect's confix.bands (the character classes as tables, the lexer's
 # longest-match rules called back).  NixFrontend carries it (MLIRNix cannot: mlnix-opt links MLIRNix and builds the
@@ -215,6 +219,11 @@ mlnix_lower_trikeshed(NixEval lowered/nixeval/SortOps.mlir SortOps)
 # The JSON byte emission: JsonOut::putInt and JsonOut::putString (lib/Eval/Formats.cpp's bodies are gone; the bridges
 # reserve room and adopt the drained bytes).  The digits and the escaping are trikeshed.fold / series / combineAll / drain.
 mlnix_lower_trikeshed(NixEval lowered/nixeval/PrintOps.mlir PrintOps)
+# The value printer's fixed bytes: EvalState::printValue's literals/separators and the TracePrinter's words, the
+# integer digits and the elision counts (Eval.cpp's out.put/putInt/elided emission is gone; the bridges reserve room
+# and adopt the drained bytes).  The words are trikeshed.slice / text / at / drain over a constant table, the digits a
+# fold over the powers of ten, the elision one combine.  The recursion/forcing/seen-table/depth guard stay in Eval.cpp.
+mlnix_lower_trikeshed(NixEval lowered/nixeval/PrintValueOps.mlir PrintValueOps)
 # The XML byte emission: XMLWriter's tag lines (lib/Eval/Formats.cpp's indent/attrs/open/close/empty bodies are gone;
 # the bridge sorts the rows, reserves room and adopts the drained bytes).  The indent, prefix, name, attributes and
 # suffix are trikeshed.series / slice / combine / combineAll / drain over a constant escape table.
