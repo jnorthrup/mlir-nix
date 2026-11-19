@@ -164,6 +164,11 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/NarFraming.mlir NarFraming)
 # slice / text / at / drain over series<i8>: one variadic combine of section views, each list a combineAll, each escaped
 # string a combineAll over a constant ATerm escape table, drained once into a pre-sized buffer (fill-drain).
 mlnix_lower_trikeshed(NixStore lowered/nixstore/DrvUnparse.mlir DrvUnparse)
+# The .attrs.json serialization of structuredAttrsFiles' dump and nixstore::jsonEscape (StructuredAttrs.cpp's and
+# StorePaths.cpp's loops are gone; the bridges size the Text and call these entries, the DOM stays C++ behind three
+# pure-read callbacks).  The stitching is one lazy combineAll over the children's cells drained once; the escape is
+# a combineAll of slices of one constant table (Nix's JSON rules, as PrintOps.mlir).
+mlnix_lower_trikeshed(NixStore lowered/nixstore/StructuredAttrsOps.mlir StructuredAttrsOps)
 
 add_library(NixFrontend STATIC Frontend/Parser.cpp Frontend/Source.cpp Frontend/Confix.cpp)
 add_dependencies(NixFrontend MLIRNixOpsIncGen TrikeShedIncGen)
