@@ -145,6 +145,11 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/Encoders.mlir Encoders)
 # The pure path algebra of nixstore::baseNameOf / dirOf (StorePaths.cpp's bodies are gone; the bridges size the Text and
 # call these entries).  The slash algebra is trikeshed.at / slice / text / drain over the byte series.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/PathOps.mlir PathOps)
+# The pure store-path naming algebra of nixstore::checkName / outputPathName / isStorePath / storePathName /
+# storePathHashPart (StorePaths.cpp's bodies are gone; checkName's bridge keeps the error wording, the others size the
+# Text and call these entries).  The naming rules are trikeshed.at / slice / text / compare / combine / drain over the
+# byte series; isStorePath calls the IsInStore entry beside it.
+mlnix_lower_trikeshed(NixStore lowered/nixstore/StoreName.mlir StoreName)
 
 add_library(NixFrontend STATIC Frontend/Parser.cpp Frontend/Source.cpp Frontend/Confix.cpp)
 add_dependencies(NixFrontend MLIRNixOpsIncGen TrikeShedIncGen)
