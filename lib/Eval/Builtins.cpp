@@ -28,19 +28,30 @@ namespace nixev {
 void registerStoreBuiltins(EvalState &state);
 void registerFormatBuiltins(EvalState &state);
 
-// The list primops' algebra is hollowed into lowered/nixeval/ListOps.mlir (trikeshed.size / at / series / fold), lowered
-// by --trikeshed-lower-cursors and linked into NixEval.  The bridges below force the operands (Nix's error order and
-// wording) and call these entries; the entries call back into the evaluator through the two callbacks for the cells only
-// the evaluator can make (a thunk `f i`, a fresh cell).
+// The list primops' algebra is hollowed into lowered/nixeval/ListOps.mlir (trikeshed.size / at / series / fold), version
+// comparison into VersionOps.mlir (trikeshed.at / slice / compare / text) and __sort into SortOps.mlir (trikeshed.sorted),
+// lowered by --trikeshed-lower-cursors and linked into NixEval.  The bridges below force the operands (Nix's error order
+// and wording) and call these entries; the entries call back into the evaluator through the callbacks for the cells only
+// the evaluator can make (a thunk `f i`, a fresh cell), the stoll reading whose throw stays here, and a sort comparison.
 extern "C" {
 void nixev_ts_length(Value *list, Value *v);
 void nixev_ts_elemAt(EvalState *st, Value *list, int64_t n, Value *v, PosPtr pos);
 void nixev_ts_genList(EvalState *st, Value *f, int64_t n, Value *v);
 void nixev_ts_fold(EvalState *st, Value *f, Value *list, Value *nul, Value *v, PosPtr pos);
+int64_t nixev_ts_compare_versions(const char *a, int64_t an, const char *b, int64_t bn);
+int64_t nixev_ts_next_component(const char *p, int64_t n, int64_t from, int64_t *start, int64_t *len);
+void nixev_ts_sort(EvalState *st, Value *f, int64_t isLessThan, Value **from, int64_t n, Value **into, PosPtr pos);
 Value *nixev_gen_elem(EvalState *st, Value *f, int64_t i) { Value *iv = st->allocValue(); st->mkInt(*iv, i); return st->mkAppValue(f, iv); }
 Value *nixev_cell(EvalState *st) { return st->allocValue(); }
+// componentsLT's toInt: digits all through, their value as stoll made it; std::out_of_range past the range of long long
+int64_t nixev_ver_int(const char *p, int64_t n, int64_t *out) {
+  std::string_view s(p, size_t(n));
+  composite::text::Reading r = nixsys::readSigned(s);
+  if (s.empty() || !composite::isAsciiDigit(s[0]) || r.consumed != s.size()) return 0;
+  *out = int64_t(nixsys::stoValue("stoll", r));
+  return 1;
 }
-
+}
 // The string primops' algebra and mkStringOf are hollowed into lowered/nixeval/StringOps.mlir (trikeshed.size / slice /
 // compare / combineAll / drain).  The bridges force and coerce the operands (Nix's error order and wording, the string
 // contexts); the entries call back for the arena room, the 4 GiB refusal, and the replacement strings only the evaluator
@@ -80,50 +91,14 @@ void nixev_replace_to(TsReplace *r, int64_t j, composite::Chars *out) {
   *out = composite::chars(c->second.data(), uint32_t(c->second.size()));
 }
 Value *nixev_name_cell(EvalState *st, const char *p, size_t n) { return st->newStringWindow(llvm::StringRef(p, n)); }
+// one sort comparison: a < b by the Nix function (or the lessThan fast path), the return value forced
+int64_t nixev_sort_lt(EvalState *st, Value *f, int64_t isLessThan, Value *a, Value *b, PosPtr pos) {
+  if (isLessThan) return st->lessThan(*a, *b, pos) ? 1 : 0;
+  Value *fargs[2] = {a, b};
+  Value r;
+  st->callFunction(*f, 2, fargs, r, pos);
+  return st->forceBool(r, pos, "while evaluating the return value of the sorting function passed to builtins.sort") ? 1 : 0;
 }
-
-//===----------------------------------------------------------------------===//
-// Version comparison (upstream names.cc)
-//===----------------------------------------------------------------------===//
-
-static std::string_view nextComponent(std::string_view::const_iterator &p, const std::string_view::const_iterator end) {
-  while (p != end && (*p == '.' || *p == '-')) ++p;
-  if (p == end) return "";
-  auto s = p;
-  if (isdigit((unsigned char)*p))
-    while (p != end && isdigit((unsigned char)*p)) p++;
-  else
-    while (p != end && (!isdigit((unsigned char)*p) && *p != '.' && *p != '-')) p++;
-  return std::string_view(&*s, p - s);
-}
-
-static bool componentsLT(std::string_view c1, std::string_view c2) {
-  auto toInt = [](std::string_view s, long long &n) {
-    composite::text::Reading r = nixsys::readSigned(s);
-    if (s.empty() || !composite::isAsciiDigit(s[0]) || r.consumed != s.size()) return false; // digits all through: no space, no sign
-    n = (long long)nixsys::stoValue("stoll", r); // what stoll made of them: their value, std::out_of_range past the range of long long
-    return true;
-  };
-  long long n1, n2;
-  bool i1 = toInt(c1, n1), i2 = toInt(c2, n2);
-  if (i1 && i2) return n1 < n2;
-  if (c1.empty() && i2) return true;
-  if (c1 == "pre" && c2 != "pre") return true;
-  if (c2 == "pre") return false;
-  if (i1) return false;
-  if (i2) return true;
-  return c1 < c2;
-}
-
-static int compareVersions(std::string_view v1, std::string_view v2) {
-  auto p1 = v1.begin(), p2 = v2.begin();
-  while (p1 != v1.end() || p2 != v2.end()) {
-    auto c1 = nextComponent(p1, v1.end());
-    auto c2 = nextComponent(p2, v2.end());
-    if (componentsLT(c1, c2)) return -1;
-    if (componentsLT(c2, c1)) return 1;
-  }
-  return 0;
 }
 
 /// A string result that is `w`, a window on the bytes of `arg` when the argument was a string: those bytes and its context are shared,
@@ -625,16 +600,16 @@ void registerBuiltins(EvalState &state) {
   });
   S.addPrimOp("__compareVersions", [](EvalState &st, A args, Value &v, PosPtr pos) {
     auto a = st.forceStringNoCtx(*args[0], pos), b = st.forceStringNoCtx(*args[1], pos);
-    st.mkInt(v, compareVersions(a, b));
+    st.mkInt(v, nixev_ts_compare_versions(a.data(), int64_t(a.size()), b.data(), int64_t(b.size())));
   });
   S.addPrimOp("__splitVersion", [](EvalState &st, A args, Value &v, PosPtr pos) {
     auto ver = st.forceStringNoCtx(*args[0], pos);
-    auto p = ver.begin();
     composite::MutableSeries<std::string_view> comps;
-    while (p != ver.end()) {
-      auto c = nextComponent(p, ver.end());
-      if (c.empty()) break;
-      comps.append(c);
+    int64_t n = int64_t(ver.size()), p = 0, s = 0, l = 0;
+    while (p < n) {
+      p = nixev_ts_next_component(ver.data(), n, p, &s, &l);
+      if (l == 0) break;
+      comps.append(std::string_view(ver.data() + s, size_t(l)));
     }
     st.mkList(v, comps |cp::α| [&](const auto &c) { return st.newString(c); });
   });
@@ -1026,17 +1001,9 @@ void registerBuiltins(EvalState &state) {
     st.forceFunction(*args[0], pos, "while evaluating the sorting function passed to builtins.sort");
     // Fast path for __lessThan.
     bool isLessThan = args[0]->type == VType::PrimOp && args[0]->primOp->name == "lessThan";
-    auto cmp = [&](Value *a, Value *b) {
-      if (isLessThan) return st.lessThan(*a, *b, pos);
-      Value *fargs[2] = {a, b};
-      Value r;
-      st.callFunction(*args[0], 2, fargs, r, pos);
-      return st.forceBool(r, pos, "while evaluating the return value of the sorting function passed to builtins.sort");
-    };
-    // The argument's cells are const and read where they lie: the sort's first pass is the drain into the result list.
-    Value *const *from = args[1]->list.elems;
+    // The argument's cells are const and read where they lie: trikeshed.sorted drains them into the result list.
     st.mkList(v, n);
-    composite::sortRows(from, v.list.elems, n, cmp);
+    nixev_ts_sort(&st, args[0], isLessThan ? 1 : 0, args[1]->list.elems, int64_t(n), v.list.elems, pos);
   });
   S.addPrimOp("__partition", [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.partition");

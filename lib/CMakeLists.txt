@@ -175,3 +175,9 @@ mlnix_lower_trikeshed(NixEval lowered/nixeval/StringOps.mlir StringOps)
 # gone; the bridges force the operands and call these entries).  The set algebra is trikeshed.sorted / bisect / where /
 # alpha / compare / series / drain.
 mlnix_lower_trikeshed(NixEval lowered/nixeval/SetOps.mlir SetOps)
+# __compareVersions and __splitVersion's component scan (the nextComponent / componentsLT / compareVersions bodies are
+# gone).  The version algebra is trikeshed.at / slice / compare / text; the stoll reading's throw stays in the bridge.
+mlnix_lower_trikeshed(NixEval lowered/nixeval/VersionOps.mlir VersionOps)
+# __sort (the cmp lambda and the sortRows call are gone).  The sort is trikeshed.sorted, stable; each comparison calls
+# back into the evaluator (the comparator is a Nix function).
+mlnix_lower_trikeshed(NixEval lowered/nixeval/SortOps.mlir SortOps)
