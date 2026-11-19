@@ -352,106 +352,26 @@ struct Scratch {
   uint64_t budget;
 };
 
-namespace detail {
-/// One walk from `start`.  exact: regex_match's (a solution is the end of the text, the first wins); otherwise regex_search's at one start
-/// (any position, the longest wins, the first of the longest; `notNull` refuses the empty match).  The answer's marks are in s.best.
-inline Result walk(const Program &prog, const char *text, uint32_t n, uint32_t start, bool exact, bool notNull, Scratch &s) {
-  uint32_t slots = 2 * (prog.groups + 1);
-  for (uint32_t i = 0; i < slots; i++) s.caps[i] = ~0u;
-  for (uint32_t i = 0; i < prog.loops; i++) s.loops[i] = {~0u, 0};
-  uint32_t sp = 0, pc = 0, pos = start, bestEnd = ~0u;
-  bool found = false; // libstdc++'s _M_has_sol
-  auto push = [&](Entry e) {
-    if (sp == s.cap) return false;
-    s.stack[sp++] = e;
-    return true;
-  };
-  for (;;) {
-    if (s.budget == 0) return Result::GaveUp;
-    s.budget--;
-    const Step &st = prog.steps[pc];
-    bool ok = true;
-    switch (st.op) {
-    case Op::Char:
-      if (pos < n && prog.sets[st.x].has(uint8_t(text[pos]))) { pos++; pc++; }
-      else ok = false;
-      break;
-    case Op::Alt:
-      if (!push({tag(kAltRight, st.y), pos, 0})) return Result::GaveUp;
-      pc = st.x;
-      break;
-    case Op::Rep: {
-      LoopState &L = s.loops[st.z];
-      bool fresh = L.count == 0 || L.pos != pos;
-      if (fresh || L.count < 2) {
-        if (!push({tag(kRepOut, st.y), pos, 0}) || !push({tag(kLoop, st.z), L.pos, L.count})) return Result::GaveUp;
-        if (fresh) L = {pos, 1};
-        else L.count++;
-        pc = st.x;
-      } else if (found) ok = false; // no more iterations here, and the way out is not tried once a solution was found
-      else pc = st.y;
-      break;
-    }
-    case Op::Jmp: pc = st.x; break;
-    case Op::Save:
-      if (!push({tag(kCap, st.x), s.caps[st.x], 0})) return Result::GaveUp;
-      s.caps[st.x] = pos;
-      pc++;
-      break;
-    case Op::Bol: if (pos == 0) pc++; else ok = false; break;
-    case Op::Eol: if (pos == n) pc++; else ok = false; break;
-    case Op::Match: {
-      bool solution = (!exact || pos == n) && !(notNull && pos == start);
-      if (solution) {
-        if (exact) {
-          for (uint32_t i = 0; i < slots; i++) s.best[i] = s.caps[i];
-          return Result::Match;
-        }
-        found = true;
-        if (bestEnd == ~0u || pos > bestEnd) {
-          bestEnd = pos;
-          for (uint32_t i = 0; i < slots; i++) s.best[i] = s.caps[i];
-        }
-      }
-      ok = false; // go on: another walk may be longer
-      break;
-    }
-    }
-    if (ok) continue;
-    for (;;) { // rewind
-      if (sp == 0) return bestEnd != ~0u ? Result::Match : Result::NoMatch;
-      Entry e = s.stack[--sp];
-      uint32_t t = e.tag >> 28, id = e.tag & 0x0fffffffu;
-      if (t == kCap) { s.caps[id] = e.a; continue; }
-      if (t == kLoop) { s.loops[id] = {e.a, e.b}; continue; }
-      if (t == kAltJoin) { found = found || e.a; continue; }
-      if (t == kRepOut) {
-        if (found) continue; // a solution was found: the repeat does not stop here
-        pc = id;
-        pos = e.a;
-        break;
-      }
-      // kAltRight: the left side is done; the right side starts with the flag cleared, and the left's flag joins it after
-      if (!push({tag(kAltJoin, 0), uint32_t(found), 0})) return Result::GaveUp;
-      found = false;
-      pc = id;
-      pos = e.a;
-      break;
-    }
-  }
-}
-} // namespace detail
+/// The walk is hollowed into MLIR (lowered/nixeval/KursiveOps.mlir, mlnix_kursive_walk): the backtracking state machine
+/// over the Step program, as libstdc++'s std::regex::extended executor answers.  The caller owns every array; the walk
+/// allocates nothing.  Step is 16B (op u8@0, x/y/z u32@4/8/12), Set 4 u64, LoopState 2 u32 (pos,count), Entry 3 u32
+/// (tag,a,b); a checkpoint tag is Tag << 28 | id (Tag above).  The entry returns Result: 0 NoMatch, 1 Match, 2 GaveUp.
+extern "C" int32_t mlnix_kursive_walk(const void *steps, const void *sets, uint32_t groups, uint32_t loops,
+    const char *text, uint32_t n, uint32_t start, int32_t exact, int32_t notNull,
+    uint32_t *caps, uint32_t *best, void *loopsArr, void *stack, uint32_t cap, uint64_t *budget);
 
 /// regex_match: the whole of text[0, n).  The groups' marks are in s.best (~0u for a group that took no part).
 inline Result matchAll(const Program &prog, const char *text, uint32_t n, Scratch &s) {
-  return detail::walk(prog, text, n, 0, true, false, s);
+  return Result(mlnix_kursive_walk(prog.steps, prog.sets, prog.groups, prog.loops, text, n, 0, 1, 0,
+      s.caps, s.best, s.loops, s.stack, s.cap, &s.budget));
 }
 
 /// regex_search from `from`: the leftmost start with a match, its longest match; `continuous` tries `from` only, `notNull` refuses an empty
-/// match.  The marks are in s.best.
+/// match.  The marks are in s.best.  The start enumeration stays here; each start's walk is the MLIR state machine.
 inline Result search(const Program &prog, const char *text, uint32_t n, uint32_t from, bool notNull, bool continuous, Scratch &s) {
   for (uint32_t start = from; start <= n; start++) {
-    Result r = detail::walk(prog, text, n, start, false, notNull, s);
+    Result r = Result(mlnix_kursive_walk(prog.steps, prog.sets, prog.groups, prog.loops, text, n, start, 0, notNull ? 1 : 0,
+        s.caps, s.best, s.loops, s.stack, s.cap, &s.budget));
     if (r != Result::NoMatch) return r;
     if (continuous) break;
   }

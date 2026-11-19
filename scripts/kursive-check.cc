@@ -1,7 +1,8 @@
 // Kursive.h against std::regex::extended: regex_match (builtins.match) and the regex_iterator walk builtins.split makes, on every pattern the
 // two benchmark workloads use, on patterns that probe libstdc++'s corners (loops that may match empty, anchors, alternations), and on random
 // patterns, where it must also agree on which patterns are errors.  libstdc++ (Kali, g++-16) is the reference: Nix on Linux answers with it.
-// Build: c++ -std=c++20 -O2 -Iinclude scripts/kursive-check.cc
+// Build: c++ -std=c++20 -O2 -Iinclude scripts/kursive-check.cc build/lib/lowered/KursiveOps.o
+//   (the walk is hollowed into lowered/nixeval/KursiveOps.mlir; link its lowered object for mlnix_kursive_walk)
 #include "Composite/Kursive.h"
 #include <cstdio>
 #include <cstdlib>

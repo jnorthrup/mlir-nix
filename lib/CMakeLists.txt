@@ -276,4 +276,9 @@ mlnix_lower_trikeshed(NixEval lowered/nixeval/CmpOps.mlir CmpOps)
 # here; the callbacks keep the forcing, the TypeError, copyPathToStore, the number text and the element's try/catch
 # addTrace.
 mlnix_lower_trikeshed(NixEval lowered/nixeval/CoerceOps.mlir CoerceOps)
+# Kursive's walk (include/Composite/Kursive.h detail::walk is gone; matchAll/search forward to this entry).  The
+# backtracking state machine over the Step program — checkpoint stack push/pop, step dispatch, the step budget — is one
+# scf.while over the caller's arrays; the bridge keeps the primop forcing/coercion, kursiveRun's checkpoint retry,
+# pieceOf interning and Nix's error wording.  The pattern compiler stays in Kursive.h for now.
+mlnix_lower_trikeshed(NixEval lowered/nixeval/KursiveOps.mlir KursiveOps)
 
