@@ -105,6 +105,39 @@ int64_t nixev_sort_lt(EvalState *st, Value *f, int64_t isLessThan, Value *a, Val
 }
 }
 
+// The higher-order list primops' algebra is hollowed into lowered/nixeval/ListOps2.mlir (trikeshed.size / at / where /
+// combineAll / drain), lowered the same way.  The bridges force the operands (Nix's error order and wording) and call
+// these entries; the entries call back for each Nix function application (callFunction + forceBool, or eqValues) and,
+// for concatLists/concatMap, each inner list's cells.  concatMap's callback caches each call's result (the function runs
+// once per element though a combineAll's region runs for its size and again for its drain).  any/all/elem short-circuit
+// in the entry's scf.while, so a later element is never forced.
+struct TsConcatMap { EvalState *st; Value *f; PosPtr pos; composite::MutableSeries<Value *> rs; };
+extern "C" {
+void nixev_ts_concatLists(EvalState *st, Value *list, Value *v, PosPtr pos);
+void nixev_ts_concatMap(EvalState *st, Value *list, Value *v, TsConcatMap *cm);
+int64_t nixev_ts_filter(EvalState *st, Value *f, Value *list, Value **keep, PosPtr pos);
+void nixev_ts_any(EvalState *st, Value *f, Value *list, Value *v, PosPtr pos);
+void nixev_ts_all(EvalState *st, Value *f, Value *list, Value *v, PosPtr pos);
+void nixev_ts_elem(EvalState *st, Value *a, Value *list, Value *v, PosPtr pos);
+void nixev_concat_part(EvalState *st, Value *l, PosPtr pos, void **elems, int64_t *n) {
+  st->forceList(*l, pos, "while evaluating a value of the list passed to builtins.concatLists"); *elems = l->list.elems; *n = int64_t(l->listSize());
+}
+void nixev_concatmap_part(TsConcatMap *cm, int64_t k, Value *x, void **elems, int64_t *n) {
+  Value *r = size_t(k) < cm->rs.size() ? cm->rs[uint32_t(k)] : nullptr;
+  if (!r) {
+    r = cm->st->allocValue(); cm->st->callFunction(*cm->f, *x, *r, cm->pos);
+    cm->st->forceList(*r, cm->pos, "while evaluating the return value of the function passed to builtins.concatMap"); cm->rs.append(r);
+  }
+  *elems = r->list.elems; *n = int64_t(r->listSize());
+}
+int64_t nixev_pred(EvalState *st, Value *f, Value *x, PosPtr pos, int64_t which) {
+  Value r; st->callFunction(*f, *x, r, pos);
+  const char *ctx = which == 0 ? "while evaluating the return value of the filtering function passed to builtins.filter" : which == 1 ? "while evaluating the return value of the function passed to builtins.any" : "while evaluating the return value of the function passed to builtins.all";
+  return st->forceBool(r, pos, ctx) ? 1 : 0;
+}
+int64_t nixev_elem_eq(EvalState *st, Value *a, Value *e, PosPtr pos) { return (a == e || st->eqValues(*a, *e, pos)) ? 1 : 0; }
+}
+
 /// A string result that is `w`, a window on the bytes of `arg` when the argument was a string: those bytes and its context are shared,
 /// nothing is copied.  Any other argument was coerced into text of its own, so the result is made from it with `ctx`.
 /// A constant as a type, so that a registering loop can make one plain function per constant: a template lambda's body sees V as a
@@ -915,47 +948,26 @@ void registerBuiltins(EvalState &state) {
   });
   S.addPrimOp("__elem", [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.elem");
-    bool res = false;
-    for (Value *e : args[1]->items()) {
-      if (e == args[0] || st.eqValues(*args[0], *e, pos)) { res = true; break; }
-    }
-    st.mkBool(v, res);
+    nixev_ts_elem(&st, args[0], args[1], &v, pos);
   });
   S.addPrimOp("__concatLists", [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[0], pos, "while evaluating the first argument passed to builtins.concatLists");
-    cp::Combine all(args[0]->items() |cp::α| [&](Value *l) {
-      st.forceList(*l, pos, "while evaluating a value of the list passed to builtins.concatLists");
-      return l->items();
-    });
-    st.mkList(v, all);
+    nixev_ts_concatLists(&st, args[0], &v, pos);
   });
   S.addPrimOp("__concatMap", [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.concatMap");
-    llvm::SmallVector<Value *, 16> rs; // one per call: the elements are not copied before the list is
-    for (Value *x : args[1]->items()) {
-      Value *r = st.allocValue();
-      st.callFunction(*args[0], *x, *r, pos);
-      st.forceList(*r, pos, "while evaluating the return value of the function passed to builtins.concatMap");
-      rs.push_back(r);
-    }
-    cp::Combine all(rs |cp::α| [](Value *r) { return r->items(); });
-    st.mkList(v, all);
+    TsConcatMap cm{&st, args[0], pos, {}};
+    nixev_ts_concatMap(&st, args[1], &v, &cm);
   });
   S.addPrimOp("__filter", [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.filter");
     // The kept cells go into stack scratch when the list is short, and straight into the arena list they will be when it is long (its
-    // tail past the kept ones is left, never copied): no growing heap series.
+    // tail past the kept ones is left, never copied): the where of ListOps2.mlir drains them, the count comes back.
     size_t n = args[1]->listSize();
-    Value **elems = args[1]->list.elems;
     Value *stackKeep[32];
     Value **keep = n <= 32 ? stackKeep : st.allocList(n);
-    size_t k = 0;
-    for (size_t i = 0; i < n; i++) {
-      Value r;
-      st.callFunction(*args[0], *elems[i], r, pos);
-      if (st.forceBool(r, pos, "while evaluating the return value of the filtering function passed to builtins.filter")) keep[k++] = elems[i];
-    }
-    if (k == n) { v = *args[1]; return; }
+    int64_t k = nixev_ts_filter(&st, args[0], args[1], keep, pos);
+    if (size_t(k) == n) { v = *args[1]; return; }
     if (n <= 32) return st.mkList(v, cp::series(keep, uint32_t(k)));
     st.mkList(v, 0);
     v.aux = uint32_t(k);
@@ -963,19 +975,11 @@ void registerBuiltins(EvalState &state) {
   });
   S.addPrimOp("__any", [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.any");
-    st.mkBool(v, std::ranges::any_of(args[1]->items(), [&](Value *e) {
-      Value r;
-      st.callFunction(*args[0], *e, r, pos);
-      return st.forceBool(r, pos, "while evaluating the return value of the function passed to builtins.any");
-    }));
+    nixev_ts_any(&st, args[0], args[1], &v, pos);
   });
   S.addPrimOp("__all", [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.all");
-    st.mkBool(v, std::ranges::all_of(args[1]->items(), [&](Value *e) {
-      Value r;
-      st.callFunction(*args[0], *e, r, pos);
-      return st.forceBool(r, pos, "while evaluating the return value of the function passed to builtins.all");
-    }));
+    nixev_ts_all(&st, args[0], args[1], &v, pos);
   });
   S.addPrimOp("__foldl'", [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceFunction(*args[0], pos, "while evaluating the first argument passed to builtins.foldlStrict");
