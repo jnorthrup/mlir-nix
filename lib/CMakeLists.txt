@@ -150,6 +150,10 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/PathOps.mlir PathOps)
 # Text and call these entries).  The naming rules are trikeshed.at / slice / text / compare / combine / drain over the
 # byte series; isStorePath calls the IsInStore entry beside it.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/StoreName.mlir StoreName)
+# The pure byte decoders nix32Decode, base64Decode (lib/Store/Hash.cpp's bodies are gone; the bridges size the Text and
+# turn the validity flag into the Maybe, parseRest's error wording stays).  trikeshed.at over the input series<i8>, a
+# constant reverse-alphabet table and guarded byte stores.
+mlnix_lower_trikeshed(NixStore lowered/nixstore/Decoders.mlir Decoders)
 
 add_library(NixFrontend STATIC Frontend/Parser.cpp Frontend/Source.cpp Frontend/Confix.cpp)
 add_dependencies(NixFrontend MLIRNixOpsIncGen TrikeShedIncGen)
@@ -222,3 +226,11 @@ mlnix_lower_trikeshed(NixEval lowered/nixeval/ListOps2.mlir ListOps2)
 # The baseNameOf / dirOf primops' slash scans (Builtins.cpp's scans are gone; the bridges coerce and share the window at
 # the bounds these entries return).  The scans are trikeshed.at / slice over the byte series.
 mlnix_lower_trikeshed(NixEval lowered/nixeval/PathBounds.mlir PathBounds)
+# The float->int rounding core of __ceil/__floor (the rounding template's std::ceil/std::floor, range test and cast are
+# gone from lib/Eval/Builtins.cpp; the bridge keeps forceValue/forceFloat/mkInt and Nix's error wording).  llvm dialect:
+# llvm.intr.ceil / llvm.intr.floor (generic form), the ordered range fcmp and fptosi.
+mlnix_lower_interface(NixEval lowered/nixeval/Rounding.mlir Rounding)
+# __parseDrvName's dash scan (Builtins.cpp's loop is gone; the bridge keeps forceStringNoCtx and the mkString/mkAttrs of
+# the two windows).  The first '-' followed by a non-letter is trikeshed.at over the byte series (C-locale isalpha).
+mlnix_lower_trikeshed(NixEval lowered/nixeval/DrvNameOps.mlir DrvNameOps)
+

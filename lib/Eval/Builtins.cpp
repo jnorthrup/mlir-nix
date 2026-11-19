@@ -11,7 +11,6 @@
 #include "llvm/ADT/TypeSwitch.h"
 
 #include <algorithm>
-#include <cmath>
 #include <cstdio>
 #include <ctime>
 #include <dirent.h>
@@ -45,6 +44,7 @@ int64_t nixev_ts_next_component(const char *p, int64_t n, int64_t from, int64_t 
 void nixev_ts_sort(EvalState *st, Value *f, int64_t isLessThan, Value **from, int64_t n, Value **into, PosPtr pos);
 int mlnix_arith_int(int op, int64_t x, int64_t y, int64_t *r); // 0 ok, 1 overflow, 2 division by zero
 void mlnix_type_pred(Value *v, int tag, Value *out); // tag: a VType, or 16 for the function group
+int mlnix_round(int up, double d, int64_t *out); // __ceil/__floor: 1 in range (result stored), 0 out of range
 Value *nixev_gen_elem(EvalState *st, Value *f, int64_t i) { Value *iv = st->allocValue(); st->mkInt(*iv, i); return st->mkAppValue(f, iv); }
 Value *nixev_cell(EvalState *st) { return st->allocValue(); }
 // componentsLT's toInt: digits all through, their value as stoll made it; std::out_of_range past the range of long long
@@ -76,6 +76,7 @@ TsBounds nixev_ts_substring(const char *s, int64_t n, int64_t start, int64_t len
 // series): the bounds of baseNameOf's component and dirOf's last slash.  The bridges coerce and share the window.
 TsBounds nixev_ts_basename_bounds(const char *p, int64_t n);
 int64_t nixev_ts_dirname_slash(const char *p, int64_t n);
+int64_t nixev_ts_drvname_split(const char *s, int64_t n); // __parseDrvName's first qualifying dash, -1 when none
 void nixev_ts_concat(EvalState *st, const composite::Chars *pieces, int64_t np, Value *v, const StringContext *ctx);
 void nixev_ts_replace(EvalState *st, TsReplace *r, const char *s, int64_t sn, const composite::Chars *from, int64_t m, Value *v);
 void nixev_ts_attrNames(EvalState *st, Bindings *set, Value *v, const uint64_t *prefixes, const llvm::StringRef *names);
@@ -495,10 +496,11 @@ void registerBuiltins(EvalState &state) {
       st.forceValue(*args[0], pos);
       if (args[0]->type == VType::Int) { v = *args[0]; return; }
       double d = st.forceFloat(*args[0], pos);
-      double r = up ? std::ceil(d) : std::floor(d);
-      if (!(r >= -9223372036854775808.0 && r < 9223372036854775808.0))
+      // The ceil/floor core, the range test and the cast are Rounding.mlir; the wording quotes the original float.
+      int64_t r;
+      if (!mlnix_round(up, d, &r))
         throw EvalError(composite::cat("NixFloat argument ", nixfe::fixedFloat(d), " is not in the range of NixInt"), pos);
-      st.mkInt(v, (int64_t)r);
+      st.mkInt(v, r);
     });
   };
   rounding("__ceil", K<true>{});
@@ -647,14 +649,10 @@ void registerBuiltins(EvalState &state) {
   });
   S.addPrimOp("__parseDrvName", [](EvalState &st, A args, Value &v, PosPtr pos) {
     auto name = st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.parseDrvName");
-    std::string_view n = name, ver;
-    for (size_t i = 0; i < name.size(); i++) {
-      if (name[i] == '-' && i + 1 < name.size() && !isalpha((unsigned char)name[i + 1])) {
-        n = name.substr(0, i);
-        ver = name.substr(i + 1);
-        break;
-      }
-    }
+    // The dash scan is DrvNameOps.mlir: the first '-' followed by a non-letter, -1 when there is none.
+    int64_t cut = nixev_ts_drvname_split(name.data(), int64_t(name.size()));
+    std::string_view n = cut < 0 ? name : name.substr(0, size_t(cut));
+    std::string_view ver = cut < 0 ? std::string_view() : name.substr(size_t(cut) + 1);
     EvalState::BindingsBuilder bb(st);
     st.mkString(bb.alloc(st.s.name), n);
     st.mkString(bb.alloc("version"), ver);

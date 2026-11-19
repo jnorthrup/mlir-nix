@@ -256,6 +256,8 @@ extern "C" {
 size_t mlnix_base16_encode(const uint8_t *d, size_t n, char *out);
 size_t mlnix_nix32_encode(const uint8_t *d, size_t n, char *out);
 size_t mlnix_base64_encode(const char *d, size_t n, char *out);
+int mlnix_nix32_decode(const char *s, size_t n, size_t size, uint8_t *out); // 1 valid (bytes written), 0 invalid
+int mlnix_base64_decode(const char *s, size_t n, uint8_t *out, size_t *outlen); // 1 valid, 0 invalid
 }
 
 void appendBase16(composite::Text &out, const uint8_t *d, size_t n) {
@@ -274,22 +276,10 @@ void appendNix32(composite::Text &out, const uint8_t *d, size_t n) {
 
 composite::Maybe<composite::Text> nix32Decode(std::string_view s, size_t size) {
   composite::Text out;
-  out.resize(size);
-  for (size_t n = 0; n < s.size(); n++) {
-    char c = s[s.size() - n - 1];
-    const char *p = strchr(nix32Chars, c);
-    if (!p || !c) return nullptr;
-    unsigned digit = p - nix32Chars;
-    unsigned b = n * 5, i = b / 8, j = b % 8;
-    if (i >= size) return nullptr;
-    out[i] = char((unsigned char)out[i] | (digit << j));
-    if (i + 1 < size) out[i + 1] = char((unsigned char)out[i + 1] | (digit >> (8 - j)));
-    else if (digit >> (8 - j)) return nullptr;
-  }
+  out.resize(size); // zero-filled: the entry ORs the digit contributions in, as the old loop did
+  if (!mlnix_nix32_decode(s.data(), s.size(), size, (uint8_t *)out.begin())) return nullptr;
   return out;
 }
-
-static const char b64chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 composite::Text base64Encode(std::string_view s) {
   composite::Text res;
@@ -301,23 +291,11 @@ composite::Text base64Encode(std::string_view s) {
 }
 
 composite::Maybe<composite::Text> base64Decode(std::string_view s) {
-  int decode[256];
-  for (int i = 0; i < 256; i++) decode[i] = -1;
-  for (int i = 0; i < 64; i++) decode[(unsigned char)b64chars[i]] = i;
   composite::Text res;
-  unsigned d = 0, bits = 0;
-  for (char c : s) {
-    if (c == '=') break;
-    if (c == '\n') continue;
-    int digit = decode[(unsigned char)c];
-    if (digit < 0) return nullptr;
-    bits += 6;
-    d = d << 6 | digit;
-    if (bits >= 8) {
-      res.push_back(char(d >> (bits - 8) & 0xff));
-      bits -= 8;
-    }
-  }
+  res.resize(s.size()); // capacity: <= 6 bits per input char, so never more than s.size() bytes
+  size_t len = 0;
+  if (!mlnix_base64_decode(s.data(), s.size(), (uint8_t *)res.begin(), &len)) return nullptr;
+  res.truncate(len);
   return res;
 }
 
