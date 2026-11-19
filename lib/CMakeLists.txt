@@ -247,4 +247,14 @@ mlnix_lower_interface(NixEval lowered/nixeval/Rounding.mlir Rounding)
 # __parseDrvName's dash scan (Builtins.cpp's loop is gone; the bridge keeps forceStringNoCtx and the mkString/mkAttrs of
 # the two windows).  The first '-' followed by a non-letter is trikeshed.at over the byte series (C-locale isalpha).
 mlnix_lower_trikeshed(NixEval lowered/nixeval/DrvNameOps.mlir DrvNameOps)
+# EvalState::eqValues / lessThan (lib/Eval/Eval.cpp's bodies are gone; the methods forward to these entries).  The type
+# dispatch, the int/float cross-comparison, the scalar comparisons and the short-circuiting list/attrs walks are
+# trikeshed.at / compare over the cells and bytes, the recursion func.call back into the entries; the callbacks keep
+# the forcing, the throws' wording, isDerivation and the outPath lookup.
+mlnix_lower_trikeshed(NixEval lowered/nixeval/CmpOps.mlir CmpOps)
+# EvalState::coerceToString (lib/Eval/Eval.cpp's body is gone; the method forwards to this entry, errorCtx as raw
+# bytes).  The type dispatch, the __toString call / outPath recursion and the list walk with its separator rule are
+# here; the callbacks keep the forcing, the TypeError, copyPathToStore, the number text and the element's try/catch
+# addTrace.
+mlnix_lower_trikeshed(NixEval lowered/nixeval/CoerceOps.mlir CoerceOps)
 

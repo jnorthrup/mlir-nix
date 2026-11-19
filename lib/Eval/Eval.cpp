@@ -1998,54 +1998,63 @@ composite::Chars EvalState::coerceToWindow(Value &v, NixStringContext &ctx, bool
   return composite::chars(std::string_view(scratch));
 }
 
+// coerceToString's, eqValues' and lessThan's algorithms are hollowed into lowered/nixeval/CoerceOps.mlir and
+// CmpOps.mlir (trikeshed.at / compare over the cells and bytes, scf.while / scf.for walks, func.call recursion),
+// lowered by --trikeshed-lower-cursors and linked into NixEval.  The methods below are thin bridges; the callbacks
+// keep what only C++ can do: forcing (the inline forceValue check and the stats census), the error wording (the
+// throws), the attribute lookups, copyPathToStore, the number text (cp::str / fixedFloat), the Text writes and the
+// list element's recursive coercion under its try/catch addTrace.  errorCtx crosses as raw bytes, never a
+// std::string_view (its ABI differs per platform).
+extern "C" {
+int64_t nixev_ts_eq(EvalState *st, Value *v1, Value *v2, PosPtr pos);
+int64_t nixev_ts_lt(EvalState *st, Value *v1, Value *v2, PosPtr pos);
+void nixev_ts_coerce(EvalState *st, Value *v, NixStringContext *ctx, int64_t coerceMore, int64_t copyToStore,
+                     PosPtr pos, int64_t canonicalizePath, const char *errorCtx, int64_t errorCtxLen, cp::Text *out);
+void nixev_cmp_force(EvalState *st, Value *v, PosPtr pos) { st->forceValue(*v, pos); }
+[[noreturn]] void nixev_cmp_eq_throw(EvalState *st, Value *v1, Value *v2, PosPtr pos) {
+  throw EvalError(cp::cat("cannot compare ", EvalState::showType(*v1), " with ", EvalState::showType(*v2)), pos);
+}
+[[noreturn]] void nixev_cmp_lt_inc(EvalState *st, Value *v1, Value *v2, PosPtr pos) {
+  throw EvalError(cp::cat("cannot compare ", EvalState::showType(*v1), " with ", EvalState::showType(*v2),
+                          "; values of that type are incomparable"), pos);
+}
+// the outPath attribute (which 0) or the __toString attribute (which 1) of a set
+const Attr *nixev_attr_get(EvalState *st, Value *v, int64_t which) {
+  return v->attrs->get(which == 0 ? st->s.outPath : st->s.toString);
+}
+[[noreturn]] void nixev_coerce_throw(EvalState *st, Value *v, PosPtr pos, const char *errorCtx, int64_t errorCtxLen) {
+  TypeError e(cp::cat("cannot coerce ", EvalState::showType(*v), " to a string: ", st->printValueForTrace(*v)), pos);
+  if (errorCtxLen) e.addTrace(pos, cp::Text(std::string_view(errorCtx, size_t(errorCtxLen))));
+  throw e;
+}
+void nixev_text_set(cp::Text *out, const char *p, int64_t n) { *out = cp::Text(p, size_t(n)); }
+void nixev_text_put(cp::Text *out, const char *p, int64_t n) { out->put(p, size_t(n)); }
+void nixev_int_text(cp::Text *out, int64_t x) { *out = cp::str(x); }
+void nixev_float_text(cp::Text *out, double d) { *out = nixfe::fixedFloat(d); }
+void nixev_copy_path(EvalState *st, NixStringContext *ctx, const char *p, int64_t n, cp::Text *out) {
+  *out = st->copyPathToStore(*ctx, std::string_view(p, size_t(n)));
+}
+// one list element: the recursion (canonicalizePath true, the default argument the C++ loop gave it), its piece
+// appended to the result and freed here; the EvalError keeps its trace
+void nixev_coerce_elem(EvalState *st, Value *e, NixStringContext *ctx, int64_t coerceMore, int64_t copyToStore,
+                       PosPtr pos, const char *errorCtx, int64_t errorCtxLen, cp::Text *result) {
+  try {
+    cp::Text piece = st->coerceToString(*e, *ctx, coerceMore != 0, copyToStore != 0, pos,
+                                        std::string_view(errorCtx, size_t(errorCtxLen)));
+    result->put(piece.data(), piece.size());
+  } catch (EvalError &err) {
+    err.addTrace(pos, "while evaluating one element of the list");
+    throw;
+  }
+}
+}
+
 cp::Text EvalState::coerceToString(Value &v, NixStringContext &ctx, bool coerceMore, bool copyToStore,
                                    PosPtr pos, std::string_view errorCtx, bool canonicalizePath) {
-  forceValue(v, pos);
-  switch (v.type) {
-  case VType::String:
-    copyContext(v, ctx);
-    return cp::Text(v.sv());
-  case VType::Path: {
-    if (copyToStore) return copyPathToStore(ctx, v.pathView());
-    return cp::Text(v.pathView());
-  }
-  case VType::Attrs: {
-    if (auto s2 = tryAttrsToString(v, ctx, coerceMore, copyToStore)) return cp::mv(*s2);
-    const Attr *o = v.attrs->get(s.outPath);
-    if (!o) {
-      TypeError e(cp::cat("cannot coerce ", showType(v), " to a string: ", printValueForTrace(v)), pos);
-      if (!errorCtx.empty()) e.addTrace(pos, cp::Text(errorCtx));
-      throw e;
-    }
-    return coerceToString(*o->value, ctx, coerceMore, copyToStore, pos,
-                          "while evaluating the `outPath` attribute", canonicalizePath);
-  }
-  default:
-    break;
-  }
-  if (coerceMore) {
-    if (v.type == VType::Bool) return v.boolean ? "1" : "";
-    if (v.type == VType::Int) return cp::str(v.integer);
-    if (v.type == VType::Float) return nixfe::fixedFloat(v.fpoint);
-    if (v.type == VType::Null) return "";
-    if (v.type == VType::List) {
-      cp::Text result;
-      for (size_t n = 0; n < v.listSize(); n++) {
-        Value *e = v.list.elems[n];
-        try {
-          result += coerceToString(*e, ctx, coerceMore, copyToStore, pos, errorCtx);
-        } catch (EvalError &err) {
-          err.addTrace(pos, "while evaluating one element of the list");
-          throw;
-        }
-        if (n < v.listSize() - 1 && (e->type != VType::List || e->listSize() != 0)) result += " ";
-      }
-      return result;
-    }
-  }
-  TypeError e(cp::cat("cannot coerce ", showType(v), " to a string: ", printValueForTrace(v)), pos);
-  if (!errorCtx.empty()) e.addTrace(pos, cp::Text(errorCtx));
-  throw e;
+  cp::Text out;
+  nixev_ts_coerce(this, &v, &ctx, int64_t(coerceMore), int64_t(copyToStore), pos, int64_t(canonicalizePath),
+                  errorCtx.data(), int64_t(errorCtx.size()), &out);
+  return out;
 }
 
 cp::Text EvalState::copyPathToStore(NixStringContext &ctx, std::string_view path) {
@@ -2086,74 +2095,9 @@ cp::Text EvalState::coerceToPath(Value &v, NixStringContext &ctx, PosPtr pos, st
 // Comparison
 //===----------------------------------------------------------------------===//
 
-bool EvalState::eqValues(Value &v1, Value &v2, PosPtr pos) {
-  forceValue(v1, pos);
-  forceValue(v2, pos);
-  if (v1.type == VType::Int && v2.type == VType::Float) return (double)v1.integer == v2.fpoint;
-  if (v1.type == VType::Float && v2.type == VType::Int) return v1.fpoint == (double)v2.integer;
-  auto norm = [](VType t) { return t == VType::PrimOp || t == VType::PrimOpApp ? VType::Lambda : t; };
-  if (norm(v1.type) != norm(v2.type)) return false;
-  switch (v1.type) {
-  case VType::Int: return v1.integer == v2.integer;
-  case VType::Float: return v1.fpoint == v2.fpoint;
-  case VType::Bool: return v1.boolean == v2.boolean;
-  case VType::Null: return true;
-  case VType::String: return v1.sv() == v2.sv();
-  case VType::Path: return v1.pathView() == v2.pathView();
-  case VType::List:
-    if (v1.listSize() != v2.listSize()) return false;
-    for (auto [a, b] : cp::joins(v1.items(), v2.items()))
-      if (a != b && !eqValues(*a, *b, pos)) return false; // a == b: one value, equal without a look
-    return true;
-  case VType::Attrs: {
-    if (v1.attrs == v2.attrs) return true;
-    if (isDerivation(v1) && isDerivation(v2)) {
-      const Attr *i = v1.attrs->get(s.outPath), *j = v2.attrs->get(s.outPath);
-      if (i && j) {
-        if (i->value == j->value) return true;
-        return eqValues(*i->value, *j->value, pos);
-      }
-    }
-    if (v1.attrs->size() != v2.attrs->size()) return false;
-    auto ra = v1.attrs->rows(), rb = v2.attrs->rows(); // the rows as Series: a layer reads through its selection
-    for (size_t k = 0; k < v1.attrs->size(); k++) {
-      const Attr &a = ra[uint32_t(k)], &b = rb[uint32_t(k)];
-      if (a.name != b.name) return false;
-      if (a.value == b.value) continue;
-      if (!eqValues(*a.value, *b.value, pos)) return false;
-    }
-    return true;
-  }
-  case VType::Lambda: case VType::PrimOp: case VType::PrimOpApp:
-    return false;
-  default:
-    throw EvalError(cp::cat("cannot compare ", showType(v1), " with ", showType(v2)), pos);
-  }
-}
+bool EvalState::eqValues(Value &v1, Value &v2, PosPtr pos) { return nixev_ts_eq(this, &v1, &v2, pos) != 0; }
 
-bool EvalState::lessThan(Value &v1, Value &v2, PosPtr pos) {
-  forceValue(v1, pos);
-  forceValue(v2, pos);
-  if (v1.type == VType::Float && v2.type == VType::Int) return v1.fpoint < (double)v2.integer;
-  if (v1.type == VType::Int && v2.type == VType::Float) return (double)v1.integer < v2.fpoint;
-  if (v1.type != v2.type)
-    throw EvalError(cp::cat("cannot compare ", showType(v1), " with ", showType(v2)), pos);
-  switch (v1.type) {
-  case VType::Int: return v1.integer < v2.integer;
-  case VType::Float: return v1.fpoint < v2.fpoint;
-  case VType::String: return v1.sv() < v2.sv();
-  case VType::Path: return v1.pathView() < v2.pathView();
-  case VType::List:
-    for (size_t i = 0;; i++) {
-      if (i == v2.listSize()) return false;
-      if (i == v1.listSize()) return true;
-      if (!eqValues(*v1.list.elems[i], *v2.list.elems[i], pos))
-        return lessThan(*v1.list.elems[i], *v2.list.elems[i], pos);
-    }
-  default:
-    throw EvalError(cp::cat("cannot compare ", showType(v1), " with ", showType(v2), "; values of that type are incomparable"), pos);
-  }
-}
+bool EvalState::lessThan(Value &v1, Value &v2, PosPtr pos) { return nixev_ts_lt(this, &v1, &v2, pos) != 0; }
 
 //===----------------------------------------------------------------------===//
 // Printing
