@@ -80,6 +80,32 @@ llvm_update_compile_flags(NixStore)
 # The hot set of the TrikeShed algebra (include/Composite/Hot.h) is the one precompiled package; scripts/hot-check.sh holds it pure.
 target_precompile_headers(NixStore PRIVATE ${PROJECT_SOURCE_DIR}/include/Composite/Hot.h)
 
+# Hollowing the C++ into MLIR (docs/interfaces, scripts/cxx-interfaces.py): an interface's C++ definition is deleted
+# (the header keeps the declaration) and provided instead by a lowered .mlir, translated to LLVM IR and compiled to an
+# object linked into the owning library.  The .mlir defines the exact mangled symbol with the ABI the extractor gives.
+# mlower_interface(TARGET MLIR STEM) is one hollowed interface; adding another is one .mlir under lowered/ and one call.
+find_program(MLNIX_MLIR_TRANSLATE mlir-translate HINTS ${LLVM_TOOLS_BINARY_DIR} REQUIRED)
+find_program(MLNIX_LOWER_CLANG clang HINTS ${LLVM_TOOLS_BINARY_DIR} REQUIRED)
+set(MLNIX_LOWERED_DIR ${CMAKE_CURRENT_BINARY_DIR}/lowered)
+file(MAKE_DIRECTORY ${MLNIX_LOWERED_DIR})
+function(mlnix_lower_interface target mlir stem)
+  set(src ${PROJECT_SOURCE_DIR}/${mlir})
+  set(ll ${MLNIX_LOWERED_DIR}/${stem}.ll)
+  set(o ${MLNIX_LOWERED_DIR}/${stem}.o)
+  add_custom_command(OUTPUT ${ll}
+    COMMAND ${MLNIX_MLIR_TRANSLATE} --mlir-to-llvmir ${src} -o ${ll}
+    DEPENDS ${src} COMMENT "lowering ${mlir} to LLVM IR")
+  add_custom_command(OUTPUT ${o}
+    COMMAND ${MLNIX_LOWER_CLANG} -O2 -c ${ll} -o ${o}
+    DEPENDS ${ll} COMMENT "compiling lowered ${stem}.o")
+  add_custom_target(mlnix_lowered_${stem} DEPENDS ${o})
+  add_dependencies(${target} mlnix_lowered_${stem})
+  target_sources(${target} PRIVATE ${o})
+  set_source_files_properties(${o} PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+endfunction()
+# nixstore::Hash::operator== (lib/Store/Hash.cpp's definition is gone; include/Nix/Store.h keeps the declaration).
+mlnix_lower_interface(NixStore lowered/nixstore/HashEq.mlir HashEq)
+
 add_library(NixFrontend STATIC Frontend/Parser.cpp Frontend/Source.cpp Frontend/Confix.cpp)
 add_dependencies(NixFrontend MLIRNixOpsIncGen TrikeShedIncGen)
 target_link_libraries(NixFrontend PUBLIC MLIRNix MLIRIR)

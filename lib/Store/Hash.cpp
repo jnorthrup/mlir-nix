@@ -341,9 +341,7 @@ composite::Text Hash::to_string(HashFormat f, bool includeAlgo) const {
   return s;
 }
 
-bool Hash::operator==(const Hash &o) const {
-  return algo == o.algo && memcmp(bytes, o.bytes, size()) == 0;
-}
+// Hash::operator== is hollowed out to MLIR: lowered/nixstore/HashEq.mlir, built into NixStore by lib/CMakeLists.txt.
 bool Hash::operator<(const Hash &o) const {
   if (algo != o.algo) return algo < o.algo;
   return memcmp(bytes, o.bytes, size()) < 0;
