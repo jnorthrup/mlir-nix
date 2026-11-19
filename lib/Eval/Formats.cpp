@@ -71,39 +71,26 @@ struct CallDepth {
 };
 } // namespace
 
+// The byte emission of JSON (an integer's digits, a string's escaping) is hollowed into lowered/nixeval/PrintOps.mlir
+// (trikeshed.fold / series / combine / combineAll / slice / drain), lowered by --trikeshed-lower-cursors and linked into
+// NixEval.  Each entry drains into room reserved here and returns how many bytes it wrote; the count is adopted as
+// appendAll adopts a copied run (the cells are plain chars, already written).
+extern "C" {
+size_t nixev_ts_int(int64_t x, char *into, size_t cap);
+size_t nixev_ts_escape(const char *p, size_t n, char *into, size_t cap);
+}
+
 void JsonOut::putInt(int64_t x) {
-  char buf[24], *e = buf + sizeof buf, *p = e;
-  uint64_t u = x < 0 ? 0 - uint64_t(x) : uint64_t(x); // INT64_MIN too
-  do *--p = char('0' + u % 10); while (u /= 10);
-  if (x < 0) *--p = '-';
-  put(std::string_view(p, size_t(e - p)));
+  uint32_t off = bytes.size();
+  bytes.reserve(size_t(off) + 21); // a sign and at most 19 digits
+  bytes.n += uint32_t(nixev_ts_int(x, bytes.data() + off, 21));
 }
 
 void JsonOut::putString(std::string_view s) {
-  static const char hex[] = "0123456789abcdef";
-  put('"');
-  size_t run = 0; // the bytes since the last escape go in as one piece
-  for (size_t i = 0; i < s.size(); i++) {
-    unsigned char c = (unsigned char)s[i];
-    if (c >= 0x20 && c != '"' && c != '\\') continue;
-    put(s.substr(run, i - run));
-    switch (c) {
-    case '"': put("\\\""); break;
-    case '\\': put("\\\\"); break;
-    case '\b': put("\\b"); break;
-    case '\f': put("\\f"); break;
-    case '\n': put("\\n"); break;
-    case '\r': put("\\r"); break;
-    case '\t': put("\\t"); break;
-    default: {
-      char u[6] = {'\\', 'u', '0', '0', hex[c >> 4], hex[c & 15]};
-      put(std::string_view(u, 6));
-    }
-    }
-    run = i + 1;
-  }
-  put(s.substr(run));
-  put('"');
+  uint32_t off = bytes.size();
+  size_t room = 2 + 6 * s.size(); // two quotes and at most six bytes a byte (\u00xx)
+  bytes.reserve(size_t(off) + room);
+  bytes.n += uint32_t(nixev_ts_escape(s.data(), s.size(), bytes.data() + off, room));
 }
 
 void EvalState::printValueAsJSON(JsonOut &out, Value &v, bool strict, NixStringContext &ctx, bool copyToStore,

@@ -184,3 +184,6 @@ mlnix_lower_trikeshed(NixEval lowered/nixeval/VersionOps.mlir VersionOps)
 # __sort (the cmp lambda and the sortRows call are gone).  The sort is trikeshed.sorted, stable; each comparison calls
 # back into the evaluator (the comparator is a Nix function).
 mlnix_lower_trikeshed(NixEval lowered/nixeval/SortOps.mlir SortOps)
+# The JSON byte emission: JsonOut::putInt and JsonOut::putString (lib/Eval/Formats.cpp's bodies are gone; the bridges
+# reserve room and adopt the drained bytes).  The digits and the escaping are trikeshed.fold / series / combineAll / drain.
+mlnix_lower_trikeshed(NixEval lowered/nixeval/PrintOps.mlir PrintOps)
