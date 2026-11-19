@@ -276,4 +276,9 @@ mlnix_lower_trikeshed(NixEval lowered/nixeval/CmpOps.mlir CmpOps)
 # here; the callbacks keep the forcing, the TypeError, copyPathToStore, the number text and the element's try/catch
 # addTrace.
 mlnix_lower_trikeshed(NixEval lowered/nixeval/CoerceOps.mlir CoerceOps)
+# EvalState::evalConcatStrings' composition (lib/Eval/Eval.cpp): the per-part int/float accumulation (add + overflow
+# test, int->float promotion) and window collection as an scf.for, and the PATH case's concat as a combineAll drained
+# once into the Text.  The callbacks keep the forcing/coercion/context merging and the throws' wording; canonPath and
+# mkPath stay in the bridge.
+mlnix_lower_trikeshed(NixEval lowered/nixeval/ConcatOps.mlir ConcatOps)
 
