@@ -199,6 +199,10 @@ mlnix_lower_trikeshed(NixEval lowered/nixeval/SortOps.mlir SortOps)
 # The JSON byte emission: JsonOut::putInt and JsonOut::putString (lib/Eval/Formats.cpp's bodies are gone; the bridges
 # reserve room and adopt the drained bytes).  The digits and the escaping are trikeshed.fold / series / combineAll / drain.
 mlnix_lower_trikeshed(NixEval lowered/nixeval/PrintOps.mlir PrintOps)
+# The XML byte emission: XMLWriter's tag lines (lib/Eval/Formats.cpp's indent/attrs/open/close/empty bodies are gone;
+# the bridge sorts the rows, reserves room and adopts the drained bytes).  The indent, prefix, name, attributes and
+# suffix are trikeshed.series / slice / combine / combineAll / drain over a constant escape table.
+mlnix_lower_trikeshed(NixEval lowered/nixeval/XmlOps.mlir XmlOps)
 # The higher-order list primops __concatLists / __concatMap / __filter / __any / __all / __elem (their C++ loops are
 # gone).  concatLists/concatMap are trikeshed.combineAll of the inner lists' cells, filter a trikeshed.where; any/all/elem
 # short-circuit in an scf.while.  Each Nix function application calls back into the evaluator.

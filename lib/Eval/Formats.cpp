@@ -265,6 +265,14 @@ void parseJSON(EvalState &state, std::string_view json, Value &v) {
 //===----------------------------------------------------------------------===//
 
 namespace {
+// The XML byte emission is hollowed into lowered/nixeval/XmlOps.mlir (trikeshed.series / slice / text / combine /
+// combineAll / at / drain over a constant escape table), lowered by --trikeshed-lower-cursors and linked into NixEval.
+// One entry writes a whole tag line into room reserved here and returns how many bytes it wrote; the attribute rows
+// and the element stack stay here, as does the recursion/forcing of toXML below.
+extern "C" size_t nixev_ts_xml_tag(int64_t kind, int64_t depth, const char *name, int64_t nn,
+                                   const composite::Chars *keys, const composite::Chars *vals, int64_t nrows,
+                                   char *into, size_t cap);
+
 struct XMLWriter {
   composite::Text &out;
   composite::MutableSeries<composite::Text> stack{};
@@ -286,49 +294,29 @@ struct XMLWriter {
       rows.append(Row{k, composite::mv(v)});
     }
   };
-  void indent(size_t depth) {
-    for (size_t i = 0; i < depth * 2; i++) out.put(' ');
-  }
-  void put(std::string_view s) { out.put(s.data(), uint32_t(s.size())); }
-  void attrs(const Attrs &as) {
+  /// One tag line: the rows sorted by name (as Nix's std::map wrote them), their keys and values as windows, the room
+  /// the emission needs (2 a depth, 2 the prefix, the name, 4 the suffix, and 4 + key + 6 a value byte), drained into
+  /// the Text's own buffer and adopted (resize before, truncate after, the PathOps way).  kind 0 open, 1 close, 2 empty.
+  void tag(int64_t kind, size_t depth, std::string_view n, const Attrs &as) {
     composite::MutableSeries<const Attrs::Row *> sorted;
     for (const Attrs::Row &r : as.rows) sorted.append(&r);
     composite::sortRows(sorted.data(), sorted.size(), [](const Attrs::Row *a, const Attrs::Row *b) { return strcmp(a->k, b->k) < 0; });
+    composite::MutableSeries<composite::Chars> keys, vals;
+    size_t room = 2 * depth + 2 + n.size() + 4;
     for (const Attrs::Row *r : sorted) {
-      out.put(' ').put(r->k).put("=\"");
-      for (char c : r->v) {
-        if (c == '"') out.put("&quot;");
-        else if (c == '<') out.put("&lt;");
-        else if (c == '>') out.put("&gt;");
-        else if (c == '&') out.put("&amp;");
-        else if (c == '\n') out.put("&#xA;");
-        else out.put(c);
-      }
-      out.put('"');
+      size_t kn = strlen(r->k);
+      keys.append(composite::chars(r->k, uint32_t(kn)));
+      vals.append(r->v.chars());
+      room += 4 + kn + 6 * size_t(r->v.size());
     }
+    size_t at = out.size();
+    out.resize(at + room);
+    out.truncate(at + nixev_ts_xml_tag(kind, int64_t(depth), n.data(), int64_t(n.size()), keys.data(), vals.data(),
+                                       int64_t(keys.size()), out.begin() + at, room));
   }
-  void open(std::string_view n, const Attrs &as = {}) {
-    indent(stack.size());
-    out.put('<');
-    put(n);
-    attrs(as);
-    out.put(">\n");
-    stack.append(composite::Text(n));
-  }
-  void close() {
-    indent(stack.size() - 1);
-    out.put("</");
-    put(stack.back());
-    out.put(">\n");
-    stack.pop();
-  }
-  void empty(std::string_view n, const Attrs &as = {}) {
-    indent(stack.size());
-    out.put('<');
-    put(n);
-    attrs(as);
-    out.put(" />\n");
-  }
+  void open(std::string_view n, const Attrs &as = {}) { tag(0, stack.size(), n, as); stack.append(composite::Text(n)); }
+  void close() { tag(1, stack.size() - 1, stack.back(), {}); stack.pop(); }
+  void empty(std::string_view n, const Attrs &as = {}) { tag(2, stack.size(), n, as); }
 };
 
 void posToXML(EvalState &st, XMLWriter::Attrs &as, PosPtr pos) {
