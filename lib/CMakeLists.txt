@@ -103,6 +103,38 @@ function(mlnix_lower_interface target mlir stem)
   target_sources(${target} PRIVATE ${o})
   set_source_files_properties(${o} PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
 endfunction()
+# A hollowed interface written in the TrikeShed dialect (not yet the llvm dialect): first --trikeshed-lower-cursors
+# (mlnix-opt), then the stock buffer pipeline mlnixci and the LLVM arm lower with (scripts/nix-native.sh), then translate
+# and compile.  Same object linkage as mlnix_lower_interface; the .mlir keeps the algebra in trikeshed ops.
+find_program(MLNIX_MLIR_OPT mlir-opt HINTS ${LLVM_TOOLS_BINARY_DIR} REQUIRED)
+set(MLNIX_TRIKESHED_PIPELINE
+  --ownership-based-buffer-deallocation --canonicalize --buffer-deallocation-simplification
+  --bufferization-lower-deallocations --convert-scf-to-cf --expand-strided-metadata --lower-affine
+  --finalize-memref-to-llvm --convert-scf-to-cf --convert-arith-to-llvm --convert-index-to-llvm
+  --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts)
+function(mlnix_lower_trikeshed target mlir stem)
+  set(src ${PROJECT_SOURCE_DIR}/${mlir})
+  set(cur ${MLNIX_LOWERED_DIR}/${stem}.cursors.mlir)
+  set(low ${MLNIX_LOWERED_DIR}/${stem}.lowered.mlir)
+  set(ll ${MLNIX_LOWERED_DIR}/${stem}.ll)
+  set(o ${MLNIX_LOWERED_DIR}/${stem}.o)
+  add_custom_command(OUTPUT ${cur}
+    COMMAND $<TARGET_FILE:mlnix-opt> ${src} --trikeshed-lower-cursors -o ${cur}
+    DEPENDS ${src} mlnix-opt COMMENT "trikeshed-lower-cursors ${mlir}")
+  add_custom_command(OUTPUT ${low}
+    COMMAND ${MLNIX_MLIR_OPT} ${cur} ${MLNIX_TRIKESHED_PIPELINE} -o ${low}
+    DEPENDS ${cur} COMMENT "lowering ${stem} buffers to llvm")
+  add_custom_command(OUTPUT ${ll}
+    COMMAND ${MLNIX_MLIR_TRANSLATE} --mlir-to-llvmir ${low} -o ${ll}
+    DEPENDS ${low} COMMENT "translating ${stem} to LLVM IR")
+  add_custom_command(OUTPUT ${o}
+    COMMAND ${MLNIX_LOWER_CLANG} -O2 -Wno-override-module -c ${ll} -o ${o}
+    DEPENDS ${ll} COMMENT "compiling lowered ${stem}.o")
+  add_custom_target(mlnix_lowered_${stem} DEPENDS ${o})
+  add_dependencies(${target} mlnix_lowered_${stem})
+  target_sources(${target} PRIVATE ${o})
+  set_source_files_properties(${o} PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+endfunction()
 # nixstore::Hash::operator== (lib/Store/Hash.cpp's definition is gone; include/Nix/Store.h keeps the declaration).
 mlnix_lower_interface(NixStore lowered/nixstore/HashEq.mlir HashEq)
 # nixstore::isInStore (lib/Store/StorePaths.cpp's definition is gone; include/Nix/Store.h keeps the declaration).
@@ -132,3 +164,6 @@ target_link_libraries(NixEval PRIVATE MLIRArithDialect MLIRControlFlowDialect ML
 llvm_update_compile_flags(NixEval)
 # nixev::EvalState::showType (lib/Eval/Eval.cpp's definition is gone; include/Nix/Eval.h keeps the declaration).
 mlnix_lower_interface(NixEval lowered/nixeval/ShowType.mlir ShowType)
+# The list primops __length, __elemAt, __genList, __foldl' (lib/Eval/Builtins.cpp's bodies are gone; the bridges force the
+# operands and call these entries).  The list algebra is trikeshed.size / at / series / fold.
+mlnix_lower_trikeshed(NixEval lowered/nixeval/ListOps.mlir ListOps)

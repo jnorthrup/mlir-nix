@@ -28,6 +28,19 @@ namespace nixev {
 void registerStoreBuiltins(EvalState &state);
 void registerFormatBuiltins(EvalState &state);
 
+// The list primops' algebra is hollowed into lowered/nixeval/ListOps.mlir (trikeshed.size / at / series / fold), lowered
+// by --trikeshed-lower-cursors and linked into NixEval.  The bridges below force the operands (Nix's error order and
+// wording) and call these entries; the entries call back into the evaluator through the two callbacks for the cells only
+// the evaluator can make (a thunk `f i`, a fresh cell).
+extern "C" {
+void nixev_ts_length(Value *list, Value *v);
+void nixev_ts_elemAt(EvalState *st, Value *list, int64_t n, Value *v, PosPtr pos);
+void nixev_ts_genList(EvalState *st, Value *f, int64_t n, Value *v);
+void nixev_ts_fold(EvalState *st, Value *f, Value *list, Value *nul, Value *v, PosPtr pos);
+Value *nixev_gen_elem(EvalState *st, Value *f, int64_t i) { Value *iv = st->allocValue(); st->mkInt(*iv, i); return st->mkAppValue(f, iv); }
+Value *nixev_cell(EvalState *st) { return st->allocValue(); }
+}
+
 //===----------------------------------------------------------------------===//
 // Version comparison (upstream names.cc)
 //===----------------------------------------------------------------------===//
@@ -911,7 +924,7 @@ void registerBuiltins(EvalState &state) {
   });
   S.addPrimOp("__length", [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[0], pos, "while evaluating the first argument passed to builtins.length");
-    st.mkInt(v, (int64_t)args[0]->listSize());
+    nixev_ts_length(args[0], &v);
   });
   S.addPrimOp("__head", [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[0], pos, "while evaluating the first argument passed to builtins.head");
@@ -932,9 +945,7 @@ void registerBuiltins(EvalState &state) {
     int64_t n = st.forceInt(*args[1], pos, "while evaluating the second argument passed to builtins.elemAt");
     if (n < 0 || (uint64_t)n >= args[0]->listSize())
       throw EvalError(composite::cat("list index ", n, " is out of bounds"), pos);
-    Value *e = args[0]->list.elems[n];
-    st.forceValue(*e, pos);
-    v = *e;
+    nixev_ts_elemAt(&st, args[0], n, &v, pos);
   });
   S.addPrimOp("__elem", [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.elem");
@@ -1003,32 +1014,13 @@ void registerBuiltins(EvalState &state) {
   S.addPrimOp("__foldl'", [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceFunction(*args[0], pos, "while evaluating the first argument passed to builtins.foldlStrict");
     st.forceList(*args[2], pos, "while evaluating the third argument passed to builtins.foldlStrict");
-    size_t n = args[2]->listSize();
-    if (n) {
-      Value *cur = args[1];
-      Value **elems = args[2]->list.elems;
-      for (size_t i = 0; i < n; i++) {
-        Value *fargs[2] = {cur, elems[i]};
-        Value *next = i == n - 1 ? &v : st.allocValue();
-        st.callFunction(*args[0], 2, fargs, *next, pos);
-        cur = next;
-      }
-      st.forceValue(v, pos);
-    } else {
-      st.forceValue(*args[1], pos);
-      v = *args[1];
-    }
+    nixev_ts_fold(&st, args[0], args[2], args[1], &v, pos);
   });
   S.addPrimOp("__genList", [](EvalState &st, A args, Value &v, PosPtr pos) {
     int64_t n = st.forceInt(*args[1], pos, "while evaluating the second argument passed to builtins.genList");
     if (n < 0) throw EvalError(composite::cat("cannot create list of size ", n), pos);
     st.forceFunction(*args[0], pos, "while evaluating the first argument passed to builtins.genList");
-    st.mkList(v, n);
-    for (int64_t i = 0; i < n; i++) {
-      Value *iv = st.allocValue();
-      st.mkInt(*iv, i);
-      v.list.elems[i] = st.mkAppValue(args[0], iv);
-    }
+    nixev_ts_genList(&st, args[0], n, &v);
   });
   S.addPrimOp("__sort", [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[1], pos, "while evaluating the second argument passed to builtins.sort");
