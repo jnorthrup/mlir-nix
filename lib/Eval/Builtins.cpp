@@ -41,6 +41,37 @@ Value *nixev_gen_elem(EvalState *st, Value *f, int64_t i) { Value *iv = st->allo
 Value *nixev_cell(EvalState *st) { return st->allocValue(); }
 }
 
+// The string primops' algebra and mkStringOf are hollowed into lowered/nixeval/StringOps.mlir (trikeshed.size / slice /
+// compare / combineAll / drain).  The bridges force and coerce the operands (Nix's error order and wording, the string
+// contexts); the entries call back for the arena room, the 4 GiB refusal, and the replacement strings only the evaluator
+// can force with their contexts.  A composite::Chars is 16 bytes: u32 count @0, const char *data @8.
+struct TsBounds { int64_t from, to; };
+struct TsReplace {
+  EvalState *st; Value **to; PosPtr pos; NixStringContext *ctx;
+  std::map<size_t, std::string_view> cache; // the replacement strings, forced once each, in match order
+};
+extern "C" {
+void nixev_ts_stringLength(const char *s, int64_t n, Value *v);
+TsBounds nixev_ts_substring(const char *s, int64_t n, int64_t start, int64_t len);
+void nixev_ts_concat(EvalState *st, const composite::Chars *pieces, int64_t np, Value *v, const StringContext *ctx);
+void nixev_ts_replace(EvalState *st, TsReplace *r, const char *s, int64_t sn, const composite::Chars *from, int64_t m, Value *v);
+char *nixev_str_room(EvalState *st, int64_t n) {
+  if (st->statsEnabled) st->nStringBytes += uint64_t(n) + 1;
+  return static_cast<char *>(st->alloc.Allocate(size_t(n) + 1, 1));
+}
+void nixev_str_toobig() { throw EvalError("string of 4 GiB or more"); }
+void nixev_replace_to(TsReplace *r, int64_t j, composite::Chars *out) {
+  auto c = r->cache.find(size_t(j));
+  if (c == r->cache.end()) {
+    NixStringContext c2;
+    auto ts = r->st->forceString(*r->to[j], c2, r->pos, "while evaluating one of the replacement strings passed to builtins.replaceStrings");
+    c = r->cache.emplace(size_t(j), ts).first;
+    r->ctx->insert(c2.begin(), c2.end());
+  }
+  *out = composite::chars(c->second.data(), uint32_t(c->second.size()));
+}
+}
+
 //===----------------------------------------------------------------------===//
 // Version comparison (upstream names.cc)
 //===----------------------------------------------------------------------===//
@@ -467,7 +498,7 @@ void registerBuiltins(EvalState &state) {
     NixStringContext ctx;
     composite::Text scratch;
     auto w = st.coerceToWindow(*args[0], ctx, false, true, pos, "while evaluating the argument passed to builtins.stringLength", scratch);
-    st.mkInt(v, (int64_t)w.size());
+    nixev_ts_stringLength(w.data(), w.size(), &v);
   });
   S.addPrimOp("__substring", [](EvalState &st, A args, Value &v, PosPtr pos) {
     int64_t start = st.forceInt(*args[0], pos, "while evaluating the first argument (the start offset) passed to builtins.substring");
@@ -477,20 +508,18 @@ void registerBuiltins(EvalState &state) {
     if (args[2]->type == VType::String) {
       // A window over the string's own bytes, sharing its context: nothing is copied.
       composite::Chars chars = args[2]->window();
-      uint32_t from = (uint64_t)start >= chars.size() ? chars.size() : uint32_t(start);
-      uint32_t to = len < 0 || (uint64_t)len >= chars.size() - from ? chars.size() : from + uint32_t(len);
-      composite::Chars w = composite::slice(chars, from, to);
+      auto b = nixev_ts_substring(chars.data(), chars.size(), start, len);
       v.type = VType::String;
-      v.str.s = w.data();
-      v.aux = w.size();
+      v.str.s = chars.data() + b.from;
+      v.aux = uint32_t(b.to - b.from);
       v.str.ctx = args[2]->str.ctx;
       return;
     }
     NixStringContext ctx;
     composite::Text scratch;  // only a coerced argument (a path, a set) gets here: a string was shared above
-    std::string_view s = composite::view(st.coerceToWindow(*args[2], ctx, false, true, pos, "while evaluating the third argument (the string) passed to builtins.substring", scratch));
-    size_t l = len < 0 ? std::string_view::npos : (size_t)len;
-    st.mkString(v, (uint64_t)start >= s.size() ? "" : s.substr(start, l), ctx);
+    auto w = st.coerceToWindow(*args[2], ctx, false, true, pos, "while evaluating the third argument (the string) passed to builtins.substring", scratch);
+    auto b = nixev_ts_substring(w.data(), w.size(), start, len);
+    st.mkString(v, std::string_view(w.data() + b.from, size_t(b.to - b.from)), ctx);
   });
   S.addPrimOp("__concatStringsSep", [](EvalState &st, A args, Value &v, PosPtr pos) {
     NixStringContext ctx;
@@ -514,7 +543,7 @@ void registerBuiltins(EvalState &state) {
       if (w.size() && w.data() == scratch.data()) w = composite::chars(st.copyString(scratch), w.size()); // coerced text lives in the arena
       pieces[nv++] = w;
     }
-    st.mkStringOf(v, llvm::ArrayRef<composite::Chars>(pieces, nv), own.result(st, ctx));
+    nixev_ts_concat(&st, pieces, int64_t(nv), &v, own.result(st, ctx));
   });
   S.addPrimOp("__replaceStrings", [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceList(*args[0], pos, "while evaluating the first argument passed to builtins.replaceStrings");
@@ -522,39 +551,13 @@ void registerBuiltins(EvalState &state) {
     if (args[0]->listSize() != args[1]->listSize())
       throw EvalError("'from' and 'to' arguments passed to builtins.replaceStrings have different lengths", pos);
     auto from = llvm::to_vector(args[0]->values() |cp::α| [&](Value &e) {
-      return st.forceString(e, pos, "while evaluating one of the strings to replace passed to builtins.replaceStrings"); });
-    std::map<size_t, std::string_view> cache;
+      auto s = st.forceString(e, pos, "while evaluating one of the strings to replace passed to builtins.replaceStrings");
+      return composite::chars(s.data(), uint32_t(s.size())); });
     NixStringContext ctx;
     std::string_view s = st.forceString(*args[2], ctx, pos, "while evaluating the third argument passed to builtins.replaceStrings");
-    composite::Text res;
-    for (size_t p = 0; p <= s.size();) {
-      bool found = false;
-      for (size_t j = 0; j < from.size(); j++) {
-        if (s.compare(p, from[j].size(), from[j]) == 0) {
-          found = true;
-          auto c = cache.find(j);
-          if (c == cache.end()) {
-            NixStringContext c2;
-            auto ts = st.forceString(*args[1]->list.elems[j], c2, pos, "while evaluating one of the replacement strings passed to builtins.replaceStrings");
-            c = cache.emplace(j, ts).first;
-            ctx.insert(c2.begin(), c2.end());
-          }
-          res += c->second;
-          if (from[j].empty()) {
-            if (p < s.size()) res += s[p];
-            p++;
-          } else {
-            p += from[j].size();
-          }
-          break;
-        }
-      }
-      if (!found) {
-        if (p < s.size()) res += s[p];
-        p++;
-      }
-    }
-    st.mkString(v, res, ctx);
+    TsReplace r{&st, args[1]->list.elems, pos, &ctx, {}};
+    nixev_ts_replace(&st, &r, s.data(), int64_t(s.size()), from.data(), int64_t(from.size()), &v);
+    v.str.ctx = st.makeContext(ctx);
   });
   S.addPrimOp("__match", [](EvalState &st, A args, Value &v, PosPtr pos) {
     auto re = st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.match");

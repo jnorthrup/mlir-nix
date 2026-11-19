@@ -167,3 +167,7 @@ mlnix_lower_interface(NixEval lowered/nixeval/ShowType.mlir ShowType)
 # The list primops __length, __elemAt, __genList, __foldl' (lib/Eval/Builtins.cpp's bodies are gone; the bridges force the
 # operands and call these entries).  The list algebra is trikeshed.size / at / series / fold.
 mlnix_lower_trikeshed(NixEval lowered/nixeval/ListOps.mlir ListOps)
+# The string primops __stringLength, __substring, __concatStringsSep, __replaceStrings and mkStringOf (their bodies are gone
+# from lib/Eval/Builtins.cpp and lib/Eval/Eval.cpp; the bridges force/coerce the operands and call these entries).  The text
+# algebra is trikeshed.size / slice / compare / combineAll / drain.
+mlnix_lower_trikeshed(NixEval lowered/nixeval/StringOps.mlir StringOps)

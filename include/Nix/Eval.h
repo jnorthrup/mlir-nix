@@ -493,8 +493,7 @@ struct EvalState {
     if (s.size() > UINT32_MAX) throw EvalError("string of 4 GiB or more");
     v.type = VType::String; v.str.s = s.data(); v.aux = static_cast<uint32_t>(s.size()); v.str.ctx = nullptr;
   }
-  /// A string made of pieces (windows over existing bytes), written once into one arena buffer.
-  void mkStringOf(Value &v, llvm::ArrayRef<composite::Chars> pieces, const StringContext *ctx);
+  /// A string made of pieces: the algebra is hollowed into lowered/nixeval/StringOps.mlir (nixev_ts_concat, declared in Eval.cpp).
   void mkPath(Value &v, std::string_view p);
   void mkList(Value &v, size_t n);
   /// `l ++ r` into out: into the room of r's or l's buffer when the other side fits there (ListExtent), else a new buffer, with

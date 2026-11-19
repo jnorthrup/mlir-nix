@@ -183,33 +183,9 @@ void EvalState::mkStoreString(Value &v, std::string_view path) {
   v.str.ctx = makeContext(NixStringContext{p});
 }
 
-void EvalState::mkStringOf(Value &v, llvm::ArrayRef<composite::Chars> pieces, const StringContext *ctx) {
-  struct Sum { size_t total; uint32_t full; composite::Chars one; };
-  Sum sum = composite::fold(composite::series(pieces.data(), uint32_t(pieces.size())), Sum{0, 0, composite::chars("", 0)},
-                            [](Sum s, const composite::Chars &p) {
-                              if (p.size()) { s.full++; s.one = p; }
-                              s.total += p.size();
-                              return s;
-                            });
-  size_t total = sum.total;
-  if (total > UINT32_MAX) throw EvalError("string of 4 GiB or more");
-  if (sum.full <= 1) { // nothing is joined to the one piece (or there is none): it is the string, its bytes shared, as a string is never written
-    v.type = VType::String;
-    v.str.s = sum.one.data();
-    v.aux = sum.one.size();
-    v.str.ctx = ctx;
-    return;
-  }
-  char *buf = static_cast<char *>(alloc.Allocate(total + 1, 1));
-  if (statsEnabled) nStringBytes += total + 1;
-  char *at = composite::fold(composite::series(pieces.data(), uint32_t(pieces.size())), buf,
-                             [](char *to, const composite::Chars &p) { return std::copy(p.data(), p.data() + p.size(), to); });
-  *at = 0;
-  v.type = VType::String;
-  v.str.s = buf;
-  v.aux = static_cast<uint32_t>(total);
-  v.str.ctx = ctx;
-}
+// mkStringOf's pieces algebra is hollowed into lowered/nixeval/StringOps.mlir (trikeshed.combineAll / drain): at most one
+// non-empty piece is shared as the string, else one arena buffer of the total drained once.
+extern "C" void nixev_ts_concat(EvalState *st, const composite::Chars *pieces, int64_t np, Value *v, const StringContext *ctx);
 
 void EvalState::mkPath(Value &v, std::string_view p) {
   if (p.size() > UINT32_MAX) throw EvalError("path of 4 GiB or more");
@@ -1740,7 +1716,7 @@ void EvalState::evalConcatStrings(Node *node, Frame *env, Value &out) {
     for (size_t k = 0; k < nv; k++) str += composite::view(views[k]);
     return mkPath(out, nixfe::canonPath(str));
   }
-  mkStringOf(out, llvm::ArrayRef<composite::Chars>(views, nv), own.result(*this, context));
+  nixev_ts_concat(this, views, int64_t(nv), &out, own.result(*this, context));
 }
 
 Symbol EvalState::pathSymbol(const nixfe::Name &comp, Node *const *dyn, unsigned &nextDyn, Frame *env,
