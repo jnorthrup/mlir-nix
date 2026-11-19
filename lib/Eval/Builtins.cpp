@@ -72,6 +72,10 @@ struct TsReplace {
 extern "C" {
 void nixev_ts_stringLength(const char *s, int64_t n, Value *v);
 TsBounds nixev_ts_substring(const char *s, int64_t n, int64_t start, int64_t len);
+// The path primops' slash scans are hollowed into lowered/nixeval/PathBounds.mlir (trikeshed.at / slice over the byte
+// series): the bounds of baseNameOf's component and dirOf's last slash.  The bridges coerce and share the window.
+TsBounds nixev_ts_basename_bounds(const char *p, int64_t n);
+int64_t nixev_ts_dirname_slash(const char *p, int64_t n);
 void nixev_ts_concat(EvalState *st, const composite::Chars *pieces, int64_t np, Value *v, const StringContext *ctx);
 void nixev_ts_replace(EvalState *st, TsReplace *r, const char *s, int64_t sn, const composite::Chars *from, int64_t m, Value *v);
 void nixev_ts_attrNames(EvalState *st, Bindings *set, Value *v, const uint64_t *prefixes, const llvm::StringRef *names);
@@ -661,15 +665,8 @@ void registerBuiltins(EvalState &state) {
     composite::Text scratch;
     auto w = st.coerceToWindow(*args[0], ctx, false, false, pos, "while evaluating the first argument passed to builtins.baseNameOf", scratch);
     std::string_view p = composite::view(w);
-    uint32_t from = 0, to = 0;
-    if (!p.empty()) {
-      size_t last = p.size() - 1;
-      if (p[last] == '/' && last > 0) last--;
-      size_t slash = p.rfind('/', last);
-      from = slash == std::string_view::npos ? 0 : uint32_t(slash + 1);
-      to = uint32_t(last + 1);
-    }
-    mkSharedString(st, v, *args[0], composite::slice(w, from, to), ctx);
+    auto b = nixev_ts_basename_bounds(p.data(), int64_t(p.size()));
+    mkSharedString(st, v, *args[0], composite::slice(w, uint32_t(b.from), uint32_t(b.to)), ctx);
   });
   S.addPrimOp("dirOf", [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceValue(*args[0], pos);
@@ -681,8 +678,9 @@ void registerBuiltins(EvalState &state) {
     NixStringContext ctx;
     composite::Text scratch;
     auto w = st.coerceToWindow(*args[0], ctx, false, false, pos, "while evaluating the first argument passed to 'builtins.dirOf'", scratch);
-    auto slash = composite::view(w).rfind('/');
-    if (slash == std::string_view::npos) return st.mkString(v, ".", ctx);
+    std::string_view p = composite::view(w);
+    auto slash = nixev_ts_dirname_slash(p.data(), int64_t(p.size()));
+    if (slash < 0) return st.mkString(v, ".", ctx);
     mkSharedString(st, v, *args[0], composite::slice(w, 0, slash == 0 ? 1 : uint32_t(slash)), ctx);
   });
 

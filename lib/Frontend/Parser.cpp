@@ -2455,26 +2455,15 @@ struct Parser {
 
 } // namespace
 
+// nixfe::canonPath's segment walk is hollowed out to MLIR: lowered/nixfe/CanonPath.mlir (trikeshed.at / slice / text /
+// drain over the byte series), built into NixFrontend by lib/CMakeLists.txt.  The bridge sizes the Text (a segment writes
+// at most its bytes + one '/', and a lone '/' when nothing is written) and adopts the drained size.
+extern "C" size_t nixfe_ts_canonpath(const char *a, size_t an, const char *b, size_t bn, char *out, size_t from);
+
 void canonPath(composite::Text &out, composite::Chars a, composite::Chars b) {
-  uint32_t from = out.size();
-  auto walk = [&](composite::Chars rest) {
-    while (rest.size()) {
-      uint32_t len = composite::firstWhere(rest, [](char c) { return c == '/'; }); // the segment: up to the next slash, or all that is left
-      composite::Chars seg = composite::slice(rest, 0, len);
-      rest = composite::slice(rest, len < rest.size() ? len + 1 : len, rest.size());
-      if (len == 0 || (len == 1 && seg[0] == '.')) continue;
-      if (len == 2 && seg[0] == '.' && seg[1] == '.') { // the last segment written goes, if there is one
-        uint32_t k = out.size();
-        while (k > from && out.data()[k - 1] != '/') k--;
-        if (k > from) out.truncate(k - 1);
-        continue;
-      }
-      out.put('/').put(seg);
-    }
-  };
-  walk(a);
-  walk(b);
-  if (out.size() == from) out.put('/');
+  size_t from = out.size();
+  out.resize(from + a.size() + b.size() + 1);
+  out.truncate(nixfe_ts_canonpath(a.data(), a.size(), b.data(), b.size(), out.begin(), from));
 }
 
 composite::Text canonPath(std::string_view path) {

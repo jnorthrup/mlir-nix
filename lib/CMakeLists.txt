@@ -142,12 +142,18 @@ mlnix_lower_interface(NixStore lowered/nixstore/IsInStore.mlir IsInStore)
 # The byte encoders appendBase16, appendNix32, base64Encode (lib/Store/Hash.cpp's bodies are gone; the bridges size the
 # Text and call these entries).  The encoding algebra is trikeshed.series / at / alpha / drain over the byte series.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/Encoders.mlir Encoders)
+# The pure path algebra of nixstore::baseNameOf / dirOf (StorePaths.cpp's bodies are gone; the bridges size the Text and
+# call these entries).  The slash algebra is trikeshed.at / slice / text / drain over the byte series.
+mlnix_lower_trikeshed(NixStore lowered/nixstore/PathOps.mlir PathOps)
 
 add_library(NixFrontend STATIC Frontend/Parser.cpp Frontend/Source.cpp Frontend/Confix.cpp)
 add_dependencies(NixFrontend MLIRNixOpsIncGen TrikeShedIncGen)
 target_link_libraries(NixFrontend PUBLIC MLIRNix MLIRIR)
 llvm_update_compile_flags(NixFrontend)
 target_precompile_headers(NixFrontend PRIVATE ${PROJECT_SOURCE_DIR}/include/Composite/Hot.h)
+# nixfe::canonPath's segment walk (Parser.cpp's body is gone; the bridge sizes the Text and calls this entry).  The walk
+# is trikeshed.at / slice / text / drain over the byte series.  NixFrontend owns it: mlnix-parse links NixFrontend alone.
+mlnix_lower_trikeshed(NixFrontend lowered/nixfe/CanonPath.mlir CanonPath)
 
 # The Nix sources the evaluator ships (lib/Corepkgs/*.nix: flakes) embedded as <nix/NAME>.
 file(GLOB COREPKGS_NIX CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/Corepkgs/*.nix)
@@ -197,3 +203,6 @@ mlnix_lower_trikeshed(NixEval lowered/nixeval/PrintOps.mlir PrintOps)
 # gone).  concatLists/concatMap are trikeshed.combineAll of the inner lists' cells, filter a trikeshed.where; any/all/elem
 # short-circuit in an scf.while.  Each Nix function application calls back into the evaluator.
 mlnix_lower_trikeshed(NixEval lowered/nixeval/ListOps2.mlir ListOps2)
+# The baseNameOf / dirOf primops' slash scans (Builtins.cpp's scans are gone; the bridges coerce and share the window at
+# the bounds these entries return).  The scans are trikeshed.at / slice over the byte series.
+mlnix_lower_trikeshed(NixEval lowered/nixeval/PathBounds.mlir PathBounds)

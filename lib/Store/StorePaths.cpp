@@ -107,19 +107,24 @@ void deletePathRecursive(std::string_view path) {
   }
 }
 
+// nixstore::baseNameOf and dirOf are hollowed out to MLIR: lowered/nixstore/PathOps.mlir (trikeshed.at / slice / text /
+// drain over the byte series), built into NixStore by lib/CMakeLists.txt.  The bridges size the Text and adopt the
+// drained bytes; the slash algebra is gone from here.
+extern "C" size_t nixstore_ts_basename(const char *p, size_t n, char *out);
+extern "C" size_t nixstore_ts_dirname(const char *p, size_t n, char *out);
+
 composite::Text baseNameOf(std::string_view p) {
-  if (p.empty()) return "";
-  size_t last = p.size();
-  if (p.back() == '/' && last > 1) last--;
-  size_t pos = p.rfind('/', last - 1);
-  if (pos == std::string_view::npos) return composite::Text(p.substr(0, last));
-  return composite::Text(p.substr(pos + 1, last - pos - 1));
+  composite::Text t;
+  t.resize(p.size());
+  t.truncate(nixstore_ts_basename(p.data(), p.size(), t.begin()));
+  return t;
 }
 
 composite::Text dirOf(std::string_view p) {
-  auto pos = p.rfind('/');
-  if (pos == std::string_view::npos) return ".";
-  return pos == 0 ? composite::Text("/") : composite::Text(p.substr(0, pos));
+  composite::Text t;
+  t.resize(p.size() + 1); // "." when there is no slash
+  t.truncate(nixstore_ts_dirname(p.data(), p.size(), t.begin()));
+  return t;
 }
 
 composite::Text jsonEscape(std::string_view s) {
