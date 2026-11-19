@@ -233,6 +233,10 @@ mlnix_lower_trikeshed(NixEval lowered/nixeval/PrintOps.mlir PrintOps)
 # and adopt the drained bytes).  The words are trikeshed.slice / text / at / drain over a constant table, the digits a
 # fold over the powers of ten, the elision one combine.  The recursion/forcing/seen-table/depth guard stay in Eval.cpp.
 mlnix_lower_trikeshed(NixEval lowered/nixeval/PrintValueOps.mlir PrintValueOps)
+# The value printer's Attrs/List composition: EvalState::printValue's separator/bracket stitching loops are gone;
+# a trikeshed.combineAll of the per-attr/element pieces (rendered once by a caching callback) drained into the Text.
+# The recursion/seen-table/depth guard/name sorting stay in Eval.cpp.
+mlnix_lower_trikeshed(NixEval lowered/nixeval/PrintCompOps.mlir PrintCompOps)
 # The XML byte emission: XMLWriter's tag lines (lib/Eval/Formats.cpp's indent/attrs/open/close/empty bodies are gone;
 # the bridge sorts the rows, reserves room and adopts the drained bytes).  The indent, prefix, name, attributes and
 # suffix are trikeshed.series / slice / combine / combineAll / drain over a constant escape table.

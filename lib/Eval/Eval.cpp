@@ -2118,6 +2118,22 @@ enum PvWord : int32_t { PV_true, PV_false, PV_null, PV_repeated, PV_setOpen, PV_
 static void tsPv(cp::Text &o, int32_t kind, int64_t a, int64_t b, size_t cap) { size_t at = o.size();
   o.resize(at + cap); o.truncate(at + nixev_ts_pv(kind, a, b, o.begin() + at, cap)); }
 
+// The Attrs/List composition is hollowed into lowered/nixeval/PrintCompOps.mlir: a trikeshed.combineAll of the
+// per-attr/element pieces with the separators and brackets, drained once into the Text.  The recursion into child
+// values, the seen-table, the depth guard and the name sorting stay here; each piece is rendered once by the
+// callback (the combineAll's region runs for its size and again for its drain, so the callback caches each piece).
+extern "C" size_t nixev_ts_pv_comp(void *ctx, int32_t kind, int64_t n, char *into, size_t cap);
+struct PvComp { EvalState *st; cp::WordTable<char> *seen; size_t depth; const composite::Frozen<const Attr *> *rows; Value *list; composite::MutableSeries<cp::Text> cache; };
+extern "C" void nixev_pv_piece(void *p, int64_t j, void **pp, int64_t *nn) {
+  PvComp &c = *static_cast<PvComp *>(p); cp::Text &t = c.cache[uint32_t(j)];
+  if (t.empty()) { // a piece is never empty (a name >= 2 bytes, a value >= 1), so empty means not yet rendered
+    if (c.list) c.st->printValue(t, *c.list->list.elems[j], c.seen, c.depth + 1);
+    else if (j & 1) c.st->printValue(t, *(*c.rows)[uint32_t(j / 2)]->value, c.seen, c.depth + 1);
+    else nixfe::printIdentifier(t, c.st->symbols[(*c.rows)[uint32_t(j / 2)]->name]); }
+  *pp = (void *)t.data(); *nn = int64_t(t.size()); }
+static void tsComp(cp::Text &o, PvComp &c, int32_t k, int64_t n) { size_t at = o.size(), need = nixev_ts_pv_comp(&c, k, n, nullptr, 0);
+  o.resize(at + need); nixev_ts_pv_comp(&c, k, n, o.begin() + at, need); o.truncate(at + need); } // size pass renders, drain writes
+
 void EvalState::printValue(cp::Text &out, Value &v, cp::WordTable<char> *seen, size_t depth) {
   if (depth > settings.maxCallDepth) throw StackOverflowError("stack overflow");
   switch (v.type) {
@@ -2129,25 +2145,13 @@ void EvalState::printValue(cp::Text &out, Value &v, cp::WordTable<char> *seen, s
   case VType::Attrs:
     if (seen && !v.attrs->empty() && !firstTime(*seen, v.attrs)) tsPv(out, 0, PV_repeated, 0, 32);
     else {
-      tsPv(out, 0, PV_setOpen, 0, 32);
-      for (auto *a : v.attrs->lexicographicOrder(symbols)) {
-        nixfe::printIdentifier(out, symbols[a->name]);
-        tsPv(out, 0, PV_eq, 0, 32);
-        printValue(out, *a->value, seen, depth + 1);
-        tsPv(out, 0, PV_semi, 0, 32);
-      }
-      tsPv(out, 0, PV_setClose, 0, 32);
+      auto rows = v.attrs->lexicographicOrder(symbols); PvComp c{this, seen, depth, &rows, nullptr, {}}; c.cache.resize(rows.size() * 2); tsComp(out, c, 0, rows.size());
     }
     break;
   case VType::List:
     if (seen && v.listSize() && !firstTime(*seen, &v)) tsPv(out, 0, PV_repeated, 0, 32);
     else {
-      tsPv(out, 0, PV_listOpen, 0, 32);
-      for (size_t i = 0; i < v.listSize(); i++) {
-        printValue(out, *v.list.elems[i], seen, depth + 1);
-        tsPv(out, 0, PV_space, 0, 32);
-      }
-      tsPv(out, 0, PV_listClose, 0, 32);
+      PvComp c{this, seen, depth, nullptr, &v, {}}; c.cache.resize(v.listSize()); tsComp(out, c, 1, v.listSize());
     }
     break;
   case VType::Thunk: case VType::App: case VType::AttrApp: case VType::Failed: tsPv(out, 0, PV_code, 0, 32); break;
