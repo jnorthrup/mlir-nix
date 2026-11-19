@@ -1,0 +1,65 @@
+module {
+  // NixEval's interface: what other components use, as the compiler's ABI gives it (scripts/cxx-interfaces.py; do not edit).
+  
+// ── lib/Eval/Eval.cpp
+  // nixev::Bindings::get(unsigned int) const
+  llvm.func @_ZNK5nixev8Bindings3getEj(!llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 16 : i64, llvm.nonnull, llvm.noundef, llvm.readonly}, i32 {llvm.noundef}) -> (!llvm.ptr {llvm.noundef})
+  // nixev::Bindings::lexicographicOrder(nixev::SymbolTable const&) const
+  llvm.func @_ZNK5nixev8Bindings18lexicographicOrderERKNS_11SymbolTableE(!llvm.ptr {llvm.align = 8 : i64, llvm.noalias, llvm.nocapture, llvm.sret = !llvm.struct<"struct.composite::Join", (i32, struct<"struct.composite::Cells", (struct<"struct.composite::Growable", (ptr, i32, i32)>)>)>, llvm.writeonly}, !llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 16 : i64, llvm.nonnull, llvm.noundef}, !llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 128 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.readonly})
+  // nixev::EvalState::copyString(std::basic_string_view<char, std::char_traits<char>>)
+  llvm.func @_ZN5nixev9EvalState10copyStringESt17basic_string_viewIcSt11char_traitsIcEE(!llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 270728 : i64, llvm.nonnull, llvm.noundef}, !llvm.array<2 x i64>) -> (!llvm.ptr {llvm.nonnull, llvm.noundef})
+  // nixev::EvalState::mkString(nixev::Value&, std::basic_string_view<char, std::char_traits<char>>, nixev::NixStringContext const&)
+  llvm.func @_ZN5nixev9EvalState8mkStringERNS_5ValueESt17basic_string_viewIcSt11char_traitsIcEERKNS_16NixStringContextE(!llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 270728 : i64, llvm.nonnull, llvm.noundef}, !llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 24 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.writeonly}, !llvm.array<2 x i64>, !llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 17 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef})
+  // nixev::EvalState::printStats()
+  llvm.func @_ZN5nixev9EvalState10printStatsEv(!llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 270728 : i64, llvm.nonnull, llvm.noundef})
+  // nixev::EvalState::baseEnvValue(llvm::StringRef)
+  llvm.func @_ZN5nixev9EvalState12baseEnvValueEN4llvm9StringRefE(!llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 270728 : i64, llvm.nonnull, llvm.noundef}, !llvm.array<2 x i64>) -> (!llvm.ptr {llvm.noundef})
+  // nixev::EvalState::showType(nixev::Value const&)
+  llvm.func @_ZN5nixev9EvalState8showTypeERKNS_5ValueE(!llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 24 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.readonly}) -> (!llvm.ptr {llvm.nonnull, llvm.noundef})
+  // nixev::EvalState::forceCell(nixev::Value&, void const*)
+  llvm.func @_ZN5nixev9EvalState9forceCellERNS_5ValueEPKv(!llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 270728 : i64, llvm.nonnull, llvm.noundef}, !llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 24 : i64, llvm.nonnull, llvm.noundef}, !llvm.ptr {llvm.noundef})
+  // nixev::EvalState::forceValueDeep(nixev::Value&)
+  llvm.func @_ZN5nixev9EvalState14forceValueDeepERNS_5ValueE(!llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 270728 : i64, llvm.nonnull, llvm.noundef}, !llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 24 : i64, llvm.nonnull, llvm.noundef})
+  // nixev::EvalState::forceBool(nixev::Value&, void const*, std::basic_string_view<char, std::char_traits<char>>)
+  llvm.func @_ZN5nixev9EvalState9forceBoolERNS_5ValueEPKvSt17basic_string_viewIcSt11char_traitsIcEE(!llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 270728 : i64, llvm.nonnull, llvm.noundef}, !llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 24 : i64, llvm.nonnull, llvm.noundef}, !llvm.ptr {llvm.noundef}, !llvm.array<2 x i64>) -> (i1 {llvm.noundef})
+  // nixev::EvalState::forceStringNoCtx(nixev::Value&, void const*, std::basic_string_view<char, std::char_traits<char>>)
+  llvm.func @_ZN5nixev9EvalState16forceStringNoCtxERNS_5ValueEPKvSt17basic_string_viewIcSt11char_traitsIcEE(!llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 270728 : i64, llvm.nonnull, llvm.noundef}, !llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 24 : i64, llvm.nonnull, llvm.noundef}, !llvm.ptr {llvm.noundef}, !llvm.array<2 x i64>) -> !llvm.array<2 x i64>
+  // nixev::EvalState::autoCallFunction(composite::Patricia<nixev::Value*> const&, nixev::Value&, nixev::Value&)
+  llvm.func @_ZN5nixev9EvalState16autoCallFunctionERKN9composite8PatriciaIPNS_5ValueEEERS3_S8_(!llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 270728 : i64, llvm.nonnull, llvm.noundef}, !llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 36 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.readonly}, !llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 24 : i64, llvm.nonnull, llvm.noundef}, !llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 24 : i64, llvm.nonnull, llvm.noundef})
+  // nixev::EvalState::isDerivation(nixev::Value&)
+  llvm.func @_ZN5nixev9EvalState12isDerivationERNS_5ValueE(!llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 270728 : i64, llvm.nonnull, llvm.noundef}, !llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 24 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.readonly}) -> (i1 {llvm.noundef})
+  // nixev::EvalState::coerceToString(nixev::Value&, nixev::NixStringContext&, bool, bool, void const*, std::basic_string_view<char, std::char_traits<char>>, bool)
+  llvm.func @_ZN5nixev9EvalState14coerceToStringERNS_5ValueERNS_16NixStringContextEbbPKvSt17basic_string_viewIcSt11char_traitsIcEEb(!llvm.ptr {llvm.align = 8 : i64, llvm.noalias, llvm.sret = !llvm.struct<"struct.composite::Text", (struct<"struct.composite::MutableSeries.17", (struct<"struct.composite::Growable.18", (ptr, i32, i32)>)>)>}, !llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 270728 : i64, llvm.nonnull, llvm.noundef}, !llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 24 : i64, llvm.nonnull, llvm.noundef}, !llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 17 : i64, llvm.nonnull, llvm.noundef}, i1 {llvm.noundef}, i1 {llvm.noundef}, !llvm.ptr {llvm.noundef}, !llvm.array<2 x i64>, i1)
+  // nixev::EvalState::printValue(composite::Text&, nixev::Value&, composite::WordTable<char>*, unsigned long)
+  llvm.func @_ZN5nixev9EvalState10printValueERN9composite4TextERNS_5ValueEPNS1_9WordTableIcEEm(!llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 270728 : i64, llvm.nonnull, llvm.noundef}, !llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 16 : i64, llvm.nonnull, llvm.noundef}, !llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 24 : i64, llvm.nonnull, llvm.noundef}, !llvm.ptr {llvm.noundef}, i64 {llvm.noundef})
+  // nixev::EvalState::parseOptions()
+  llvm.func @_ZN5nixev9EvalState12parseOptionsEv(!llvm.ptr {llvm.align = 8 : i64, llvm.noalias, llvm.nocapture, llvm.sret = !llvm.struct<"struct.nixfe::ParseOptions", (i8, i32, i32, i32, ptr, struct<"class.std::basic_string_view", (i64, ptr)>)>, llvm.writeonly}, !llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 270728 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.readonly})
+  // nixev::EvalState::lowerToMLIR(nixfe::Origin*, composite::MutableSeries<composite::Text, composite::Growable<composite::Text>> const*)
+  llvm.func @_ZN5nixev9EvalState11lowerToMLIREPN5nixfe6OriginEPKN9composite13MutableSeriesINS4_4TextENS4_8GrowableIS6_EEEE(!llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 270728 : i64, llvm.nonnull, llvm.noundef}, !llvm.ptr {llvm.noundef}, !llvm.ptr {llvm.noundef, llvm.readonly}) -> i64
+  // nixev::EvalState::evalExprOp(mlir::nix::ExprOp)
+  llvm.func @_ZN5nixev9EvalState10evalExprOpEN4mlir3nix6ExprOpE(!llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 270728 : i64, llvm.nonnull, llvm.noundef}, i64) -> (!llvm.ptr {llvm.noundef})
+  // nixev::EvalState::resolveExprPath(std::basic_string_view<char, std::char_traits<char>>)
+  llvm.func @_ZN5nixev9EvalState15resolveExprPathESt17basic_string_viewIcSt11char_traitsIcEE(!llvm.ptr {llvm.align = 8 : i64, llvm.noalias, llvm.nonnull, llvm.sret = !llvm.struct<"struct.composite::Text", (struct<"struct.composite::MutableSeries.17", (struct<"struct.composite::Growable.18", (ptr, i32, i32)>)>)>}, !llvm.ptr {llvm.align = 8 : i64, llvm.nocapture, llvm.nonnull, llvm.readnone}, !llvm.array<2 x i64>)
+  // nixev::EvalState::realisePath(std::basic_string_view<char, std::char_traits<char>>, void const*)
+  llvm.func @_ZN5nixev9EvalState11realisePathESt17basic_string_viewIcSt11char_traitsIcEEPKv(!llvm.ptr {llvm.align = 8 : i64, llvm.noalias, llvm.sret = !llvm.struct<"struct.composite::Text", (struct<"struct.composite::MutableSeries.17", (struct<"struct.composite::Growable.18", (ptr, i32, i32)>)>)>}, !llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 270728 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.readonly}, !llvm.array<2 x i64>, !llvm.ptr {llvm.nocapture, llvm.readnone})
+  // nixev::EvalState::evalMLIRFile(std::basic_string_view<char, std::char_traits<char>>, std::basic_string_view<char, std::char_traits<char>>)
+  llvm.func @_ZN5nixev9EvalState12evalMLIRFileESt17basic_string_viewIcSt11char_traitsIcEES4_(!llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 270728 : i64, llvm.nonnull, llvm.noundef}, !llvm.array<2 x i64>, !llvm.array<2 x i64>) -> (!llvm.ptr {llvm.noundef})
+  // nixev::EvalState::evalString(std::basic_string_view<char, std::char_traits<char>>, std::basic_string_view<char, std::char_traits<char>>, std::basic_string_view<char, std::char_traits<char>>)
+  llvm.func @_ZN5nixev9EvalState10evalStringESt17basic_string_viewIcSt11char_traitsIcEES4_S4_(!llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 270728 : i64, llvm.nonnull, llvm.noundef}, !llvm.array<2 x i64>, !llvm.array<2 x i64>, !llvm.array<2 x i64>) -> (!llvm.ptr {llvm.noundef})
+  // nixev::EvalState::findFile(nixev::Value&, std::basic_string_view<char, std::char_traits<char>>, void const*)
+  llvm.func @_ZN5nixev9EvalState8findFileERNS_5ValueESt17basic_string_viewIcSt11char_traitsIcEEPKv(!llvm.ptr {llvm.align = 8 : i64, llvm.noalias, llvm.sret = !llvm.struct<"struct.composite::Text", (struct<"struct.composite::MutableSeries.17", (struct<"struct.composite::Growable.18", (ptr, i32, i32)>)>)>}, !llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 270728 : i64, llvm.nonnull, llvm.noundef}, !llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 24 : i64, llvm.nonnull, llvm.noundef}, !llvm.array<2 x i64>, !llvm.ptr {llvm.noundef})
+  // nixev::formatError(nixev::EvalState*, nixev::EvalError const&)
+  llvm.func @_ZN5nixev11formatErrorEPNS_9EvalStateERKNS_9EvalErrorE(!llvm.ptr {llvm.align = 8 : i64, llvm.noalias, llvm.sret = !llvm.struct<"struct.composite::Text", (struct<"struct.composite::MutableSeries.17", (struct<"struct.composite::Growable.18", (ptr, i32, i32)>)>)>}, !llvm.ptr {llvm.noundef, llvm.readonly}, !llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 48 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.readonly})
+  // nixev::formatParseError(nixfe::ParseError const&, char const*)
+  llvm.func @_ZN5nixev16formatParseErrorERKN5nixfe10ParseErrorEPKc(!llvm.ptr {llvm.align = 8 : i64, llvm.noalias, llvm.sret = !llvm.struct<"struct.composite::Text", (struct<"struct.composite::MutableSeries.17", (struct<"struct.composite::Growable.18", (ptr, i32, i32)>)>)>}, !llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 32 : i64, llvm.nonnull, llvm.noundef}, !llvm.ptr {llvm.noundef})
+  // nixev::runWithLargeStack(composite::Fn<int ()>)
+  llvm.func @_ZN5nixev17runWithLargeStackEN9composite2FnIFivEEE(!llvm.array<2 x ptr>) -> (i32 {llvm.noundef})
+  
+// ── lib/Eval/Formats.cpp
+  // nixev::tomlTimestamps
+  llvm.mlir.global external local_unnamed_addr @_ZN5nixev14tomlTimestampsE() {addr_space = 0 : i32} : i8
+  // nixev::EvalState::printValueAsJSON(nixev::JsonOut&, nixev::Value&, bool, nixev::NixStringContext&, bool, void const*)
+  llvm.func @_ZN5nixev9EvalState16printValueAsJSONERNS_7JsonOutERNS_5ValueEbRNS_16NixStringContextEbPKv(!llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 270728 : i64, llvm.nonnull, llvm.noundef}, !llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 16 : i64, llvm.nonnull, llvm.noundef}, !llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 24 : i64, llvm.nonnull, llvm.noundef}, i1 {llvm.noundef}, !llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 17 : i64, llvm.nonnull, llvm.noundef}, i1 {llvm.noundef}, !llvm.ptr {llvm.noundef})
+  // nixev::EvalState::printValueAsXML(composite::Text&, nixev::Value&, bool, bool, nixev::NixStringContext&)
+  llvm.func @_ZN5nixev9EvalState15printValueAsXMLERN9composite4TextERNS_5ValueEbbRNS_16NixStringContextE(!llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 270728 : i64, llvm.nonnull, llvm.noundef}, !llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 16 : i64, llvm.nonnull, llvm.noundef}, !llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 24 : i64, llvm.nonnull, llvm.noundef}, i1 {llvm.noundef}, i1 {llvm.noundef}, !llvm.ptr {llvm.align = 8 : i64, llvm.dereferenceable = 17 : i64, llvm.nonnull, llvm.noundef})
+}
