@@ -33,6 +33,8 @@ void registerFormatBuiltins(EvalState &state);
 // lowered by --trikeshed-lower-cursors and linked into NixEval.  The bridges below force the operands (Nix's error order
 // and wording) and call these entries; the entries call back into the evaluator through the callbacks for the cells only
 // the evaluator can make (a thunk `f i`, a fresh cell), the stoll reading whose throw stays here, and a sort comparison.
+// The integer checked-arithmetic core is ArithOps.mlir and the type predicates / typeOf are TypeOps.mlir (llvm dialect,
+// mlnix_lower_interface): the bridges keep the forcing, the dispatch and Nix's error wording.
 extern "C" {
 void nixev_ts_length(Value *list, Value *v);
 void nixev_ts_elemAt(EvalState *st, Value *list, int64_t n, Value *v, PosPtr pos);
@@ -41,6 +43,8 @@ void nixev_ts_fold(EvalState *st, Value *f, Value *list, Value *nul, Value *v, P
 int64_t nixev_ts_compare_versions(const char *a, int64_t an, const char *b, int64_t bn);
 int64_t nixev_ts_next_component(const char *p, int64_t n, int64_t from, int64_t *start, int64_t *len);
 void nixev_ts_sort(EvalState *st, Value *f, int64_t isLessThan, Value **from, int64_t n, Value **into, PosPtr pos);
+int mlnix_arith_int(int op, int64_t x, int64_t y, int64_t *r); // 0 ok, 1 overflow, 2 division by zero
+void mlnix_type_pred(Value *v, int tag, Value *out); // tag: a VType, or 16 for the function group
 Value *nixev_gen_elem(EvalState *st, Value *f, int64_t i) { Value *iv = st->allocValue(); st->mkInt(*iv, i); return st->mkAppValue(f, iv); }
 Value *nixev_cell(EvalState *st) { return st->allocValue(); }
 // componentsLT's toInt: digits all through, their value as stoll made it; std::out_of_range past the range of long long
@@ -376,24 +380,22 @@ void registerBuiltins(EvalState &state) {
   });
 
   // -- Types ---------------------------------------------------------------
-  auto typePred = [&]<VType T>(const char *name, K<T>) {
+  // The tag test and the Bool write are TypeOps.mlir (mlnix_type_pred); tag 16 is the function group (isFunction).
+  auto typePred = [&]<int T>(const char *name, K<T>) {
     S.addPrimOp(name, [](EvalState &st, A args, Value &v, PosPtr pos) {
       st.forceValue(*args[0], pos);
-      st.mkBool(v, args[0]->type == T);
+      mlnix_type_pred(args[0], T, &v);
     });
   };
-  typePred("isNull", K<VType::Null>{});
-  S.addPrimOp("__isFunction", [](EvalState &st, A args, Value &v, PosPtr pos) {
-    st.forceValue(*args[0], pos);
-    st.mkBool(v, args[0]->isFunction());
-  });
-  typePred("__isInt", K<VType::Int>{});
-  typePred("__isFloat", K<VType::Float>{});
-  typePred("__isString", K<VType::String>{});
-  typePred("__isBool", K<VType::Bool>{});
-  typePred("__isPath", K<VType::Path>{});
-  typePred("__isAttrs", K<VType::Attrs>{});
-  typePred("__isList", K<VType::List>{});
+  typePred("isNull", K<int(VType::Null)>{});
+  typePred("__isFunction", K<16>{});
+  typePred("__isInt", K<int(VType::Int)>{});
+  typePred("__isFloat", K<int(VType::Float)>{});
+  typePred("__isString", K<int(VType::String)>{});
+  typePred("__isBool", K<int(VType::Bool)>{});
+  typePred("__isPath", K<int(VType::Path)>{});
+  typePred("__isAttrs", K<int(VType::Attrs)>{});
+  typePred("__isList", K<int(VType::List)>{});
   S.addPrimOp("__typeOf", [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceValue(*args[0], pos);
     st.mkString(v, EvalState::typeOf(*args[0]));
@@ -423,19 +425,12 @@ void registerBuiltins(EvalState &state) {
       }
       int64_t x = st.forceInt(a, pos, first);
       int64_t y = st.forceInt(b, pos, second);
+      // The checked core (overflow detection + result, __builtin_*_overflow's exact tests) is ArithOps.mlir.
       int64_t r;
-      bool of = false;
-      const char *verb = "";
-      switch (op) {
-      case '+': of = __builtin_add_overflow(x, y, &r); verb = "adding"; break;
-      case '-': of = __builtin_sub_overflow(x, y, &r); verb = "subtracting"; break;
-      case '*': of = __builtin_mul_overflow(x, y, &r); verb = "multiplying"; break;
-      default:
-        if (y == 0) throw EvalError("division by zero", pos);
-        if (x == INT64_MIN && y == -1) { of = true; verb = "dividing"; r = 0; }
-        else r = x / y;
-      }
-      if (of) {
+      int flag = mlnix_arith_int(op, x, y, &r);
+      if (flag == 2) throw EvalError("division by zero", pos);
+      if (flag == 1) {
+        const char *verb = op == '+' ? "adding" : op == '-' ? "subtracting" : op == '*' ? "multiplying" : "dividing";
         const char *sym = op == '+' ? " + " : op == '-' ? " - " : op == '*' ? " * " : " / ";
         throw EvalError(composite::cat("integer overflow in ", verb, " ", x, sym, y), pos);
       }

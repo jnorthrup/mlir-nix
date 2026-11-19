@@ -167,6 +167,12 @@ target_link_libraries(NixEval PRIVATE MLIRArithDialect MLIRControlFlowDialect ML
 llvm_update_compile_flags(NixEval)
 # nixev::EvalState::showType (lib/Eval/Eval.cpp's definition is gone; include/Nix/Eval.h keeps the declaration).
 mlnix_lower_interface(NixEval lowered/nixeval/ShowType.mlir ShowType)
+# The integer checked-arithmetic core of __add/__sub/__mul/__div (the arith template's switch is gone from
+# lib/Eval/Builtins.cpp; the bridge keeps the forcing, the int/float dispatch and Nix's error wording).
+mlnix_lower_interface(NixEval lowered/nixeval/ArithOps.mlir ArithOps)
+# The type predicates __isInt/.../isNull/__isFunction and EvalState::typeOf (the typePred comparisons are gone from
+# lib/Eval/Builtins.cpp, typeOf's body from lib/Eval/Eval.cpp; include/Nix/Eval.h keeps the declaration).
+mlnix_lower_interface(NixEval lowered/nixeval/TypeOps.mlir TypeOps)
 # The list primops __length, __elemAt, __genList, __foldl' (lib/Eval/Builtins.cpp's bodies are gone; the bridges force the
 # operands and call these entries).  The list algebra is trikeshed.size / at / series / fold.
 mlnix_lower_trikeshed(NixEval lowered/nixeval/ListOps.mlir ListOps)

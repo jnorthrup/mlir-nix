@@ -567,20 +567,7 @@ void EvalState::warn(std::string_view msg) {
 
 // EvalState::showType is hollowed out to MLIR: lowered/nixeval/ShowType.mlir, built into NixEval by lib/CMakeLists.txt.
 
-const char *EvalState::typeOf(const Value &v) {
-  switch (v.type) {
-  case VType::Int: return "int";
-  case VType::Bool: return "bool";
-  case VType::String: return "string";
-  case VType::Path: return "path";
-  case VType::Null: return "null";
-  case VType::Attrs: return "set";
-  case VType::List: return "list";
-  case VType::Lambda: case VType::PrimOp: case VType::PrimOpApp: return "lambda";
-  case VType::Float: return "float";
-  default: return "thunk";
-  }
-}
+// EvalState::typeOf is hollowed out to MLIR: lowered/nixeval/TypeOps.mlir, built into NixEval by lib/CMakeLists.txt.
 
 void EvalState::throwTypeError(const char *expected, Value &v, PosPtr pos, std::string_view ctx) {
   TypeError e(cp::cat("expected ", expected, " but found ", showType(v), ": ", printValueForTrace(v)), pos);
