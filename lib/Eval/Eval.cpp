@@ -1644,66 +1644,66 @@ void EvalState::evalAttrsDynamic(Node *node, Frame *env, Value &out) {
   mkAttrs(out, bb.finish());
 }
 
+// evalConcatStrings' composition is hollowed into lowered/nixeval/ConcatOps.mlir (trikeshed.combineAll / drain and the
+// scf.for accumulation), lowered by --trikeshed-lower-cursors into NixEval.  The per-part forcing (lookupForced /
+// forceValue), coercion (coerceToWindow), context merging (own.add) and the error wording (throwCannotAdd /
+// throwIntOverflow) stay C++ callbacks; the int add + overflow test, the int->float promotion, the float adds and the
+// window collection (views[nv], total) are MLIR.  The PATH case's concat is a combineAll drained once into the Text;
+// canonPath and mkPath stay here.  ConcatRec / ConcatResult layouts are the .mlir's record / result (asserted below).
+struct ConcatCtx { EvalState *st; Frame *env; Node **parts; NixStringContext *context; cp::Text *scratch; PieceContexts *own; };
+struct ConcatRec { uint8_t ft, kind; int64_t payload; composite::Chars w; };
+struct ConcatResult { int64_t firstType, n; double nf; int64_t nv, total; };
+static_assert(offsetof(ConcatRec, payload) == 8 && offsetof(ConcatRec, w) == 16 && sizeof(ConcatRec) == 32);
+static_assert(offsetof(ConcatResult, nf) == 16 && offsetof(ConcatResult, nv) == 24 && offsetof(ConcatResult, total) == 32 && sizeof(ConcatResult) == 40);
+extern "C" {
+void nixev_ts_concat_parts(ConcatCtx *ctx, int64_t np, int64_t forceString, composite::Chars *views, ConcatResult *res);
+int64_t nixev_ts_path_concat(const composite::Chars *pieces, int64_t np, char *into);
+void nixev_cc_part(ConcatCtx *c, int64_t k, int64_t ft, int64_t isFirst, ConcatRec *rec) {
+  Node *pv = c->parts[k]; PosPtr ppos = pv->pos();
+  Value *v = c->st->lookupForced(c->env, pv); c->st->forceValue(*v, ppos);
+  VType ftt = isFirst ? v->type : VType(ft); rec->ft = uint8_t(ftt);
+  if (ftt == VType::Int || ftt == VType::Float) {
+    if (v->type == VType::Int) { rec->kind = 1; rec->payload = v->integer; }
+    else if (v->type == VType::Float) { rec->kind = 2; __builtin_memcpy(&rec->payload, &v->fpoint, 8); }
+    else throwCannotAdd(EvalState::showType(*v), ftt == VType::Int ? "an integer" : "a float", ppos);
+  } else {
+    const StringContext *pc = nullptr;
+    composite::Chars w = c->st->coerceToWindow(*v, *c->context, false, ftt == VType::String, ppos, "while evaluating a path segment", *c->scratch, !isFirst, &pc);
+    c->own->add(pc, *c->context);
+    if (w.size() && w.data() == c->scratch->data()) w = composite::chars(c->st->copyString(*c->scratch), w.size()); // text made here lives in the arena
+    rec->kind = 0; rec->payload = w.size(); rec->w = w;
+  }
+}
+[[noreturn]] void nixev_cc_overflow(ConcatCtx *c, int64_t k, int64_t n, int64_t x) { throwIntOverflow(n, x, c->parts[k]->pos()); }
+}
+
 void EvalState::evalConcatStrings(Node *node, Frame *env, Value &out) {
-  // The result is the series of its parts.  A part that is already a string is a view of its arena bytes: no copy and no heap string; only a
-  // part that must be coerced (a number, a path, a set with __toString or outPath) makes text, kept in `owned` where it does not move.  The
-  // total is known before anything is written, so the result is one arena buffer, filled once.  Numbers and paths are as they were.
+  // The result is the series of its parts.  A part that is already a string is a view of its arena bytes: no copy and no
+  // heap string; only a part that must be coerced makes text, copied into the arena at once in the callback.  The total
+  // is known before anything is written, so the result is one arena buffer, filled once.  Numbers and paths are as they were.
   auto parts = node->args();
   bool forceString = node->flags & Node::kForceString;
   NixStringContext context;
-  // The windows of the parts: a stack array (the arena past sixteen parts).  A part that must be coerced (a number, a path, a set with __toString)
-  // makes text in `scratch`, which is copied into the arena at once, so no part owns anything and nothing is a heap list.
-  size_t np = parts.size(), nv = 0;
+  size_t np = parts.size();
   composite::Chars stackViews[16];
   composite::Chars *views = np <= 16 ? stackViews : static_cast<composite::Chars *>(alloc.Allocate(np * sizeof(composite::Chars), alignof(composite::Chars)));
   cp::Text scratch;
   PieceContexts own; // the string pieces' own contexts: shared as the result's when there is one, merged only when there are several
-  size_t total = 0;
-  int64_t n = 0;
-  double nf = 0;
-  bool first = !forceString;
-  VType firstType = VType::String;
-  for (Node *pv : parts) {
-    PosPtr ppos = pv->pos();
-    Value *v = lookupForced(env, pv); // a part is forced now: one made here is made evaluated, not a thunk forced on the next line
-    forceValue(*v, ppos);
-    if (first) firstType = v->type;
-    if (firstType == VType::Int) {
-      if (v->type == VType::Int) {
-        if (int64_t s; __builtin_add_overflow(n, v->integer, &s)) throwIntOverflow(n, v->integer, ppos); else n = s;
-      } else if (v->type == VType::Float) {
-        firstType = VType::Float;
-        nf = (double)n;
-        nf += v->fpoint;
-      } else {
-        throwCannotAdd(showType(*v), "an integer", ppos);
-      }
-    } else if (firstType == VType::Float) {
-      if (v->type == VType::Int) nf += (double)v->integer;
-      else if (v->type == VType::Float) nf += v->fpoint;
-      else throwCannotAdd(showType(*v), "a float", ppos);
-    } else {
-      const StringContext *pc = nullptr;
-      composite::Chars w = coerceToWindow(*v, context, false, firstType == VType::String, ppos, "while evaluating a path segment", scratch, !first, &pc);
-      own.add(pc, context);
-      if (w.size() && w.data() == scratch.data()) { w = composite::chars(copyString(scratch), w.size()); } // text made here lives in the arena
-      views[nv++] = w;
-      total += w.size();
-    }
-    first = false;
-  }
+  ConcatCtx ctx{this, env, node->operands, &context, &scratch, &own};
+  ConcatResult r;
+  nixev_ts_concat_parts(&ctx, int64_t(np), int64_t(forceString), views, &r);
   PosPtr pos = node->pos();
-  if (firstType == VType::Int) return mkInt(out, n);
-  if (firstType == VType::Float) return mkFloat(out, nf);
-  if (firstType == VType::Path) {
+  if (r.firstType == int64_t(VType::Int)) return mkInt(out, r.n);
+  if (r.firstType == int64_t(VType::Float)) return mkFloat(out, r.nf);
+  if (r.firstType == int64_t(VType::Path)) {
     if (own.any(context))
       throw EvalError("a string that refers to a store path cannot be appended to a path", pos);
     cp::Text str;
-    str.reserve(total);
-    for (size_t k = 0; k < nv; k++) str += composite::view(views[k]);
+    str.reserve(size_t(r.total)); str.resize(size_t(r.total));
+    nixev_ts_path_concat(views, r.nv, str.begin());
     return mkPath(out, nixfe::canonPath(str));
   }
-  nixev_ts_concat(this, views, int64_t(nv), &out, own.result(*this, context));
+  nixev_ts_concat(this, views, r.nv, &out, own.result(*this, context));
 }
 
 Symbol EvalState::pathSymbol(const nixfe::Name &comp, Node *const *dyn, unsigned &nextDyn, Frame *env,
