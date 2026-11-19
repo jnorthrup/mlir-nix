@@ -158,6 +158,12 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/Decoders.mlir Decoders)
 # buffer to the Sink, the walk stays).  The little-endian prefix, the pad and the length+bytes+pad composition are
 # trikeshed.series / slice / combine / drain; the constant NAR tokens are a blob + off/len tables read with at.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/NarFraming.mlir NarFraming)
+# The derivation ATerm writer nixstore::unparseTo (StorePaths.cpp's composition loop, TextOut/HashOut and the
+# escapeInto/appendEscaped helpers are gone; the bridges marshal the Derivation into record arrays, apply maskOutputs
+# and slot __json, size the Text and call this entry).  The whole ATerm composition is trikeshed.combineAll / combine /
+# slice / text / at / drain over series<i8>: one variadic combine of section views, each list a combineAll, each escaped
+# string a combineAll over a constant ATerm escape table, drained once into a pre-sized buffer (fill-drain).
+mlnix_lower_trikeshed(NixStore lowered/nixstore/DrvUnparse.mlir DrvUnparse)
 
 add_library(NixFrontend STATIC Frontend/Parser.cpp Frontend/Source.cpp Frontend/Confix.cpp)
 add_dependencies(NixFrontend MLIRNixOpsIncGen TrikeShedIncGen)

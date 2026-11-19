@@ -297,7 +297,7 @@ struct Derivation {
 
   bool isFixed() const;
   composite::Text unparse(bool maskOutputs, const DrvInputs *actualInputs = nullptr) const;
-  /// SHA-256 of unparse(...), the text fed to the hash as it is made and never kept.
+  /// SHA-256 of unparse(...): the ATerm text composed once in DrvUnparse.mlir and drained into a Text, then hashed.
   Hash hashUnparsed(bool maskOutputs, const DrvInputs *actualInputs = nullptr) const;
 };
 

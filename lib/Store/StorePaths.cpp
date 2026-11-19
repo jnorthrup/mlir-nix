@@ -724,231 +724,129 @@ bool Derivation::isFixed() const {
          outputs.begin()->second.kind == DerivationOutput::CAFixed;
 }
 
-/// Appends `s` in quotes with ATerm escapes.  The bytes between two escapes are copied whole: the values of an
-/// environment are scripts of kilobytes, and a byte-at-a-time push_back was a fiftieth of a NixOS evaluation.
-/// The ATerm escape of `s` (no quotes) written at `w`, which has room for 2 * s.size() bytes; the end of what was written.  Every byte writes
-/// either itself or a backslash and its escape letter, chosen by a table and advanced by one or two with no branch on the byte: a script full
-/// of newlines and quotes costs no mispredicted branch per line.
-static char *escapeInto(char *w, std::string_view s) {
-  struct Escapes {
-    char e[256] = {};
-    constexpr Escapes() { e[uint8_t('"')] = '"'; e[uint8_t('\\')] = '\\'; e[uint8_t('\n')] = 'n'; e[uint8_t('\r')] = 'r'; e[uint8_t('\t')] = 't'; }
-  };
-  static constexpr Escapes kEsc;
-  // Sixteen bytes at a time (the compilers' vector extension: SSE2 or NEON, no intrinsics): a block with none of the five bytes ATerm
-  // escapes, as nearly all of a build script is, is copied whole; a block with one goes through the table a byte at a time.
-  typedef unsigned char Block __attribute__((vector_size(16)));
-  typedef unsigned long long Halves __attribute__((vector_size(16)));
-  const char *p = s.data(), *end = p + s.size();
-  for (; end - p >= 16; p += 16) {
-    Block b;
-    std::memcpy(&b, p, 16);
-    Block hit = (b == '"') | (b == '\\') | (b == '\n') | (b == '\r') | (b == '\t');
-    Halves h = (Halves)hit;
-    if ((h[0] | h[1]) == 0) {
-      std::memcpy(w, p, 16);
-      w += 16;
-      continue;
-    }
-    for (int i = 0; i < 16; i++) {
-      unsigned char c = uint8_t(p[i]);
-      char e = kEsc.e[c];
-      w[0] = e ? '\\' : char(c);
-      w[1] = e;
-      w += 1 + (e != 0);
-    }
-  }
-  for (; p < end; p++) {
-    unsigned char c = uint8_t(*p);
-    char e = kEsc.e[c];
-    w[0] = e ? '\\' : char(c);
-    w[1] = e;
-    w += 1 + (e != 0);
-  }
-  return w;
-}
-
-/// Appends `s` in quotes with ATerm escapes.  A Text grows by what is put, so the worst case cannot be written in place first: each run of
-/// s (half the buffer, as escaping doubles a byte at most) is escaped into a buffer on the stack and put whole.  Every byte escapes by itself,
-/// so where the runs are cut changes nothing.
-static void appendEscaped(composite::Text &out, std::string_view s) {
-  char buf[4096];
-  constexpr size_t kChunk = sizeof buf / 2;
-  out += '"';
-  for (size_t at = 0; at < s.size(); at += kChunk) {
-    std::string_view part = s.substr(at, kChunk);
-    out.put(buf, size_t(escapeInto(buf, part) - buf));
-  }
-  out += '"';
-}
+// The derivation ATerm text is composed in lowered/nixstore/DrvUnparse.mlir (trikeshed.combineAll + combine + drain over
+// series<i8>, built into NixStore by lib/CMakeLists.txt): one lazy composition of the whole ATerm drained once into a
+// pre-sized buffer.  The bridge here only marshals the Derivation into flat record arrays -- normalizing each output's
+// kind to its (name,path,algo,hash) fields, applying maskOutputs and slotting __json into the env order -- sizes the Text
+// and adopts the drained bytes.  The composition loop, the two Out sinks and the ATerm escape helpers are gone from here.
+namespace {
+struct DrvWin { const char *p; size_t n; };
+struct DrvOut { DrvWin name, path, algo, hash; };
+struct DrvIn { DrvWin path; const DrvWin *outs; size_t nouts; };
+struct DrvEnv { DrvWin key, val; };
+struct DrvBuf {
+  composite::MutableSeries<DrvOut> outs;
+  composite::MutableSeries<composite::Text> owned; // the methodAlgo / hash strings the records point into
+  composite::MutableSeries<DrvIn> ins;
+  composite::MutableSeries<DrvWin> inouts, srcs, args;
+  composite::MutableSeries<DrvEnv> env;
+  DrvWin platform, builder;
+  size_t bound = 0;
+};
+} // namespace
+extern "C" int64_t nixstore_ts_unparse(const DrvOut *, int64_t, const DrvIn *, int64_t, const DrvWin *, int64_t,
+                                       const char *, int64_t, const char *, int64_t, const DrvWin *, int64_t,
+                                       const DrvEnv *, int64_t, char *, int64_t);
 
 namespace {
-/// The ATerm text, made into a Text.
-struct TextOut {
-  composite::Text &s;
-  void c(char x) { s += x; }
-  void lit(std::string_view v) { s.put(v); }
-  void quoted(std::string_view v) { s += '"'; s.put(v); s += '"'; }
-  void escaped(std::string_view v) { appendEscaped(s, v); }
-  void reserve(size_t n) { s.reserve(s.size() + n); }
-};
-/// The ATerm text fed to a hash as it is made, through a buffer: a derivation's text (its whole environment) is never kept to be hashed.
-struct HashOut {
-  HashSink &h;
-  char buf[16384];
-  size_t n = 0;
-  void flush() { if (n) h.update(std::string_view(buf, n)); n = 0; }
-  void room(size_t k) { if (n + k > sizeof buf) flush(); }
-  void c(char x) { room(1); buf[n++] = x; }
-  void lit(std::string_view v) {
-    if (v.size() > sizeof buf / 2) { flush(); h.update(v); return; }
-    room(v.size());
-    std::memcpy(buf + n, v.data(), v.size());
-    n += v.size();
-  }
-  void quoted(std::string_view v) { c('"'); lit(v); c('"'); }
-  void escaped(std::string_view v) {
-    c('"');
-    constexpr size_t kChunk = (sizeof buf) / 2 - 1; // escaping doubles a byte at most
-    for (size_t at = 0; at < v.size(); at += kChunk) {
-      std::string_view part = v.substr(at, kChunk);
-      room(2 * part.size());
-      n = size_t(escapeInto(buf + n, part) - buf);
-    }
-    c('"');
-  }
-  void reserve(size_t) {}
-};
-
-template <class Out>
-void unparseTo(const Derivation &d, Out &out, bool maskOutputs, const DrvInputs *actualInputs) {
-  const auto &outputs = d.outputs;
-  const auto &inputDrvs = d.inputDrvs;
-  const auto &inputSrcs = d.inputSrcs;
-  const auto &platform = d.platform;
-  const auto &builder = d.builder;
-  const auto &args = d.args;
-  const auto &env = d.env;
-  const auto &structuredAttrs = d.structuredAttrs;
-
-  // Note: the store dir is embedded in paths already.
-  out.lit("Derive([");
-  bool first = true;
-  for (auto &[name, o] : outputs) {
-    if (!first) out.c(',');
-    first = false;
-    out.c('(');
-    out.quoted(name);
-    out.c(',');
+void marshalDrv(const Derivation &d, bool maskOutputs, const DrvInputs *actualInputs, DrvBuf &b) {
+  auto win = [](const composite::Text &t) { return DrvWin{t.data(), t.size()}; };
+  auto winv = [](std::string_view v) { return DrvWin{v.data(), v.size()}; };
+  const DrvWin empty{"", 0};
+  const auto &inputs = actualInputs ? *actualInputs : d.inputDrvs;
+  b.outs.reserve(d.outputs.size());
+  b.owned.reserve(2 * d.outputs.size());
+  b.ins.reserve(inputs.size());
+  size_t totalOuts = 0;
+  for (const auto &[path, outs] : inputs) totalOuts += outs.size();
+  b.inouts.reserve(totalOuts);
+  b.srcs.reserve(d.inputSrcs.size());
+  b.args.reserve(d.args.size());
+  b.env.reserve(d.env.size() + 1);
+  for (const auto &[name, o] : d.outputs) {
+    DrvWin pw = empty, aw = empty, hw = empty;
     switch (o.kind) {
     case DerivationOutput::InputAddressed:
-      out.quoted(maskOutputs ? std::string_view("") : std::string_view(o.path));
-      out.lit(",\"\",\"\"");
+      pw = maskOutputs ? empty : win(o.path);
       break;
-    case DerivationOutput::CAFixed:
-      out.quoted(maskOutputs ? std::string_view("") : std::string_view(o.path));
-      out.c(',');
-      out.quoted(o.methodAlgo());
-      out.c(',');
-      out.quoted(o.hash.to_string(HashFormat::Base16, false));
+    case DerivationOutput::CAFixed: {
+      pw = maskOutputs ? empty : win(o.path);
+      composite::Text a = o.methodAlgo(), h = o.hash.to_string(HashFormat::Base16, false);
+      aw = win(a); hw = win(h); b.owned.append(composite::mv(a)); b.owned.append(composite::mv(h));
       break;
-    case DerivationOutput::CAFloating:
-      out.lit("\"\",");
-      out.quoted(o.methodAlgo());
-      out.lit(",\"\"");
+    }
+    case DerivationOutput::CAFloating: {
+      composite::Text a = o.methodAlgo(); aw = win(a); b.owned.append(composite::mv(a));
       break;
+    }
     case DerivationOutput::Deferred:
-      out.lit("\"\",\"\",\"\"");
       break;
-    case DerivationOutput::Impure:
-      out.lit("\"\",");
-      out.quoted(o.methodAlgo());
-      out.lit(",\"impure\"");
+    case DerivationOutput::Impure: {
+      composite::Text a = o.methodAlgo(); aw = win(a); b.owned.append(composite::mv(a)); hw = winv("impure");
       break;
     }
-    out.c(')');
-  }
-  out.lit("],[");
-  first = true;
-  const auto &inputs = actualInputs ? *actualInputs : inputDrvs;
-  for (auto &[path, outs] : inputs) {
-    if (!first) out.c(',');
-    first = false;
-    out.c('(');
-    out.quoted(path);
-    out.lit(",[");
-    bool f2 = true;
-    for (auto &o : outs) {
-      if (!f2) out.c(',');
-      f2 = false;
-      out.quoted(o);
     }
-    out.lit("])");
+    b.outs.append(DrvOut{win(name), pw, aw, hw});
   }
-  out.lit("],[");
-  first = true;
-  for (auto &p : inputSrcs) {
-    if (!first) out.c(',');
-    first = false;
-    out.quoted(p);
+  for (const auto &[path, outs] : inputs) {
+    const DrvWin *base = b.inouts.data() + b.inouts.size();
+    for (const composite::Text &o : outs) b.inouts.append(win(o));
+    b.ins.append(DrvIn{win(path), base, outs.size()});
   }
-  out.lit("],");
-  out.quoted(platform);
-  out.c(',');
-  out.escaped(builder);
-  out.lit(",[");
-  first = true;
-  for (auto &a : args) {
-    if (!first) out.c(',');
-    first = false;
-    out.escaped(a);
-  }
-  out.lit("],[");
-  first = true;
-  // The environment in key order, with `__json` (the structured attributes, which win over an env entry of that name) at its place in
-  // that order: env is a sorted map, so the walk slots it in; nothing is copied and no map is built.
-  size_t envBytes = 0;
-  for (auto &[k, v] : env) envBytes += k.size() + v.size() + 8;
-  if (structuredAttrs) envBytes += structuredAttrs->size() + 16;
-  out.reserve(envBytes);
+  for (const composite::Text &p : d.inputSrcs) b.srcs.append(win(p));
+  b.platform = win(d.platform);
+  b.builder = win(d.builder);
+  for (const composite::Text &a : d.args) b.args.append(win(a));
+  // The environment in key order, with __json (the structured attributes, which win over an env entry of that name) at
+  // its place in that order; an output's value is masked when maskOutputs.  Nothing is copied and no map is built.
   auto isOutput = [&](std::string_view k) {
-    for (auto &[name, o] : outputs)
+    for (const auto &[name, o] : d.outputs)
       if (name == k) return true;
     return false;
   };
-  auto entry = [&](std::string_view k, std::string_view v) {
-    if (!first) out.c(',');
-    first = false;
-    out.c('(');
-    out.escaped(k);
-    out.c(',');
-    out.escaped(maskOutputs && isOutput(k) ? std::string_view() : v);
-    out.c(')');
+  auto addEnv = [&](std::string_view k, std::string_view v) {
+    b.env.append(DrvEnv{winv(k), maskOutputs && isOutput(k) ? empty : winv(v)});
   };
   constexpr std::string_view kJson = "__json";
-  bool json = structuredAttrs.has_value();
-  for (auto &[k, v] : env) {
-    if (json && std::string_view(k) >= kJson) { entry(kJson, *structuredAttrs); json = false; }
-    if (structuredAttrs && k == kJson) continue;
-    entry(k, v);
+  bool json = d.structuredAttrs.has_value();
+  for (const auto &[k, v] : d.env) {
+    if (json && std::string_view(k) >= kJson) { addEnv(kJson, *d.structuredAttrs); json = false; }
+    if (d.structuredAttrs && k == kJson) continue;
+    addEnv(k, v);
   }
-  if (json) entry(kJson, *structuredAttrs);
-  out.lit("])");
+  if (json) addEnv(kJson, *d.structuredAttrs);
+  // A worst-case bound: every field quoted (2 + n) or escaped (2 + 2n), plus structural slack per element.  The entry
+  // also answers -needed when cap is short, so the bridge retries; the bound only keeps that to one call.
+  size_t bytes = b.platform.n + b.builder.n, fields = 2;
+  for (const DrvOut &o : b.outs) { bytes += o.name.n + o.path.n + o.algo.n + o.hash.n; fields += 4; }
+  for (const DrvIn &i : b.ins) { bytes += i.path.n; fields += 1; for (size_t j = 0; j < i.nouts; j++) { bytes += i.outs[j].n; fields += 1; } }
+  for (const DrvWin &s : b.srcs) { bytes += s.n; fields += 1; }
+  for (const DrvWin &a : b.args) { bytes += a.n; fields += 1; }
+  for (const DrvEnv &e : b.env) { bytes += e.key.n + e.val.n; fields += 2; }
+  b.bound = 2 * bytes + 2 * fields + 16 * (b.outs.size() + b.ins.size() + b.srcs.size() + b.args.size() + b.env.size() + 1) + 64;
 }
 } // namespace
 
 composite::Text Derivation::unparse(bool maskOutputs, const DrvInputs *actualInputs) const {
+  DrvBuf b;
+  marshalDrv(*this, maskOutputs, actualInputs, b);
+  auto call = [&](char *into, int64_t cap) {
+    return nixstore_ts_unparse(b.outs.data(), b.outs.size(), b.ins.data(), b.ins.size(), b.srcs.data(), b.srcs.size(),
+                               b.platform.p, b.platform.n, b.builder.p, b.builder.n, b.args.data(), b.args.size(),
+                               b.env.data(), b.env.size(), into, cap);
+  };
   composite::Text s;
-  TextOut out{s};
-  unparseTo(*this, out, maskOutputs, actualInputs);
+  s.resize(b.bound);
+  int64_t w = call(s.begin(), int64_t(b.bound));
+  if (w < 0) { s.resize(size_t(-w)); w = call(s.begin(), -w); }
+  s.truncate(size_t(w));
   return s;
 }
 
 Hash Derivation::hashUnparsed(bool maskOutputs, const DrvInputs *actualInputs) const {
+  composite::Text t = unparse(maskOutputs, actualInputs);
   HashSink h(HashAlgo::SHA256);
-  HashOut out{h};
-  unparseTo(*this, out, maskOutputs, actualInputs);
-  out.flush();
+  h.update(std::string_view(t.data(), t.size()));
   return h.finish();
 }
 
