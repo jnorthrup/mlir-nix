@@ -71,6 +71,28 @@ Tok keywordOf(std::string_view w) {
   return k ? Tok(uint8_t(*k)) : T_ID;
 }
 
+/// The record nixfe_lex_next reads and writes (lowered/nixfrontend/LexScan.mlir): the source and the lexer's state
+/// (p, the state stack), then the token it produced.  Every field is 8 bytes, in this order.  dkind: 0 the span is a
+/// slice of the input, 1 a fixed derived text (span = index<<32|1), 2 an unescape request (dFrom..dTo).
+struct LexRec {
+  const char *src;
+  uint64_t n, p;
+  void *lex;
+  uint64_t pipeOps;
+  uint8_t *stack;
+  uint64_t sp, stackCap;
+  uint64_t tok, ch, hasIndent, offset, span, value, posLine, posCol;
+  uint64_t errCode, errOff, dFrom, dTo, dkind;
+};
+static_assert(sizeof(LexRec) == 168 && offsetof(LexRec, lex) == 24 && offsetof(LexRec, stack) == 40 &&
+                  offsetof(LexRec, tok) == 64 && offsetof(LexRec, dkind) == 160,
+              "the record is the dialect's layout");
+
+extern "C" int32_t nixfe_lex_next(LexRec *rec);
+extern "C" uint64_t nixfe_lex_unescape(const char *src, uint64_t n, uint64_t from, uint64_t to, char *out, uint64_t cap);
+// The longest-match choice among the rules that can begin a default token (LexRules.h), shared with the Confix scan.
+extern "C" uint64_t nixfe_confix_match(const char *src, uint64_t n, uint64_t i);
+
 struct Lexer : public lex::Rules {
   Lexer(Origin *o, const ParseOptions &opts)
       : Rules(o->text->view()), origin(o), opts(opts) {
@@ -87,7 +109,8 @@ struct Lexer : public lex::Rules {
   /// Lex again from `off`, a token's start in the default state, whose position is `at`.
   void reposition(size_t off, Pos at) {
     p = off;
-    stack.assign(1, S_INITIAL);
+    stack.clear();
+    stack.append(uint8_t(S_INITIAL));
     if (wantPos && at.valid()) {
       line = at.line;
       lineStart = off - (at.col - 1);
@@ -96,22 +119,58 @@ struct Lexer : public lex::Rules {
   }
   /// Every state on the stack is the default one: what follows is not inside a string or a path.
   bool plain() const {
-    for (State s : stack)
-      if (s != S_INITIAL && s != S_DEFAULT) return false;
+    for (uint32_t i = 0; i < stack.size(); i++)
+      if (stack[i] != S_INITIAL && stack[i] != S_DEFAULT) return false;
     return true;
   }
 
-  /// Produce the next token (T_EOF at end, repeatedly).
+  /// Produce the next token (T_EOF at end, repeatedly).  The state machine is LexScan.mlir's nixfe_lex_next; this
+  /// bridge owns the Token, the derived-text pool and the state stack, and turns the record into the Token API.
   Token nextToken() {
-    if (stack.empty()) stack.append(S_INITIAL);
-    Token t;
-    if (!next(t)) {
-      t = Token();
-      t.t = T_EOF;
-      t.pos = posAt(src.size());
-      t.offset = uint32_t(src.size());
+    if (stack.empty()) {
+      stack.reserve(32);
+      stack.append(uint8_t(S_INITIAL));
     }
-    return t;
+    for (;;) {
+      LexRec rec;
+      rec.src = src.data();
+      rec.n = src.size();
+      rec.p = p;
+      rec.lex = this;
+      rec.pipeOps = opts.pipeOperators ? 1 : 0;
+      rec.stack = stack.base();
+      rec.sp = stack.size();
+      rec.stackCap = stack.cap;
+      int32_t st = nixfe_lex_next(&rec);
+      p = rec.p;
+      stack.n = uint32_t(rec.sp);
+      if (st == 3) { // the state stack ran out of room: double it and lex the same token again
+        stack.reserve(size_t(stack.cap) * 2);
+        continue;
+      }
+      if (st == 1) { // end of input
+        Token t;
+        t.t = T_EOF;
+        t.pos = posAt(src.size());
+        t.offset = uint32_t(src.size());
+        return t;
+      }
+      if (st == 2) lexError(rec.errCode, rec.errOff);
+      Token t;
+      t.t = Tok(rec.tok);
+      t.ch = char(rec.ch);
+      t.hasIndent = rec.hasIndent != 0;
+      t.offset = uint32_t(rec.offset);
+      t.pos = Pos{uint32_t(rec.posLine), uint32_t(rec.posCol)};
+      if (t.t == T_FLOAT) __builtin_memcpy(&t.f, &rec.value, 8);
+      else if (t.t == T_INT) t.i = int64_t(rec.value);
+      if (rec.dkind == 2) setDerived(t, unescapeInto(rec.dFrom, rec.dTo));
+      else {
+        t.derived = rec.dkind == 1;
+        t.span = join::TwInt(uint32_t(rec.span >> 32), uint32_t(rec.span));
+      }
+      return t;
+    }
   }
 
   /// Where an offset is: its line, and its column counted in bytes from the start of the line.  Offsets are asked for in
@@ -138,9 +197,7 @@ struct Lexer : public lex::Rules {
     return q ? static_cast<size_t>(static_cast<const char *>(q) - src.data()) : src.size();
   }
 
-  [[noreturn]] void error(std::string_view msg, size_t off) {
-    throw ParseError(msg, posAt(off), origin);
-  }
+  [[noreturn]] void error(std::string_view msg, size_t off) { throw ParseError(msg, posAt(off), origin); }
 
   enum State { S_INITIAL, S_DEFAULT, S_STRING, S_IND_STRING, S_INPATH, S_INPATH_SLASH };
   Origin *origin; // kept for the run (newOrigin)
@@ -149,370 +206,72 @@ struct Lexer : public lex::Rules {
   /// mutated.  Deque: entries do not move.  The four fixed ones are kFixed (a span of second() 1).
   composite::MutableSeries<composite::Text, composite::Chunked<composite::Text>> derived;
   static constexpr std::string_view kFixed[] = {"$", "''", "'", "~/"};
-  enum Fixed : uint32_t { F_DOLLAR, F_TWO_QUOTES, F_QUOTE, F_HOME };
-  void setSlice(Token &t, size_t from, size_t to) { t.span = join::TwInt(uint32_t(from), uint32_t(to)); }
-  void setFixed(Token &t, Fixed f) { t.derived = true; t.span = join::TwInt(uint32_t(f), 1); }
   void setDerived(Token &t, composite::Text s) {
     derived.append(composite::mv(s));
     t.derived = true;
     t.span = join::TwInt(uint32_t(derived.size() - 1), 0);
   }
-  /// A string piece: the slice itself unless it has escapes to resolve.
-  void setUnescaped(Token &t, size_t from, size_t to) {
-    std::string_view seg = src.substr(from, to - from);
-    if (seg.find_first_of("\\\r") == std::string_view::npos) setSlice(t, from, to);
-    else setDerived(t, unescapeStr(seg));
-  }
-  composite::MutableSeries<State> stack;
+  /// The state stack (S_INITIAL..S_INPATH_SLASH), grown by the bridge when the lowered machine reports room (status 3).
+  composite::MutableSeries<uint8_t> stack;
   size_t p = 0;
   uint32_t line = 1;
   size_t lineStart = 0;          // the offset where `line` starts
   size_t nextNl = newlineFrom(0); // the first newline at or after lineStart
 
-  State top() { return stack.back(); }
-  void push(State s) { stack.append(s); }
-  void pop() { if (stack.size() > 1) stack.pop(); }
-  static composite::Text unescapeStr(std::string_view s) {
-    composite::Text t;
-    t.reserve(s.size());
-    for (size_t i = 0; i < s.size();) {
-      char c = s[i++];
-      if (c == '\\') {
-        c = i < s.size() ? s[i++] : '\0';
-        if (c == 'n') t += '\n';
-        else if (c == 'r') t += '\r';
-        else if (c == 't') t += '\t';
-        else t += c;
-      } else if (c == '\r') {
-        t += '\n';
-        if (i < s.size() && s[i] == '\n') i++;
-      } else {
-        t += c;
-      }
-    }
-    return t;
+  /// Resolve a string piece's escapes into a derived text: the lowered nixfe_lex_unescape writes into the Text's own
+  /// buffer (the output is never longer than the input), and the text is truncated to what it wrote.
+  composite::Text unescapeInto(size_t from, size_t to) {
+    composite::Text s;
+    uint32_t len = uint32_t(to - from);
+    s.resize(len);
+    uint64_t w = nixfe_lex_unescape(src.data(), src.size(), from, to, s.begin(), len);
+    s.truncate(uint32_t(w));
+    return s;
   }
-
-  void checkNul(std::string_view s, size_t off) {
-    if (s.find('\0') != std::string_view::npos)
-      error("input string contains NUL byte", off);
-  }
-
-  bool next(Token &t) {
-    while (true) {
-      if (eof(p)) {
-        State s = top();
-        if (s == S_INPATH) {
-          pop();
-          t.t = T_PATH_END;
-          t.pos = posAt(p);
-          t.offset = uint32_t(p);
-          return true;
-        }
-        if (s == S_INPATH_SLASH)
-          error("path has a trailing slash", p);
-        return false;
-      }
-      State st = top();
-      if (st == S_INITIAL || st == S_DEFAULT) {
-        // Between two tokens the commonest things are blanks and `#` comments: one loop, no token made for them.
-        size_t q = p, n = src.size();
-        for (;;) {
-          while (q < n && (src[q] == ' ' || src[q] == '\n' || src[q] == '\t' || src[q] == '\r')) q++;
-          if (q < n && src[q] == '#') {
-            while (q < n && src[q] != '\n' && src[q] != '\r') q++;
-            continue;
-          }
-          break;
-        }
-        p = q;
-        if (eof(p)) continue; // the end of the input is handled at the top
-      }
-      t = Token();
-      t.offset = uint32_t(p);
-      t.pos = posAt(p);
-      switch (st) {
-      case S_STRING:
-        return lexString(t);
-      case S_IND_STRING:
-        return lexIndString(t);
-      case S_INPATH:
-      case S_INPATH_SLASH:
-        return lexInPath(t);
-      default:
-        if (lexDefault(t)) return true;
-        continue; // whitespace / comment
-      }
-    }
-  }
-
-  bool lexString(Token &t) {
-    size_t i = p;
-    // ${
-    if (at(i) == '$' && at(i + 1) == '{') {
-      push(S_DEFAULT);
-      p += 2;
-      t.t = T_DOLLAR_CURLY;
-      return true;
-    }
-    if (at(i) == '"') {
-      pop();
-      p++;
-      t.t = T_CHAR;
-      t.ch = '"';
-      return true;
-    }
-    size_t j = i;
-    while (!eof(j)) {
-      char c = src[j];
-      if (c == '"') break;
-      if (c == '\\') {
-        if (eof(j + 1)) break;
-        j += 2;
-        continue;
-      }
-      if (c == '$') {
-        char n = at(j + 1);
-        if (eof(j + 1)) break;
-        if (n == '{') break;
-        if (n == '"') { j++; break; } // trailing-context rule: `$` before `"`
-        if (n == '\\') {
-          if (eof(j + 2)) break;
-          j += 3;
-          continue;
-        }
-        j += 2;
-        continue;
-      }
-      j++;
-    }
-    if (j == i) {
-      // `$`, `\`, `$\` at EOF: return EOF to let the parser fail.
-      p = src.size();
-      t.t = T_EOF;
-      t.pos = posAt(p);
-      t.offset = uint32_t(p);
-      return true;
-    }
-    t.t = T_STR;
-    setUnescaped(t, i, j);
-    checkNul(text(t), i);
-    p = j;
-    return true;
-  }
-
-  bool lexIndString(Token &t) {
-    size_t i = p;
-    // Main rule: ([^\$\']|\$[^\{\']|\'[^\'\$])+
-    size_t j = i;
-    while (!eof(j)) {
-      char c = src[j];
-      if (c != '$' && c != '\'') { j++; continue; }
-      if (eof(j + 1)) break;
-      char n = src[j + 1];
-      if (c == '$' && n != '{' && n != '\'') { j += 2; continue; }
-      if (c == '\'' && n != '\'' && n != '$') { j += 2; continue; }
-      break;
-    }
-    if (j > i) {
-      t.t = T_IND_STR;
-      setSlice(t, i, j);
-      t.hasIndent = true;
-      checkNul(text(t), i);
-      p = j;
-      return true;
-    }
-    if (at(i) == '\'' && at(i + 1) == '\'') {
-      if (at(i + 2) == '$') { t.t = T_IND_STR; setFixed(t, F_DOLLAR); p += 3; return true; }
-      if (at(i + 2) == '\'') { t.t = T_IND_STR; setFixed(t, F_TWO_QUOTES); p += 3; return true; }
-      if (at(i + 2) == '\\' && !eof(i + 3)) {
-        t.t = T_IND_STR;
-        setDerived(t, unescapeStr(src.substr(i + 2, 2)));
-        // `''\` followed by CR LF: unescape handles "\\\r" as '\r' literal;
-        // upstream matches exactly one char after the backslash.
-        p += 4;
-        return true;
-      }
-      pop();
-      p += 2;
-      t.t = T_IND_STRING_CLOSE;
-      return true;
-    }
-    if (at(i) == '$' && at(i + 1) == '{') {
-      push(S_DEFAULT);
-      p += 2;
-      t.t = T_DOLLAR_CURLY;
-      return true;
-    }
-    if (at(i) == '$') { t.t = T_IND_STR; setFixed(t, F_DOLLAR); p++; return true; }
-    if (at(i) == '\'') { t.t = T_IND_STR; setFixed(t, F_QUOTE); p++; return true; }
-    // unreachable
-    error("lexer error in indented string", i);
-  }
-
-  bool lexInPath(Token &t) {
-    size_t i = p;
-    if (at(i) == '$' && at(i + 1) == '{') {
-      pop();
-      push(S_INPATH);
-      push(S_DEFAULT);
-      p += 2;
-      t.t = T_DOLLAR_CURLY;
-      return true;
-    }
-    size_t l = std::max({mPath(i), mPathSeg(i), [&] {
-                           size_t j = i;
-                           while (!eof(j) && isPathChar(src[j])) j++;
-                           return j - i;
-                         }()});
-    if (l) {
-      pop();
-      push(src[i + l - 1] == '/' ? S_INPATH_SLASH : S_INPATH);
-      t.t = T_STR;
-      setSlice(t, i, i + l);
-      p += l;
-      return true;
-    }
-    if (top() == S_INPATH_SLASH)
-      error("path has a trailing slash", i);
-    pop();
-    t.t = T_PATH_END;
-    return true;
-  }
-
-  bool lexDefault(Token &t) {
-    size_t i = p;
-    char c = at(i);
-    // Whitespace and comments.
-    if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
-      while (!eof(p) && (src[p] == ' ' || src[p] == '\t' || src[p] == '\r' || src[p] == '\n')) p++;
-      return false;
-    }
-    if (c == '#') {
-      while (!eof(p) && src[p] != '\n' && src[p] != '\r') p++;
-      return false;
-    }
-
-    // Characters that start no rule but the default one: the token is the character.
-    switch (c) {
-    case '(': case ')': case '[': case ']': case ';': case ',': case '@': case '?': case ':': case '*':
-      p = i + 1;
-      t.t = T_CHAR;
-      t.ch = c;
-      return true;
+  /// The lex errors the lowered machine reports by code; the wording and the position stay here.
+  [[noreturn]] void lexError(uint64_t code, size_t off) {
+    switch (code) {
+    case 1: error("path has a trailing slash", off);
+    case 2: error("lexer error in indented string", off);
+    case 3: error("input string contains NUL byte", off);
+    case 4: error(composite::cat("invalid integer '", src.substr(off, p - off), "'"), off);
+    case 5: error(composite::cat("invalid float '", src.substr(off, p - off), "'"), off);
     default:
-      break;
-    }
-
-    // An identifier or keyword is the commonest token.  Of the rules that can start with an identifier character only
-    // a path (a '/' straight after the run of path characters) and a URI (a ':' after the scheme, which is that run)
-    // can be longer than the identifier rule's match; when neither follows, no other matcher can fire, so none runs.
-    if (isIdStart(c)) {
-      size_t j = i + 1;
-      while (!eof(j) && isPathChar(src[j])) j++;
-      char after = at(j);
-      if (after != '/' && after != ':') {
-        size_t len = mId(i);
-        t.t = keywordOf(src.substr(i, len));
-        if (t.t == T_ID) setSlice(t, i, i + len);
-        p = i + len;
-        return true;
-      }
-    }
-
-    // The commonest single characters.  Each case below is a character no other rule can continue, and it is the same
-    // token matchDefault would return: `{`, `}` and `"` start no rule but their own; `=` is plain unless `==` follows; a
-    // space after `-`, `+`, `<`, `>`, `!` leaves no operator (`->`, `++`, `<=`, `<|`, `>=`, `!=`), no path and no <spath>;
-    // a `.` is plain unless a digit (float), `.` or `/` (operator, path) follows, or a run of path characters ends in `/`.
-    switch (c) {
-    case '{': p = i + 1; push(S_DEFAULT); t.t = T_CHAR; t.ch = c; return true;
-    case '}': p = i + 1; if (top() != S_INITIAL) pop(); t.t = T_CHAR; t.ch = c; return true;
-    case '\"': p = i + 1; push(S_STRING); t.t = T_CHAR; t.ch = c; return true;
-    case '=':
-      if (at(i + 1) == '=') break;
-      p = i + 1; t.t = T_CHAR; t.ch = c; return true;
-    case '-': case '+': case '<': case '>': case '!':
-      if (at(i + 1) != ' ') break;
-      p = i + 1; t.t = T_CHAR; t.ch = c; return true;
-    case '.': {
-      char n = at(i + 1);
-      if (isDigit(n) || n == '.' || n == '/') break;
-      if (isPathChar(n)) {
-        size_t j = i + 2;
-        while (!eof(j) && isPathChar(src[j])) j++;
-        if (at(j) == '/') break;
-      }
-      p = i + 1; t.t = T_CHAR; t.ch = c; return true;
-    }
-    default:
-      break;
-    }
-
-    static constexpr Tok kwTok[] = {T_IF, T_THEN, T_ELSE, T_ASSERT, T_WITH, T_LET, T_IN, T_REC, T_INHERIT, T_OR_KW};
-    static constexpr Tok opTok[] = {T_ELLIPSIS, T_EQ, T_NEQ, T_LEQ, T_GEQ, T_AND, T_OR, T_IMPL, T_UPDATE, T_CONCAT, T_PIPE_FROM, T_PIPE_INTO};
-    lex::Match best = matchDefault(i, c); // the longest rule, the earlier winning a tie (LexRules.h)
-
-    size_t len = best.len;
-    int r = best.rule;
-    p = i + len;
-    if (r < lex::R_OPERATOR) { t.t = kwTok[r]; return true; }
-    if (r < lex::R_OPERATOR + 12) {
-      t.t = opTok[r - lex::R_OPERATOR];
-      if ((t.t == T_PIPE_FROM || t.t == T_PIPE_INTO) && !opts.pipeOperators)
-        error("experimental Nix feature 'pipe-operators' is disabled; add '--extra-experimental-features pipe-operators' to enable it", i);
-      return true;
-    }
-    switch (r) {
-    case lex::R_ID: t.t = T_ID; setSlice(t, i, i + len); return true;
-    case lex::R_INT: {
-      composite::text::Reading n = nixsys::readUnsigned(src.substr(i, len)); // the facet reads the lexeme where it lies: no NUL, no copy
-      if (n.overflow || n.value > (uint64_t)INT64_MAX)
-        error(composite::cat("invalid integer '", src.substr(i, len), "'"), i);
-      t.t = T_INT;
-      t.i = (int64_t)n.value;
-      return true;
-    }
-    case lex::R_FLOAT:
-      errno = 0;
-      {
-        nixsys::CStr txt(src.substr(i, len)); // strtod needs a NUL: the lexeme is copied to the stack (CStr), not to the heap
-        t.f = strtod(txt.c_str(), nullptr);
-        if (errno) error(composite::cat("invalid float '", src.substr(i, len), "'"), i);
-      }
-      t.t = T_FLOAT;
-      return true;
-    case lex::R_DOLLAR_CURLY: push(S_DEFAULT); t.t = T_DOLLAR_CURLY; return true;
-    case lex::R_RBRACE:
-      if (top() != S_INITIAL) pop();
-      t.t = T_CHAR; t.ch = '}';
-      return true;
-    case lex::R_LBRACE: push(S_DEFAULT); t.t = T_CHAR; t.ch = '{'; return true;
-    case lex::R_DQUOTE: push(S_STRING); t.t = T_CHAR; t.ch = '"'; return true;
-    case lex::R_IND_OPEN: push(S_IND_STRING); t.t = T_IND_STRING_OPEN; return true;
-    case lex::R_PATH_START: {
-      // PATH_START: re-lex as PATH_SEG / HPATH_START, then INPATH_SLASH.
-      if (c == '~') { t.t = T_HPATH; setFixed(t, F_HOME); p = i + 2; }
-      else { size_t l = mPathSeg(i); t.t = T_PATH; setSlice(t, i, i + l); p = i + l; }
-      push(S_INPATH_SLASH);
-      return true;
-    }
-    case lex::R_PATH:
-    case lex::R_HPATH:
-      setSlice(t, i, i + len);
-      push(src[i + len - 1] == '/' ? S_INPATH_SLASH : S_INPATH);
-      t.t = r == lex::R_PATH ? T_PATH : T_HPATH;
-      return true;
-    case lex::R_SPATH: t.t = T_SPATH; setSlice(t, i, i + len); return true;
-    case lex::R_URI: t.t = T_URI; setSlice(t, i, i + len); return true;
-    case lex::R_COMMENT: return false;
-    default:
-      t.t = T_CHAR;
-      t.ch = c;
-      return true;
+      error("experimental Nix feature 'pipe-operators' is disabled; add '--extra-experimental-features "
+            "pipe-operators' to enable it",
+            off);
     }
   }
 };
 
+/// The position of an offset (Lexer::posAt), packed line<<32|col, called back per token by the lowered machine.
+extern "C" uint64_t nixfe_lex_pos(void *lex, uint64_t off) {
+  Pos p = static_cast<Lexer *>(lex)->posAt(off);
+  return (uint64_t(p.line) << 32) | p.col;
+}
+/// The keyword with exactly this text, else T_ID (keywordOf), called back for an identifier.
+extern "C" uint64_t nixfe_lex_keyword(const char *src, uint64_t n, uint64_t i, uint64_t len) {
+  (void)n;
+  return uint64_t(keywordOf(std::string_view(src + i, len)));
+}
+/// The integer lexeme as readUnsigned reads it: 0 ok (value written), 1 invalid (overflow or past INT64_MAX).
+extern "C" uint64_t nixfe_lex_int(const char *src, uint64_t n, uint64_t i, uint64_t len, uint64_t *out) {
+  (void)n;
+  composite::text::Reading r = nixsys::readUnsigned(std::string_view(src + i, len));
+  if (r.overflow || r.value > uint64_t(INT64_MAX)) return 1;
+  *out = r.value;
+  return 0;
+}
+/// The float lexeme as strtod reads it: 0 ok (bits written), 1 invalid (errno).
+extern "C" uint64_t nixfe_lex_float(const char *src, uint64_t n, uint64_t i, uint64_t len, uint64_t *out) {
+  (void)n;
+  errno = 0;
+  nixsys::CStr txt(std::string_view(src + i, len));
+  double d = strtod(txt.c_str(), nullptr);
+  if (errno) return 1;
+  __builtin_memcpy(out, &d, 8);
+  return 0;
+}
 //===----------------------------------------------------------------------===//
 // The parser: upstream's grammar in one pass that builds no tree
 //===----------------------------------------------------------------------===//

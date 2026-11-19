@@ -174,6 +174,11 @@ mlnix_lower_trikeshed(NixFrontend lowered/nixfe/LiteralString.mlir LiteralString
 # (--ownership-based-buffer-deallocation takes only structured loops), and --convert-ub-to-llvm reads the poison the lift
 # leaves.
 mlnix_lower_trikeshed(NixFrontend lowered/nixfrontend/ConfixScan.mlir ConfixScan --lift-cf-to-scf --convert-ub-to-llvm)
+# The Nix lexer's token state machine (nixfe::Lexer::nextToken): lib/Frontend/Parser.cpp's next/lexString/lexIndString/
+# lexInPath/lexDefault/unescapeStr are gone; the bridge owns the Token, the derived-text pool and the state stack and
+# calls nixfe_lex_next (the character classes as tables, the longest-match rules / keyword / number / position called
+# back).  Same cf-loop lifting as the Confix scan beside it.
+mlnix_lower_trikeshed(NixFrontend lowered/nixfrontend/LexScan.mlir LexScan --lift-cf-to-scf --convert-ub-to-llvm)
 
 # The Nix sources the evaluator ships (lib/Corepkgs/*.nix: flakes) embedded as <nix/NAME>.
 file(GLOB COREPKGS_NIX CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/Corepkgs/*.nix)
