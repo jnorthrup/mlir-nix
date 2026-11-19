@@ -122,7 +122,7 @@ function(mlnix_lower_trikeshed target mlir stem)
     COMMAND $<TARGET_FILE:mlnix-opt> ${src} --trikeshed-lower-cursors -o ${cur}
     DEPENDS ${src} mlnix-opt COMMENT "trikeshed-lower-cursors ${mlir}")
   add_custom_command(OUTPUT ${low}
-    COMMAND ${MLNIX_MLIR_OPT} ${cur} ${MLNIX_TRIKESHED_PIPELINE} -o ${low}
+    COMMAND ${MLNIX_MLIR_OPT} ${cur} ${ARGN} ${MLNIX_TRIKESHED_PIPELINE} -o ${low}
     DEPENDS ${cur} COMMENT "lowering ${stem} buffers to llvm")
   add_custom_command(OUTPUT ${ll}
     COMMAND ${MLNIX_MLIR_TRANSLATE} --mlir-to-llvmir ${low} -o ${ll}
@@ -159,6 +159,13 @@ target_precompile_headers(NixFrontend PRIVATE ${PROJECT_SOURCE_DIR}/include/Comp
 # nixfe::canonPath's segment walk (Parser.cpp's body is gone; the bridge sizes the Text and calls this entry).  The walk
 # is trikeshed.at / slice / text / drain over the byte series.  NixFrontend owns it: mlnix-parse links NixFrontend alone.
 mlnix_lower_trikeshed(NixFrontend lowered/nixfe/CanonPath.mlir CanonPath)
+# The Nix delimiter scan (nixfe::confix::Bands): lib/Frontend/Confix.cpp's Scanner is gone; the bridge sizes the Bands and
+# calls confix_scan_nix, the body of the confix dialect's confix.bands (the character classes as tables, the lexer's
+# longest-match rules called back).  NixFrontend carries it (MLIRNix cannot: mlnix-opt links MLIRNix and builds the
+# lowered object).  Its state machine is cf blocks: --lift-cf-to-scf structures the loops first
+# (--ownership-based-buffer-deallocation takes only structured loops), and --convert-ub-to-llvm reads the poison the lift
+# leaves.
+mlnix_lower_trikeshed(NixFrontend lowered/nixfrontend/ConfixScan.mlir ConfixScan --lift-cf-to-scf --convert-ub-to-llvm)
 
 # The Nix sources the evaluator ships (lib/Corepkgs/*.nix: flakes) embedded as <nix/NAME>.
 file(GLOB COREPKGS_NIX CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/Corepkgs/*.nix)

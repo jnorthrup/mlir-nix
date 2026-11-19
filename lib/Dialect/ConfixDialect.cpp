@@ -1,7 +1,8 @@
 //===- ConfixDialect.cpp - The confix dialect, confix-to-llvm, and the index below TrikeShed -------===//
 //
 // The scan is LLVM IR (lib/Confix/confix.ll).  This file registers the dialect and lowers its ops: `confix.scan` to a call of the IR's
-// confix_scan_json, confix_scan_cbor or confix_scan_yaml, and the reads of a Flat record (include/NixDialect/Confix.td) to loads from it.
+// confix_scan_json, confix_scan_cbor or confix_scan_yaml, `confix.bands` to a call of ConfixScan.mlir's confix_scan_nix (the Nix delimiter
+// scan, lowered at build time), and the reads of a Flat record (include/NixDialect/Confix.td) to loads from it.
 // `confix.index`, `confix.columns` and `confix.unescape` make and read TrikeShed's series and cursors; trikeshed-lower-cursors lowers
 // them, with the patterns this dialect gives it through CursorLoweringInterface (Composite/CursorLowering.h).
 
@@ -466,7 +467,7 @@ struct ConfixToLLVMPass : PassWrapper<ConfixToLLVMPass, OperationPass<ModuleOp>>
     ModuleOp module = getOperation();
     SmallVector<Operation *> ops;
     module.walk([&](Operation *op) {
-      if (isa<ScanOp, SizeOp, RowOp, KidOp>(op))
+      if (isa<ScanOp, SizeOp, RowOp, KidOp, BandsOp>(op))
         ops.push_back(op);
     });
     for (Operation *op : ops) {
@@ -501,6 +502,17 @@ struct ConfixToLLVMPass : PassWrapper<ConfixToLLVMPass, OperationPass<ModuleOp>>
       } else if (auto kid = dyn_cast<KidOp>(op)) {
         Value row = l.element(l.field(kid.getFlat(), Kid, l.ptr), l.i32, l.widen(kid.getAt()));
         op->replaceAllUsesWith(ValueRange{row});
+      } else if (auto bands = dyn_cast<BandsOp>(op)) {
+        // the Nix delimiter scan: ConfixScan.mlir's entry, linked into NixFrontend as confix.ll's scanner is into MLIRNix
+        StringRef callee = "confix_scan_nix";
+        if (!module.lookupSymbol(callee)) {
+          OpBuilder::InsertionGuard g(b);
+          b.setInsertionPointToStart(module.getBody());
+          LLVM::LLVMFuncOp::create(b, module.getLoc(), callee, LLVM::LLVMFunctionType::get(l.i32, {l.ptr}));
+        }
+        Value status = LLVM::CallOp::create(b, op->getLoc(), LLVM::LLVMFunctionType::get(l.i32, {l.ptr}), callee,
+                                            ValueRange{bands.getRec()}).getResult();
+        op->replaceAllUsesWith(ValueRange{status});
       }
       op->erase();
     }

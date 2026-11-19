@@ -130,6 +130,37 @@ def Confix_KidOp : Confix_Op<"kid"> {
   let assemblyFormat = "$flat `[` $at `]` attr-dict `:` type($flat)";
 }
 
+// ---- the Nix delimiter scan: the frontend's bands (Nix/Confix.h), the same index-first reading of a source.
+//
+// The scan is lowered/nixfrontend/ConfixScan.mlir, lowered at build time (lib/CMakeLists.txt) and linked into NixFrontend:
+// the lexer's state machine without tokens, the character classes as tables, the longest-match
+// rules called back from Nix/LexRules.h (shared with the lexer).  The record, which the caller owns and fills (all fields
+// 8 bytes, in this order):
+//
+//   src     ptr   in   the source's bytes
+//   n       i64   in   its size (below 2^32 - 1: the spans are 32-bit)
+//   start   i64   in   where the scan begins (0 for a whole source)
+//   rooted  i64   in   1 when the scan ends where its first band closes (a scan from Bands::need)
+//   span    ptr   out  [rowCap] of u64: open << 32 | close, the closing delimiter's offset (0 until the band closes)
+//   kind    ptr   out  [rowCap] of u8: the BandKind, the character that opens the band
+//   stmts   ptr   out  [rowCap] of u64: first << 32 | count into ends, the band's qualified semicolons and commas
+//   ends    ptr   out  [endCap] of u32: the statement ends, a band's together and in order
+//   rows    i64   in/out  the bands already met / after the scan
+//   nends   i64   in/out  the ends already met / after
+//   rowCap  i64   in   the room of span, kind and stmts
+//   endCap  i64   in   the room of ends
+//
+// The status is 0 when the source balances, 1 when it does not (a string or comment that does not end, a closer that
+// matches nothing, a path ending in a slash: the bands are then not to be used), 2 when the room ran out: the caller
+// doubles the arrays and scans again, as the caller of confix.scan does on YAML's Room.
+
+def Confix_BandsOp : Confix_Op<"bands"> {
+  let summary = "scan a Nix source's delimiters into a band record";
+  let arguments = (ins Arg<LLVM_AnyPointer, "", [MemWrite]>:$rec);
+  let results = (outs I32:$status);
+  let assemblyFormat = "$rec attr-dict `:` type($rec)";
+}
+
 // ---- the index as TrikeShed's series and cursor (PRELOAD-DIALECTS step 5): ConfixIndex's facets, lowered below TrikeShed.
 //
 // The ops above read a Flat record through a pointer.  These two are the same index as Kotlin hands it out
