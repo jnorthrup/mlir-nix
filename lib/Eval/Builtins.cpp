@@ -50,11 +50,20 @@ struct TsReplace {
   EvalState *st; Value **to; PosPtr pos; NixStringContext *ctx;
   std::map<size_t, std::string_view> cache; // the replacement strings, forced once each, in match order
 };
+// The set primops' algebra is hollowed into lowered/nixeval/SetOps.mlir (trikeshed.sorted / bisect / where / alpha /
+// compare / series / drain), lowered the same way.  The bridges force the operands (Nix's error order and wording) and
+// call these entries; attrNames / attrValues hand in the symbol table's prefix words and name windows (their data
+// pointers) so the names sort by their bytes, and nixev_name_cell makes a name's string cell over the table's own bytes.
 extern "C" {
 void nixev_ts_stringLength(const char *s, int64_t n, Value *v);
 TsBounds nixev_ts_substring(const char *s, int64_t n, int64_t start, int64_t len);
 void nixev_ts_concat(EvalState *st, const composite::Chars *pieces, int64_t np, Value *v, const StringContext *ctx);
 void nixev_ts_replace(EvalState *st, TsReplace *r, const char *s, int64_t sn, const composite::Chars *from, int64_t m, Value *v);
+void nixev_ts_attrNames(EvalState *st, Bindings *set, Value *v, const uint64_t *prefixes, const llvm::StringRef *names);
+void nixev_ts_attrValues(EvalState *st, Bindings *set, Value *v, const uint64_t *prefixes, const llvm::StringRef *names);
+int nixev_ts_getAttr(EvalState *st, Bindings *set, int64_t sym, Value *v, PosPtr pos);
+int nixev_ts_hasAttr(Bindings *set, int64_t sym);
+void nixev_ts_intersectAttrs(EvalState *st, Value *v, Bindings *b0, Bindings *b1);
 char *nixev_str_room(EvalState *st, int64_t n) {
   if (st->statsEnabled) st->nStringBytes += uint64_t(n) + 1;
   return static_cast<char *>(st->alloc.Allocate(size_t(n) + 1, 1));
@@ -70,6 +79,7 @@ void nixev_replace_to(TsReplace *r, int64_t j, composite::Chars *out) {
   }
   *out = composite::chars(c->second.data(), uint32_t(c->second.size()));
 }
+Value *nixev_name_cell(EvalState *st, const char *p, size_t n) { return st->newStringWindow(llvm::StringRef(p, n)); }
 }
 
 //===----------------------------------------------------------------------===//
@@ -764,21 +774,17 @@ void registerBuiltins(EvalState &state) {
   // -- Attribute sets ----------------------------------------------------------
   S.addPrimOp("__attrNames", [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceAttrs(*args[0], pos, "while evaluating the argument passed to builtins.attrNames");
-    auto sorted = args[0]->attrs->lexicographicOrder(st.symbols);
-    st.mkList(v, sorted |cp::α| [&](const Attr *a) { return st.newStringWindow(st.symbols[a->name]); }); // the names' own bytes
+    nixev_ts_attrNames(&st, args[0]->attrs, &v, st.symbols.prefix.data(), st.symbols.names.data());
   });
   S.addPrimOp("__attrValues", [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceAttrs(*args[0], pos, "while evaluating the argument passed to builtins.attrValues");
-    auto sorted = args[0]->attrs->lexicographicOrder(st.symbols);
-    st.mkList(v, sorted |cp::α| [](const Attr *a) { return a->value; });
+    nixev_ts_attrValues(&st, args[0]->attrs, &v, st.symbols.prefix.data(), st.symbols.names.data());
   });
   S.addPrimOp("__getAttr", [](EvalState &st, A args, Value &v, PosPtr pos) {
     auto name = st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.getAttr");
     st.forceAttrs(*args[1], pos, "while evaluating the second argument passed to builtins.getAttr");
-    const Attr *a = args[1]->attrs->get(st.symbolOfString(name));
-    if (!a) throw EvalError(composite::cat("attribute '", name, "' missing"), pos);
-    st.forceValue(*a->value, pos);
-    v = *a->value;
+    if (!nixev_ts_getAttr(&st, args[1]->attrs, st.symbolOfString(name), &v, pos))
+      throw EvalError(composite::cat("attribute '", name, "' missing"), pos);
   });
   S.addPrimOp("__unsafeGetAttrPos", [](EvalState &st, A args, Value &v, PosPtr pos) {
     auto name = st.forceStringNoCtx(*args[0], pos);
@@ -796,7 +802,7 @@ void registerBuiltins(EvalState &state) {
   S.addPrimOp("__hasAttr", [](EvalState &st, A args, Value &v, PosPtr pos) {
     auto name = st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.hasAttr");
     st.forceAttrs(*args[1], pos, "while evaluating the second argument passed to builtins.hasAttr");
-    st.mkBool(v, args[1]->attrs->get(st.symbolOfString(name)) != nullptr);
+    st.mkBool(v, nixev_ts_hasAttr(args[1]->attrs, st.symbolOfString(name)) != 0);
   });
   S.addPrimOp("removeAttrs", [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceAttrs(*args[0], pos, "while evaluating the first argument passed to builtins.removeAttrs");
@@ -837,22 +843,9 @@ void registerBuiltins(EvalState &state) {
   S.addPrimOp("__intersectAttrs", [](EvalState &st, A args, Value &v, PosPtr pos) {
     st.forceAttrs(*args[0], pos, "while evaluating the first argument passed to builtins.intersectAttrs");
     st.forceAttrs(*args[1], pos, "while evaluating the second argument passed to builtins.intersectAttrs");
-    Bindings *b = st.allocBindings(std::min(args[0]->attrs->size(), args[1]->attrs->size()));
-    size_t n = 0;
-    // Walk the smaller set and probe the larger one.  callPackage intersects a
-    // function's ~10 formals with all of nixpkgs (~40k attributes): walking the
-    // large side did 40k failing probes and a 1 MB scan per call (90-96% of all
-    // attrset lookups in the NixOS and nixpkgs workloads).  Either way the result
-    // is sorted, with the entries of the second set.
-    if (args[0]->attrs->size() < args[1]->attrs->size()) {
-      for (auto &a : *args[0]->attrs)
-        if (const Attr *j = args[1]->attrs->get(a.name)) b->attrs[n++] = *j;
-    } else {
-      for (auto &a : *args[1]->attrs)
-        if (args[0]->attrs->get(a.name)) b->attrs[n++] = a;
-    }
-    b->size_ = n;
-    st.mkAttrs(v, b);
+    // Walk the smaller set and probe the larger (callPackage intersects ~10 formals with all of nixpkgs); the result is
+    // sorted, with the entries of the second set.  The walk and the probes are trikeshed.where / bisect in SetOps.mlir.
+    nixev_ts_intersectAttrs(&st, &v, args[0]->attrs, args[1]->attrs);
   });
   S.addPrimOp("__catAttrs", [](EvalState &st, A args, Value &v, PosPtr pos) {
     Symbol name = st.symbolOfString(st.forceStringNoCtx(*args[0], pos, "while evaluating the first argument passed to builtins.catAttrs"));

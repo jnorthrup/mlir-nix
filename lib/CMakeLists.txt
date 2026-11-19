@@ -171,3 +171,7 @@ mlnix_lower_trikeshed(NixEval lowered/nixeval/ListOps.mlir ListOps)
 # from lib/Eval/Builtins.cpp and lib/Eval/Eval.cpp; the bridges force/coerce the operands and call these entries).  The text
 # algebra is trikeshed.size / slice / compare / combineAll / drain.
 mlnix_lower_trikeshed(NixEval lowered/nixeval/StringOps.mlir StringOps)
+# The set primops __attrNames, __attrValues, __getAttr, __hasAttr, __intersectAttrs (lib/Eval/Builtins.cpp's bodies are
+# gone; the bridges force the operands and call these entries).  The set algebra is trikeshed.sorted / bisect / where /
+# alpha / compare / series / drain.
+mlnix_lower_trikeshed(NixEval lowered/nixeval/SetOps.mlir SetOps)
