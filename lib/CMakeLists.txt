@@ -275,6 +275,17 @@ mlnix_lower_trikeshed(NixEval lowered/nixeval/TomlScan.mlir TomlScan --lift-cf-t
 # gone).  concatLists/concatMap are trikeshed.combineAll of the inner lists' cells, filter a trikeshed.where; any/all/elem
 # short-circuit in an scf.while.  Each Nix function application calls back into the evaluator.
 mlnix_lower_trikeshed(NixEval lowered/nixeval/ListOps2.mlir ListOps2)
+# __groupBy / __zipAttrsWith / __partition / __catAttrs / removeAttrs / __listToAttrs / __mapAttrs (their C++ loops are
+# gone): the stable grouping by name is trikeshed.sorted over name << 32 | row words and a where of the run starts, the
+# selections where / alpha, removeAttrs' membership a bisect, the rows drained into the set.  Each evaluator interaction
+# (an application, a forcing, a list or thunk cell, the result set) calls back into Builtins.cpp.
+mlnix_lower_trikeshed(NixEval lowered/nixeval/GroupOps.mlir GroupOps)
+# __genericClosure's walk: the worklist and the keys met, kept as libc++'s std::set kept them (its red-black tree and its
+# comparison sequence: every comparison is a Nix lessThan).  Forcing, comparing and the operator call back.
+mlnix_lower_trikeshed(NixEval lowered/nixeval/ClosureOps.mlir ClosureOps)
+# __getContext's context algebra: the elements read, sorted by path bytes (trikeshed.sorted / compare unsigned), the
+# runs of one path, their flags (fold) and outputs (where).  The sets are made by a callback.
+mlnix_lower_trikeshed(NixEval lowered/nixeval/ContextOps.mlir ContextOps)
 # The baseNameOf / dirOf primops' slash scans (Builtins.cpp's scans are gone; the bridges coerce and share the window at
 # the bounds these entries return).  The scans are trikeshed.at / slice over the byte series.
 mlnix_lower_trikeshed(NixEval lowered/nixeval/PathBounds.mlir PathBounds)
