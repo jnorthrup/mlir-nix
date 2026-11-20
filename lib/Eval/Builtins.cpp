@@ -6,6 +6,7 @@
 #include "Composite/Mutable.h"
 #include "Nix/Eval.h"
 #include "Nix/Numbers.h"
+#include "NixDialect/Kursive.h"
 
 #include "mlir/IR/BuiltinAttributes.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -171,9 +172,11 @@ static const ku::Program &kursiveOf(EvalState &st, std::string_view re, PosPtr p
   if (it != cache.end()) return *it->second;
   static ku::Step steps[1 << 16];
   static ku::Set sets[4096];
-  static ku::detail::Node pool[1 << 16];
   ku::Program scratch{steps, 0, 1 << 16, sets, 0, 4096};
-  ku::compile(re.data(), uint32_t(re.size()), scratch, pool, 1 << 16);
+  static uint32_t words[4 << 16], n[4]; // the combinators: re2mlir, kursive-to-program (lib/Dialect/KursiveDialect.cpp)
+  scratch.error = ku::Error(mlir::kursive::compileProgram(llvm::StringRef(re.data(), re.size()), 1 << 16, 1 << 16, 4096, words, &sets[0].w[0], n));
+  scratch.nSteps = n[0], scratch.nSets = n[1], scratch.groups = n[2], scratch.loops = n[3];
+  for (uint32_t i = 0; i < scratch.nSteps; i++) steps[i] = {ku::Op(words[4 * i]), words[4 * i + 1], words[4 * i + 2], words[4 * i + 3]};
   if (scratch.error == ku::Error::Space) throw EvalError(composite::cat("memory limit exceeded by regular expression '", re, "'"), pos);
   if (scratch.error != ku::Error::None) throw EvalError(composite::cat("invalid regular expression '", re, "'"), pos);
   auto *prog = static_cast<ku::Program *>(st.alloc.Allocate(sizeof(ku::Program), alignof(ku::Program)));

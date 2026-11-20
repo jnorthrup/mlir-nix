@@ -1,9 +1,10 @@
 // Kursive.h against std::regex::extended: regex_match (builtins.match) and the regex_iterator walk builtins.split makes, on every pattern the
 // two benchmark workloads use, on patterns that probe libstdc++'s corners (loops that may match empty, anchors, alternations), and on random
 // patterns, where it must also agree on which patterns are errors.  libstdc++ (Kali, g++-16) is the reference: Nix on Linux answers with it.
-// Build: c++ -std=c++20 -O2 -Iinclude scripts/kursive-check.cc build/lib/lowered/KursiveOps.o
-//   (the walk is hollowed into lowered/nixeval/KursiveOps.mlir; link its lowered object for mlnix_kursive_walk)
+// Build: ninja -C build kursive-check (tools/CMakeLists.txt): the patterns compile through the kursive combinator dialect
+//   (mlir::kursive::compileProgram: re2mlir, kursive-to-program) and walk in lowered/nixeval/KursiveOps.mlir.
 #include "Composite/Kursive.h"
+#include "NixDialect/Kursive.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -33,14 +34,17 @@ static const char alphabet[] = "abcdeiopsuwxyzrgtABXZ0123579./-_:@%<>+=,?#\" \\\
 struct Engine {
   std::vector<Step> steps = std::vector<Step>(1 << 16);
   std::vector<Set> sets = std::vector<Set>(4096);
-  std::vector<detail::Node> pool = std::vector<detail::Node>(1 << 16);
+  std::vector<uint32_t> words = std::vector<uint32_t>(4 << 16);
   std::vector<uint32_t> caps = std::vector<uint32_t>(256), best = std::vector<uint32_t>(256);
   std::vector<LoopState> loops = std::vector<LoopState>(1 << 16);
   std::vector<Entry> stack = std::vector<Entry>(1 << 18);
   Program prog;
   bool compile(const std::string &pat) {
     prog = Program{steps.data(), 0, uint32_t(steps.size()), sets.data(), 0, uint32_t(sets.size())};
-    composite::kursive::compile(pat.data(), uint32_t(pat.size()), prog, pool.data(), uint32_t(pool.size()));
+    uint32_t n[4];
+    prog.error = Error(mlir::kursive::compileProgram(pat, 1 << 16, uint32_t(steps.size()), uint32_t(sets.size()), words.data(), sets[0].w, n));
+    prog.nSteps = n[0], prog.nSets = n[1], prog.groups = n[2], prog.loops = n[3];
+    for (uint32_t i = 0; i < prog.nSteps; i++) steps[i] = Step{Op(words[4 * i]), words[4 * i + 1], words[4 * i + 2], words[4 * i + 3]};
     return prog.error == Error::None && prog.groups < 120;
   }
   Scratch scratch() { return Scratch{caps.data(), best.data(), loops.data(), stack.data(), uint32_t(stack.size()), uint64_t(1) << 26}; }
