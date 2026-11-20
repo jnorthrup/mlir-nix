@@ -435,7 +435,20 @@ void EvalState::printValueAsXML(composite::Text &out, Value &v, bool strict, boo
 // TOML input
 //===----------------------------------------------------------------------===//
 
+// The scan of the document (whitespace, comments, keys, headers, strings and escapes, numbers, dates, the array and
+// inline-table nesting, the syntax errors) is lowered/nixeval/TomlScan.mlir, and so is every message's text.  It hands
+// its events here in order, and the tables (dotted keys, headers, array-of-tables, duplicates, redefinitions) are built
+// and checked here, so an error found here still comes before a lexical error later in the text.
+extern "C" int32_t nixev_ts_toml_scan(int64_t *rec);
+extern "C" int64_t nixev_ts_toml_msg(int64_t code, int64_t line, const char *w, int64_t wn, char *into, int64_t cap);
 namespace {
+[[noreturn]] void tomlFail(int64_t code, int64_t line, std::string_view w) {
+  composite::Text m;
+  m.resize(200 + w.size());
+  m.truncate(size_t(nixev_ts_toml_msg(code, line, w.data(), int64_t(w.size()), m.begin(), int64_t(m.size()))));
+  throw EvalError(composite::mv(m));
+}
+
 struct TomlNode {
   enum Kind { Table, Array, Leaf } kind = Table;
   composite::TextTable<TomlNode *> table;     // by key, the keys' bytes in the parser's Bump; no order (the set is sorted when built)
@@ -448,364 +461,68 @@ struct TomlNode {
 
 struct TomlParser {
   EvalState &st;
-  std::string_view s;
   bool timestamps;
   composite::MutableSeries<composite::Own<TomlNode>> nodes; // every node of the parse, owned here
   composite::Bump keyBytes;                                  // every key of every table
+  TomlNode root;
+  int64_t line = 1;                                          // the line of the scan's latest event
+  struct Frame { TomlNode *node; uint32_t elems, keys; };    // an open array (node null) or table; frames[0] the current [table]
+  composite::MutableSeries<Frame> frames;
+  composite::MutableSeries<Value *> elems;                   // the open arrays' elements
+  composite::MutableSeries<std::string_view> keys;           // the open keys' parts (windows on the input or the scan's bytes)
   TomlNode *make() { return nodes[nodes.append(composite::own<TomlNode>())].get(); }
   /// The child of `t` named `k`, null when there is none yet: a reference to fill.  It holds until t's next new key.
   TomlNode *&child(TomlNode &t, std::string_view k) {
     return t.table.at(k.data(), uint32_t(k.size()), [&] { return keyBytes.copy(k.data(), uint32_t(k.size())); });
   }
-  size_t p = 0;
-  int line = 1;
+  [[noreturn]] void fail(int64_t code, std::string_view k) { tomlFail(code, line, k); }
 
-  [[noreturn]] void fail(std::string_view m) {
-    throw EvalError(composite::cat("while parsing TOML: ", m, " (line ", line, ")"));
-  }
-  bool eof() { return p >= s.size(); }
-  char peek(size_t o = 0) { return p + o < s.size() ? s[p + o] : '\0'; }
-  void wsInline() {
-    while (!eof() && (s[p] == ' ' || s[p] == '\t')) p++;
-  }
-  void comment() {
-    if (peek() == '#') {
-      while (!eof() && s[p] != '\n') {
-        if ((unsigned char)s[p] < 0x20 && s[p] != '\t' && s[p] != '\r') fail("control character in comment");
-        p++;
-      }
-    }
-  }
-  void newline() {
-    if (peek() == '\r' && peek(1) == '\n') p += 2, line++;
-    else if (peek() == '\n') p++, line++;
-  }
-  void wsAll() { // whitespace, newlines and comments (inside arrays)
-    while (!eof()) {
-      wsInline();
-      comment();
-      if (peek() == '\n' || (peek() == '\r' && peek(1) == '\n')) newline();
-      else break;
-    }
-  }
-  static bool isBare(char c) { return composite::isAsciiAlnum(c) || c == '_' || c == '-'; }
-
-  static void utf8(composite::Text &out, uint32_t cp) {
-    if (cp < 0x80) out += char(cp);
-    else if (cp < 0x800) { out += char(0xC0 | (cp >> 6)); out += char(0x80 | (cp & 0x3F)); }
-    else if (cp < 0x10000) { out += char(0xE0 | (cp >> 12)); out += char(0x80 | ((cp >> 6) & 0x3F)); out += char(0x80 | (cp & 0x3F)); }
-    else { out += char(0xF0 | (cp >> 18)); out += char(0x80 | ((cp >> 12) & 0x3F)); out += char(0x80 | ((cp >> 6) & 0x3F)); out += char(0x80 | (cp & 0x3F)); }
-  }
-
-  composite::Text escape() {
-    // at backslash
-    p++;
-    char e = peek();
-    p++;
-    composite::Text out;
-    switch (e) {
-    case 'b': return "\b";
-    case 't': return "\t";
-    case 'n': return "\n";
-    case 'f': return "\f";
-    case 'r': return "\r";
-    case 'e': return "\x1b";
-    case '"': return "\"";
-    case '\\': return "\\";
-    case 'u': case 'U': {
-      int n = e == 'u' ? 4 : 8;
-      uint32_t cp = 0;
-      for (int i = 0; i < n; i++) {
-        char c = peek();
-        p++;
-        cp <<= 4;
-        if (c >= '0' && c <= '9') cp |= c - '0';
-        else if (c >= 'a' && c <= 'f') cp |= c - 'a' + 10;
-        else if (c >= 'A' && c <= 'F') cp |= c - 'A' + 10;
-        else fail("invalid unicode escape");
-      }
-      utf8(out, cp);
-      return out;
-    }
-    default: fail(composite::cat("invalid escape sequence '\\", e, "'"));
-    }
-  }
-
-  composite::Text basicString() {
-    if (s.substr(p, 3) == "\"\"\"") {
-      p += 3;
-      if (peek() == '\n') { p++; line++; }
-      else if (peek() == '\r' && peek(1) == '\n') { p += 2; line++; }
-      composite::Text out;
-      while (true) {
-        if (eof()) fail("unterminated multi-line string");
-        if (s.substr(p, 3) == "\"\"\"") {
-          p += 3;
-          // Up to two additional quotes belong to the content.
-          int extra = 0;
-          while (peek() == '"' && extra < 2) { out += '"'; p++; extra++; }
-          return out;
-        }
-        char c = s[p];
-        if (c == '\\') {
-          // line ending backslash
-          size_t q = p + 1;
-          while (q < s.size() && (s[q] == ' ' || s[q] == '\t')) q++;
-          if (q < s.size() && (s[q] == '\n' || s[q] == '\r')) {
-            p = q;
-            while (!eof() && (s[p] == ' ' || s[p] == '\t' || s[p] == '\n' || s[p] == '\r')) {
-              if (s[p] == '\n') line++;
-              p++;
-            }
-            continue;
-          }
-          out += escape();
-          continue;
-        }
-        if (c == '\n') line++;
-        out += c;
-        p++;
-      }
-    }
-    p++;
-    composite::Text out;
-    while (true) {
-      if (eof() || peek() == '\n') fail("unterminated string");
-      char c = s[p];
-      if (c == '"') { p++; return out; }
-      if (c == '\\') { out += escape(); continue; }
-      out += c;
-      p++;
-    }
-  }
-  composite::Text literalString() {
-    if (s.substr(p, 3) == "'''") {
-      p += 3;
-      if (peek() == '\n') { p++; line++; }
-      else if (peek() == '\r' && peek(1) == '\n') { p += 2; line++; }
-      composite::Text out;
-      while (true) {
-        if (eof()) fail("unterminated multi-line literal string");
-        if (s.substr(p, 3) == "'''") {
-          p += 3;
-          int extra = 0;
-          while (peek() == '\'' && extra < 2) { out += '\''; p++; extra++; }
-          return out;
-        }
-        if (s[p] == '\n') line++;
-        out += s[p++];
-      }
-    }
-    p++;
-    composite::Text out;
-    while (true) {
-      if (eof() || peek() == '\n') fail("unterminated literal string");
-      if (peek() == '\'') { p++; return out; }
-      out += s[p++];
-    }
-  }
-
-  composite::MutableSeries<composite::Text> key() {
-    composite::MutableSeries<composite::Text> parts;
-    while (true) {
-      wsInline();
-      composite::Text k;
-      if (peek() == '"') k = basicString();
-      else if (peek() == '\'') k = literalString();
-      else {
-        size_t start = p;
-        while (!eof() && isBare(s[p])) p++;
-        if (p == start) fail("expected a key");
-        k = composite::Text(s.substr(start, p - start));
-      }
-      if (k.find('\0') != composite::npos) fail("key contains a NUL byte");
-      parts.append(composite::mv(k));
-      wsInline();
-      if (peek() == '.') { p++; continue; }
-      return parts;
-    }
-  }
-
-  bool isDateAhead() {
-    // YYYY-MM-DD or HH:MM:SS
-    auto d = [&](size_t o) { return composite::isAsciiDigit(peek(o)); };
-    if (d(0) && d(1) && d(2) && d(3) && peek(4) == '-' && d(5) && d(6) && peek(7) == '-') return true;
-    if (d(0) && d(1) && peek(2) == ':' && d(3) && d(4) && peek(5) == ':') return true;
-    return false;
-  }
-
-  composite::Text dateTime() {
-    size_t start = p;
-    auto take = [&](auto pred) { while (!eof() && pred(s[p])) p++; };
-    take([](char c) { return composite::isAsciiDigit(c) || c == '-' || c == ':'; });
-    composite::Text res(s.substr(start, p - start));
-    // date-time separator
-    if ((peek() == 'T' || peek() == 't' || (peek() == ' ' && composite::isAsciiDigit(peek(1)))) && res.find('-') != composite::npos) {
-      p++;
-      res += 'T';
-      size_t ts = p;
-      take([](char c) { return composite::isAsciiDigit(c) || c == ':'; });
-      res += s.substr(ts, p - ts);
-    }
-    if (peek() == '.') {
-      p++;
-      size_t fs = p;
-      take([](char c) { return composite::isAsciiDigit(c); });
-      composite::Text frac(s.substr(fs, p - fs));
-      size_t padTo = frac.size() <= 3 ? 3 : frac.size() <= 6 ? 6 : 9;
-      if (frac.size() > 9) frac.truncate(9);
-      while (frac.size() < padTo) frac += '0';
-      res += '.';
-      res += frac;
-    }
-    if (peek() == 'Z' || peek() == 'z') { p++; res += "Z"; }
-    else if ((peek() == '+' || peek() == '-') && composite::isAsciiDigit(peek(1))) {
-      size_t os = p;
-      p++;
-      take([](char c) { return composite::isAsciiDigit(c) || c == ':'; });
-      res += s.substr(os, p - os);
-    }
-    return res;
-  }
-
-  Value *number() {
-    size_t start = p;
-    composite::Text tok;
-    while (!eof() && (composite::isAsciiAlnum(s[p]) || s[p] == '_' || s[p] == '+' || s[p] == '-' || s[p] == '.'))
-      tok += s[p++];
-    if (tok.empty()) fail("expected a value");
-    Value *v = st.allocValue();
-    std::string_view t = tok; // windows on tok, which is not written to again
-    bool neg = false;
-    std::string_view body = t;
-    if (body[0] == '+' || body[0] == '-') { neg = body[0] == '-'; body = body.substr(1); }
-    if (body == "inf") { st.mkFloat(*v, neg ? -INFINITY : INFINITY); return v; }
-    if (body == "nan") { st.mkFloat(*v, NAN); return v; }
-    auto strip = [&](std::string_view x) {
-      composite::Text r;
-      for (size_t i = 0; i < x.size(); i++) {
-        if (x[i] == '_') {
-          if (i == 0 || i + 1 >= x.size() || !composite::isAsciiAlnum(x[i - 1]) || !composite::isAsciiAlnum(x[i + 1]))
-            fail("invalid underscore in number");
-          continue;
-        }
-        r += x[i];
-      }
-      return r;
-    };
-    if (body.size() > 2 && body[0] == '0' && (body[1] == 'x' || body[1] == 'o' || body[1] == 'b')) {
-      if (t[0] == '+' || t[0] == '-') fail("sign not allowed on non-decimal integer");
-      int base = body[1] == 'x' ? 16 : body[1] == 'o' ? 8 : 2;
-      composite::Text digits = strip(body.substr(2));
-      composite::CharSeries cs = composite::chars(digits);
-      composite::text::Reading r = base == 16 ? composite::facet<composite::text::Integer<16, false>>(cs)
-                                 : base == 8  ? composite::facet<composite::text::Integer<8, false>>(cs)
-                                              : composite::facet<composite::text::Integer<2, false>>(cs);
-      if (r.consumed != digits.size()) fail("invalid integer");
-      if (r.overflow || r.value > (uint64_t)INT64_MAX) fail("too large integer");
-      st.mkInt(*v, (int64_t)r.value);
-      return v;
-    }
-    composite::Text clean = strip(t);
-    bool isFloat = clean.find_first_of(".eE") != composite::npos;
-    if (isFloat) {
-      char *end;
-      double d = strtod(clean.c_str(), &end);
-      if (*end) fail(composite::cat("invalid float '", tok, "'"));
-      st.mkFloat(*v, d);
-      return v;
-    }
-    std::string_view digits = clean[0] == '+' || clean[0] == '-' ? std::string_view(clean).substr(1) : std::string_view(clean);
-    if (digits.size() > 1 && digits[0] == '0') fail("leading zeros are not allowed");
-    composite::text::Reading r = composite::facet<composite::text::Integer<10, true>>(composite::chars(clean));
-    long long n = (long long)r.value;
-    if (r.consumed != clean.size()) fail(composite::cat("invalid value '", tok, "'"));
-    if (r.overflow) {
-      if (clean[0] == '-')
-        throw EvalError("while parsing TOML: [error] toml::parse_dec_integer: too small integer: current min digits = -2^63");
-      throw EvalError("while parsing TOML: [error] toml::parse_dec_integer: too large integer: current max digits = 2^63");
-    }
-    (void)start;
-    st.mkInt(*v, n);
-    return v;
-  }
-
-  Value *value() {
-    char c = peek();
-    if (c == '"') {
-      composite::Text sv = basicString();
-      if (sv.find('\0') != composite::npos) fail("string contains a NUL byte");
-      Value *v = st.newString(sv);
-      return v;
-    }
-    if (c == '\'') {
-      Value *v = st.newString(literalString());
-      return v;
-    }
-    if (s.substr(p, 4) == "true" && !isBare(peek(4))) { p += 4; return &st.vTrue; }
-    if (s.substr(p, 5) == "false" && !isBare(peek(5))) { p += 5; return &st.vFalse; }
-    if (c == '[') {
-      p++;
-      composite::MutableSeries<Value *> elems;
-      while (true) {
-        wsAll();
-        if (peek() == ']') { p++; break; }
-        elems.append(value());
-        wsAll();
-        if (peek() == ',') { p++; continue; }
-        if (peek() == ']') { p++; break; }
-        fail("expected ',' or ']' in array");
-      }
-      Value *v = st.allocValue();
-      st.mkList(*v, elems);
-      return v;
-    }
-    if (c == '{') {
-      p++;
-      TomlNode *node = make();
-      wsInline();
-      if (peek() == '}') { p++; return toValue(*node); }
-      while (true) {
-        auto k = key();
-        wsInline();
-        if (peek() != '=') fail("expected '=' in inline table");
-        p++;
-        wsInline();
-        Value *v = value();
-        setKey(*node, k, v);
-        wsInline();
-        if (peek() == ',') { p++; continue; }
-        if (peek() == '}') { p++; break; }
-        fail("expected ',' or '}' in inline table");
-      }
-      return toValue(*node);
-    }
-    if (isDateAhead()) {
-      composite::Text dt = dateTime();
-      if (!timestamps) throw EvalError("while parsing TOML: Dates and times are not supported");
-      Value *v = st.allocValue();
-      EvalState::BindingsBuilder bb(st);
-      st.mkString(bb.alloc("_type"), "timestamp");
-      st.mkString(bb.alloc("value"), dt);
-      st.mkAttrs(*v, bb.finish());
-      return v;
-    }
-    return number();
-  }
-
-  void setKey(TomlNode &tbl, const composite::MutableSeries<composite::Text> &k, Value *v) {
+  void setKey(TomlNode &tbl, uint32_t from, Value *v) {
     TomlNode *cur = &tbl;
-    for (size_t i = 0; i + 1 < k.size(); i++) {
-      TomlNode *&n = child(*cur, k[i]);
+    for (uint32_t i = from; i + 1 < keys.size(); i++) {
+      TomlNode *&n = child(*cur, keys[i]);
       if (!n) n = make();
-      else if (n->kind != TomlNode::Table || n->inlineTable) fail(composite::cat("cannot redefine key '", k[i], "'"));
+      else if (n->kind != TomlNode::Table || n->inlineTable) fail(29, keys[i]);
       cur = n;
     }
-    TomlNode *&leaf = child(*cur, k.back());
-    if (leaf) fail(composite::cat("duplicate key '", k.back(), "'"));
+    TomlNode *&leaf = child(*cur, keys.back());
+    if (leaf) fail(30, keys.back());
     leaf = make();
     leaf->kind = TomlNode::Leaf;
     leaf->leaf = v;
+  }
+
+  void header(bool aot) {
+    TomlNode *t = &root;
+    for (uint32_t i = 0; i + 1 < keys.size(); i++) {
+      TomlNode *&n = child(*t, keys[i]);
+      if (!n) n = make();
+      if (n->kind == TomlNode::Array) t = n->array.back();
+      else if (n->kind == TomlNode::Table && !n->inlineTable) t = n;
+      else fail(29, keys[i]);
+    }
+    TomlNode *&last = child(*t, keys.back());
+    if (aot) {
+      if (!last) { last = make(); last->kind = TomlNode::Array; last->arrayOfTables = true; }
+      if (last->kind != TomlNode::Array || !last->arrayOfTables) fail(29, keys.back());
+      TomlNode *nt = make();
+      last->array.append(nt);
+      frames[0].node = nt;
+    } else {
+      if (!last) last = make();
+      else if (last->kind != TomlNode::Table || last->defined) fail(31, keys.back());
+      last->defined = true;
+      frames[0].node = last;
+    }
+    keys.clear();
+  }
+
+  /// A complete value: an element of the open array, or the value of the open table's key.
+  void deliver(Value *v) {
+    Frame &f = frames.back();
+    if (!f.node) { elems.append(v); return; }
+    setKey(*f.node, f.keys, v);
+    while (keys.size() > f.keys) keys.pop();
   }
 
   Value *toValue(TomlNode &n) {
@@ -821,65 +538,53 @@ struct TomlParser {
     return v;
   }
 
-  void parse(Value &out) {
-    TomlNode root;
-    TomlNode *cur = &root;
-    while (true) {
-      wsAll();
-      if (eof()) break;
-      if (peek() == '[') {
-        bool aot = peek(1) == '[';
-        p += aot ? 2 : 1;
-        auto k = key();
-        wsInline();
-        if (aot) {
-          if (peek() != ']' || peek(1) != ']') fail("expected ']]'");
-          p += 2;
-        } else {
-          if (peek() != ']') fail("expected ']'");
-          p++;
-        }
-        TomlNode *t = &root;
-        for (size_t i = 0; i + 1 < k.size(); i++) {
-          TomlNode *&n = child(*t, k[i]);
-          if (!n) n = make();
-          if (n->kind == TomlNode::Array) t = n->array.back();
-          else if (n->kind == TomlNode::Table && !n->inlineTable) t = n;
-          else fail(composite::cat("cannot redefine key '", k[i], "'"));
-        }
-        TomlNode *&last = child(*t, k.back());
-        if (aot) {
-          if (!last) { last = make(); last->kind = TomlNode::Array; last->arrayOfTables = true; }
-          if (last->kind != TomlNode::Array || !last->arrayOfTables) fail(composite::cat("cannot redefine key '", k.back(), "'"));
-          TomlNode *nt = make();
-          last->array.append(nt);
-          cur = nt;
-        } else {
-          if (!last) last = make();
-          else if (last->kind != TomlNode::Table || last->defined) fail(composite::cat("table '", k.back(), "' already defined"));
-          last->defined = true;
-          cur = last;
-        }
-        wsInline();
-        comment();
-        if (!eof() && peek() != '\n' && peek() != '\r') fail("expected newline after table header");
-        continue;
-      }
-      auto k = key();
-      wsInline();
-      if (peek() != '=') fail("expected '=' after key");
-      p++;
-      wsInline();
-      Value *v = value();
-      setKey(*cur, k, v);
-      wsInline();
-      comment();
-      if (!eof() && peek() != '\n' && peek() != '\r') fail("expected newline after value");
-    }
+  void parse(std::string_view s, Value &out) {
+    frames.append({&root, 0, 0});
+    composite::MutableSeries<uint8_t> stack(s.size() + 1);
+    composite::MutableSeries<char> dec(2 * s.size() + 16);
+    int64_t rec[16] = {int64_t(s.data()), int64_t(s.size()), int64_t(this), int64_t(stack.data()), int64_t(dec.data()), 0, 1};
+    if (int32_t code = nixev_ts_toml_scan(rec)) tomlFail(code, rec[6], std::string_view((const char *)rec[9], size_t(rec[10])));
     out = *toValue(root);
   }
 };
 } // namespace
+
+/// The scan's events (TomlScan.mlir's header lists them): the values made here, in order.
+extern "C" void nixev_toml_ev(void *c, int64_t kind, const char *p, int64_t a, int64_t line) {
+  TomlParser &P = *static_cast<TomlParser *>(c);
+  EvalState &st = P.st;
+  P.line = line;
+  Value *v;
+  switch (kind) {
+  case 0: P.keys.append(std::string_view(p, size_t(a))); return;
+  case 1: v = st.newString(std::string_view(p, size_t(a))); break;
+  case 2: st.mkInt(*(v = st.allocValue()), a); break;
+  case 3: st.mkFloat(*(v = st.allocValue()), __builtin_bit_cast(double, a)); break;
+  case 4: v = a ? &st.vTrue : &st.vFalse; break;
+  case 5: {
+    if (!P.timestamps) tomlFail(32, 0, {});
+    v = st.allocValue();
+    EvalState::BindingsBuilder bb(st);
+    st.mkString(bb.alloc("_type"), "timestamp");
+    st.mkString(bb.alloc("value"), std::string_view(p, size_t(a)));
+    st.mkAttrs(*v, bb.finish());
+    break;
+  }
+  case 6: P.frames.append({nullptr, P.elems.size(), P.keys.size()}); return;
+  case 7: {
+    uint32_t from = P.frames.back().elems, n = P.elems.size() - from;
+    st.mkList(*(v = st.allocValue()), size_t(n));
+    for (uint32_t i = 0; i < n; i++) v->list.elems[i] = P.elems[from + i];
+    while (P.elems.size() > from) P.elems.pop();
+    P.frames.pop();
+    break;
+  }
+  case 8: P.frames.append({P.make(), P.elems.size(), P.keys.size()}); return;
+  case 9: v = P.toValue(*P.frames.back().node); P.frames.pop(); break;
+  default: return P.header(a != 0);
+  }
+  P.deliver(v);
+}
 
 //===----------------------------------------------------------------------===//
 // Registration
@@ -1123,9 +828,9 @@ void registerFormatBuiltins(EvalState &state) {
   });
   S.addPrimOp("fromTOML", [](EvalState &st, A args, Value &v, PosPtr pos) {
     auto s = st.forceString(*args[0], pos, "while evaluating the argument passed to builtins.fromTOML");
-    TomlParser P{st, s, tomlTimestamps};
+    TomlParser P{st, tomlTimestamps};
     try {
-      P.parse(v);
+      P.parse(s, v);
     } catch (EvalError &e) {
       if (!e.pos) e.pos = pos;
       throw;

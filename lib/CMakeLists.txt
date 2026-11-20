@@ -267,6 +267,10 @@ mlnix_lower_trikeshed(NixEval lowered/nixeval/PrintCompOps.mlir PrintCompOps)
 # the bridge sorts the rows, reserves room and adopts the drained bytes).  The indent, prefix, name, attributes and
 # suffix are trikeshed.series / slice / combine / combineAll / drain over a constant escape table.
 mlnix_lower_trikeshed(NixEval lowered/nixeval/XmlOps.mlir XmlOps)
+# builtins.fromTOML's scan (lib/Eval/Formats.cpp's TomlParser lexing/syntax is gone; the bridge builds the tables from
+# its events in order and keeps the duplicate/redefinition checks).  A cf state machine over the input bytes with an
+# explicit nesting stack, lifted to scf first; the messages are one trikeshed combine drained once.
+mlnix_lower_trikeshed(NixEval lowered/nixeval/TomlScan.mlir TomlScan --lift-cf-to-scf --convert-ub-to-llvm)
 # The higher-order list primops __concatLists / __concatMap / __filter / __any / __all / __elem (their C++ loops are
 # gone).  concatLists/concatMap are trikeshed.combineAll of the inner lists' cells, filter a trikeshed.where; any/all/elem
 # short-circuit in an scf.while.  Each Nix function application calls back into the evaluator.
