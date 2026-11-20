@@ -180,9 +180,9 @@ perturbation. Sanitizer timings are not included in the table.
 To repeat on Kali, from the repository root:
 
 ```sh
-g++-16 -std=c++20 -O2 -g -fsanitize=address,undefined -I include scripts/minmax-check.cc -o build/minmax-check
+g++-16 -std=c++20 -O2 -g -fsanitize=address,undefined -I include scripts/minmax-check.cc build/lib/lowered/ClusterOps.o -o build/minmax-check
 MALLOC_PERTURB_=165 build/minmax-check
-clang++-22 -std=c++20 -O2 -I include scripts/inode-bench.cc -o build/inode-bench
+clang++-22 -std=c++20 -O2 -I include scripts/inode-bench.cc build/lib/lowered/ClusterOps.o -o build/inode-bench
 build/inode-bench 6
 build/inode-bench 48
 ```
@@ -192,8 +192,8 @@ build/inode-bench 48
 `include/Composite/Funnel.h` is the table the sea-of-nodes client would call when a window outgrows its dense buckets.
 Each bucket is a cluster (23 rows, 384 B). A bucket that is full says so (`insert` returns 2) and the row reroutes to
 its salted bucket one level down, where the bucket count halves, as in Krapivin's funnel. The pegs absorb a burst
-past the heap, so a collision costs one more row in the same bucket, not a probe sequence. Levels are `Series` views
-over storage the caller owns; nothing allocates. `Cluster::find` uses the heap's min and max edges to skip the heap scan
+past the heap, so a collision costs one more row in the same bucket, not a probe sequence. Levels are runs of buckets
+in storage the caller owns; nothing allocates. `Cluster::find` uses the heap's min and max edges to skip the heap scan
 for a key outside them, then scans the eight pegs.
 
 With no deletes a full bucket stays full, so a lookup that reaches a bucket with room and does not find the key there
@@ -214,11 +214,16 @@ No insert was refused, even at 0.99 load. These are probe counts, not times: eac
 timing against a conventional table has been taken. Kali (g++-16, ASan and UBSan) passes the same check with the same probe bounds.
 
 ```sh
-clang++ -std=c++20 -O2 -g -fsanitize=address,undefined -I include scripts/funnel-check.cc -o build/funnel-check
+clang++ -std=c++20 -O2 -g -fsanitize=address,undefined -I include scripts/funnel-check.cc build/lib/lowered/ClusterOps.o -o build/funnel-check
 build/funnel-check
 ```
 
 ## The transform form and the optimizer (Kali, 2026-10-28, one boot)
+
+Since then the algorithms below moved to MLIR (`lowered/composite/ClusterOps.mlir`, built into NixStore and
+TrikeShedRuntime): `MinMaxHeap.h` and `Funnel.h` keep the inline storage and call it, a row crossing as its bytes and
+its `<` / `==` as C callbacks. The transform and pragmatic C++ forms measured here are gone; every build line links
+the lowered object. The deleted C++, kept verbatim as an oracle, makes the same comparisons in the same order.
 
 The heap, the pegs and the table are written as transforms over `Series` (`fold`, `foldN`, `vec<N>`, `argMin`, `firstWhere`): no
 loop is written in `MinMaxHeap.h` or `Funnel.h`. The same algorithm as the loop version runs (65,651,101 comparisons on the same

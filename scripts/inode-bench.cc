@@ -3,7 +3,7 @@
 // of min-max heap clusters over the window's tiny 96-bit address space, filled
 // by arithmetic and drained in order).  docs/BTRFS-COMPRESSOR.md.
 //
-// Build: c++ -std=gnu++20 -O2 -I include scripts/inode-bench.cc -o /tmp/inode-bench
+// Build: c++ -std=gnu++20 -O2 -I include scripts/inode-bench.cc build/lib/lowered/ClusterOps.o -o /tmp/inode-bench
 // The gate: both paths emit byte-identical streams.  3 interleaved runs,
 // min/mean wall reported.
 

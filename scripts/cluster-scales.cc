@@ -10,7 +10,7 @@
 //   cluster+  the same, with the pegs drained as a sorted run (one sort of the bag, then a pointer) instead of an argMin per pop
 // Rows are InodeRow (16 B); keys are unique, so the streams must be byte-identical.  Time is the minimum of 5 interleaved rounds.
 //
-// Build: clang++ -std=c++20 -O3 -I include scripts/cluster-scales.cc -o build/cluster-scales
+// Build: clang++ -std=c++20 -O3 -I include scripts/cluster-scales.cc build/lib/lowered/ClusterOps.o -o build/cluster-scales
 // Run:   build/cluster-scales [WINDOW FLOOD]...   (default: the sweep below)
 
 #include "Composite/MinMaxHeap.h"

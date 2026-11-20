@@ -88,9 +88,9 @@ The cluster is 2x to 3x slower than a plain insertion sort of the indices at eve
 ## To repeat
 
 ```sh
-clang++ -std=c++20 -O3 -I include scripts/cluster-scales.cc -o build/cluster-scales && build/cluster-scales
+clang++ -std=c++20 -O3 -I include scripts/cluster-scales.cc build/lib/lowered/ClusterOps.o -o build/cluster-scales && build/cluster-scales
 build/cluster-scales 128 20 512 92     # chosen (window, flood) pairs
-clang++ -std=c++20 -O3 -I include scripts/cluster-order-scales.cc -o build/cluster-order-scales && build/cluster-order-scales
+clang++ -std=c++20 -O3 -I include scripts/cluster-order-scales.cc build/lib/lowered/ClusterOps.o -o build/cluster-order-scales && build/cluster-order-scales
 ```
 
 On macOS use `xcrun clang++` (Homebrew's clang does not find the SDK's headers without SDKROOT).
