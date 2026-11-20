@@ -3,7 +3,8 @@
 // drain, clusterOrder's fill-then-drain, and Krapivin's funnel (the salted splitmix slot, the put/get level walk with
 // its rerouting and early exit).  The C++ headers are drop-in bridges: a row crosses as rs opaque bytes (the Inline
 // body's cells and its u32 count are the ABI), and Row's `<` / `==` cross as neutral C callbacks
-// int(const void *, const void *), so any Row with those operators works unchanged.  The walks are scf.while / scf.for
+// int(const void *, const void *), so any Row with those operators works unchanged (a null `<` is clusterOrder's
+// (i64 key, u32 index) order, built in).  The walks are scf.while / scf.for
 // over the caller's arrays: nothing allocates (the heap and the pegs are inline bodies, as in the C++).  Helpers are
 // module-unique (mmx_*): the pipeline exports them.
 //
@@ -85,11 +86,29 @@ func.func private @mmx_swap(%base: !llvm.ptr, %rs: i64, %x: i32, %y: i32) {
   return
 }
 
-// Row's operator< or operator== as a callback, 0/1.
+// Row's operator< or operator== as a callback, 0/1.  A null fn is clusterOrder's row order, monomorphized: (i64 key at
+// 0 signed, then u32 index at 8).
 func.func private @mmx_cmp(%fn: !llvm.ptr, %x: !llvm.ptr, %y: !llvm.ptr) -> i1 {
   %z = arith.constant 0 : i32
-  %c = llvm.call %fn(%x, %y) : !llvm.ptr, (!llvm.ptr, !llvm.ptr) -> i32
-  %b = arith.cmpi ne, %c, %z : i32
+  %null = llvm.mlir.zero : !llvm.ptr
+  %builtin = llvm.icmp "eq" %fn, %null : !llvm.ptr
+  %b = scf.if %builtin -> (i1) {
+    %kx = llvm.load %x : !llvm.ptr -> i64
+    %ky = llvm.load %y : !llvm.ptr -> i64
+    %ix8 = llvm.getelementptr %x[8] : (!llvm.ptr) -> !llvm.ptr, i8
+    %iy8 = llvm.getelementptr %y[8] : (!llvm.ptr) -> !llvm.ptr, i8
+    %ix = llvm.load %ix8 : !llvm.ptr -> i32
+    %iy = llvm.load %iy8 : !llvm.ptr -> i32
+    %kne = arith.cmpi ne, %kx, %ky : i64
+    %klt = arith.cmpi slt, %kx, %ky : i64
+    %ilt = arith.cmpi ult, %ix, %iy : i32
+    %lt = arith.select %kne, %klt, %ilt : i1
+    scf.yield %lt : i1
+  } else {
+    %c = llvm.call %fn(%x, %y) : !llvm.ptr, (!llvm.ptr, !llvm.ptr) -> i32
+    %nz = arith.cmpi ne, %c, %z : i32
+    scf.yield %nz : i1
+  }
   return %b : i1
 }
 

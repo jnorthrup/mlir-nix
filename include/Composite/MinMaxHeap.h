@@ -9,19 +9,15 @@
 // every swap settles at an edge.  A bag of spare pegs absorbs what an edge
 // swap displaces -- the slop cache.  Nothing here allocates.  The size bounds
 // below cover each unit, not the residency of a whole bucket array in L1.
+//
+// The algorithms are MLIR (lowered/composite/ClusterOps.mlir, linked into NixStore and TrikeShedRuntime): the heap's
+// push/climb/sift and edge pops, the pegs' argMin, the cluster's insert routing, min race, find and drain.  These types
+// keep the storage (inline bodies, no heap) and are bridges: a row crosses as sizeof(Row) bytes, its `<` and `==` as
+// C callbacks, so any plain-data Row with those operators works.  The laws the C++ held at compile time are checked
+// by scripts/minmax-check.cc.
 
 #include "Composite/Folds.h"
 #include "Composite/Mutable.h"
-
-// COMPOSITE_PEDANTIC selects how the kernels below are written; the algorithm, its comparisons and its output are the same.
-//   1  pedantic: every walk is a transform over a Series (fold, foldN, argMin, vec<N>): PRELOAD's form, no loop written.
-//   0  pragmatic: the plain loop each of those transforms replaces, for the optimizer that does better with a loop.
-// The default is pedantic: on Kali (77de09c:docs/OPTIMIZER-LADDER.md) clang -O3 runs it fastest and g++ runs it faster than the pragmatic form on
-// every row; pragmatic is the escape hatch (it measured better under clang -O2 and ThinLTO).  -DCOMPOSITE_PEDANTIC=0|1 overrides it.
-// Both are checked by scripts/minmax-check.cc and funnel-check.cc, and compared by scripts/optimizer-ladder.sh.
-#ifndef COMPOSITE_PEDANTIC
-#define COMPOSITE_PEDANTIC 1
-#endif
 
 namespace composite {
 
@@ -52,16 +48,40 @@ struct InodeRow {
 };
 static_assert(sizeof(InodeRow) == 16);
 
+// ClusterOps.mlir's entries: rows are rs-byte cells, `n` the u32 count of an Inline body, less/eq a Row's operators.
+extern "C" {
+using MmxCmp = int (*)(const void *, const void *);
+using MmxEmit = void (*)(void *, const void *);
+void mmx_heap_push(void *cells, uint32_t *n, uint64_t rs, MmxCmp less, const void *row);
+void mmx_heap_pop_min(void *cells, uint32_t *n, uint64_t rs, MmxCmp less, void *out);
+void mmx_heap_pop_max(void *cells, uint32_t *n, uint64_t rs, MmxCmp less, void *out);
+uint32_t mmx_max_at(const void *cells, uint32_t n, uint64_t rs, MmxCmp less);
+uint32_t mmx_arg_min(const void *cells, uint32_t n, uint64_t rs, MmxCmp less);
+void mmx_peg_pop(void *cells, uint32_t *n, uint64_t rs, MmxCmp less, void *out);
+uint32_t mmx_cluster_insert(void *heap, uint32_t *hn, uint32_t capN, void *pegs, uint32_t *pn, uint32_t capP, uint64_t rs, MmxCmp less,
+                            const void *row);
+void mmx_cluster_min(const void *heap, uint32_t hn, const void *pegs, uint32_t pn, uint64_t rs, MmxCmp less, void *out);
+void mmx_cluster_pop_min(void *heap, uint32_t *hn, void *pegs, uint32_t *pn, uint64_t rs, MmxCmp less, void *out);
+const void *mmx_cluster_find(const void *heap, uint32_t hn, const void *pegs, uint32_t pn, uint64_t rs, MmxCmp less, MmxCmp eq,
+                             const void *row);
+void mmx_cluster_drain(void *heap, uint32_t *hn, void *pegs, uint32_t *pn, uint64_t rs, MmxCmp less, void *ctx, MmxEmit emit);
+void mmx_order(void *heap, uint32_t *hn, uint32_t capN, void *pegs, uint32_t *pn, uint32_t capP, uint64_t rs, MmxCmp less,
+               const void *rows, uint32_t n, void *ctx, MmxEmit emit);
+}
+template <class Row> int mmxLess(const void *x, const void *y) { return *static_cast<const Row *>(x) < *static_cast<const Row *>(y); }
+template <class Row> int mmxEq(const void *x, const void *y) { return *static_cast<const Row *>(x) == *static_cast<const Row *>(y); }
+/// emit(row) as a C callback over the functor ctx points at (F: its pointer type).
+template <class Row, class F> void mmxEmit(void *ctx, const void *row) { (*static_cast<F>(ctx))(*static_cast<const Row *>(row)); }
+
 /// A min-max heap over a fixed array (Atkinson, Sack, Santoro, Strothotte 1986).
 /// Even levels are min levels, odd levels are max levels.  The minimum is the
 /// root; the maximum is a child of the root -- both edges are O(1) reads, and
 /// every removal swaps an edge row with the last row and sifts it down.
 /// The caller must not push when full or read/pop when empty.
-/// No loop is written here: a sift is a fold over the levels with a (position, live) state, and a scan is a transform.
 template <class Row, unsigned N>
 struct MinMaxHeap {
   static_assert((N & (N + 1)) == 0, "N is one less than a power of two (level-clean)");
-  static constexpr uint32_t kLevels = (N ? 32 - __builtin_clz(N) : 0);
+  static_assert(plainData<Row>, "a row crosses into ClusterOps.mlir as its bytes");
   MutableSeries<Row, Inline<Row, N>> a;  // the rows in heap order: an inline body, no heap
 
   constexpr uint32_t size() const { return a.size(); }
@@ -69,108 +89,14 @@ struct MinMaxHeap {
   /// The rows in heap order, as a Series.
   constexpr auto rows() const { return series(a.data(), a.size()); }
 
-  constexpr void push(Row r) {
-    uint32_t i = a.append(r);
-    if (i == 0) return;
-    // level(i) = floor(log2(i + 1)); a min level is an even level.
-    bool minLevel = ((31 - __builtin_clz(i + 1)) & 1) == 0;
-    uint32_t p = (i - 1) / 2;
-    if (minLevel ? a[p] < a[i] : a[i] < a[p]) {
-      swap(i, p);  // settle at the parent edge
-      minLevel ? climb(p, kMaxFirst) : climb(p, kMinFirst);
-    } else {
-      minLevel ? climb(i, kMinFirst) : climb(i, kMaxFirst);
-    }
+  void push(Row r) {
+    if (full()) TODO("append past the capacity of a fixed body");
+    mmx_heap_push(a.cells, &a.n, sizeof(Row), mmxLess<Row>, &r);
   }
-
   constexpr Row min() const { return a[0]; }
-  constexpr Row max() const { return a[maxAt()]; }
-
-  constexpr Row popMin() {
-    Row r = a[0];
-    a[0] = a[a.size() - 1];
-    a.pop();
-    if (a.size() > 1) sift(0, kMinFirst);
-    return r;
-  }
-  constexpr Row popMax() {
-    if (a.size() == 1) return popMin();
-    uint32_t m = maxAt();
-    Row r = a[m];
-    a[m] = a[a.size() - 1];
-    a.pop();
-    if (m < a.size()) sift(m, kMaxFirst);
-    return r;
-  }
-
-private:
-  /// before(x, y): x belongs nearer the edge than y.  Min levels put the smaller first, max levels the larger.
-  static constexpr auto kMinFirst = [](const Row &x, const Row &y) { return x < y; };
-  static constexpr auto kMaxFirst = [](const Row &x, const Row &y) { return y < x; };
-  struct Walk { uint32_t i; bool live; };
-
-  constexpr void swap(uint32_t x, uint32_t y) { Row t = a[x]; a[x] = a[y]; a[y] = t; }
-  constexpr uint32_t maxAt() const { return a.size() == 1 ? 0u : a.size() > 2 && a[1] < a[2] ? 2u : 1u; }
-
-  /// Grandparent walk upward: while the row is nearer the edge than its grandparent, swap with it.  kLevels is a constant,
-  /// so the walk is straight-line code.
-  template <class B> constexpr void climb(uint32_t from, B before) {
-#if COMPOSITE_PEDANTIC
-    foldN<kLevels>(Walk{from, true}, [&](Walk w, uint32_t) -> Walk {
-      if (!w.live || w.i < 3) return Walk{w.i, false};
-      uint32_t g = (w.i - 3) / 4;
-      if (!before(a[w.i], a[g])) return Walk{w.i, false};
-      swap(w.i, g);
-      return Walk{g, true};
-    });
-#else
-    for (uint32_t i = from; i >= 3;) {
-      uint32_t g = (i - 3) / 4;
-      if (!before(a[i], a[g])) break;
-      swap(i, g);
-      i = g;
-    }
-#endif
-  }
-
-  /// Walk downward: the nearest-the-edge of children and grandchildren replaces the row if it is nearer the edge.  Stop
-  /// after a child swap (the child is on the opposite level); after a grandchild swap, repair against its parent and go on.
-  /// The candidates are the constant vec<6>: two children, then four grandchildren, in index order.
-  template <class B> constexpr void sift(uint32_t from, B before) {
-    const uint32_t n = a.size();
-#if !COMPOSITE_PEDANTIC
-    for (uint32_t i = from;;) {
-      uint32_t l = 2 * i + 1;
-      if (l >= n) break;
-      uint32_t m = l;
-      if (l + 1 < n && before(a[l + 1], a[m])) m = l + 1;
-      for (uint32_t g = 4 * i + 3; g < n && g <= 4 * i + 6; ++g)
-        if (before(a[g], a[m])) m = g;
-      if (!before(a[m], a[i])) break;
-      swap(i, m);
-      if (m < 4 * i + 3) break;  // a child is on the opposite level: stop here
-      uint32_t p = (m - 1) / 2;
-      if (before(a[p], a[m])) swap(m, p);
-      i = m;
-    }
-#else
-    foldN<kLevels>(Walk{from, true}, [&](Walk w, uint32_t) -> Walk {
-      uint32_t i = w.i, l = 2 * i + 1;
-      if (!w.live || l >= n) return Walk{i, false};
-      auto kin = vec<6>([&](uint32_t k) { return k < 2 ? l + k : 4 * i + 1 + k; });
-      uint32_t m = foldN<5>(l, [&](uint32_t best, uint32_t k) -> uint32_t {
-        uint32_t x = kin[k + 1];
-        return x < n && before(a[x], a[best]) ? x : best;
-      });
-      if (!before(a[m], a[i])) return Walk{i, false};
-      swap(i, m);
-      if (m < 4 * i + 3) return Walk{m, false};
-      uint32_t p = (m - 1) / 2;
-      if (before(a[p], a[m])) swap(m, p);
-      return Walk{m, true};
-    });
-#endif
-  }
+  Row max() const { return a[mmx_max_at(a.cells, a.n, sizeof(Row), mmxLess<Row>)]; }
+  Row popMin() { Row r; mmx_heap_pop_min(a.cells, &a.n, sizeof(Row), mmxLess<Row>, &r); return r; }
+  Row popMax() { Row r; mmx_heap_pop_max(a.cells, &a.n, sizeof(Row), mmxLess<Row>, &r); return r; }
 };
 
 /// The slop cache: a fixed bag of spare pegs that settles edge swaps.  A full heap that takes a row swaps its max edge out to
@@ -187,30 +113,20 @@ struct Pegs {
   /// The pegs, as a Series over the cells.
   constexpr auto rows() const { return series(bag.data(), bag.size()); }
 
-  /// The smallest peg: P is register scale, so this is an argMin over the cells.
-  constexpr uint32_t least() const {
-#if COMPOSITE_PEDANTIC
-    return argMin(rows(), [](const Row &x, const Row &y) { return x < y; });
-#else
-    uint32_t m = 0;
-    for (uint32_t i = 1; i < bag.size(); ++i) if (bag[i] < bag[m]) m = i;
-    return m;
-#endif
-  }
-  constexpr Row min() const { return bag[least()]; }
-  constexpr Row popMin() {
-    uint32_t m = least();
-    Row r = bag[m];
-    bag.removeSwap(m);
-    return r;
-  }
+  /// The smallest peg (the first of equals): P is register scale, so this is an argMin over the cells.
+  uint32_t least() const { return mmx_arg_min(bag.cells, bag.n, sizeof(Row), mmxLess<Row>); }
+  Row min() const { return bag[least()]; }
+  Row popMin() { Row r; mmx_peg_pop(bag.cells, &bag.n, sizeof(Row), mmxLess<Row>, &r); return r; }
 };
 
 /// A cluster: the heap and its pegs.  `insert` returns 0 when the heap took the
 /// row, 1 when it parked on a peg (the slop path), and 2 when the cluster is
 /// full -- the caller reroutes, and in the compressor the sea-of-nodes client
 /// sends the row to the next cluster or to the sparing hash table.  A full
-/// cluster takes nothing and stays intact.
+/// cluster takes nothing and stays intact.  `min`/`popMin` race the heap's min
+/// edge against the least peg; `find` skips the heap for a key outside its
+/// [min, max] edges and always searches the pegs; `drain` emits every row in
+/// key order, one popMin a row.
 template <class Row, unsigned N, unsigned P>
 struct Cluster {
   MinMaxHeap<Row, N> heap;
@@ -219,104 +135,37 @@ struct Cluster {
   constexpr uint32_t size() const { return heap.size() + pegs.size(); }
   constexpr bool full() const { return heap.full() && pegs.full(); }
 
-  constexpr Row min() const {
-    return !heap.size() ? pegs.min() : !pegs.size() || heap.min() < pegs.min() ? heap.min() : pegs.min();
+  Row min() const { Row r; mmx_cluster_min(heap.a.cells, heap.a.n, pegs.bag.cells, pegs.bag.n, sizeof(Row), mmxLess<Row>, &r); return r; }
+  Row popMin() { Row r; mmx_cluster_pop_min(heap.a.cells, &heap.a.n, pegs.bag.cells, &pegs.bag.n, sizeof(Row), mmxLess<Row>, &r); return r; }
+  uint32_t insert(Row r) {
+    return mmx_cluster_insert(heap.a.cells, &heap.a.n, N, pegs.bag.cells, &pegs.bag.n, P, sizeof(Row), mmxLess<Row>, &r);
   }
-  constexpr Row popMin() {
-    return !heap.size() ? pegs.popMin() : !pegs.size() || heap.min() < pegs.min() ? heap.popMin() : pegs.popMin();
+  /// The stored row equal to `r`, or null.
+  const Row *find(const Row &r) const {
+    return static_cast<const Row *>(
+        mmx_cluster_find(heap.a.cells, heap.a.n, pegs.bag.cells, pegs.bag.n, sizeof(Row), mmxLess<Row>, mmxEq<Row>, &r));
   }
-
-  constexpr uint32_t insert(Row r) {
-    if (heap.full() && pegs.full()) return 2;
-    if (!heap.full()) { heap.push(r); return 0; }
-    if (!(heap.max() < r)) {
-      // the new row belongs inside: settle the max edge out to a peg
-      pegs.push(heap.popMax());
-      heap.push(r);
-    } else {
-      pegs.push(r);  // beyond the edge: park on a peg, heap untouched
-    }
-    return 1;
-  }
-
-  /// The stored row equal to `r`, or null.  The heap's edges are O(1) reads, so a key outside [min, max] skips the heap
-  /// search; the pegs are unordered and always searched.  Both are firstWhere over a Series.
-  constexpr const Row *find(const Row &r) const {
-    auto is = [&](const Row &c) { return c == r; };
-    if (heap.size() && !(r < heap.min()) && !(heap.max() < r)) {
-      uint32_t k = firstWhere(heap.rows(), is);
-      if (k < heap.size()) return &heap.a[k];
-    }
-    uint32_t k = firstWhere(pegs.rows(), is);
-    return k < pegs.size() ? &pegs.bag[k] : nullptr;
-  }
-
-  /// Emits every row in key order: the min edge of the heap and the min peg
-  /// race, and the smaller leaves.  The drain of a fill -- no search, one pop
-  /// a row, locally dispatched.  A fold over as many steps as there are rows.
-  template <class Emit>
-  constexpr void drain(Emit &&emit) {
-#if COMPOSITE_PEDANTIC
-    fold(iota(size()), 0u, [&](uint32_t done, uint32_t) { emit(popMin()); return done + 1; });
-#else
-    while (size()) emit(popMin());
-#endif
+  template <class Emit> void drain(Emit &&emit) {
+    mmx_cluster_drain(heap.a.cells, &heap.a.n, pegs.bag.cells, &pegs.bag.n, sizeof(Row), mmxLess<Row>, (void *)&emit,
+                      mmxEmit<Row, decltype(&emit)>);
   }
 };
 
 /// Stable permutation of one cluster. Read the whole input before any output,
-/// so the caller can reuse its key buffer for the permutation.
+/// so the caller can reuse its key buffer for the permutation.  A row is (key, index), ordered by key then index: the
+/// order ClusterOps.mlir builds in when it is handed no `<` (a null callback), so no comparison leaves the MLIR.
 template <class Keys, class Emit>
-constexpr bool clusterOrder(const Keys &keys, Emit emit) {
+bool clusterOrder(const Keys &keys, Emit emit) {
   if (uint64_t(keys.size()) > 23) return false;
-  struct Row {
-    int64_t key;
-    uint32_t index;
-    constexpr bool operator<(const Row &r) const { return key != r.key ? key < r.key : index < r.index; }
-  };
+  struct Row { int64_t key; uint32_t index; };
+  Row rows[23];
+  fold(iota(uint32_t(keys.size())), 0u, [&](uint32_t, uint32_t i) { rows[i] = {int64_t(keys[i]), i}; return 0u; });
   Cluster<Row, 15, 8> c;
-  fold(iota(uint32_t(keys.size())), 0u, [&](uint32_t, uint32_t i) { c.insert({int64_t(keys[i]), i}); return 0u; });
-  c.drain([&](Row r) { emit(r.index); });
+  auto out = [&](const Row &r) { emit(r.index); };
+  mmx_order(c.heap.a.cells, &c.heap.a.n, 15, c.pegs.bag.cells, &c.pegs.bag.n, 8, sizeof(Row), nullptr, rows, uint32_t(keys.size()), &out,
+            mmxEmit<Row, decltype(&out)>);
   return true;
 }
-
-namespace law {
-constexpr bool mixedEdges() {
-  constexpr int input[] = {0, 0, 1, 0, 0, 0, 1}, expected[] = {0, 1, 0, 1, 0, 0, 0};
-  auto run = [&](uint32_t reverse) {
-    MinMaxHeap<int, 7> h;
-    fold(series(input, 7), 0, [&](int, int x) { h.push(reverse ? -x : x); return 0; });
-    return fold(iota(7), true, [&](bool ok, uint32_t i) {
-      int x = ((i & 1) != reverse) ? h.popMax() : h.popMin();
-      return ok && x == (reverse ? -expected[i] : expected[i]);
-    });
-  };
-  return run(0) && run(1);
-}
-static_assert(mixedEdges(), "equal child/grandchild keys preserve both heap edges");
-
-/// The law of the cluster, held at compile time: a cluster filled out of order
-/// and drained emits the same stream a sort of the same rows emits; a full
-/// cluster says so and stays intact.
-constexpr bool clusterSorts() {
-  constexpr uint32_t seed[23] = {7, 3, 9, 1, 8, 12, 5, 14, 0, 11, 6, 13, 2, 10, 4,
-                                 20, 16, 18, 15, 19, 17, 22, 21};
-  auto rowOf = [&](uint32_t i) { return InodeRow::pack(100 + (seed[i] >> 3), uint8_t(1 + (seed[i] & 3)), seed[i] * 11, 100, seed[i]); };
-  Cluster<InodeRow, 15, 8> c;
-  fold(iota(23), 0u, [&](uint32_t, uint32_t i) { c.insert(rowOf(i)); return 0u; });
-  // the 24th row spills: the cluster is full, intact, and says so
-  if (c.insert(InodeRow::pack(999, 1, 0, 100, 999)) != 2 || c.size() != 23) return false;
-  // the drained stream must equal the sorted order: row k of the drain is the row of rank k
-  struct Out { uint32_t k; bool ok; };
-  Out out = {0, true};
-  c.drain([&](InodeRow r) {
-    uint32_t rank = fold(iota(23), 0u, [&](uint32_t below, uint32_t i) { return below + (rowOf(i) < r ? 1u : 0u); });
-    out = Out{out.k + 1, out.ok && rank == out.k};
-  });
-  return out.k == 23 && out.ok && c.size() == 0;
-}
-static_assert(clusterSorts(), "a drained cluster emits the sorted stream, and a full cluster spills");
-}  // namespace law
 
 static_assert(sizeof(MinMaxHeap<InodeRow, 15>) <= 2 * 128,
               "the heap keeps two 128 B lines on tap (register and cache line capacity)");
