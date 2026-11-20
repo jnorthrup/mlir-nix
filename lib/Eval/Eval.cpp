@@ -320,11 +320,28 @@ template <class Map, class Count> static auto ranked(const Map &m, Count count) 
   return std::move(v).freeze();
 }
 
+// The MLNIX_STATS report's composition is hollowed into lowered/nixeval/StatsOps.mlir: every line is ONE variadic
+// trikeshed.combine of constant label slices, unsigned decimal drains of the counters and the float/name windows,
+// drained once into room here; the ranked lists (scopes/continents/dialects, top ops, evalOp kinds, the son-gap ops)
+// and the lambda-pool meta-name join are nested combineAll.  The bridge reads the counters, formats the floats
+// (snprintf, as llvm::format did), ranks the tables (ranked/cp::sortRows) and keeps the conditionals and the
+// llvm::errs() write.  vals: i64[8]; wins: {ptr,len}[8]; rows: 64-byte {namePtr,nameLen,a,b,c,fptr,flen,pad}.
+struct StatsWin { const char *p; uint64_t n; };
+struct StatsRow { const char *p; uint64_t n, a, b, c; const char *fp; uint64_t fn, pad; };
+extern "C" int64_t nixev_ts_stats(int32_t kind, const uint64_t *vals, const StatsWin *wins, const StatsRow *rows, int64_t nrows, char *into, int64_t cap);
+
 void EvalState::printStats() {
-  llvm::errs() << "attribute cells: bytes=" << sizeof(Attr)
-               << " position_rows=" << attributePositions.size()
-               << " position_bytes=" << attributePositions.capacity() * sizeof(PosPtr) << "\n";
-  llvm::errs() << "frame allocations: count=" << nFrames << " bytes=" << nFrameBytes << " slots=" << nFrameSlots << '\n';
+  uint64_t vals[8]; StatsWin wins[8]; char fbuf[8][32];
+  auto V = [&](std::initializer_list<uint64_t> vs) { size_t i = 0; for (uint64_t v : vs) vals[i++] = v; };
+  auto F = [&](const char *fmt, std::initializer_list<double> vs) { size_t i = 0; for (double v : vs) { wins[i] = {fbuf[i], (uint64_t)snprintf(fbuf[i], 32, fmt, v)}; ++i; } };
+  char room[512];
+  auto out = [&](int32_t kind, const StatsRow *rows = nullptr, int64_t nrows = 0) {
+    int64_t w = nixev_ts_stats(kind, vals, wins, rows, nrows, room, sizeof room);
+    if (w > (int64_t)sizeof room) { cp::Text t; t.resize(size_t(w)); nixev_ts_stats(kind, vals, wins, rows, nrows, t.begin(), w); llvm::errs() << llvm::StringRef(t.data(), size_t(w)); }
+    else llvm::errs() << llvm::StringRef(room, size_t(w));
+  };
+  V({sizeof(Attr), attributePositions.size(), attributePositions.capacity() * sizeof(PosPtr)}); out(0);
+  V({nFrames, nFrameBytes, nFrameSlots}); out(1);
   if (nFrames) {
     auto mb = [](uint64_t b) { return b / 1048576.0; };
     struct rusage ru; getrusage(RUSAGE_SELF, &ru);
@@ -336,15 +353,12 @@ void EvalState::printStats() {
     uint64_t mergeBytes = Bindings::mergedCells * sizeof(Attr) + Bindings::merged * sizeof(Bindings);
     uint64_t values = nValues * sizeof(Value), named = values + nFrameBytes + nBindingBytes + nListBytes + nStringBytes + nMaskBytes + nLayerBytes + mergeBytes + nCtxBytes + nFormalBytes;
     uint64_t handed = alloc.getTotalMemory();  // the slabs, which is what the pages are
-    llvm::errs() << llvm::format("== arena: %.0f MB of slabs; peak RSS %.0f MB. By use: values %.0f (%llu cells), frames %.0f, attribute rows %.0f, list cells %.0f, string bytes %.0f, other and slack %.0f MB\n",
-                                 mb(handed), rss, mb(values), (unsigned long long)nValues, mb(nFrameBytes), mb(nBindingBytes), mb(nListBytes),
-                                 mb(nStringBytes), mb(handed > named ? handed - named + nMaskBytes + nLayerBytes + mergeBytes + nCtxBytes + nFormalBytes : 0));
-    llvm::errs() << llvm::format("   \"other\" named: frame stats words %.0f MB (a stats run only), `//` flat merges %.0f, layer headers %.0f, string contexts %.0f, formals %.0f; still unnamed (slab tails, alignment) %.0f MB\n",
-                                 mb(nMaskBytes), mb(mergeBytes), mb(nLayerBytes), mb(nCtxBytes), mb(nFormalBytes), mb(handed > named ? handed - named : 0));
-    llvm::errs() << llvm::format("   `++` wrote %llu cells into a buffer's room (ListExtent) instead of copying its other side\n",
-                                 (unsigned long long)nListExtended);
+    V({nValues});
+    F("%.0f", {mb(handed), rss, mb(values), mb(nFrameBytes), mb(nBindingBytes), mb(nListBytes), mb(nStringBytes), mb(handed > named ? handed - named + nMaskBytes + nLayerBytes + mergeBytes + nCtxBytes + nFormalBytes : 0)}); out(2);
+    F("%.0f", {mb(nMaskBytes), mb(mergeBytes), mb(nLayerBytes), mb(nCtxBytes), mb(nFormalBytes), mb(handed > named ? handed - named : 0)}); out(3);
+    V({nListExtended}); out(4);
   }
-  llvm::errs() << "values evaluated at their first touch, never a thunk (the caller forces them next): " << nEager << "\n";
+  V({nEager}); out(5);
 #ifdef __linux__
   if (nFrames) {
     // The peak is anonymous memory (heap, arena, IR) plus file-backed pages (the mapped source files, the binary): /proc says which.
@@ -356,15 +370,14 @@ void EvalState::printStats() {
       sscanf(line, "VmHWM: %lu kB", &hwm); sscanf(line, "VmRSS: %lu kB", &rss);
     }
     if (f) fclose(f);
-    llvm::errs() << llvm::format("== resident at exit: %.0f MB anonymous (arena %.0f + %.0f MB of heap, IR and the rest), %.0f MB file-backed (mapped sources and the binary); high-water mark %.0f MB\n",
-                                 anon / 1024.0, alloc.getTotalMemory() / 1048576.0, anon / 1024.0 - alloc.getTotalMemory() / 1048576.0, file / 1024.0, hwm / 1024.0);
+    F("%.0f", {anon / 1024.0, alloc.getTotalMemory() / 1048576.0, anon / 1024.0 - alloc.getTotalMemory() / 1048576.0, file / 1024.0, hwm / 1024.0}); out(6);
   }
   { // This thread (the evaluator's: the state is torn down where it ran): user and kernel time, what it waited for, the faults it took.
     struct rusage ru;
-    if (getrusage(RUSAGE_THREAD, &ru) == 0)
-      llvm::errs() << llvm::format("== evaluator thread: user %.2f s, system %.2f s; %ld voluntary context switches (it blocked), %ld involuntary; %ld minor faults, %ld major\n",
-                                   ru.ru_utime.tv_sec + ru.ru_utime.tv_usec / 1e6, ru.ru_stime.tv_sec + ru.ru_stime.tv_usec / 1e6, ru.ru_nvcsw, ru.ru_nivcsw,
-                                   ru.ru_minflt, ru.ru_majflt);
+    if (getrusage(RUSAGE_THREAD, &ru) == 0) {
+      F("%.2f", {ru.ru_utime.tv_sec + ru.ru_utime.tv_usec / 1e6, ru.ru_stime.tv_sec + ru.ru_stime.tv_usec / 1e6});
+      V({(uint64_t)ru.ru_nvcsw, (uint64_t)ru.ru_nivcsw, (uint64_t)ru.ru_minflt, (uint64_t)ru.ru_majflt}); out(7);
+    }
   }
 #endif
   if (!pools.empty()) {
@@ -381,34 +394,25 @@ void EvalState::printStats() {
       seenBytes += p->seen.getMemorySize();
     }
     auto mb = [](uint64_t b) { return b / 1048576.0; };
-    llvm::errs() << llvm::format("== per-file pools (%zu files): Confix bands %llu rows (%.1f MB) + %llu statement ends (%.1f MB) + opening index %llu entries (%.1f MB); lambda rows %llu (%.1f MB), names %.1f MB, free names %.1f MB, seen %.1f MB\n",
-                                 pools.size(), (unsigned long long)bandRows, mb(bandBytes), (unsigned long long)ends, mb(ends * 4), (unsigned long long)openingEntries, mb(openingBytes),
-                                 (unsigned long long)poolRows, mb(poolRowBytes), mb(nameBytes), mb(freeBytes), mb(seenBytes));
+    V({pools.size(), bandRows, ends, openingEntries, poolRows});
+    F("%.1f", {mb(bandBytes), mb(ends * 4), mb(openingBytes), mb(poolRowBytes), mb(nameBytes), mb(freeBytes), mb(seenBytes)}); out(8);
   }
-  if (nReturns) llvm::errs() << llvm::format("== son's account of the frames at their return (MLNIX_STATS): %llu of %llu lambda bodies dead at return by son "
-                                            "(no closure, every value a use takes lazily forced on every path that returns); of %llu returns (%.1f MB of "
-                                            "frames), dead by the run (no closure, every thunk over them forced, projections too) %llu (%.1f%%, %.1f MB), dead "
-                                            "by son %llu (%.1f%%, %.1f MB); son wrong (dead by son, not by the run): %llu\n",
-                                            (unsigned long long)nSonDeadBodies, (unsigned long long)nBodies, (unsigned long long)nReturns, nReturnBytes / 1048576.0,
-                                            (unsigned long long)nRunDead, 100.0 * nRunDead / nReturns, nRunDeadBytes / 1048576.0,
-                                            (unsigned long long)nSonDead, 100.0 * nSonDead / nReturns, nSonDeadBytes / 1048576.0, (unsigned long long)nSonWrong);
-  if (nReturns) llvm::errs() << llvm::format("   dead by the run, not by son, by why son keeps the frame: the body makes a closure %llu, a value forced on some "
-                                            "path that returns only %llu, a value passed to a callee son does not see %llu, a value passed on unforced %llu\n",
-                                            (unsigned long long)nSonGap[1], (unsigned long long)nSonGap[2], (unsigned long long)nSonGap[3],
-                                            (unsigned long long)nSonGap[4]);
+  if (nReturns) {
+    V({nSonDeadBodies, nBodies, nReturns, nRunDead, nSonDead, nSonWrong});
+    F("%.1f", {nReturnBytes / 1048576.0, 100.0 * nRunDead / nReturns, nRunDeadBytes / 1048576.0, 100.0 * nSonDead / nReturns, nSonDeadBytes / 1048576.0}); out(9);
+    V({nSonGap[1], nSonGap[2], nSonGap[3], nSonGap[4]}); out(10);
+  }
   if (nSonGap[2] + nSonGap[3] + nSonGap[4]) {
     auto g = ranked(sonGapByOp, [](auto &e) { return e.v.n[0] + e.v.n[1] + e.v.n[2]; });
-    llvm::errs() << "   the op whose lazy use decides (path, callee, passed on):";
-    for (size_t i = 0; i < g.size() && i < 10; ++i)
-      llvm::errs() << llvm::format(" %.*s %llu/%llu/%llu", int(g[i]->v.name.size()), g[i]->v.name.data(), (unsigned long long)g[i]->v.n[0],
-                                   (unsigned long long)g[i]->v.n[1], (unsigned long long)g[i]->v.n[2]);
-    llvm::errs() << "\n";
+    cp::MutableSeries<StatsRow> rs; rs.reserve(g.size());
+    for (size_t i = 0; i < g.size() && i < 10; ++i) rs.append(StatsRow{g[i]->v.name.data(), g[i]->v.name.size(), g[i]->v.n[0], g[i]->v.n[1], g[i]->v.n[2], nullptr, 0, 0});
+    out(11, rs.data(), int64_t(rs.size()));
   }
-  llvm::errs() << "calls run on a stack frame (strict bodies over their one argument): " << nStackFrames << "\n";
-  llvm::errs() << "selector calls with no frame (lib.optional, lib.optionalAttrs shapes): " << nSelectorCalls << "\n";
-  llvm::errs() << "curried intermediates held by value: " << nStackCells << " (" << nStackCells * sizeof(Value) << " bytes of heap cells not allocated)\n";
-  llvm::errs() << "empty attribute sets: " << nEmptyShared << " shared as one constant (" << nEmptyShared * (sizeof(Bindings)) << " bytes not allocated)\n";
-  llvm::errs() << "value allocations: count=" << nValues << " bytes=" << nValues * sizeof(Value) << '\n';
+  V({nStackFrames}); out(12);
+  V({nSelectorCalls}); out(13);
+  V({nStackCells, nStackCells * sizeof(Value)}); out(14);
+  V({nEmptyShared, nEmptyShared * (sizeof(Bindings))}); out(15);
+  V({nValues, nValues * sizeof(Value)}); out(16);
   // How many ops of real programs live where: per tier of the dialect hierarchy
   // (scope > continent > dialect), read from the IRDL declaration.
   auto *core = ctx.getLoadedDialect<nd::NixDialect>();
@@ -426,11 +430,6 @@ void EvalState::printStats() {
     add(perContinent, it == core->continents.end() ? "core" : llvm::StringRef(it->second.continent), n);
     total += n;
   }
-  auto section = [&](const char *title, cp::TextTable<uint64_t> &m) {
-    llvm::errs() << "== " << title << " (" << m.size() << ")\n";
-    for (auto *e : ranked(m, [](auto &e) { return e.v; }))
-      llvm::errs() << "  " << llvm::format("%-9.*s", int(e->n), e->p) << llvm::format("%9llu", (unsigned long long)e->v) << "\n";
-  };
   { // The sea of nodes against its schedule: the ops the index holds against the ops that ever ran,
     // file code against the bodies demand minted.  The thunk cells are finer grain's rows.
     cp::WordTable<char> minted; // a set, by the region's address
@@ -447,27 +446,25 @@ void EvalState::printStats() {
       if (minted.find(uint64_t(uintptr_t(ri)))) { mR++; mOps += ri->nOps; mRan += ran; mEvals += ri->nEvals; mTh += ri->nThunks; }
       else { fR++; fOps += ri->nOps; fRan += ran; fEvals += ri->nEvals; fTh += ri->nThunks; }
     }
-    llvm::errs() << "== sea of nodes: " << fR << " file regions hold " << fOps << " ops ("
-                 << llvm::format("%.1f", fOps ? 100.0 * fRan / fOps : 0.0) << "% ever ran, " << fEvals << " evals, "
-                 << fTh << " thunk cells); " << mR << " minted bodies hold " << mOps << " ops ("
-                 << llvm::format("%.1f", mOps ? 100.0 * mRan / mOps : 0.0) << "% ever ran, " << mEvals << " evals, "
-                 << mTh << " thunk cells).  Finer grain mints a cell: the thunk cells are its rows against lambda grain's "
-                 << mR << "\n";
+    V({fR, fOps, fEvals, fTh, mR, mOps, mEvals, mTh});
+    F("%.1f", {fOps ? 100.0 * fRan / fOps : 0.0, mOps ? 100.0 * mRan / mOps : 0.0}); out(17);
   }
-  if (pre) llvm::errs() << "== prelowering: " << pre->adopted << " files adopted (" << pre->waited << " of them waited for), " << pre->missed << " lowered by the evaluator\n";
-  llvm::errs() << "== symbols: " << symbols.creates << " interning calls, " << symbols.size() << " symbols\n";
+  if (pre) { V({pre->adopted, pre->waited, pre->missed}); out(18); }
+  V({symbols.creates, symbols.size()}); out(19);
   { // the dynamic mix: what the run evaluated, by op kind
     uint64_t tot = 0;
     for (auto &e : evalsByKind) tot += e.v.n[0];
-    auto ev = ranked(evalsByKind, [](auto &e) { return e.v.n[0]; });
-    if (tot) llvm::errs() << "== evalOp calls by op kind (" << tot << " in all)\n";
-    for (size_t i = 0; tot && i < ev.size() && i < 16; i++)
-      llvm::errs() << "  " << llvm::format("%-26.*s", int(ev[i]->v.name.size()), ev[i]->v.name.data()) << llvm::format("%12llu", (unsigned long long)ev[i]->v.n[0]) << llvm::format("%7.1f%%", 100.0 * ev[i]->v.n[0] / tot) << '\n';
+    if (tot) {
+      auto ev = ranked(evalsByKind, [](auto &e) { return e.v.n[0]; });
+      char pb[16][16]; cp::MutableSeries<StatsRow> rs; rs.reserve(ev.size());
+      for (size_t i = 0; i < ev.size() && i < 16; i++) { int pn = snprintf(pb[i], 16, "%.1f", 100.0 * ev[i]->v.n[0] / tot);
+        rs.append(StatsRow{ev[i]->v.name.data(), ev[i]->v.name.size(), ev[i]->v.n[0], 0, 0, pb[i], (uint64_t)pn, 0}); }
+      V({tot}); out(20, rs.data(), int64_t(rs.size()));
+    }
   }
-  llvm::errs() << "== mlnix ops lowered: " << total << "\n";
-  llvm::errs() << "== `//`: " << nUpdMerged << " merges, " << nUpdTop << " entries copied\n";
-  llvm::errs() << "== lowering " << llvm::format("%.0f", nsLower / 1e6) << " ms (the analysis of deferred lambdas included), minted on demand "
-               << llvm::format("%.0f", nsMint / 1e6) << " ms\n";
+  V({total}); out(21);
+  V({nUpdMerged, nUpdTop}); out(22);
+  F("%.0f", {nsLower / 1e6, nsMint / 1e6}); out(23);
   if (!pools.empty()) {
     size_t names = 0, seen = 0, free = 0;
     for (auto &p : pools) {
@@ -476,8 +473,7 @@ void EvalState::printStats() {
       seen += p->seen.size();
       free += p->freeCol.size();
     }
-    llvm::errs() << "== read plan: " << names << " names pooled; " << seen << " lambdas skimmed and not yet reached (" << free
-                 << " free names kept)\n";
+    V({names, seen, free}); out(24);
   }
   if (!pools.empty()) {
     // The pools are Cursors: print them by their own column names.  A row is deferred when lowering
@@ -488,18 +484,23 @@ void EvalState::printStats() {
       rows += p->rows.size();
       for (nixev::RegionInfo *ri : p->rows.col<nixfe::PoolCol::Body>().view()) minted += ri != nullptr;
     }
-    llvm::errs() << "== lambda pools: " << pools.size() << " files, (";
-    for (size_t i = 0; i < pools[0]->rows.meta.size(); i++) llvm::errs() << (i ? ", " : "") << pools[0]->rows.meta[i];
-    llvm::errs() << "), " << rows << " rows deferred, " << minted << " drained (body minted on a first call), "
-                 << rows - minted << " never called\n";
+    size_t nm = pools[0]->rows.meta.size();
+    for (size_t i = 0; i < nm; i++) wins[i] = {pools[0]->rows.meta[i], strlen(pools[0]->rows.meta[i])};
+    V({pools.size(), rows, minted, rows - minted, nm}); out(25);
   }
-  section("scopes", perScope);
-  section("continents", perContinent);
-  section("dialects", perDialect);
-  auto o = ranked(opStats, [](auto &e) { return e.v.n[0]; });
-  llvm::errs() << "== top ops\n";
-  for (size_t i = 0; i < o.size() && i < 14; i++)
-    llvm::errs() << "  " << llvm::format("%-22.*s", int(o[i]->v.name.size()), o[i]->v.name.data()) << llvm::format("%9llu", (unsigned long long)o[i]->v.n[0]) << "\n";
+  auto section = [&](int32_t kind, cp::TextTable<uint64_t> &m) {
+    auto g = ranked(m, [](auto &e) { return e.v; });
+    cp::MutableSeries<StatsRow> rs; rs.reserve(g.size());
+    for (auto *e : g) rs.append(StatsRow{e->p, e->n, e->v, 0, 0, nullptr, 0, 0});
+    V({m.size()}); out(kind, rs.data(), int64_t(rs.size()));
+  };
+  section(26, perScope);
+  section(27, perContinent);
+  section(28, perDialect);
+  { auto o = ranked(opStats, [](auto &e) { return e.v.n[0]; });
+    cp::MutableSeries<StatsRow> rs; rs.reserve(o.size());
+    for (size_t i = 0; i < o.size() && i < 14; i++) rs.append(StatsRow{o[i]->v.name.data(), o[i]->v.name.size(), o[i]->v.n[0], 0, 0, nullptr, 0, 0});
+    out(29, rs.data(), int64_t(rs.size())); }
 }
 
 EvalState::~EvalState() {

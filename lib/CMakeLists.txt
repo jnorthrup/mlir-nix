@@ -275,6 +275,11 @@ mlnix_lower_trikeshed(NixEval lowered/nixeval/PrintValueOps.mlir PrintValueOps)
 # a trikeshed.combineAll of the per-attr/element pieces (rendered once by a caching callback) drained into the Text.
 # The recursion/seen-table/depth guard/name sorting stay in Eval.cpp.
 mlnix_lower_trikeshed(NixEval lowered/nixeval/PrintCompOps.mlir PrintCompOps)
+# The MLNIX_STATS report (EvalState::printStats): every line's composition is one variadic trikeshed.combine of label
+# slices, unsigned decimal drains and the float/name windows, drained once into room the bridge reserves; the ranked
+# lists and the meta-name join are nested combineAll.  The bridge reads the counters, formats the floats (snprintf),
+# ranks the tables and keeps the conditionals and the llvm::errs() write.
+mlnix_lower_trikeshed(NixEval lowered/nixeval/StatsOps.mlir StatsOps)
 # The XML byte emission: XMLWriter's tag lines (lib/Eval/Formats.cpp's indent/attrs/open/close/empty bodies are gone;
 # the bridge sorts the rows, reserves room and adopts the drained bytes).  The indent, prefix, name, attributes and
 # suffix are trikeshed.series / slice / combine / combineAll / drain over a constant escape table.
