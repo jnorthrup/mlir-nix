@@ -7,7 +7,6 @@
 #include "mlir/IR/BuiltinAttributes.h"
 
 #include <cmath>
-#include <cstring>
 #include <unistd.h>
 #include <climits>
 
@@ -198,13 +197,19 @@ void parseJSON(EvalState &state, std::string_view json, Value &v) {
 //===----------------------------------------------------------------------===//
 
 namespace {
-// The XML byte emission is hollowed into lowered/nixeval/XmlOps.mlir (trikeshed.series / slice / text / combine /
-// combineAll / at / drain over a constant escape table), lowered by --trikeshed-lower-cursors and linked into NixEval.
-// One entry writes a whole tag line into room reserved here and returns how many bytes it wrote; the attribute rows
-// and the element stack stay here, as does the recursion/forcing of toXML below.
-extern "C" size_t nixev_ts_xml_tag(int64_t kind, int64_t depth, const char *name, int64_t nn,
-                                   const composite::Chars *keys, const composite::Chars *vals, int64_t nrows,
-                                   char *into, size_t cap);
+// The XML byte emission is hollowed into lowered/nixeval/XmlOps.mlir (one entry writes a whole tag line into room
+// reserved here); the composition around it -- the attribute rows' dedup scan, their sort into the tag's key/value
+// windows and room, the formals' sorted names -- is lowered/nixeval/FmtCompOps.mlir.  The element stack stays here,
+// as does the recursion/forcing of toXML below.
+extern "C" {
+size_t nixev_ts_xml_tag(int64_t kind, int64_t depth, const char *name, int64_t nn,
+                        const composite::Chars *keys, const composite::Chars *vals, int64_t nrows,
+                        char *into, size_t cap);
+int64_t nixev_ts_xml_find(const void *rows, int64_t stride, int64_t n, const char *k);
+int64_t nixev_ts_xml_prep(const void *rows, int64_t stride, int64_t n, int64_t depth, int64_t nn,
+                          composite::Chars *keys, composite::Chars *vals);
+void nixev_ts_xml_formals(void *doc, const llvm::StringRef *wins, int64_t n);
+}
 
 struct XMLWriter {
   composite::Text &out;
@@ -219,29 +224,19 @@ struct XMLWriter {
     Attrs() = default;
     Attrs(const char *k, composite::Text v) { set(k, composite::mv(v)); }
     void set(const char *k, composite::Text v) {
-      for (Row &r : rows)
-        if (strcmp(r.k, k) == 0) {
-          r.v = composite::mv(v);
-          return;
-        }
-      rows.append(Row{k, composite::mv(v)});
+      int64_t at = nixev_ts_xml_find(rows.data(), int64_t(sizeof(Row)), int64_t(rows.size()), k);
+      if (at >= 0) rows[uint32_t(at)].v = composite::mv(v);
+      else rows.append(Row{k, composite::mv(v)});
     }
   };
-  /// One tag line: the rows sorted by name (as Nix's std::map wrote them), their keys and values as windows, the room
-  /// the emission needs (2 a depth, 2 the prefix, the name, 4 the suffix, and 4 + key + 6 a value byte), drained into
-  /// the Text's own buffer and adopted (resize before, truncate after, the PathOps way).  kind 0 open, 1 close, 2 empty.
+  static_assert(sizeof(Attrs::Row) == 24 && offsetof(Attrs::Row, k) == 0 && sizeof(composite::Text) == 16);
+  /// One tag line: the rows sorted by name and their windows (FmtCompOps), the room the emission needs, drained
+  /// into the Text's own buffer and adopted (resize before, truncate after, the PathOps way).  kind 0 open, 1 close, 2 empty.
   void tag(int64_t kind, size_t depth, std::string_view n, const Attrs &as) {
-    composite::MutableSeries<const Attrs::Row *> sorted;
-    for (const Attrs::Row &r : as.rows) sorted.append(&r);
-    composite::sortRows(sorted.data(), sorted.size(), [](const Attrs::Row *a, const Attrs::Row *b) { return strcmp(a->k, b->k) < 0; });
     composite::MutableSeries<composite::Chars> keys, vals;
-    size_t room = 2 * depth + 2 + n.size() + 4;
-    for (const Attrs::Row *r : sorted) {
-      size_t kn = strlen(r->k);
-      keys.append(composite::chars(r->k, uint32_t(kn)));
-      vals.append(r->v.chars());
-      room += 4 + kn + 6 * size_t(r->v.size());
-    }
+    keys.resize(as.rows.size()); vals.resize(as.rows.size());
+    size_t room = size_t(nixev_ts_xml_prep(as.rows.data(), int64_t(sizeof(Attrs::Row)), int64_t(as.rows.size()),
+                                           int64_t(depth), int64_t(n.size()), keys.data(), vals.data()));
     size_t at = out.size();
     out.resize(at + room);
     out.truncate(at + nixev_ts_xml_tag(kind, int64_t(depth), n.data(), int64_t(n.size()), keys.data(), vals.data(),
@@ -337,10 +332,7 @@ void toXML(EvalState &st, XMLWriter &doc, Value &v, bool strict, bool location, 
       composite::MutableSeries<llvm::StringRef> names; // the formals' bytes are the attributes' own: windows on them are sorted
       ArrayAttr formals = *lam.getFormals();
       for (Attribute f : formals) names.append(cast<StringAttr>(f).getValue());
-      composite::sortRows(names.data(), names.size(), [](llvm::StringRef a, llvm::StringRef b) {
-        return composite::lessChars(composite::series(a.data(), uint32_t(a.size())), composite::series(b.data(), uint32_t(b.size())));
-      });
-      for (llvm::StringRef n : names) doc.empty("attr", XMLWriter::Attrs("name", composite::Text(n)));
+      nixev_ts_xml_formals(&doc, names.data(), int64_t(names.size()));
       doc.close();
     } else {
       doc.empty("varpat", XMLWriter::Attrs("name", composite::Text(lam.getArgName() ? *lam.getArgName() : llvm::StringRef(""))));
@@ -354,6 +346,12 @@ void toXML(EvalState &st, XMLWriter &doc, Value &v, bool strict, bool location, 
   }
 }
 } // namespace
+
+// The formals' emission loop is FmtCompOps.mlir's (the windows sorted there, one call a name); the tag's bytes XmlOps'.
+static_assert(sizeof(llvm::StringRef) == 2 * sizeof(void *)); // {data ptr @0, len @8}, as fc_win_cmp reads it
+extern "C" void nixev_xml_formal(void *doc, const llvm::StringRef *names, int64_t k) {
+  static_cast<XMLWriter *>(doc)->empty("attr", XMLWriter::Attrs("name", composite::Text(names[uint32_t(k)])));
+}
 
 void EvalState::printValueAsXML(composite::Text &out, Value &v, bool strict, bool location, NixStringContext &ctx) {
   out.put("<?xml version='1.0' encoding='utf-8'?>\n");
@@ -374,6 +372,8 @@ void EvalState::printValueAsXML(composite::Text &out, Value &v, bool strict, boo
 // and checked here, so an error found here still comes before a lexical error later in the text.
 extern "C" int32_t nixev_ts_toml_scan(int64_t *rec);
 extern "C" int64_t nixev_ts_toml_msg(int64_t code, int64_t line, const char *w, int64_t wn, char *into, int64_t cap);
+// An open array's close: its elements (a window of the elems stack) drained into the list's cells, FmtCompOps.mlir.
+extern "C" void nixev_ts_toml_cells(const void *elems, int64_t n, void *into);
 namespace {
 [[noreturn]] void tomlFail(int64_t code, int64_t line, std::string_view w) {
   composite::Text m;
@@ -507,7 +507,7 @@ extern "C" void nixev_toml_ev(void *c, int64_t kind, const char *p, int64_t a, i
   case 7: {
     uint32_t from = P.frames.back().elems, n = P.elems.size() - from;
     st.mkList(*(v = st.allocValue()), size_t(n));
-    for (uint32_t i = 0; i < n; i++) v->list.elems[i] = P.elems[from + i];
+    nixev_ts_toml_cells(P.elems.data() + from, int64_t(n), v->list.elems);
     while (P.elems.size() > from) P.elems.pop();
     P.frames.pop();
     break;

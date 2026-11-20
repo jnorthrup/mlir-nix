@@ -276,9 +276,13 @@ mlnix_lower_trikeshed(NixEval lowered/nixeval/PrintValueOps.mlir PrintValueOps)
 # The recursion/seen-table/depth guard/name sorting stay in Eval.cpp.
 mlnix_lower_trikeshed(NixEval lowered/nixeval/PrintCompOps.mlir PrintCompOps)
 # The XML byte emission: XMLWriter's tag lines (lib/Eval/Formats.cpp's indent/attrs/open/close/empty bodies are gone;
-# the bridge sorts the rows, reserves room and adopts the drained bytes).  The indent, prefix, name, attributes and
-# suffix are trikeshed.series / slice / combine / combineAll / drain over a constant escape table.
+# the bridge reserves room and adopts the drained bytes).  The indent, prefix, name, attributes and suffix are
+# trikeshed.series / slice / combine / combineAll / drain over a constant escape table.
 mlnix_lower_trikeshed(NixEval lowered/nixeval/XmlOps.mlir XmlOps)
+# The XML composition residue and fromTOML's array close (lib/Eval/Formats.cpp's Attrs::set scan, tag's row sort and
+# key/value windows, the formals' sorted names and the open array's elems fill are gone): the dedup scan an scf.while,
+# the rows and names trikeshed.sorted by unsigned bytes, the windows and room one scf.for, the elems one drain.
+mlnix_lower_trikeshed(NixEval lowered/nixeval/FmtCompOps.mlir FmtCompOps)
 # builtins.fromTOML's scan (lib/Eval/Formats.cpp's TomlParser lexing/syntax is gone; the bridge builds the tables from
 # its events in order and keeps the duplicate/redefinition checks).  A cf state machine over the input bytes with an
 # explicit nesting stack, lifted to scf first; the messages are one trikeshed combine drained once.
