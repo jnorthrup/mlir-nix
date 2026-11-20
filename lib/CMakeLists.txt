@@ -164,6 +164,15 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/NarFraming.mlir NarFraming)
 # slice / text / at / drain over series<i8>: one variadic combine of section views, each list a combineAll, each escaped
 # string a combineAll over a constant ATerm escape table, drained once into a pre-sized buffer (fill-drain).
 mlnix_lower_trikeshed(NixStore lowered/nixstore/DrvUnparse.mlir DrvUnparse)
+# The derivation ATerm reader nixstore::parseDerivation (StorePaths.cpp's ATermParser and its walk are gone; the bridge
+# builds the Derivation from the decoded strings, keeping the outputs' kinds, parseHashAlgo/parseHash and their errors,
+# __json and the sorted maps).  The walk of the fixed Derive(...) structure is trikeshed.at / slice / compare / drain
+# over series<i8> (each run between escapes a slice drained into the room), a failure offset passed through every step.
+mlnix_lower_trikeshed(NixStore lowered/nixstore/DrvParse.mlir DrvParse)
+# The derivation JSON writer nixstore::derivationToJSON (StorePaths.cpp's composition is gone; the bridge reuses
+# marshalDrv's record arrays plus each output's kind).  One variadic trikeshed.combine of literal slices, escaped strings
+# (combineAll over Nix's JSON escape table) and list combineAlls, drained once into a pre-sized buffer (fill-drain).
+mlnix_lower_trikeshed(NixStore lowered/nixstore/DrvJson.mlir DrvJson)
 # The .attrs.json serialization of structuredAttrsFiles' dump and nixstore::jsonEscape (StructuredAttrs.cpp's and
 # StorePaths.cpp's loops are gone; the bridges size the Text and call these entries, the DOM stays C++ behind three
 # pure-read callbacks).  The stitching is one lazy combineAll over the children's cells drained once; the escape is
