@@ -190,6 +190,10 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/StructuredAttrsOps.mlir Structur
 # worklist and visited set (bisect + insert), collectGarbage's dead set and referrer-safe rounds, allValidPaths' order,
 # queryPathInfo's lines (parts), contentFingerprint (a fold through XXH3-64, written here) and sameContent's walk.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/StoreGraph.mlir StoreGraph)
+# The crit-bit trie of include/Composite/Patricia.h (its algorithms are gone from the header; the template keeps the
+# storage, the value, copy and emit): the leaf walk, the key compare (trikeshed.compare), set's plan and link, prefix's
+# byte-order walk.  NixStore owns it; NixEval (Eval.h's tries) links NixStore.
+mlnix_lower_trikeshed(NixStore lowered/nixstore/Patricia.mlir Patricia)
 
 add_library(NixFrontend STATIC Frontend/Parser.cpp Frontend/Source.cpp Frontend/Confix.cpp)
 add_dependencies(NixFrontend MLIRNixOpsIncGen TrikeShedIncGen)
