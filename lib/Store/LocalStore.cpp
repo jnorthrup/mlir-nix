@@ -14,13 +14,10 @@
 //===----------------------------------------------------------------------===//
 
 #include "Composite/Mutable.h"
-#include "Composite/Rows.h"
 #include "Composite/Text.h"
 #include "Nix/Numbers.h"
 #include "Nix/Os.h"
 #include "Nix/Store.h"
-#include "llvm/ADT/ArrayRef.h" // xxh3_64bits' ArrayRef overload lives here from LLVM 23, in xxhash.h before
-#include "llvm/Support/xxhash.h"
 #include <cerrno>
 #include <cstring>
 #include <dirent.h>
@@ -32,6 +29,18 @@
 #include <unistd.h>
 
 namespace nixstore {
+
+// The store's graph and content algorithms are lowered/nixstore/StoreGraph.mlir (built into NixStore by lib/CMakeLists.txt): the set
+// algebra, computeFSClosure's worklist, collectGarbage's rounds, contentFingerprint (xxh3 too) and sameContent, allValidPaths' order and
+// queryPathInfo's lines.  What stays here hands the sorted sets over as windows and answers the callbacks, which read and write the store.
+namespace {
+struct GWin { const char *p; int64_t n; };
+template <class C> composite::MutableSeries<GWin> wins(const C &texts) {
+  composite::MutableSeries<GWin> w;
+  for (const composite::Text &t : texts) w.append({t.data(), int64_t(t.size())});
+  return w;
+}
+} // namespace
 
 Store::Store(StoreSettings s) : settings(std::move(s)) {
   if (settings.stateDir.empty()) {
@@ -77,24 +86,22 @@ bool Store::isValidPath(std::string_view path) {
   return pathExists(infoFile(path)) && pathExists(toReal(path));
 }
 
+extern "C" int64_t nixstore_ts_infolines(const char *p, int64_t n, int64_t *recs); // {key 0-4, value offset, value length}, in line order
 composite::Maybe<PathInfo> Store::queryPathInfo(std::string_view path) {
   composite::Text f = infoFile(path);
   if (!pathExists(f) || !pathExists(toReal(path))) return nullptr;
   PathInfo info;
   info.path = composite::Text(path);
   composite::Text text = readFile(f);
-  composite::eachLine(text.data(), uint32_t(text.size()), [&](const char *p, uint32_t n) {
-    std::string_view line(p, n);
-    auto c = line.find(": ");
-    if (c == std::string_view::npos) return;
-    std::string_view k = line.substr(0, c);
-    std::string_view v = line.substr(c + 2);
-    if (k == "narHash") info.narHash = parseHash(v, nullptr);
-    else if (k == "narSize") info.narSize = nixsys::stoValue("stoull", nixsys::readUnsigned(v));
-    else if (k == "ref") info.references.insert(v);
-    else if (k == "deriver") info.deriver = composite::Text(v);
-    else if (k == "ca") info.ca = composite::Text(v);
-  });
+  composite::MutableSeries<int64_t> r(3 * (text.size() / 2 + 2));
+  for (uint32_t i = 0, k = uint32_t(nixstore_ts_infolines(text.data(), text.size(), r.data())); i < k; i++) {
+    std::string_view v(text.data() + r[3 * i + 1], size_t(r[3 * i + 2]));
+    if (r[3 * i] == 0) info.narHash = parseHash(v, nullptr);
+    else if (r[3 * i] == 1) info.narSize = nixsys::stoValue("stoull", nixsys::readUnsigned(v));
+    else if (r[3 * i] == 2) info.references.insert(v);
+    else if (r[3 * i] == 3) info.deriver = composite::Text(v);
+    else info.ca = composite::Text(v);
+  }
   return info;
 }
 
@@ -110,6 +117,7 @@ void Store::registerValidPath(const PathInfo &info) {
   rename(tmp.c_str(), infoFile(info.path).c_str());
 }
 
+extern "C" void nixstore_ts_sortwins(const GWin *w, int64_t n, int64_t *order); // the windows' indices in byte order
 composite::MutableSeries<composite::Text> Store::allValidPaths() {
   composite::MutableSeries<composite::Text> res;
   DIR *d = opendir((settings.stateDir + "/info").c_str());
@@ -121,14 +129,11 @@ composite::MutableSeries<composite::Text> Store::allValidPaths() {
     if (pathExists(toReal(p))) res.append(composite::mv(p));
   }
   closedir(d);
-  composite::MutableSeries<composite::Text *> order; // rows of pointers are sorted, then each path moves once, into its place
-  for (auto &p : res) order.append(&p);
-  composite::sortRows(order.data(), order.size(), [](const composite::Text *a, const composite::Text *b) {
-    return composite::lessChars(composite::series(a->data(), uint32_t(a->size())), composite::series(b->data(), uint32_t(b->size())));
-  });
+  composite::MutableSeries<int64_t> order(res.size()); // the paths' order is sorted, then each path moves once, into its place
+  nixstore_ts_sortwins(wins(res).data(), res.size(), order.data());
   composite::MutableSeries<composite::Text> sorted;
   sorted.reserve(res.size());
-  for (composite::Text *p : order) sorted.append(composite::mv(*p));
+  for (int64_t i : order) sorted.append(composite::mv(res[uint32_t(i)]));
   return sorted;
 }
 
@@ -265,28 +270,26 @@ composite::Text Store::addTextToStore(std::string_view name, std::string_view te
 // Derivations in the store
 //===----------------------------------------------------------------------===//
 
+extern "C" int64_t nixstore_ts_union(const GWin *a, int64_t na, const GWin *b, int64_t nb, GWin *out);
+/// A derivation's references: its input sources and input derivations, both sorted, merged (a path in both once).
+static composite::MutableSeries<GWin> drvRefs(const Derivation &drv) {
+  composite::MutableSeries<GWin> srcs = wins(drv.inputSrcs), ins, out(srcs.size() + drv.inputDrvs.size());
+  for (auto &[p, o] : drv.inputDrvs) ins.append({p.data(), int64_t(p.size())});
+  out.resize(size_t(nixstore_ts_union(srcs.data(), srcs.size(), ins.data(), ins.size(), out.data())));
+  return out;
+}
 static SortedSet drvReferences(const Derivation &drv) {
-  SortedSet refs(drv.inputSrcs.begin(), drv.inputSrcs.end());
-  for (auto &[p, o] : drv.inputDrvs) refs.insert(p);
+  SortedSet refs;
+  for (GWin r : drvRefs(drv)) refs.rows.append(composite::Text(r.p, size_t(r.n)));
   return refs;
 }
 
 composite::Text Store::writeDerivation(Derivation &&drv) {
   // The text's hash names the path; a store that writes keeps the text too, made once, and a read-only one only feeds the hash with it.
   composite::Text text = settings.readOnly ? composite::Text() : drv.unparse(false);
-  // The path's type is `text` and its references: the input sources and the input derivations, both sorted, merged here (a path in both
-  // once), as makeTextPath would join drvReferences' set, without building the set.
+  // The path's type is `text` and its references (drvRefs' windows), as makeTextPath would join drvReferences' set, without building the set.
   composite::Text type = "text";
-  auto src = drv.inputSrcs.begin(), srcEnd = drv.inputSrcs.end();
-  auto in = drv.inputDrvs.begin(), inEnd = drv.inputDrvs.end();
-  while (src != srcEnd || in != inEnd) {
-    const composite::Text *r;
-    if (in == inEnd || (src != srcEnd && *src < in->first)) r = &*src++;
-    else if (src == srcEnd || in->first < *src) r = &(in++)->first;
-    else { r = &*src++; ++in; }
-    type += ':';
-    type += *r;
-  }
+  for (GWin r : drvRefs(drv)) type.put(':').put(r.p, size_t(r.n));
   composite::Text path = makeStorePath(settings.storeDir, type, settings.readOnly ? drv.hashUnparsed(false) : hashString(HashAlgo::SHA256, text),
                                        drv.name + ".drv");
   const Derivation &kept = keepDerivation(path, std::move(drv), false).drv; // a path names its text: the first is kept, never rewritten
@@ -294,71 +297,38 @@ composite::Text Store::writeDerivation(Derivation &&drv) {
   return path;
 }
 
-/// A fingerprint of a derivation's content: each of its strings through xxh3, in order, with the counts that delimit its lists.  Equal content
-/// gives equal fingerprints; sameContent checks the converse.
-static uint64_t contentFingerprint(const Derivation &drv) {
-  uint64_t h = 0;
-  auto word = [&](uint64_t w) { h = (h ^ w) * 0x9e3779b97f4a7c15ull; h ^= h >> 29; };
-  auto str = [&](std::string_view s) { word(llvm::xxh3_64bits(llvm::ArrayRef<uint8_t>(reinterpret_cast<const uint8_t *>(s.data()), s.size()))); };
-  str(drv.name), str(drv.platform), str(drv.builder);
-  word(drv.args.size());
-  for (const composite::Text &a : drv.args) str(a);
-  word(drv.inputSrcs.size());
-  for (const composite::Text &s : drv.inputSrcs) str(s);
-  word(drv.inputDrvs.size());
-  for (auto &[p, outs] : drv.inputDrvs) {
-    str(p), word(outs.size());
-    for (const composite::Text &o : outs) str(o);
-  }
-  word(drv.outputs.size());
-  for (auto &[n, o] : drv.outputs) str(n), word(o.kind), str(o.path);
-  word(drv.env.size());
-  for (auto &[k, v] : drv.env) str(k), str(v);
-  word(drv.structuredAttrs.has_value());
-  if (drv.structuredAttrs) str(*drv.structuredAttrs);
-  return h;
+/// A derivation as tokens {tag, a, b} in contentFingerprint's order, which StoreGraph.mlir folds into the fingerprint (each string through
+/// xxh3, with the counts that delimit its lists) and walks in step with another's for sameContent: whether `c`, a derivation as
+/// writeDerivation keeps it, is `n` with its output paths filled in (an input-addressed output's path and its env entry, empty in n).
+/// Tags: 0 word, 1 string, 2 word not fingerprinted, 3 Hash*, 4 an output's kind, 5 an env value, 6 an output's path, 7 the outputs' count.
+namespace {
+struct GTok { int64_t tag, a, b; };
 }
-
-/// Whether `c`, a derivation as writeDerivation keeps it, is `n` with its output paths filled in: equal in every field but what filling in
-/// writes, an input-addressed output's path and its env entry (empty in n, as derivationStrict leaves them).
-static bool sameContent(const Derivation &n, const Derivation &c) {
-  if (n.name != c.name || n.platform != c.platform || n.builder != c.builder || n.structuredAttrs != c.structuredAttrs ||
-      n.args.size() != c.args.size() || !(n.inputSrcs == c.inputSrcs) || n.inputDrvs.size() != c.inputDrvs.size() ||
-      n.outputs.size() != c.outputs.size() || n.env.size() != c.env.size())
-    return false;
-  for (uint32_t i = 0; i < n.args.size(); i++)
-    if (n.args[i] != c.args[i]) return false;
-  for (size_t i = 0; i < n.inputDrvs.size(); i++) {
-    auto &a = n.inputDrvs.begin()[i], &b = c.inputDrvs.begin()[i];
-    if (a.first != b.first || !(a.second == b.second)) return false;
-  }
-  for (size_t i = 0; i < n.outputs.size(); i++) {
-    auto &[an, a] = n.outputs.begin()[i];
-    auto &[bn, b] = c.outputs.begin()[i];
-    if (an != bn) return false;
-    if (a.kind == DerivationOutput::Deferred) {
-      if (b.kind != DerivationOutput::InputAddressed) return false;
-    } else if (a.kind != b.kind || a.path != b.path || a.method != b.method || a.hashAlgo != b.hashAlgo || !(a.hash == b.hash)) {
-      return false;
-    }
-  }
-  for (size_t i = 0; i < n.env.size(); i++) {
-    auto &[ak, av] = n.env.begin()[i];
-    auto &[bk, bv] = c.env.begin()[i];
-    if (ak != bk) return false;
-    if (av != bv) { // only an output's entry may differ, which filling in wrote
-      auto o = n.outputs.find(ak);
-      if (o == n.outputs.end() || o->second.kind != DerivationOutput::Deferred || !av.empty()) return false;
-    }
-  }
-  return true;
+extern "C" uint64_t nixstore_ts_fingerprint(const GTok *t, int64_t n);
+extern "C" int64_t nixstore_ts_samecontent(const GTok *n, int64_t nn, const GTok *c, int64_t nc);
+static composite::MutableSeries<GTok> drvTokens(const Derivation &d) {
+  composite::MutableSeries<GTok> t;
+  auto w = [&](int64_t tag, uint64_t v) { t.append({tag, int64_t(v), 0}); };
+  auto s = [&](int64_t tag, std::string_view v) { t.append({tag, int64_t(uintptr_t(v.data())), int64_t(v.size())}); };
+  auto all = [&](const auto &xs) { w(0, xs.size()); for (const composite::Text &x : xs) s(1, x); };
+  s(1, d.name), s(1, d.platform), s(1, d.builder), all(d.args), all(d.inputSrcs), w(0, d.inputDrvs.size());
+  for (auto &[p, outs] : d.inputDrvs) s(1, p), all(outs);
+  w(7, d.outputs.size());
+  for (auto &[n, o] : d.outputs) s(1, n), w(4, o.kind), s(6, o.path), w(2, uint64_t(o.method)), w(2, uint64_t(o.hashAlgo)), w(3, uintptr_t(&o.hash));
+  w(0, d.env.size());
+  for (auto &[k, v] : d.env) s(1, k), s(5, v);
+  w(0, d.structuredAttrs.has_value());
+  if (d.structuredAttrs) s(1, *d.structuredAttrs);
+  return t;
 }
 
 const composite::Text *Store::sameDerivation(const Derivation &drv, uint64_t &fingerprint) const {
-  fingerprint = contentFingerprint(drv);
+  composite::MutableSeries<GTok> t = drvTokens(drv);
+  fingerprint = nixstore_ts_fingerprint(t.data(), t.size());
   const ContentRow *r = drvByContent.get(ContentRow{fingerprint, nullptr});
   if (!r) return nullptr;
-  return sameContent(drv, r->rec->drv) ? &r->rec->path : nullptr;
+  composite::MutableSeries<GTok> c = drvTokens(r->rec->drv);
+  return nixstore_ts_samecontent(t.data(), t.size(), c.data(), c.size()) ? &r->rec->path : nullptr;
 }
 
 void Store::rememberDerivation(uint64_t fingerprint, std::string_view drvPath) {
@@ -514,29 +484,56 @@ void Store::fillInOutputPaths(Derivation &drv, DrvInputs *inputsOut) {
   }
 }
 
-SortedSet Store::computeFSClosure(const SortedSet &paths, bool includeOutputs) {
-  SortedSet res;
-  composite::MutableSeries<composite::Text> todo;
-  for (const auto &pth : paths) todo.append(pth.clone());
-  while (!todo.empty()) {
-    composite::Text p = composite::mv(todo.back());
-    todo.pop();
-    if (!res.insert(p)) continue;
-    if (auto info = queryPathInfo(p)) {
-      for (auto &r : info->references) todo.append(r.clone());
-    } else if (DrvRecord *rec = drvAt(p)) {
-      auto &d = rec->drv;
-      for (auto &r : drvReferences(d)) todo.append(r.clone());
+// computeFSClosure's walk is nixstore_ts_closure (the worklist and the visited set, room 0, sorted), collectGarbage's past the roots
+// nixstore_ts_gc (the dead paths deleted in referrer-safe rounds).  The callbacks read a path's references or a derivation's valid
+// outputs, kept here as long as the walk, and delete a path.
+namespace {
+struct Walk {
+  Store *st;
+  composite::MutableSeries<GWin> room[2]; // the visited windows, the walk's frames
+  composite::MutableSeries<SortedSet> sets;
+  composite::MutableSeries<composite::MutableSeries<GWin>> got;
+  bool dryRun = false;
+  composite::MutableSeries<composite::Text> *deleted = nullptr;
+};
+} // namespace
+extern "C" {
+int64_t nixstore_ts_closure(Walk *c, const GWin *seeds, int64_t n, int64_t includeOutputs);
+int64_t nixstore_ts_gc(Walk *c, const GWin *valid, int64_t nv, const GWin *live, int64_t nl);
+GWin *nixstore_walk_room(Walk *c, int64_t which, int64_t need) {
+  if (c->room[which].size() < need) c->room[which].resize(size_t(need) * 2);
+  return c->room[which].data();
+}
+/// which 0: the path's info's references, else a cached derivation's; 1: a derivation's valid outputs; 2: the info's references.
+const GWin *nixstore_walk_next(Walk *c, const char *p, int64_t n, int64_t which, int64_t *count) {
+  std::string_view path(p, size_t(n));
+  composite::MutableSeries<GWin> &w = c->got[c->got.append(composite::MutableSeries<GWin>())];
+  if (which == 1) {
+    try {
+      for (auto &[name, o] : c->st->readDerivation(path).outputs)
+        if (!o.path.empty() && c->st->isValidPath(o.path)) w.append({o.path.data(), int64_t(o.path.size())});
+    } catch (Error &) {
     }
-    if (includeOutputs && p.size() > 4 && p.substr(p.size() - 4) == ".drv") {
-      try {
-        const Derivation &d = readDerivation(p);
-        for (auto &[n, o] : d.outputs)
-          if (!o.path.empty() && isValidPath(o.path)) todo.append(o.path.clone());
-      } catch (Error &) {
-      }
-    }
+  } else if (auto info = c->st->queryPathInfo(path)) {
+    w = wins(c->sets[c->sets.append(composite::mv(info->references))]);
+  } else if (Store::DrvRecord *rec = which == 0 ? c->st->drvAt(path) : nullptr) {
+    w = drvRefs(rec->drv);
   }
+  *count = w.size();
+  return w.data();
+}
+void nixstore_walk_gone(Walk *c, const char *p, int64_t n) {
+  std::string_view path(p, size_t(n));
+  if (!c->dryRun) deletePathRecursive(c->st->toReal(path)), unlink(c->st->infoFile(path).c_str());
+  c->deleted->append(composite::Text(path));
+}
+}
+
+SortedSet Store::computeFSClosure(const SortedSet &paths, bool includeOutputs) {
+  Walk c{this};
+  int64_t n = nixstore_ts_closure(&c, wins(paths).data(), paths.size(), includeOutputs);
+  SortedSet res;
+  for (uint32_t i = 0; i < n; i++) res.rows.append(composite::Text(c.room[0][i].p, size_t(c.room[0][i].n)));
   return res;
 }
 
@@ -876,34 +873,10 @@ bool Store::collectGarbage(bool dryRun, composite::MutableSeries<composite::Text
     }
   };
   scanRoots(scanRoots, settings.stateDir + "/gcroots");
-  auto live = computeFSClosure(roots, true);
-  composite::MutableSeries<composite::Text> dead;
-  for (auto &p : allValidPaths())
-    if (!live.count(p)) dead.append(composite::mv(p));
-  // Delete in referrer-safe order: repeat until no progress.
-  bool progress = true;
-  SortedSet remaining(dead.begin(), dead.end());
-  while (progress && !remaining.empty()) {
-    progress = false;
-    SortedSet kept, gone; // still referenced by another dead path (the next round's); deleted in this round (no longer a referrer)
-    for (const composite::Text &p : remaining) {
-      bool referenced = false;
-      for (const composite::Text &q : remaining) {
-        if (q == p || gone.contains(q)) continue;
-        if (auto info = queryPathInfo(q))
-          if (info->references.count(p)) { referenced = true; break; }
-      }
-      if (referenced) { kept.insert(p); continue; }
-      if (!dryRun) {
-        deletePathRecursive(toReal(p));
-        unlink(infoFile(p).c_str());
-      }
-      deleted.append(p.clone());
-      gone.insert(p);
-      progress = true;
-    }
-    remaining = std::move(kept);
-  }
+  SortedSet live = computeFSClosure(roots, true);
+  composite::MutableSeries<composite::Text> valid = allValidPaths();
+  Walk g{this, {}, {}, {}, dryRun, &deleted};
+  nixstore_ts_gc(&g, wins(valid).data(), valid.size(), wins(live).data(), live.size());
   return true;
 }
 
