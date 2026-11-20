@@ -285,6 +285,11 @@ mlnix_lower_interface(NixEval lowered/nixeval/Rounding.mlir Rounding)
 # __parseDrvName's dash scan (Builtins.cpp's loop is gone; the bridge keeps forceStringNoCtx and the mkString/mkAttrs of
 # the two windows).  The first '-' followed by a non-letter is trikeshed.at over the byte series (C-locale isalpha).
 mlnix_lower_trikeshed(NixEval lowered/nixeval/DrvNameOps.mlir DrvNameOps)
+# Flake references and toJSON's UTF-8 check (lib/Eval/Formats.cpp's percentDecode/percentEncode/parseQuery/isHexRev/
+# putFlakeAttr/parseFlakeRef/flakeRefToString/checkUTF8 bodies are gone; the bridges keep forcing, the throws' wording,
+# the values and canonPath).  The splits are trikeshed.parts, the words compare/slice, the parameters sorted, the
+# unparsed reference one combine of encoded combineAlls drained once.
+mlnix_lower_trikeshed(NixEval lowered/nixeval/FlakeRefOps.mlir FlakeRefOps)
 # EvalState::eqValues / lessThan (lib/Eval/Eval.cpp's bodies are gone; the methods forward to these entries).  The type
 # dispatch, the int/float cross-comparison, the scalar comparisons and the short-circuiting list/attrs walks are
 # trikeshed.at / compare over the cells and bytes, the recursion func.call back into the entries; the callbacks keep
