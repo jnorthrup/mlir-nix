@@ -11,6 +11,7 @@ add_mlir_dialect_library(MLIRNix
   Dialect/SumoDialect.cpp
   Dialect/SonDialect.cpp
   Dialect/ConfixDialect.cpp
+  Dialect/KursiveDialect.cpp
   PARTIAL_SOURCES_INTENDED
   DEPENDS MLIRNixOpsIncGen TrikeShedIncGen
   LINK_LIBS PUBLIC MLIRTrikeShed MLIRIR MLIRPass MLIRTransforms MLIRTransformUtils MLIRRewrite MLIRSideEffectInterfaces MLIRIRDL MLIRParser MLIRLLVMDialect)

@@ -57,6 +57,15 @@ mlir_tablegen(ConfixDialect.cpp.inc -gen-dialect-defs -dialect=confix)
 mlir_tablegen(ConfixEnums.h.inc -gen-enum-decls)
 mlir_tablegen(ConfixEnums.cpp.inc -gen-enum-defs)
 
+# TrikeShed's kursive combinators (Kursive.td): regular expressions as combinators, re2mlir and the Step program
+set(LLVM_TARGET_DEFINITIONS Kursive.td)
+mlir_tablegen(Kursive.h.inc -gen-op-decls)
+mlir_tablegen(Kursive.cpp.inc -gen-op-defs)
+mlir_tablegen(KursiveDialect.h.inc -gen-dialect-decls -dialect=kursive)
+mlir_tablegen(KursiveDialect.cpp.inc -gen-dialect-defs -dialect=kursive)
+mlir_tablegen(KursiveTypes.h.inc -gen-typedef-decls -typedefs-dialect=kursive)
+mlir_tablegen(KursiveTypes.cpp.inc -gen-typedef-defs -typedefs-dialect=kursive)
+
 add_public_tablegen_target(MLIRNixOpsIncGen)
 
 # The continents' IRDL declaration, embedded in the binary as a raw string
