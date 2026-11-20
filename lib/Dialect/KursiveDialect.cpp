@@ -17,6 +17,7 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/Pass/Pass.h"
+#include "mlir/Pass/PassManager.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -415,6 +416,40 @@ struct KursiveToProgramPass : PassWrapper<KursiveToProgramPass, OperationPass<Mo
   }
 };
 } // namespace
+
+int mlir::kursive::compileProgram(StringRef re, unsigned poolCap, unsigned capSteps, unsigned capSets, uint32_t *steps,
+                                  uint64_t *sets, uint32_t counts[4]) {
+  static MLIRContext ctx(MLIRContext::Threading::DISABLED); // the patterns' own: the evaluator's may be in use
+  static bool loaded = (ctx.loadDialect<KursiveDialect, memref::MemRefDialect>(), true);
+  (void)loaded;
+  OpBuilder b(&ctx);
+  OwningOpRef<ModuleOp> m = ModuleOp::create(b.getUnknownLoc());
+  b.setInsertionPointToEnd(m->getBody());
+  PatternOp::create(b, b.getUnknownLoc(), "x", re);
+  PassManager pm(&ctx);
+  auto r = std::make_unique<Re2MlirPass>();
+  r->poolCap = poolCap, r->setCap = capSets;
+  auto k = std::make_unique<KursiveToProgramPass>();
+  k->stepCap = capSteps;
+  pm.addPass(std::move(r)), pm.addPass(std::move(k));
+  if (failed(pm.run(*m))) llvm::report_fatal_error("kursive: the passes failed on a pattern re2mlir read");
+  int err = Invalid;
+  for (auto g : m->getOps<memref::GlobalOp>()) {
+    auto v = cast<DenseElementsAttr>(*g.getInitialValue());
+    if (g.getSymName() == "x_counts") {
+      auto c = v.getValues<int32_t>();
+      for (int i = 0; i < 4; i++) counts[i] = uint32_t(c[i]);
+      err = c[4];
+    } else if (g.getSymName() == "x_steps") {
+      uint32_t i = 0;
+      for (int32_t w : v.getValues<int32_t>()) steps[i++] = uint32_t(w);
+    } else {
+      uint32_t i = 0;
+      for (int64_t w : v.getValues<int64_t>()) sets[i++] = uint64_t(w);
+    }
+  }
+  return err;
+}
 
 void mlir::kursive::registerKursivePasses() {
   PassRegistration<Re2MlirPass>();

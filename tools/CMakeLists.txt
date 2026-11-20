@@ -26,3 +26,10 @@ set_target_properties(mlnix-c PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${PROJECT_BINA
 target_link_libraries(mlnix-c PRIVATE MLIRNix MLIRTrikeShed MLIRParser MLIRIR MLIRSupport
   MLIRArithDialect MLIRAsyncDialect MLIRControlFlowDialect MLIRSCFDialect)
 llvm_update_compile_flags(mlnix-c)
+
+# Kursive against std::regex::extended (scripts/kursive-check.cc; libstdc++ is the oracle, so it is run on Linux): the
+# patterns compile through the kursive dialect (MLIRNix) and walk in NixEval's lowered KursiveOps.  Not built by default.
+add_executable(kursive-check EXCLUDE_FROM_ALL ${PROJECT_SOURCE_DIR}/scripts/kursive-check.cc)
+target_link_libraries(kursive-check PRIVATE NixEval MLIRNix MLIRIR MLIRPass MLIRSupport)
+# -std=c++20, not gnu++20: Nix's libstdc++ regex is strict (__STRICT_ANSI__), which rejects escapes like \a and \1
+set_target_properties(kursive-check PROPERTIES CXX_EXTENSIONS OFF)
