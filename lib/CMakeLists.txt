@@ -139,6 +139,12 @@ endfunction()
 mlnix_lower_interface(NixStore lowered/nixstore/HashEq.mlir HashEq)
 # nixstore::isInStore (lib/Store/StorePaths.cpp's definition is gone; include/Nix/Store.h keeps the declaration).
 mlnix_lower_interface(NixStore lowered/nixstore/IsInStore.mlir IsInStore)
+# SHA-512 (lib/Store/Hash.cpp's SHA512Ctx is gone; HashSink keeps the context as plain state and calls these entries) and
+# Ed25519 verification (lib/Store/Ed25519.cpp keeps only the ed25519VerifyBase64 bridge).  The compression is a fold over
+# each block's 8-byte slices plus scf.for rounds; the padding a combine of a pad slice and a length series, drained; the
+# field/point/scalar arithmetic is scf/arith over i64 limb memrefs with trikeshed.fold/compare for the S < L and R checks.
+mlnix_lower_trikeshed(NixStore lowered/nixstore/Sha512.mlir Sha512)
+mlnix_lower_trikeshed(NixStore lowered/nixstore/Ed25519.mlir Ed25519)
 # The byte encoders appendBase16, appendNix32, base64Encode (lib/Store/Hash.cpp's bodies are gone; the bridges size the
 # Text and call these entries).  The encoding algebra is trikeshed.series / at / alpha / drain over the byte series.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/Encoders.mlir Encoders)
