@@ -184,6 +184,11 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/DrvJson.mlir DrvJson)
 # pure-read callbacks).  The stitching is one lazy combineAll over the children's cells drained once; the escape is
 # a combineAll of slices of one constant table (Nix's JSON rules, as PrintOps.mlir).
 mlnix_lower_trikeshed(NixStore lowered/nixstore/StructuredAttrsOps.mlir StructuredAttrsOps)
+# The local store's graph and content algorithms (LocalStore.cpp's bodies are gone; the bridges hand the sorted sets over as
+# windows and answer the store's reads and writes as callbacks): drvReferences' union (sorted + where), computeFSClosure's
+# worklist and visited set (bisect + insert), collectGarbage's dead set and referrer-safe rounds, allValidPaths' order,
+# queryPathInfo's lines (parts), contentFingerprint (a fold through XXH3-64, written here) and sameContent's walk.
+mlnix_lower_trikeshed(NixStore lowered/nixstore/StoreGraph.mlir StoreGraph)
 
 add_library(NixFrontend STATIC Frontend/Parser.cpp Frontend/Source.cpp Frontend/Confix.cpp)
 add_dependencies(NixFrontend MLIRNixOpsIncGen TrikeShedIncGen)
