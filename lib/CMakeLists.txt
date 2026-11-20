@@ -285,6 +285,10 @@ mlnix_lower_interface(NixEval lowered/nixeval/Rounding.mlir Rounding)
 # __parseDrvName's dash scan (Builtins.cpp's loop is gone; the bridge keeps forceStringNoCtx and the mkString/mkAttrs of
 # the two windows).  The first '-' followed by a non-letter is trikeshed.at over the byte series (C-locale isalpha).
 mlnix_lower_trikeshed(NixEval lowered/nixeval/DrvNameOps.mlir DrvNameOps)
+# derivationStrict's pure algebra (StoreBuiltins.cpp keeps the forcing, the store calls and the throws): the
+# outputHashMode / legacy-attribute words, every message as one combineAll of template pieces, the outputs' duplicate
+# check over a sorted index series, the context elements sorted, made unique and split, and __structuredAttrs' object.
+mlnix_lower_trikeshed(NixEval lowered/nixeval/DrvStrictOps.mlir DrvStrictOps)
 # Flake references and toJSON's UTF-8 check (lib/Eval/Formats.cpp's percentDecode/percentEncode/parseQuery/isHexRev/
 # putFlakeAttr/parseFlakeRef/flakeRefToString/checkUTF8 bodies are gone; the bridges keep forcing, the throws' wording,
 # the values and canonPath).  The splits are trikeshed.parts, the words compare/slice, the parameters sorted, the

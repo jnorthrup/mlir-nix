@@ -23,12 +23,33 @@ template <class... P> static composite::MutableSeries<composite::Text> progArgs(
 
 static bool isDrvPath(std::string_view p) { return p.size() > 4 && p.substr(p.size() - 4) == ".drv"; }
 
+// derivationStrict's text algebra, lowered/nixeval/DrvStrictOps.mlir (its header has each entry's contract): the words, the messages as
+// template pieces, the outputs' set check, the context elements sorted, made unique and split, the __structuredAttrs object.  The forcing,
+// the store calls and the throws stay here.
+struct DsWin { const char *p; int64_t n; };
+extern "C" int64_t nixev_ts_drv_word(const char *p, int64_t n, int64_t lo, int64_t hi);
+extern "C" int64_t nixev_ts_drv_msg(int64_t code, const char *a, int64_t an, const char *b, int64_t bn, char *into, int64_t cap);
+extern "C" int64_t nixev_ts_drv_outputs(const DsWin *w, int64_t n, int64_t *order);
+extern "C" int64_t nixev_ts_drv_ctx(const DsWin *w, int64_t n, int64_t *recs);
+extern "C" int64_t nixev_ts_drv_jsonobj(const char *p, const int64_t *ends, int64_t k, char *into, int64_t cap);
+enum DsMsg { DM_NAME, DM_DYN, DM_GIT, DM_MODE, DM_DUP, DM_DRVPATH, DM_NOOUT, DM_ALGO, DM_CA, DM_IMPURE, DM_BUILDER, DM_SYSTEM, DM_DOTDRV,
+             DM_MULTI, DM_NONAME, DM_INSET, DM_NAMEATTR, DM_ATTR, DM_DRV, DM_LEGACY, DM_JSON, DM_OUTCTX, DM_DRVCTX };
+static composite::Text drvMsg(int64_t c, std::string_view a = {}, std::string_view b = {}) {
+  char room[512]; // the context elements ("!out!drv", "=drv") come on every derivation: no heap room, no zero fill; a longer message asks again
+  int64_t n = nixev_ts_drv_msg(c, a.data(), int64_t(a.size()), b.data(), int64_t(b.size()), room, int64_t(sizeof room));
+  if (n <= int64_t(sizeof room)) return composite::Text(room, size_t(n));
+  composite::Text m;
+  m.resize(size_t(n));
+  nixev_ts_drv_msg(c, a.data(), int64_t(a.size()), b.data(), int64_t(b.size()), m.begin(), n);
+  return m;
+}
+
 static void addOutputsToResult(EvalState &st, EvalState::BindingsBuilder &bb, std::string_view drvPath,
                                const nixstore::Derivation &drv) {
   for (auto &[name, o] : drv.outputs) {
     composite::Text p = o.kind == nixstore::DerivationOutput::CAFixed && o.path.empty()
                             ? o.fixedPath(st.store->storeDir(), drv.name, name) : o.path.clone();
-    st.mkString(bb.alloc(name), p, NixStringContext{st.copyString(composite::cat("!", name, "!", drvPath))});
+    st.mkString(bb.alloc(name), p, NixStringContext{st.copyString(drvMsg(DM_OUTCTX, name, drvPath))});
   }
 }
 
@@ -36,21 +57,20 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
   st.forceAttrs(*args[0], pos, "while evaluating the argument passed to builtins.derivationStrict");
   Bindings *attrs = args[0]->attrs;
   const Attr *nameAttr = attrs->get(st.s.name);
-  if (!nameAttr)
-    throw EvalError("attribute 'name' missing", pos)
-        .addTrace(pos, "in the attrset passed as argument to builtins.derivationStrict");
+  if (!nameAttr) throw EvalError(drvMsg(DM_NONAME), pos).addTrace(pos, drvMsg(DM_INSET));
   composite::Text drvName;
   try {
     drvName = composite::Text(st.forceStringNoCtx(*nameAttr->value, pos, "while evaluating the `name` attribute passed to builtins.derivationStrict"));
   } catch (EvalError &e) {
-    e.addTrace(st.positionOf(*nameAttr), "while evaluating the derivation attribute 'name'");
+    e.addTrace(st.positionOf(*nameAttr), drvMsg(DM_NAMEATTR));
     throw;
   }
+  auto fail = [&](int64_t c, std::string_view a = {}) { return EvalError(drvMsg(c, a), pos); };
   try {
     try {
       nixstore::checkName(drvName);
     } catch (nixstore::Error &e) {
-      throw EvalError(composite::cat("invalid derivation name: ", e.what(), ". Please pass a different 'name'."), pos);
+      throw fail(DM_NAME, e.what());
     }
 
     bool structured = false;
@@ -66,37 +86,32 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
     NixStringContext context;                         // what coercions make: paths copied to the store, and the rarer attributes
     composite::MutableSeries<const StringContext *> owns; // each string attribute's own context, interned: its elements are not copied
     composite::Text coerced;
-    bool contentAddressed = false, isImpure = false;
     composite::Maybe<composite::Text> outputHash;
     composite::Maybe<nixstore::HashAlgo> outputHashAlgo;
     composite::Maybe<nixstore::FileIngestionMethod> ingestionMethod;
     nixstore::SortedSet outputs; // the output names: rows kept sorted, in the order the derivation lists them
     outputs.insert("out");
-    composite::Text jsonObj("{");
-    bool jsonFirst = true;
+    JsonOut json;                         // __structuredAttrs: each attribute's "key":value, one after the other
+    composite::MutableSeries<int64_t> jsonEnds; // where each ends
 
     auto handleHashMode = [&](std::string_view s) {
-      if (s == "recursive" || s == "nar") ingestionMethod = nixstore::FileIngestionMethod::NixArchive;
-      else if (s == "flat") ingestionMethod = nixstore::FileIngestionMethod::Flat;
-      else if (s == "text")
-        throw EvalError("experimental Nix feature 'dynamic-derivations' is disabled; add '--extra-experimental-features dynamic-derivations' to enable it", pos);
-      else if (s == "git")
-        throw EvalError("experimental Nix feature 'git-hashing' is disabled; add '--extra-experimental-features git-hashing' to enable it", pos);
-      else throw EvalError(composite::cat("invalid value '", s, "' for 'outputHashMode' attribute"), pos);
+      int64_t w = nixev_ts_drv_word(s.data(), int64_t(s.size()), 0, 5); // recursive nar flat text git
+      if (w < 0) throw fail(DM_MODE, s);
+      if (w >= 3) throw fail(w == 3 ? DM_DYN : DM_GIT);
+      ingestionMethod = w == 2 ? nixstore::FileIngestionMethod::Flat : nixstore::FileIngestionMethod::NixArchive;
     };
-    auto handleOutputs = [&](const auto &ss) {
+    auto handleOutputs = [&](const composite::MutableSeries<composite::Text> &ss) {
+      composite::MutableSeries<DsWin> w;
+      composite::MutableSeries<int64_t> order;
+      for (auto &j : ss) w.append(DsWin{j.data(), int64_t(j.size())}), order.append(0);
+      if (int64_t r = nixev_ts_drv_outputs(w.data(), int64_t(w.size()), order.data())) throw fail(DM_DUP - 1 + (r & 3), (r & 3) == 1 ? std::string_view(ss[uint32_t(r >> 2)]) : "");
       outputs = nixstore::SortedSet();
-      for (auto &j : ss) {
-        if (outputs.count(j)) throw EvalError(composite::cat("duplicate derivation output '", j, "'"), pos);
-        if (j == "drvPath") throw EvalError("invalid derivation output name 'drvPath'", pos);
-        outputs.insert(j);
-      }
-      if (outputs.empty()) throw EvalError("derivation cannot have an empty set of outputs", pos);
+      for (int64_t k : order) outputs.rows.append(ss[uint32_t(k)].clone()); // sorted and unique already
     };
     auto parseAlgo = [&](std::string_view s) -> composite::Maybe<nixstore::HashAlgo> {
       if (s.empty()) return nullptr;
       auto a = nixstore::parseHashAlgo(s);
-      if (!a) throw EvalError(composite::cat("unknown hash algorithm '", s, "', expect 'blake3', 'md5', 'sha1', 'sha256', or 'sha512'"), pos);
+      if (!a) throw fail(DM_ALGO, s);
       return a;
     };
 
@@ -109,15 +124,9 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
           if (i->value->type == VType::Null) continue;
         }
         if (i->name == st.s.contentAddressed) {
-          if (st.forceBool(*i->value, pos, "")) {
-            contentAddressed = true;
-            throw EvalError("experimental Nix feature 'ca-derivations' is disabled; add '--extra-experimental-features ca-derivations' to enable it", pos);
-          }
+          if (st.forceBool(*i->value, pos, "")) throw fail(DM_CA);
         } else if (i->name == st.s.impure) {
-          if (st.forceBool(*i->value, pos, "")) {
-            isImpure = true;
-            throw EvalError("experimental Nix feature 'impure-derivations' is disabled; add '--extra-experimental-features impure-derivations' to enable it", pos);
-          }
+          if (st.forceBool(*i->value, pos, "")) throw fail(DM_IMPURE);
         } else if (i->name == st.s.args) {
           st.forceList(*i->value, pos, "");
           for (size_t k = 0; k < i->value->listSize(); k++)
@@ -125,13 +134,10 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
                                                  "while evaluating an element of the argument list"));
         } else if (structured) {
           if (i->name == st.s.structuredAttrs) continue;
-          JsonOut js;
-          js.put(jsonFirst ? "" : ",");
-          js.putString(key);
-          js.put(':');
-          st.printValueAsJSON(js, *i->value, true, context, true, pos);
-          jsonObj += js.view();
-          jsonFirst = false;
+          json.putString(key);
+          json.put(':');
+          st.printValueAsJSON(json, *i->value, true, context, true, pos);
+          jsonEnds.append(int64_t(json.bytes.size()));
           if (i->name == st.s.builder) drv.builder = composite::Text(st.forceString(*i->value, context, pos));
           else if (i->name == st.s.system) drv.platform = composite::Text(st.forceStringNoCtx(*i->value, pos));
           else if (i->name == st.s.outputHash) outputHash = composite::Text(st.forceStringNoCtx(*i->value, pos));
@@ -144,18 +150,13 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
             for (uint32_t k = 0, n = strs.size(); k < n; k++) ss.append(strs[k]);
             handleOutputs(ss);
           }
-          static const char *legacy[] = {"allowedReferences", "allowedRequisites", "disallowedReferences",
-                                         "disallowedRequisites", "maxSize", "maxClosureSize"};
-          for (auto *l : legacy)
-            if (key == l)
-              st.warn(composite::cat("In a derivation named '", drvName, "', 'structuredAttrs' disables the effect of the derivation attribute '",
-                                     key, "'; use 'outputChecks.<output>.", key, "' instead"));
+          if (nixev_ts_drv_word(key.data(), int64_t(key.size()), 5, 11) >= 0) st.warn(drvMsg(DM_LEGACY, drvName, key)); // structuredAttrs disables it
         } else {
           const StringContext *own = nullptr;
           composite::Text s(composite::view(st.coerceToWindow(*i->value, context, true, true, pos, "", coerced, true, &own)));
           if (own) owns.append(own);
           if (i->name == st.s.json) {
-            st.warn(composite::cat("In derivation '", drvName, "': setting structured attributes via '__json' is deprecated, and may be disallowed in future versions of Nix. Set '__structuredAttrs = true' instead."));
+            st.warn(drvMsg(DM_JSON, drvName));
             drv.structuredAttrs = composite::mv(s);
           } else {
             if (i->name == st.s.builder) drv.builder = s.clone();
@@ -174,25 +175,31 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
           }
         }
       } catch (EvalError &e) {
-        e.addTrace(st.positionOf(*i), composite::cat("while evaluating attribute '", key, "' of derivation '", drvName, "'"));
+        e.addTrace(st.positionOf(*i), drvMsg(DM_ATTR, key, drvName));
         throw;
       }
     }
-    if (structured) drv.structuredAttrs = jsonObj + "}";
+    if (structured) {
+      composite::Text t;
+      t.resize(json.bytes.size() + jsonEnds.size() + 2);
+      t.truncate(size_t(nixev_ts_drv_jsonobj(json.bytes.data(), jsonEnds.data(), int64_t(jsonEnds.size()), t.begin(), int64_t(t.size()))));
+      drv.structuredAttrs = composite::mv(t);
+    }
 
     // The derivation's context: the string attributes' own (arena C strings, read where they lie) and what coercions made, sorted and made
-    // unique once, in the order the set gave them.
-    composite::MutableSeries<std::string_view> elems;
+    // unique once (DrvStrictOps), in the order the set gave them; each record {row, kind, a, b} names its windows in the element.
+    composite::MutableSeries<DsWin> elems;
     for (const StringContext *c : owns)
-      for (size_t k = 0; k < c->n; k++) elems.append(c->elems[k]);
-    for (auto &c : context) elems.append(c);
-    cp::sortRows(elems.data(), elems.size(), [](std::string_view a, std::string_view b) { return a < b; });
-    size_t nElems = cp::uniqueFirst(elems.data(), elems.size(), [](std::string_view e) { return e; });
-    for (size_t ei = 0; ei < nElems; ei++) {
-      std::string_view c = elems[uint32_t(ei)];
-      if (c[0] == '=') {
-        std::string_view d(c.substr(1));
-        auto refs = st.store->computeFSClosure(nixstore::SortedSet::of(d));
+      for (size_t k = 0; k < c->n; k++) elems.append(DsWin{c->elems[k], int64_t(__builtin_strlen(c->elems[k]))});
+    for (const char *c : context) elems.append(DsWin{c, int64_t(__builtin_strlen(c))});
+    composite::MutableSeries<int64_t> recs;
+    for (size_t k = 0; k < 6 * elems.size(); k++) recs.append(0);
+    for (int64_t r = 0, nr = nixev_ts_drv_ctx(elems.data(), int64_t(elems.size()), recs.data()); r < nr; r++) {
+      const int64_t *q = &recs[uint32_t(6 * r)];
+      const char *c = elems[uint32_t(q[0])].p;
+      std::string_view a(c + q[2], size_t(q[3]));
+      if (q[1] == 0) {
+        auto refs = st.store->computeFSClosure(nixstore::SortedSet::of(a));
         for (auto &j : refs) {
           drv.inputSrcs.insert(j);
           if (isDrvPath(j)) {
@@ -200,22 +207,16 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
             for (auto &[n, o] : dd.outputs) drv.inputDrvs[j].insert(n);
           }
         }
-      } else if (c[0] == '!') {
-        auto p = c.find('!', 1);
-        drv.inputDrvs[c.substr(p + 1)].insert(c.substr(1, p - 1));
-      } else {
-        drv.inputSrcs.insert(c);
-      }
+      } else if (q[1] == 1) drv.inputDrvs[a].insert(std::string_view(c + q[4], size_t(q[5])));
+      else drv.inputSrcs.insert(a);
     }
 
-    if (drv.builder.empty()) throw EvalError("required attribute 'builder' missing", pos);
-    if (drv.platform.empty()) throw EvalError("required attribute 'system' missing", pos);
-    if (isDrvPath(drvName))
-      throw EvalError("derivation names are allowed to end in '.drv' only if they produce a single derivation file", pos);
+    if (drv.builder.empty()) throw fail(DM_BUILDER);
+    if (drv.platform.empty()) throw fail(DM_SYSTEM);
+    if (isDrvPath(drvName)) throw fail(DM_DOTDRV);
 
     if (outputHash) {
-      if (outputs.size() != 1 || *outputs.begin() != "out")
-        throw EvalError("multiple outputs are not supported in fixed-output derivations", pos);
+      if (outputs.size() != 1 || *outputs.begin() != "out") throw fail(DM_MULTI);
       composite::Text warning;
       nixstore::Hash h;
       try {
@@ -237,8 +238,6 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
       drv.env["out"] = o.path.clone();
       drv.outputs["out"] = o;
     } else {
-      (void)contentAddressed;
-      (void)isImpure;
       for (auto &o : outputs) {
         drv.env[o] = "";
         drv.outputs[o] = nixstore::DerivationOutput{};
@@ -262,12 +261,11 @@ static void derivationStrict(EvalState &st, A args, Value &v, PosPtr pos) {
       }
     }
     EvalState::BindingsBuilder bb(st);
-    st.mkString(bb.alloc(st.s.drvPath), drvPath, NixStringContext{st.copyString(composite::cat("=", drvPath))});
+    st.mkString(bb.alloc(st.s.drvPath), drvPath, NixStringContext{st.copyString(drvMsg(DM_DRVCTX, drvPath))});
     addOutputsToResult(st, bb, drvPath, st.store->readDerivation(drvPath)); // the derivation as the store keeps it, not a copy
     st.mkAttrs(v, bb.finish());
   } catch (EvalError &e) {
-    e.addTrace(nullptr, composite::cat("while evaluating derivation '", drvName, "'\n  whose name attribute is located at ",
-                                       st.showPos(st.positionOf(*nameAttr))));
+    e.addTrace(nullptr, drvMsg(DM_DRV, drvName, st.showPos(st.positionOf(*nameAttr))));
     throw;
   }
 }
