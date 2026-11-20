@@ -280,9 +280,6 @@ mlnix_lower_trikeshed(NixEval lowered/nixeval/ListOps2.mlir ListOps2)
 # selections where / alpha, removeAttrs' membership a bisect, the rows drained into the set.  Each evaluator interaction
 # (an application, a forcing, a list or thunk cell, the result set) calls back into Builtins.cpp.
 mlnix_lower_trikeshed(NixEval lowered/nixeval/GroupOps.mlir GroupOps)
-# __genericClosure's walk: the worklist and the keys met, kept as libc++'s std::set kept them (its red-black tree and its
-# comparison sequence: every comparison is a Nix lessThan).  Forcing, comparing and the operator call back.
-mlnix_lower_trikeshed(NixEval lowered/nixeval/ClosureOps.mlir ClosureOps)
 # __getContext's context algebra: the elements read, sorted by path bytes (trikeshed.sorted / compare unsigned), the
 # runs of one path, their flags (fold) and outputs (where).  The sets are made by a callback.
 mlnix_lower_trikeshed(NixEval lowered/nixeval/ContextOps.mlir ContextOps)
