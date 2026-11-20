@@ -1,21 +1,24 @@
-// Composite/Confix.h against the reader of builtins.fromJSON it replaced, which is copied here as the oracle (lib/Eval/Formats.cpp before the
-// port): the same document gives the same value, and the same fault at the same offset with the same words, on
+// builtins.fromJSON's reader (lowered/nixeval/JsonRead.mlir: the confix dialect's confix.checked scan and the reification of its rows)
+// against the reader it replaced, which is copied here as the oracle (lib/Eval/Formats.cpp before the port to an index, then
+// include/Composite/Confix.h, now gone): the same document gives the same value, and the same fault at the same offset with the same
+// words, on
 //   - every string of 12 bytes up to length 6, and every sequence of up to 5 tokens (a word, a number, a string, an escape, a delimiter),
 //   - every escape \uXXXX (both cases of the digits) and every low half after a high surrogate, every byte (and every two) where it can matter,
 //     numbers of one to 25 digits at several offsets, the number that ends the text,
-//   - random documents (nesting, whitespace, escapes, surrogate pairs, integers at every boundary of 64 bits, floats) and random mutations
-//     of them (a byte deleted, inserted, replaced, a cut),
+//   - random documents (nesting, whitespace, escapes, surrogate pairs, integers at every boundary of 64 bits, floats, duplicate keys) and
+//     random mutations of them (a byte deleted, inserted, replaced, a cut),
 //   - the .json files under the directories given on the command line.
-// The library is the oracle for the numbers (strtoll, strtoull, strtod), as in numbers-check.cc; the index is also held to its own laws
-// (rows in the order they open, every row but the first the child of one row after which it comes, a child inside its parent, an object's
-// children in pairs whose first is a string, each row's span holding what its tag says).  The text is scanned from a buffer of exactly its
-// size, so that a read past the end is a fault under AddressSanitizer and not a read of the NUL a std::string keeps there.
-// A scan of a document nested a million deep must not need the stack.
-// Build like scripts/minmax-check.cc, with undefined behaviour fatal (a report that only prints would pass a reader that overflows a Long), e.g.
-//   c++ -std=c++20 -O2 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -I include scripts/confix-check.cc -o build/confix-check
+// The library is the oracle for the numbers (strtoll, strtoull, strtod), as in numbers-check.cc; the index the scan leaves in the record is
+// also held to its own laws (rows in the order they open, every row but the first the child of one row after which it comes, a child inside
+// its parent, an object's children in pairs whose first is a string, each row's span holding what its tag says).  The values are made by
+// the lowered entry itself (nixev_json_read) through the callbacks below, which stand in for the evaluator's arena: a Value here has the
+// evaluator's layout (type u8 @0, payload @8), and EvalState::mkList is defined here under the evaluator's mangled name.  The text is read
+// from a buffer whose end is the end of a page followed by an unmapped one, so that a read past its end is a fault (the lowered object is not
+// instrumented by AddressSanitizer).  A document nested a million deep must not need the stack.
+// Build after `ninja -C build` (which lowers JsonRead.mlir), with undefined behaviour fatal, e.g.
+//   c++ -std=c++20 -O2 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined scripts/confix-check.cc build/lib/lowered/JsonRead.o -o build/confix-check
 // and run it with optional counts: confix-check [random documents (200000)] [max length of a string (6)] [max tokens (5)] [dir...]
 // or with --emit DIR N to write N random documents and mutations of them to DIR, for a run of two evaluators over the same texts.
-#include "Composite/Confix.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -27,11 +30,14 @@
 #include <random>
 #include <string>
 #include <string_view>
+#include <sys/mman.h>
 #include <sys/stat.h>
+#include <unistd.h>
+#include <csignal>
+#include <deque>
 #include <vector>
 
 using std::string;
-namespace cf = composite::confix;
 
 static long long cases = 0, failures = 0;
 static void report(const string &input, const string &want, const string &got, const char *what) {
@@ -235,55 +241,122 @@ static string oldRead(const string &text) {
 }
 
 //===----------------------------------------------------------------------===//
-// The new reader: scan, then the values from the index
+// The new reader: the lowered entry, its values made through these callbacks
 //===----------------------------------------------------------------------===//
 
-struct Sink { string s; void put(char c) { s += c; } };                                         // a byte at a time: putRun puts
-struct RunSink { string s; void put(char c) { s += c; } void append(const char *p, size_t n) { s.append(p, n); } }; // in pieces: putRun appends
-static string dump(const char *s, const cf::Index &ix, uint32_t r) {
-  uint32_t from = ix.open(r), to = ix.close(r);
-  switch (ix.tag(r)) {
-  case cf::Tag::Nothing: return "null";
-  case cf::Tag::Boolean: return s[from] == 't' ? "true" : "false";
-  case cf::Tag::Long: return "i" + std::to_string((long long)cf::readLong(s, from, to));
-  case cf::Tag::Double: return number(std::strtod(string(s + from, to - from + 1).c_str(), nullptr));
-  case cf::Tag::String: { RunSink k; cf::decode(s, from, to, k); return quote(k.s); }
-  case cf::Tag::Array: {
+namespace nixev {
+struct Value {
+  uint8_t type = 0; // VType: Int 5, Float 6, Bool 7, Null 8, String 9, Attrs 11, List 12
+  uint32_t aux = 0;
+  union {
+    int64_t integer;
+    double fpoint;
+    bool boolean;
+    const char *s;
+    Value **elems;
+    void *attrs;
+  };
+  Value() : integer(0) {}
+};
+struct Members { std::vector<std::pair<string, Value *>> rows; };
+struct EvalState {
+  std::deque<Value> values;
+  std::deque<string> strings;
+  std::deque<std::vector<Value *>> lists;
+  std::deque<Members> sets;
+  void mkList(Value &v, size_t n);
+};
+void EvalState::mkList(Value &v, size_t n) {
+  lists.emplace_back(n, nullptr);
+  v.type = 12, v.aux = uint32_t(n), v.elems = lists.back().data();
+}
+} // namespace nixev
+using nixev::EvalState;
+using nixev::Value;
+struct Rec { // confix.checked's record (Confix.td), its arrays grown as the bridge in Formats.cpp grows them
+  uint64_t w[16] = {};
+  std::vector<uint64_t> span, kids, stack;
+  std::vector<uint8_t> tag;
+  std::vector<uint32_t> kid, pend;
+  long grows = 0;
+  void size(uint64_t rows, uint64_t depth) {
+    span.resize(rows), kids.resize(rows), tag.resize(rows), kid.resize(rows), pend.resize(rows), stack.resize(depth);
+    w[3] = rows, w[4] = uint64_t(span.data()), w[5] = uint64_t(tag.data()), w[6] = uint64_t(kids.data()), w[7] = uint64_t(kid.data());
+    w[9] = uint64_t(stack.data()), w[11] = depth, w[12] = uint64_t(pend.data());
+  }
+};
+struct Chars { uint32_t n; const char *p; }; // composite::Chars: u32 count @0, ptr @8
+extern "C" {
+int32_t nixev_json_read(Rec *r, EvalState *st, Value *root);
+uint64_t nixev_json_decode(const char *s, uint64_t from, uint64_t to, char *into, int64_t shown);
+const char *nixev_json_what(int64_t fault, uint64_t *len);
+void nixev_json_grow(Rec *r, int64_t stack) {
+  r->grows++;
+  stack ? r->size(r->w[3], 2 * r->w[11]) : r->size(2 * r->w[3], r->w[11]);
+}
+Value *nixev_json_value(EvalState *st) { return &st->values.emplace_back(); }
+void nixev_json_string(EvalState *st, Value *v, const char *p, uint64_t n) {
+  st->strings.emplace_back(p, n);
+  v->type = 9, v->aux = uint32_t(n), v->s = st->strings.back().data();
+}
+void nixev_json_attrs(EvalState *st, Value *v, const Chars *keys, Value **vals, uint64_t n) {
+  nixev::Members &m = st->sets.emplace_back();
+  for (uint64_t k = 0; k < n; k++) m.rows.emplace_back(string(keys[k].p, keys[k].n), vals[k]);
+  v->type = 11, v->attrs = &m;
+}
+}
+
+// A Value as the oracle writes one: an object's members in the order the entry gave them (it sorts and keeps the last of equal keys).
+static string dump(const Value &v) {
+  switch (v.type) {
+  case 8: return "null";
+  case 7: return v.boolean ? "true" : "false";
+  case 5: return "i" + std::to_string((long long)v.integer);
+  case 6: return number(v.fpoint);
+  case 9: return quote(string(v.s, v.aux));
+  case 12: {
     string out = "[";
-    auto kids = ix.kidsOf(r);
-    for (uint32_t i = 0; i < kids.size(); i++) out += (i ? "," : "") + dump(s, ix, kids[i]);
+    for (uint32_t i = 0; i < v.aux; i++) out += (i ? "," : "") + dump(*v.elems[i]);
     return out + "]";
   }
-  case cf::Tag::Object: {
-    auto kids = ix.kidsOf(r);
-    std::vector<std::pair<string, string>> kv;
-    for (uint32_t i = 0; i + 1 < kids.size(); i += 2) {
-      Sink k;
-      cf::decode(s, ix.open(kids[i]), ix.close(kids[i]), k);
-      kv.emplace_back(k.s, dump(s, ix, kids[i + 1]));
-    }
-    return Old::object(kv);
+  case 11: {
+    string out = "{";
+    auto &rows = static_cast<nixev::Members *>(v.attrs)->rows;
+    for (size_t i = 0; i < rows.size(); i++) out += (i ? "," : "") + quote(rows[i].first) + ":" + dump(*rows[i].second);
+    return out + "}";
   }
   }
   return "?";
 }
+// The rows the scan left in the record.
+enum Tag : uint8_t { Nothing, Boolean, Long, Double, String, Object, Array };
+struct Index {
+  const Rec &r;
+  uint32_t size() const { return uint32_t(r.w[2]); }
+  uint32_t open(uint32_t i) const { return uint32_t(r.span[i] >> 32); }
+  uint32_t close(uint32_t i) const { return uint32_t(r.span[i]); }
+  Tag tag(uint32_t i) const { return Tag(r.tag[i]); }
+  uint32_t first(uint32_t i) const { return uint32_t(r.kids[i] >> 32); }
+  uint32_t count(uint32_t i) const { return uint32_t(r.kids[i]); }
+  uint32_t kidAt(uint32_t i, uint32_t k) const { return r.kid[first(i) + k]; }
+};
 // What a row's span holds, by its tag: the bytes the element is written in, read here with no help from the scan.
 static bool spells(const char *s, uint32_t from, uint32_t to, const char *w) {
   uint32_t len = uint32_t(std::strlen(w));
   return to - from + 1 == len && !std::memcmp(s + from, w, len);
 }
-static string spanLaw(const char *s, cf::Tag t, uint32_t from, uint32_t to) {
+static string spanLaw(const char *s, Tag t, uint32_t from, uint32_t to) {
   switch (t) {
-  case cf::Tag::Nothing: return spells(s, from, to, "null") ? "" : "a null that is not spelled null";
-  case cf::Tag::Boolean: return spells(s, from, to, "true") || spells(s, from, to, "false") ? "" : "a boolean that is not spelled true or false";
-  case cf::Tag::String: return to > from && s[from] == '"' && s[to] == '"' ? "" : "a string not from quote to quote";
-  case cf::Tag::Object: return s[from] == '{' && s[to] == '}' ? "" : "an object not from brace to brace";
-  case cf::Tag::Array: return s[from] == '[' && s[to] == ']' ? "" : "an array not from bracket to bracket";
-  case cf::Tag::Long: // an optional minus and digits (a lone minus is a Long that reads 0, as it did)
+  case Nothing: return spells(s, from, to, "null") ? "" : "a null that is not spelled null";
+  case Boolean: return spells(s, from, to, "true") || spells(s, from, to, "false") ? "" : "a boolean that is not spelled true or false";
+  case String: return to > from && s[from] == '"' && s[to] == '"' ? "" : "a string not from quote to quote";
+  case Object: return s[from] == '{' && s[to] == '}' ? "" : "an object not from brace to brace";
+  case Array: return s[from] == '[' && s[to] == ']' ? "" : "an array not from bracket to bracket";
+  case Long: // an optional minus and digits (a lone minus is a Long that reads 0, as it did)
     for (uint32_t i = from + (s[from] == '-'); i <= to; i++)
       if (s[i] < '0' || s[i] > '9') return "a long with a byte that is not a digit";
     return "";
-  case cf::Tag::Double: // the bytes a number is written in, beginning as one does
+  case Double: // the bytes a number is written in, beginning as one does
     if (s[from] != '-' && (s[from] < '0' || s[from] > '9')) return "a double that does not begin as a number";
     for (uint32_t i = from; i <= to; i++)
       if (!((s[i] >= '0' && s[i] <= '9') || s[i] == '-' || s[i] == '+' || s[i] == '.' || s[i] == 'e' || s[i] == 'E')) return "a double with a byte a number does not have";
@@ -292,54 +365,93 @@ static string spanLaw(const char *s, cf::Tag t, uint32_t from, uint32_t to) {
   return "a row with no tag";
 }
 // The laws of the index of a text of `size` bytes that scanned.
-static string laws(const char *s, uint32_t size, const cf::Index &ix) {
+static string laws(const char *s, uint32_t size, const Index &ix) {
   uint32_t n = ix.size();
   if (n == 0) return "no rows";
-  if (ix.kids.size() != n - 1) return "kids is not rows - 1";
+  if (ix.r.w[8] != n - 1) return "kids is not rows - 1";
+  if (ix.r.w[10] != 0 || ix.r.w[13] != 0) return "a container left open";
   std::vector<int> parent(n, -1);
   for (uint32_t i = 0; i < n; i++) {
     if (i + 1 < n && ix.open(i) >= ix.open(i + 1)) return "rows not in the order they open";
     if (ix.open(i) > ix.close(i)) return "span reversed";
     if (ix.close(i) >= size) return "a span past the end of the text";
     if (string l = spanLaw(s, ix.tag(i), ix.open(i), ix.close(i)); !l.empty()) return l;
-    auto kids = ix.kidsOf(i);
-    bool container = ix.tag(i) == cf::Tag::Object || ix.tag(i) == cf::Tag::Array;
-    if (!container && kids.size()) return "a leaf with children";
-    if (ix.tag(i) == cf::Tag::Object && kids.size() % 2) return "an object with an odd number of children";
+    uint32_t count = ix.count(i);
+    bool container = ix.tag(i) == Object || ix.tag(i) == Array;
+    if (!container && count) return "a leaf with children";
+    if (ix.tag(i) == Object && count % 2) return "an object with an odd number of children";
     uint32_t last = i;
-    for (uint32_t k = 0; k < kids.size(); k++) {
-      uint32_t c = kids[k];
+    for (uint32_t k = 0; k < count; k++) {
+      uint32_t c = ix.kidAt(i, k);
       if (c <= i || c >= n) return "a child not after its parent";
       if (c <= last && k) return "children out of order";
       last = c;
       if (parent[c] != -1) return "a row with two parents";
       parent[c] = int(i);
       if (!(ix.open(i) < ix.open(c) && ix.close(c) < ix.close(i))) return "a child not inside its parent";
-      if (ix.tag(i) == cf::Tag::Object && k % 2 == 0 && ix.tag(c) != cf::Tag::String) return "a key that is not a string";
+      if (ix.tag(i) == Object && k % 2 == 0 && ix.tag(c) != String) return "a key that is not a string";
     }
   }
   for (uint32_t i = 1; i < n; i++) if (parent[i] == -1) return "a row with no parent";
   return "";
 }
-static string newRead(const string &text) {
-  // The text is scanned from a buffer of exactly its size: a read of the byte after the end (the NUL a std::string keeps there) is an
-  // AddressSanitizer fault, as it is for a source that is a slice of a file.
-  uint32_t size = uint32_t(text.size());
-  std::unique_ptr<char[]> own(new char[size]);
-  std::memcpy(own.get(), text.data(), size);
-  const char *s = own.get();
-  cf::Index ix;
-  cf::Scan e = cf::scan(composite::chars(s, size), ix);
-  if (e) {
-    if (e.fault == cf::Fault::Unsigned) return "ERROR unsigned " + string(s + e.at, e.end - e.at);
-    if (e.fault == cf::Fault::Nul) { Sink k; cf::decode(s, e.at, e.end - 1, k); return "ERROR nul " + shownNul(k.s); }
-    return "ERROR col " + std::to_string(e.at + 1) + ": " + cf::what(e.fault);
+// The text at the end of a mapping whose next page is unmapped: a read past its end faults.
+static const char *fenced(const string &text) {
+  static char *base = nullptr;
+  static size_t mapped = 0;
+  static long page = sysconf(_SC_PAGESIZE);
+  size_t need = (text.size() + page - 1) / page * page + page;
+  if (need > mapped) {
+    if (base) munmap(base, mapped);
+    base = static_cast<char *>(mmap(nullptr, need, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0));
+    mapped = need;
+    mprotect(base + need - page, page, PROT_NONE);
   }
-  if (string l = laws(s, size, ix); !l.empty()) return "LAW " + l;
-  return dump(s, ix, 0);
+  char *at = base + (mapped - page) - text.size();
+  std::memcpy(at, text.data(), text.size());
+  return at;
+}
+static long long grown = 0;
+static string newRead(const string &text) {
+  uint32_t size = uint32_t(text.size());
+  const char *s = fenced(text);
+  Rec r;
+  r.w[0] = uint64_t(s), r.w[1] = size;
+  if (cases % 2) r.size(size / 8 + 16, 16); // the bridge's first room
+  else r.size(1, 1);                        // or none to speak of: the scan grows the arrays as it goes
+  EvalState st;
+  Value root;
+  int32_t f = nixev_json_read(&r, &st, &root);
+  grown += r.grows;
+  uint32_t at = uint32_t(r.w[14]), end = uint32_t(r.w[15]);
+  if (f == 14) return "ERROR unsigned " + string(s + at, end - at);
+  if (f == 15) {
+    string k(end - at, '\0');
+    k.resize(nixev_json_decode(s, at, end - 1, k.data(), 1));
+    return "ERROR nul " + k;
+  }
+  if (f) {
+    uint64_t len;
+    const char *w = nixev_json_what(f, &len);
+    return "ERROR col " + std::to_string(at + 1) + ": " + string(w, len);
+  }
+  if (string l = laws(s, size, Index{r}); !l.empty()) return "LAW " + l;
+  return dump(root);
+}
+// A reading that does not end is a mismatch too: the old reader ends on every text, so each new reading gets 10 seconds.
+static const string *reading = nullptr;
+static void stuck(int) {
+  report(*reading, "a reading that ends", "a reading still going after 10 s", "reader");
+  std::printf("%lld cases, %lld mismatches\n", cases, failures);
+  std::_Exit(1);
 }
 static void both(const string &text) {
-  string a = oldRead(text), b = newRead(text);
+  string a = oldRead(text);
+  reading = &text;
+  signal(SIGALRM, stuck);
+  alarm(10);
+  string b = newRead(text);
+  alarm(0);
   cases++;
   if (a != b) report(text, a, b, "reader");
 }
@@ -544,18 +656,31 @@ int main(int argc, char **argv) {
   int nfiles = 0;
   for (int i = 4; i < argc; i++) files(argv[i], nfiles);
   if (nfiles) std::printf("%d files\n", nfiles);
-  // A document nested a million deep: the scan keeps its own stack, not the machine's.
+  // A document nested a million deep: the scan keeps its own stack and the values are made in one walk, not on the machine's stack.
   {
-    string deep(1000000, '['), shut(1000000, ']');
-    cf::Index ix;
-    cf::Scan e = cf::scan(composite::chars((deep + "1" + shut).data(), 2000001), ix);
-    if (e || ix.size() != 1000001) { std::printf("MISMATCH: a million deep did not scan (%d)\n", int(e.fault)); failures++; }
+    string deep = string(1000000, '[') + "1" + string(1000000, ']');
+    Rec r;
+    r.w[0] = uint64_t(deep.data()), r.w[1] = deep.size();
+    r.size(16, 16);
+    EvalState st;
+    Value root;
+    int32_t f = nixev_json_read(&r, &st, &root);
+    const Value *v = &root;
+    uint32_t depth = 0;
+    while (v->type == 12 && v->aux == 1) v = v->elems[0], depth++;
+    if (f || r.w[2] != 1000001 || depth != 1000000 || v->type != 5 || v->integer != 1) {
+      std::printf("MISMATCH: a million deep did not read (%d)\n", f);
+      failures++;
+    }
     cases++;
     string unclosed(1000000, '[');
-    cf::Scan u = cf::scan(composite::chars(unclosed.data(), 1000000), ix);
-    if (u.fault != cf::Fault::EndOfInput || u.at != 1000000) { std::printf("MISMATCH: a million brackets, never closed\n"); failures++; }
+    Rec u;
+    u.w[0] = uint64_t(unclosed.data()), u.w[1] = unclosed.size();
+    u.size(16, 16);
+    if (nixev_json_read(&u, &st, &root) != 1 || u.w[14] != 1000000) { std::printf("MISMATCH: a million brackets, never closed\n"); failures++; }
     cases++;
   }
+  std::printf("%lld grows of the record's arrays\n", grown);
   std::printf("%lld cases, %lld mismatches\n", cases, failures);
   return failures ? 1 : 0;
 }
