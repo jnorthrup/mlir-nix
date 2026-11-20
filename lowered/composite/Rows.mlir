@@ -6,7 +6,7 @@
 // each comparison in the order the template did (a throw unwinds through these frames; the bridge's RAII
 // temp is freed), mlnix_rows_sort_u32 compares the leading u32 keys itself.  The bridge owns the merge's
 // temp run (::operator new/delete); this module allocates nothing on the heap.  Plain scf/arith/llvm: rows
-// of any width are bytes at a stride, not a series of scalars.  Generated (scratch gen_rows.py).
+// of any width are bytes at a stride, not a series of scalars.
 
 func.func private @nx_rows_copy1(%dst: !llvm.ptr, %src: !llvm.ptr, %rb: i64) {
   %k0 = arith.constant 8 : i64
