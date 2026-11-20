@@ -20,42 +20,20 @@ namespace nixev {
 using A = Value **;
 static composite::Text str(std::string_view s) { return composite::Text(s); }
 
-/// Whether `k` is one of `names` (a fixed set of words, asked by count() before).
-template <size_t N> static bool oneOf(std::string_view k, const char *const (&names)[N]) {
-  for (const char *n : names)
-    if (k == n) return true;
-  return false;
-}
-
-/// Drops one row of a SortedMap (the store's has no erase): the rows after it move down a place, as SortedSet::erase moves its rows.
-template <class V> static void eraseRow(nixstore::SortedMap<V> &m, typename nixstore::SortedMap<V>::Row *at) {
-  for (typename nixstore::SortedMap<V>::Row *r = at; r + 1 != m.end(); ++r) nixstore::SortedMap<V>::swapRows(r[0], r[1]);
-  m.rows.pop();
-}
-
 //===----------------------------------------------------------------------===//
 // JSON output
 //===----------------------------------------------------------------------===//
 
+// The scan is lowered/nixeval/FlakeRefOps.mlir's nixev_ts_utf8_bad (the bad byte's index, or -1); the wording stays here.
+extern "C" int64_t nixev_ts_utf8_bad(const char *p, int64_t n);
 static void checkUTF8(std::string_view s) {
-  size_t i = 0;
-  while (i < s.size()) {
-    unsigned char c = s[i];
-    size_t n = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 0;
-    bool ok = n != 0 && i + n <= s.size();
-    for (size_t k = 1; ok && k < n; k++) ok = ((unsigned char)s[i + k] >> 6) == 2;
-    if (!ok) {
-      size_t bad = i;
-      if (n > 1)
-        for (size_t k = 1; k < n && i + k < s.size(); k++)
-          if (((unsigned char)s[i + k] >> 6) != 2) { bad = i + k; break; }
-      const char hex[] = "0123456789ABCDEF";
-      unsigned char byte = (unsigned char)s[bad];
-      throw EvalError(composite::cat("JSON serialization error: [json.exception.type_error.316] invalid UTF-8 byte at index ", bad, ": 0x",
-                                     hex[byte >> 4], hex[byte & 15]));
-    }
-    i += n;
-  }
+  int64_t at = nixev_ts_utf8_bad(s.data(), int64_t(s.size()));
+  if (at < 0) return;
+  size_t bad = size_t(at);
+  const char hex[] = "0123456789ABCDEF";
+  unsigned char byte = (unsigned char)s[bad];
+  throw EvalError(composite::cat("JSON serialization error: [json.exception.type_error.316] invalid UTF-8 byte at index ", bad, ": 0x",
+                                 hex[byte >> 4], hex[byte & 15]));
 }
 
 namespace {
@@ -891,203 +869,72 @@ bool tomlTimestamps = false;
 // Flake references (parseFlakeRef / flakeRefToString)
 //===----------------------------------------------------------------------===//
 
-static composite::Text percentDecode(std::string_view s) {
-  composite::Text r;
-  for (size_t i = 0; i < s.size(); i++) {
-    if (s[i] == '%' && i + 2 < s.size() && composite::isDigitIn(s[i + 1], 16) && composite::isDigitIn(s[i + 2], 16)) {
-      r += char(composite::facet<composite::text::Integer<16, false>>(composite::chars(s.data() + i + 1, 2)).value);
-      i += 2;
-    } else r += s[i];
-  }
-  return r;
+// The text algebra of both (percent-decoding and -encoding with their keep sets, the query's split and SortedMap order,
+// isHexRev, putFlakeAttr's typing, the reference-type classification and the unparsed text) is
+// lowered/nixeval/FlakeRefOps.mlir.  These bridges keep the forcing, the throws' wording, the values (BindingsBuilder,
+// mkString/mkInt/mkBool) and canonPath against the working directory (a callback); the entries write into room sized here.
+extern "C" {
+int64_t nixev_ts_flake_parse(void *ctx, const char *p, int64_t n, char *out, int64_t cap, int64_t *recs);
+int64_t nixev_ts_flake_unparse(const int64_t *ents, int64_t n, char *into, int64_t cap);
+const char *nixev_flake_canon(composite::Text *t, const char *p, int64_t n, int64_t *len) {
+  char buf[PATH_MAX];
+  *t = nixfe::canonPath(composite::cat(getcwd(buf, sizeof buf) ? buf : "/", '/', std::string_view(p, size_t(n))));
+  *len = int64_t(t->size());
+  return t->begin();
+}
 }
 
-static composite::Text percentEncode(std::string_view s, const char *keep = "-._~/:@!$'()*+,;=") {
-  composite::Text r;
-  for (unsigned char c : s) {
-    if (composite::isAsciiAlnum(char(c)) || c == 0 || std::string_view(keep).find(char(c)) != std::string_view::npos) r += char(c);
-    else {
-      const char buf[4] = {'%', "0123456789ABCDEF"[c >> 4], "0123456789ABCDEF"[c & 15], 0};
-      r += buf;
-    }
-  }
-  return r;
-}
-
-static nixstore::SortedMap<composite::Text> parseQuery(std::string_view q) {
-  nixstore::SortedMap<composite::Text> m;
-  size_t i = 0;
-  while (i < q.size()) {
-    size_t amp = q.find('&', i);
-    if (amp == std::string_view::npos) amp = q.size();
-    auto kv = q.substr(i, amp - i);
-    auto eq = kv.find('=');
-    if (eq != std::string_view::npos) m[percentDecode(kv.substr(0, eq))] = percentDecode(kv.substr(eq + 1));
-    else if (!kv.empty()) m[percentDecode(kv)] = "";
-    i = amp + 1;
-  }
-  return m;
-}
-
-static bool isHexRev(std::string_view s) {
-  if (s.size() != 40) return false;
-  for (char c : s)
-    if (!composite::isDigitIn(c, 16)) return false;
-  return true;
-}
-
-static void putFlakeAttr(EvalState &st, EvalState::BindingsBuilder &bb, std::string_view k, std::string_view v) {
-  static const char *const ints[] = {"revCount", "lastModified"};
-  static const char *const bools[] = {"submodules", "shallow", "allRefs", "exportIgnore", "lfs", "verifyCommit"};
-  Value &x = bb.alloc(k);
-  if (oneOf(k, ints)) st.mkInt(x, (int64_t)composite::facet<composite::text::Integer<10, true>>(composite::chars(v)).value);
-  else if (oneOf(k, bools)) st.mkBool(x, v == "1" || v == "true");
-  else st.mkString(x, v);
-}
-
+// Records of 6 i64 (name offset, length, value offset, length, kind 0 string / 1 int / 2 bool, the int or bool) over
+// the bytes in `out`; the entry asks for more room with -(need) - 2 and reports a bad github-like reference with -1.
 static void parseFlakeRef(EvalState &st, std::string_view ref, Value &v, PosPtr pos) {
-  composite::Text s(ref);
-  composite::Text query;
-  if (auto q = s.find('?'); q != composite::npos) {
-    query.put(s.substr(q + 1));
-    s.truncate(q);
-  }
-  if (auto h = s.find('#'); h != composite::npos) s.truncate(h);
-  auto params = parseQuery(query);
+  composite::Text out, canon;
+  composite::MutableSeries<int64_t> recs;
+  recs.resize((ref.size() + 8) * 6);
+  int64_t r, cap = 4 * int64_t(ref.size()) + 128;
+  do {
+    out.resize(size_t(cap));
+    r = nixev_ts_flake_parse(&canon, ref.data(), int64_t(ref.size()), out.begin(), cap, recs.data());
+    cap = -r - 2;
+  } while (r < -1);
+  if (r < 0) throw EvalError(composite::cat("'", ref, "' is not a valid URL"), pos);
   EvalState::BindingsBuilder bb(st);
-  auto colon = s.find(':');
-  composite::Text scheme;
-  if (colon != composite::npos) scheme.put(s.substr(0, colon));
-  if (scheme == "github" || scheme == "gitlab" || scheme == "sourcehut") {
-    composite::Text rest(s.substr(colon + 1));
-    composite::MutableSeries<composite::Text> parts;
-    size_t i = 0;
-    while (true) {
-      size_t sl = rest.find('/', i);
-      parts.append(percentDecode(rest.substr(i, sl == composite::npos ? composite::npos : sl - i)));
-      if (sl == composite::npos) break;
-      i = sl + 1;
-    }
-    if (parts.size() < 2 || parts.size() > 3)
-      throw EvalError(composite::cat("'", ref, "' is not a valid URL"), pos);
-    st.mkString(bb.alloc("type"), scheme);
-    st.mkString(bb.alloc("owner"), parts[0]);
-    st.mkString(bb.alloc("repo"), parts[1]);
-    if (parts.size() == 3) {
-      if (isHexRev(parts[2])) params["rev"] = parts[2].clone();
-      else params["ref"] = parts[2].clone();
-    }
-    for (auto &[k, val] : params) putFlakeAttr(st, bb, k, val);
-  } else if (scheme == "path" || (scheme.empty() && !s.empty() && (s[0] == '/' || s[0] == '.'))) {
-    st.mkString(bb.alloc("type"), "path");
-    composite::Text p(scheme.empty() ? s.chars() : s.substr(colon + 1));
-    if (!p.empty() && p[0] != '/') {
-      char buf[PATH_MAX];
-      p = nixfe::canonPath(composite::cat(getcwd(buf, sizeof buf) ? buf : "/", '/', p));
-    }
-    st.mkString(bb.alloc("path"), percentDecode(p));
-    for (auto &[k, val] : params) putFlakeAttr(st, bb, k, val);
-  } else if (scheme.rfind("git+", 0) == 0 || scheme.rfind("hg+", 0) == 0 || scheme.rfind("tarball+", 0) == 0 ||
-             scheme.rfind("file+", 0) == 0) {
-    auto plus = scheme.find('+');
-    composite::Text type(scheme.substr(0, plus));
-    st.mkString(bb.alloc("type"), type == "hg" ? std::string_view("mercurial") : std::string_view(type));
-    composite::Text url(s.substr(plus + 1));
-    nixstore::SortedMap<composite::Text> keep;
-    for (auto &[k, val] : params) {
-      static const char *const attrs[] = {"ref", "rev", "dir", "narHash", "revCount", "lastModified",
-                                          "submodules", "shallow", "allRefs", "exportIgnore", "lfs"};
-      if (oneOf(k, attrs)) putFlakeAttr(st, bb, k, val);
-      else keep[k] = val.clone();
-    }
-    if (!keep.empty()) {
-      url += "?";
-      bool first = true;
-      for (auto &[k, val] : keep) { url.put(first ? "" : "&").put(k).put('=').put(val); first = false; }
-    }
-    st.mkString(bb.alloc("url"), url);
-  } else if (scheme == "http" || scheme == "https" || scheme == "file") {
-    static const char *exts[] = {".zip", ".tar", ".tgz", ".tar.gz", ".tar.xz", ".tar.bz2", ".tar.zst"};
-    bool tarball = false;
-    for (auto *e : exts)
-      if (s.size() >= strlen(e) && s.substr(s.size() - strlen(e)) == e) tarball = true;
-    st.mkString(bb.alloc("type"), tarball ? "tarball" : "file");
-    composite::Text url = s.clone();
-    if (!query.empty()) url.put('?').put(query);
-    st.mkString(bb.alloc("url"), url);
-  } else {
-    // Indirect: [flake:]id[/ref-or-rev]
-    composite::Text rest(scheme == "flake" ? s.substr(colon + 1) : s.chars());
-    auto sl = rest.find('/');
-    st.mkString(bb.alloc("type"), "indirect");
-    st.mkString(bb.alloc("id"), rest.substr(0, sl));
-    if (sl != composite::npos) {
-      composite::Text r(rest.substr(sl + 1));
-      if (isHexRev(r)) params["rev"] = composite::mv(r);
-      else params["ref"] = composite::mv(r);
-    }
-    for (auto &[k, val] : params) putFlakeAttr(st, bb, k, val);
+  for (const int64_t *x = recs.data(), *end = x + 6 * r; x != end; x += 6) {
+    Value &a = bb.alloc(std::string_view(out.begin() + x[0], size_t(x[1])));
+    if (x[4] == 1) st.mkInt(a, x[5]);
+    else if (x[4] == 2) st.mkBool(a, x[5] != 0);
+    else st.mkString(a, std::string_view(out.begin() + x[2], size_t(x[3])));
   }
   st.mkAttrs(v, bb.finish());
 }
 
+// Entries of 5 i64 (key address, length, value address, length or the int/bool, kind 0 string / 1 int / 2 bool) in
+// the set's order; `into`'s last 21 bytes per entry hold the ints' digits.
 static void flakeRefToString(EvalState &st, Value &arg, Value &v, PosPtr pos) {
   st.forceAttrs(arg, pos, "while evaluating the argument passed to builtins.flakeRefToString");
-  nixstore::SortedMap<composite::Text> m;
+  composite::MutableSeries<int64_t> ents;
+  int64_t cap = 64;
   for (auto &a : *arg.attrs) {
     st.forceValue(*a.value, pos);
     std::string_view k = st.symbols[a.name]; // the symbol table's bytes: they never move
-    switch (a.value->type) {
-    case VType::String: m[k] = composite::Text(a.value->sv()); break;
-    case VType::Int:
-      if (a.value->integer < 0)
-        throw EvalError(composite::cat("negative value given for flake ref attr ", k, ": ", a.value->integer), pos);
-      m[k] = composite::str(a.value->integer);
-      break;
-    case VType::Bool: m[k] = composite::Text(a.value->boolean ? "1" : "0"); break;
-    default:
+    Value &x = *a.value;
+    if (x.type == VType::Int && x.integer < 0)
+      throw EvalError(composite::cat("negative value given for flake ref attr ", k, ": ", x.integer), pos);
+    if (x.type != VType::String && x.type != VType::Int && x.type != VType::Bool)
       throw EvalError(composite::cat("flake reference attribute sets may only contain integers, Booleans, and strings, but attribute '",
-                                     k, "' is ", EvalState::showType(*a.value)),
+                                     k, "' is ", EvalState::showType(x)),
                       pos);
-    }
+    std::string_view s = x.type == VType::String ? x.sv() : std::string_view();
+    int64_t kind = x.type == VType::String ? 0 : x.type == VType::Int ? 1 : 2;
+    int64_t row[5] = {(int64_t)k.data(), int64_t(k.size()), (int64_t)s.data(), kind == 0 ? int64_t(s.size()) : kind == 1 ? x.integer : int64_t(x.boolean), kind};
+    for (int64_t w : row) ents.append(w);
+    cap += 3 * int64_t(k.size() + s.size()) + 45;
   }
-  auto take = [&](std::string_view k) {
-    auto it = m.find(k);
-    if (it == m.end()) return composite::Text();
-    composite::Text r = composite::mv(it->second);
-    eraseRow(m, it);
-    return r;
-  };
-  composite::Text type = take("type");
-  if (type.empty()) throw EvalError("attribute 'type' is missing in call to 'fetchTree'", pos);
   composite::Text res;
-  if (type == "github" || type == "gitlab" || type == "sourcehut") {
-    composite::Text owner = take("owner"), repo = take("repo"), rev = take("rev"), ref = take("ref");
-    res = composite::cat(type, ':', percentEncode(owner), '/', percentEncode(repo));
-    if (!rev.empty()) res.put('/').put(rev);
-    else if (!ref.empty()) res.put('/').put(percentEncode(ref));
-  } else if (type == "path") {
-    res = composite::cat("path:", percentEncode(take("path")));
-  } else if (type == "git" || type == "mercurial" || type == "tarball" || type == "file") {
-    composite::Text url = take("url");
-    std::string_view prefix = type == "mercurial" ? std::string_view("hg") : std::string_view(type);
-    res = composite::cat(prefix, '+', url);
-  } else if (type == "indirect") {
-    res = composite::cat("flake:", take("id"));
-    composite::Text rev = take("rev"), ref = take("ref");
-    if (!ref.empty()) res.put('/').put(ref);
-    if (!rev.empty()) res.put('/').put(rev);
-  } else {
-    throw EvalError(composite::cat("unsupported flake reference type '", type, "'"), pos);
-  }
-  if (!m.empty()) {
-    res += "?";
-    bool first = true;
-    for (auto &[k, val] : m) {
-      res.put(first ? "" : "&").put(percentEncode(k, "-._~")).put('=').put(percentEncode(val, "-._~/:"));
-      first = false;
-    }
-  }
+  res.resize(size_t(cap));
+  int64_t r = nixev_ts_flake_unparse(ents.data(), int64_t(ents.size() / 5), res.begin(), cap);
+  if (r == -1) throw EvalError("attribute 'type' is missing in call to 'fetchTree'", pos);
+  if (r < 0) throw EvalError(composite::cat("unsupported flake reference type '", res.substr(0, size_t(-r - 2)), "'"), pos);
+  res.truncate(size_t(r));
   st.mkString(v, res);
 }
 
