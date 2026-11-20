@@ -1,7 +1,6 @@
 //===- Formats.cpp - JSON, XML and TOML conversions -----------------------===//
 
 #include "Composite/CharSeries.h"
-#include "Composite/Confix.h"
 #include "Composite/Mutable.h"
 #include "Nix/Eval.h"
 
@@ -140,102 +139,58 @@ void EvalState::printValueAsJSON(JsonOut &out, Value &v, bool strict, NixStringC
 // JSON input
 //===----------------------------------------------------------------------===//
 
+// builtins.fromJSON's reader is hollowed into lowered/nixeval/JsonRead.mlir (the confix dialect's confix.checked: the scan
+// into the rows of an index, checked as the reader before checked, the open containers a stack in the record; then the
+// strings decoded, the numbers read and a Value made for each row, an object's members in key order by trikeshed.sorted).
+// Here: the record's arrays, grown when the scan asks; the arena (allocValue, mkString, the BindingsBuilder); the words.
 namespace {
-/// The error of a scan that stopped (Composite/Confix.h), in the words of the reader that took JSON before the index did.
-[[noreturn]] void jsonFault(const composite::confix::Scan &e, std::string_view json) {
-  using composite::confix::Fault;
-  if (e.fault == Fault::Unsigned)
-    throw EvalError(composite::cat("unsigned json number ", json.substr(e.at, e.end - e.at), " outside of Nix integer range"));
-  if (e.fault == Fault::Nul) {
-    composite::Text decoded, shown;
-    composite::confix::decode(json.data(), e.at, e.end - 1, decoded);
-    for (char c : decoded) {
-      if (c == '\0') shown += "\xe2\x90\x80"; // U+2400 SYMBOL FOR NULL, as UTF-8
-      else shown += c;
-    }
-    throw EvalError(composite::cat("input string '", shown, "' cannot be represented as Nix string because it contains null bytes"));
+/// confix.checked's record (Confix.td): src, n, rows, rowCap, span, tag, kids, kid, nkid, stack, sp, stackCap, pend, npend, at, end.
+struct JsonRec {
+  uint64_t w[16] = {};
+  composite::MutableSeries<uint64_t> span, kids, stack;
+  composite::MutableSeries<uint8_t> tag;
+  composite::MutableSeries<uint32_t> kid, pend;
+  void size(uint64_t rows, uint64_t depth) {
+    span.resize(rows), kids.resize(rows), tag.resize(rows), kid.resize(rows), pend.resize(rows), stack.resize(depth);
+    w[3] = rows, w[4] = uint64_t(span.data()), w[5] = uint64_t(tag.data()), w[6] = uint64_t(kids.data()), w[7] = uint64_t(kid.data());
+    w[9] = uint64_t(stack.data()), w[11] = depth, w[12] = uint64_t(pend.data());
   }
-  throw EvalError(composite::cat("[json.exception.parse_error.101] parse error at line 1, column ", size_t(e.at) + 1,
-                                 ": syntax error while parsing value - ", composite::confix::what(e.fault)));
-}
-
-/// The text of the String row from..to (its quotes): a window of the source when nothing in it is escaped, else decoded into `scratch`.
-std::string_view stringOf(std::string_view json, uint32_t from, uint32_t to, composite::Text &scratch) {
-  const char *body = json.data() + from + 1;
-  if (!memchr(body, '\\', to - from - 1)) return std::string_view(body, to - from - 1);
-  scratch.clear();
-  composite::confix::decode(json.data(), from, to, scratch);
-  return std::string_view(scratch.data(), scratch.size());
-}
-
-/// The values of an index, made now: a Value for each row, a container's filled from the Values of its children, which are made before it is
-/// visited because the row of a child comes after the row of its parent.
-void reifyJSON(EvalState &st, const composite::confix::Index &ix, std::string_view json, Value &root) {
-  using composite::confix::Tag;
-  const char *s = json.data();
-  composite::MutableSeries<Value *> vals(ix.size());
-  vals[0] = &root;
-  composite::Text scratch;
-  composite::MutableSeries<Value *> elems, members;
-  composite::MutableSeries<composite::Text> keys;
-  composite::MutableSeries<uint32_t> order;
-  for (uint32_t i = 0; i < ix.size(); i++) {
-    if (!vals[i]) continue; // a key: it is read when its object is made
-    Value &v = *vals[i];
-    uint32_t from = ix.open(i), to = ix.close(i);
-    switch (ix.tag(i)) {
-    case Tag::Nothing: st.mkNull(v); break;
-    case Tag::Boolean: st.mkBool(v, s[from] == 't'); break;
-    case Tag::Long: st.mkInt(v, composite::confix::readLong(s, from, to)); break;
-    case Tag::Double: {
-      composite::Text num(json.substr(from, to - from + 1)); // strtod wants the NUL after it
-      st.mkFloat(v, strtod(num.c_str(), nullptr));
-      break;
-    }
-    case Tag::String: st.mkString(v, stringOf(json, from, to, scratch)); break;
-    case Tag::Array: {
-      auto kids = ix.kidsOf(i);
-      if (kids.size() == 0) { st.mkList(v, 0); break; }
-      elems.clear();
-      for (uint32_t k = 0; k < kids.size(); k++) {
-        vals[kids[k]] = st.allocValue();
-        elems.append(vals[kids[k]]);
-      }
-      st.mkList(v, elems);
-      break;
-    }
-    case Tag::Object: {
-      auto kids = ix.kidsOf(i);
-      EvalState::BindingsBuilder bb(st);
-      // The members in the order they came, sorted once below: an object of n members costs n log n whatever the order of its keys.
-      keys.clear();
-      members.clear();
-      order.clear();
-      for (uint32_t k = 0; k + 1 < kids.size(); k += 2) {
-        keys.append(composite::Text(stringOf(json, ix.open(kids[k]), ix.close(kids[k]), scratch)));
-        members.append(vals[kids[k + 1]] = st.allocValue());
-        order.append(k / 2);
-      }
-      // In key order, as the sorted map they were in gave them; sortRows is stable, so of equal keys the last in the text is the last here: it wins.
-      composite::sortRows(order.begin(), order.size(), [&](uint32_t a, uint32_t b) { return keys[a] < keys[b]; });
-      for (uint32_t k = 0; k < order.size(); k++) {
-        if (k + 1 < order.size() && keys[order[k]] == keys[order[k + 1]]) continue;
-        bb.insert(keys[order[k]], members[order[k]]);
-      }
-      st.mkAttrs(v, bb.finish());
-      break;
-    }
-    }
-  }
-}
+};
 } // namespace
+extern "C" {
+int32_t nixev_json_read(JsonRec *r, EvalState *st, Value *root);
+uint64_t nixev_json_decode(const char *s, uint64_t from, uint64_t to, char *into, int64_t shown);
+const char *nixev_json_what(int64_t fault, uint64_t *len);
+void nixev_json_grow(JsonRec *r, int64_t stack) { stack ? r->size(r->w[3], 2 * r->w[11]) : r->size(2 * r->w[3], r->w[11]); }
+Value *nixev_json_value(EvalState *st) { return st->allocValue(); }
+void nixev_json_string(EvalState *st, Value *v, const char *p, uint64_t n) { st->mkString(*v, std::string_view(p, n)); }
+void nixev_json_attrs(EvalState *st, Value *v, const composite::Chars *keys, Value **vals, uint64_t n) {
+  EvalState::BindingsBuilder bb(*st);
+  for (uint64_t k = 0; k < n; k++) bb.insert(llvm::StringRef(keys[k].data(), keys[k].size()), vals[k]);
+  st->mkAttrs(*v, bb.finish());
+}
+}
 
 void parseJSON(EvalState &state, std::string_view json, Value &v) {
   if (json.size() >= 0xFFFFFFFFull) throw EvalError("a JSON text of 4 GiB or more is not supported");
-  composite::confix::Index ix;
-  composite::confix::Scan e = composite::confix::scan(composite::chars(json.data(), uint32_t(json.size())), ix);
-  if (e) jsonFault(e, json);
-  reifyJSON(state, ix, json, v);
+  JsonRec r;
+  r.w[0] = uint64_t(json.data()), r.w[1] = json.size();
+  r.size(json.size() / 8 + 16, 16);
+  int32_t fault = nixev_json_read(&r, &state, &v);
+  if (!fault) return;
+  // The words of the reader that took JSON before the index did; the column is where the reading had got to, plus one.
+  uint32_t at = uint32_t(r.w[14]), end = uint32_t(r.w[15]);
+  if (fault == 14) throw EvalError(composite::cat("unsigned json number ", json.substr(at, end - at), " outside of Nix integer range"));
+  if (fault == 15) {
+    composite::Text shown; // a NUL shown as U+2400 SYMBOL FOR NULL
+    shown.resize(end - at);
+    shown.truncate(uint32_t(nixev_json_decode(json.data(), at, end - 1, shown.begin(), 1)));
+    throw EvalError(composite::cat("input string '", shown, "' cannot be represented as Nix string because it contains null bytes"));
+  }
+  uint64_t len;
+  const char *what = nixev_json_what(fault, &len);
+  throw EvalError(composite::cat("[json.exception.parse_error.101] parse error at line 1, column ", size_t(at) + 1,
+                                 ": syntax error while parsing value - ", std::string_view(what, len)));
 }
 
 //===----------------------------------------------------------------------===//

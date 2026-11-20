@@ -260,6 +260,12 @@ mlnix_lower_trikeshed(NixEval lowered/nixeval/SortOps.mlir SortOps)
 # The JSON byte emission: JsonOut::putInt and JsonOut::putString (lib/Eval/Formats.cpp's bodies are gone; the bridges
 # reserve room and adopt the drained bytes).  The digits and the escaping are trikeshed.fold / series / combineAll / drain.
 mlnix_lower_trikeshed(NixEval lowered/nixeval/PrintOps.mlir PrintOps)
+# builtins.fromJSON's reader (include/Composite/Confix.h and Formats.cpp's reifyJSON are gone; parseJSON owns the
+# record's arrays and calls this entry, the arena and the error wording stay C++ callbacks).  The checked scan is the
+# confix dialect's confix.checked (its body a cf state machine, the open containers a stack in the record); the strings'
+# decoding, the numbers' reading and the walk that makes the Values are here, an object's members put in key order by
+# trikeshed.sorted / slice / compare unsigned (stable: the last of equal keys kept).
+mlnix_lower_trikeshed(NixEval lowered/nixeval/JsonRead.mlir JsonRead --lift-cf-to-scf --convert-ub-to-llvm)
 # The value printer's fixed bytes: EvalState::printValue's literals/separators and the TracePrinter's words, the
 # integer digits and the elision counts (Eval.cpp's out.put/putInt/elided emission is gone; the bridges reserve room
 # and adopt the drained bytes).  The words are trikeshed.slice / text / at / drain over a constant table, the digits a

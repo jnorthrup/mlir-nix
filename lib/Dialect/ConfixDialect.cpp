@@ -4,7 +4,8 @@
 // confix_scan_json, confix_scan_cbor or confix_scan_yaml, `confix.bands` to a call of ConfixScan.mlir's confix_scan_nix (the Nix delimiter
 // scan, lowered at build time), and the reads of a Flat record (include/NixDialect/Confix.td) to loads from it.
 // `confix.index`, `confix.columns` and `confix.unescape` make and read TrikeShed's series and cursors; trikeshed-lower-cursors lowers
-// them, with the patterns this dialect gives it through CursorLoweringInterface (Composite/CursorLowering.h).
+// them, with the patterns this dialect gives it through CursorLoweringInterface (Composite/CursorLowering.h), as it lowers
+// `confix.checked` (builtins.fromJSON's scan) to a call of its body, JsonRead.mlir's confix_scan_checked.
 
 #include "NixDialect/Confix.h"
 
@@ -12,6 +13,7 @@
 #include "Composite/TrikeShed.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
@@ -398,11 +400,27 @@ struct UnescapeLowering : OpConversionPattern<UnescapeOp> {
   }
 };
 
+/// confix.checked: a call of its body, JsonRead.mlir's confix_scan_checked (declared when the module does not define it).
+struct CheckedLowering : OpConversionPattern<CheckedOp> {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(CheckedOp op, OpAdaptor a, ConversionPatternRewriter &rw) const override {
+    auto module = op->getParentOfType<ModuleOp>();
+    auto type = rw.getFunctionType({a.getRec().getType()}, {rw.getI32Type()});
+    if (!module.lookupSymbol("confix_scan_checked")) {
+      OpBuilder::InsertionGuard g(rw);
+      rw.setInsertionPointToStart(module.getBody());
+      func::FuncOp::create(rw, module.getLoc(), "confix_scan_checked", type).setPrivate();
+    }
+    rw.replaceOpWithNewOp<func::CallOp>(op, "confix_scan_checked", TypeRange{rw.getI32Type()}, ValueRange{a.getRec()});
+    return success();
+  }
+};
+
 struct ConfixCursorLowering : composite::CursorLoweringInterface {
   using CursorLoweringInterface::CursorLoweringInterface;
   void populateCursorLowering(const TypeConverter &types, RewritePatternSet &patterns, ConversionTarget &target) const override {
-    patterns.add<IndexLowering, ColumnsLowering, UnescapeLowering>(types, patterns.getContext());
-    target.addIllegalOp<IndexOp, ColumnsOp, UnescapeOp>();
+    patterns.add<IndexLowering, ColumnsLowering, UnescapeLowering, CheckedLowering>(types, patterns.getContext());
+    target.addIllegalOp<IndexOp, ColumnsOp, UnescapeOp, CheckedOp>();
     target.addLegalDialect<LLVM::LLVMDialect>();
   }
 };

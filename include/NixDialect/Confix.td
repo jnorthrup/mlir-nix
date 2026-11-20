@@ -53,7 +53,7 @@ def Confix_Dialect : Dialect {
   let dependentDialects = ["::mlir::LLVM::LLVMDialect"];
 }
 
-// ---- the syntaxes, the kinds of element, and the faults.  The numbers are those of the IR and of include/Composite/Confix.h (Tag).
+// ---- the syntaxes, the kinds of element, and the faults.  The numbers are those of the IR and of the rows confix.checked writes.
 
 def Confix_Json : I32EnumAttrCase<"Json", 0, "json">;
 def Confix_Cbor : I32EnumAttrCase<"Cbor", 1, "cbor">;
@@ -161,6 +161,44 @@ def Confix_BandsOp : Confix_Op<"bands"> {
   let assemblyFormat = "$rec attr-dict `:` type($rec)";
 }
 
+// ---- builtins.fromJSON's scan: a JSON text checked as that reader checks it, into the rows of its index.
+//
+// The scan confix.scan makes is Kotlin's, which does not check.  This one is the reader of builtins.fromJSON (the C++
+// port of Confix it replaces was include/Composite/Confix.h): its faults are nlohmann's, at the offsets that reader had
+// reached, and a number without a fraction or an exponent that fits 64 bits is a Long.  Its body is
+// lowered/nixeval/JsonRead.mlir (confix_scan_checked, linked into NixEval with the reification that reads the rows).
+// The record, which the caller owns (all fields 8 bytes, in this order):
+//
+//   src     ptr   in   the text's bytes
+//   n       i64   in   its size (below 2^32 - 1: the spans are 32-bit)
+//   rows    i64   out  the rows found, in the order the elements open
+//   rowCap  i64   in   the room of span, tag, kids, kid and pend
+//   span    ptr   out  [rowCap] of u64: open << 32 | close, the first and the last byte (a string's quotes included)
+//   tag     ptr   out  [rowCap] of u8: TagKind (Nothing, Boolean, Long, Double, String, Object, Array)
+//   kids    ptr   out  [rowCap] of u64: first << 32 | count into kid, a row's direct children (an object's keys and
+//                      values alternating)
+//   kid     ptr   out  [rowCap] of u32; nkid i64 out: how many
+//   stack   ptr   --   [stackCap] of u64: the open containers, row << 32 | where their children start in pend; sp i64
+//   stackCap i64  in
+//   pend    ptr   --   [rowCap] of u32: the rows finished inside the open containers; npend i64
+//   at      i64   out  where the reading had got to when it stopped (the column of nlohmann's message is at + 1); for
+//                      Unsigned and Nul where the number or the string opens
+//   end     i64   out  for Unsigned and Nul, one past it
+//
+// When rows reach rowCap or sp reaches stackCap, the scan calls nixev_json_grow(rec, 0 or 1), which makes the arrays
+// larger and writes their places back.  The fault, 0 for none: 1 the text ended where a value was expected, 2 an invalid
+// literal, 3 a key expected, 4 ':' expected, 5 '}' expected, 6 ']' expected, 7 trailing content, 8 a string without its
+// closing quote, 9 a control character in a string, 10 a backslash at the end, 11 \u without four hex digits, 12 a high
+// surrogate not followed by \u, 13 a backslash before a character that is not an escape, 14 Unsigned (an integer from
+// 2^63 to 2^64 - 1), 15 Nul (a string with \u0000).  No recursion: a document nested as deep as it is long is scanned.
+
+def Confix_CheckedOp : Confix_Op<"checked"> {
+  let summary = "scan a JSON text, checking it as builtins.fromJSON does, into the rows of its index";
+  let arguments = (ins Arg<LLVM_AnyPointer, "", [MemWrite]>:$rec);
+  let results = (outs I32:$fault);
+  let assemblyFormat = "$rec attr-dict `:` type($rec)";
+}
+
 // ---- the index as TrikeShed's series and cursor (PRELOAD-DIALECTS step 5): ConfixIndex's facets, lowered below TrikeShed.
 //
 // The ops above read a Flat record through a pointer.  These two are the same index as Kotlin hands it out
@@ -173,8 +211,8 @@ def Confix_IndexOp : Confix_Op<"index", [Pure]> {
   let summary = "scan a text into its index: TrikeShed's cursor of rows and series of children";
   let description = [{
     Syntax.scanIndex (Confix.kt) for JSON and CBOR.  `text` is a `!trikeshed.series<i8>`.  `rows` is a cursor of schema
-    "ConfixIndex", one row per element in the order the elements open, with the columns of include/Composite/Confix.h's
-    Index (Col: Span, Tag, Kids) and the facets of ConfixIndexK:
+    "ConfixIndex", one row per element in the order the elements open, with the columns of confix.checked's rows
+    (span, tag, kids) and the facets of ConfixIndexK:
 
       0 span  !trikeshed.twin<i32>        (open, close): the first and the last byte, a string's quotes included  (Spans)
       1 tag   i8                           the TagKind (IOMemento)                                                (Tags)
