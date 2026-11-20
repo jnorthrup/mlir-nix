@@ -83,7 +83,7 @@ func.func private @to_np_end(%xs: !b, %i: index, %n: index) -> index {
     scf.condition(%go) %nj : index
   } do {
   ^bb0(%j: index):
-    scf.yield(%j) : index
+    scf.yield %j : index
   }
   return %r : index
 }
@@ -114,7 +114,7 @@ func.func @mlnix_ts_nixpath(%p: !llvm.ptr, %n: i64, %recs: !llvm.ptr, %cap: i64)
   %v2 = builtin.unrealized_conversion_cast %v1 : !d to !m
   %v3 = builtin.unrealized_conversion_cast %v2 : !m to !b
   %v4 = arith.index_cast %n : i64 to index
-  %v8 = scf.while (%i = %v5, %c = %v5) : (index, index) -> (index, index) {
+  %v8:2 = scf.while (%i = %v5, %c = %v5) : (index, index) -> (index, index) {
     %in = arith.cmpi ult, %i, %v4 : index
     scf.condition(%in) %i, %c : index, index
   } do {
@@ -124,7 +124,7 @@ func.func @mlnix_ts_nixpath(%p: !llvm.ptr, %n: i64, %recs: !llvm.ptr, %cap: i64)
     %v11 = arith.select %v10, %v6, %v5 : index
     %v12 = arith.addi %c, %v11 : index
     %v13 = arith.addi %v9, %v6 : index
-    scf.yield(%v13, %v12) : index, index
+    scf.yield %v13, %v12 : index, index
   }
   %v14 = arith.index_cast %v8#1 : index to i64
   %v16 = arith.subi %v15, %v14 : i64
@@ -167,7 +167,7 @@ func.func @mlnix_ts_nixpath(%p: !llvm.ptr, %n: i64, %recs: !llvm.ptr, %cap: i64)
         scf.yield %k : index
       }
       %v42 = arith.addi %v21, %v6 : index
-      scf.yield(%v42, %v23) : index, index
+      scf.yield %v42, %v23 : index, index
     }
     scf.yield %v14 : i64
   }
