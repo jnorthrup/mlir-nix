@@ -727,6 +727,7 @@ struct DrvBuf {
   composite::MutableSeries<DrvIn> ins;
   composite::MutableSeries<DrvWin> inouts, srcs, args;
   composite::MutableSeries<DrvEnv> env;
+  composite::MutableSeries<int64_t> kinds; // each output's DerivationOutput::Kind (the JSON writer's fields)
   DrvWin platform, builder;
   size_t bound = 0;
 };
@@ -773,7 +774,7 @@ void marshalDrv(const Derivation &d, bool maskOutputs, const DrvInputs *actualIn
       break;
     }
     }
-    b.outs.append(DrvOut{win(name), pw, aw, hw});
+    b.outs.append(DrvOut{win(name), pw, aw, hw}); b.kinds.append(int64_t(o.kind));
   }
   for (const auto &[path, outs] : inputs) {
     const DrvWin *base = b.inouts.data() + b.inouts.size();
@@ -812,22 +813,25 @@ void marshalDrv(const Derivation &d, bool maskOutputs, const DrvInputs *actualIn
   for (const DrvEnv &e : b.env) { bytes += e.key.n + e.val.n; fields += 2; }
   b.bound = 2 * bytes + 2 * fields + 16 * (b.outs.size() + b.ins.size() + b.srcs.size() + b.args.size() + b.env.size() + 1) + 64;
 }
+// A Text drained by an entry that answers the bytes written, or -needed when the room (bound) is short.
+template <class F> composite::Text drained(size_t bound, F call) {
+  composite::Text s;
+  s.resize(bound);
+  int64_t w = call(s.begin(), int64_t(bound));
+  if (w < 0) { s.resize(size_t(-w)); w = call(s.begin(), -w); }
+  s.truncate(size_t(w));
+  return s;
+}
 } // namespace
 
 composite::Text Derivation::unparse(bool maskOutputs, const DrvInputs *actualInputs) const {
   DrvBuf b;
   marshalDrv(*this, maskOutputs, actualInputs, b);
-  auto call = [&](char *into, int64_t cap) {
+  return drained(b.bound, [&](char *into, int64_t cap) {
     return nixstore_ts_unparse(b.outs.data(), b.outs.size(), b.ins.data(), b.ins.size(), b.srcs.data(), b.srcs.size(),
                                b.platform.p, b.platform.n, b.builder.p, b.builder.n, b.args.data(), b.args.size(),
                                b.env.data(), b.env.size(), into, cap);
-  };
-  composite::Text s;
-  s.resize(b.bound);
-  int64_t w = call(s.begin(), int64_t(b.bound));
-  if (w < 0) { s.resize(size_t(-w)); w = call(s.begin(), -w); }
-  s.truncate(size_t(w));
-  return s;
+  });
 }
 
 Hash Derivation::hashUnparsed(bool maskOutputs, const DrvInputs *actualInputs) const {
@@ -837,66 +841,29 @@ Hash Derivation::hashUnparsed(bool maskOutputs, const DrvInputs *actualInputs) c
   return h.finish();
 }
 
-namespace {
-struct ATermParser {
-  std::string_view s;
-  size_t p = 0;
-  [[noreturn]] void fail() { throw Error(composite::cat("invalid derivation (ATerm parse error at offset ", p, ")")); }
-  void expect(std::string_view t) {
-    if (s.substr(p, t.size()) != t) fail();
-    p += t.size();
-  }
-  bool peek(char c) { return p < s.size() && s[p] == c; }
-  composite::Text str() {
-    expect("\"");
-    composite::Text r;
-    while (p < s.size() && s[p] != '"') {
-      if (s[p] == '\\') {
-        p++;
-        if (p >= s.size()) fail();
-        char c = s[p++];
-        if (c == 'n') r += '\n';
-        else if (c == 'r') r += '\r';
-        else if (c == 't') r += '\t';
-        else r += c;
-      } else {
-        r += s[p++];
-      }
-    }
-    expect("\"");
-    return r;
-  }
-  composite::MutableSeries<composite::Text> strs() {
-    composite::MutableSeries<composite::Text> v;
-    expect("[");
-    while (!peek(']')) {
-      v.append(str());
-      if (peek(',')) p++;
-    }
-    expect("]");
-    return v;
-  }
-};
-} // namespace
+// parseDerivation's walk over the ATerm text is lowered/nixstore/DrvParse.mlir: it decodes every string into the room,
+// records it in `wins` in text order, counts the lists ([outputs, inputs, srcs, args, env, each input's outputs]) and
+// answers -1 or the old parser's failure offset.  Building the Derivation stays here: the outputs' kinds and methods,
+// parseHashAlgo/parseHash and their errors (first, for the outputs the walk read before an ATerm error: the old parser
+// classified each output as it went), __json, and the sorted maps and sets.
+extern "C" int64_t nixstore_ts_drvparse(const char *, int64_t, char *, DrvWin *, int64_t *);
 
 Derivation parseDerivation(std::string_view text, composite::Text name) {
   Derivation d;
   d.name = composite::mv(name);
-  ATermParser P{text};
-  P.expect("Derive([");
-  while (!P.peek(']')) {
-    P.expect("(");
-    composite::Text id = P.str();
-    P.expect(",");
-    composite::Text path = P.str();
-    P.expect(",");
-    composite::Text algo = P.str();
-    P.expect(",");
-    composite::Text hash = P.str();
-    P.expect(")");
+  size_t half = text.size() / 2 + 2;
+  composite::Text room;
+  room.resize(text.size());
+  composite::MutableSeries<DrvWin> wins(half);
+  composite::MutableSeries<int64_t> counts(half + 5);
+  int64_t fail = nixstore_ts_drvparse(text.data(), int64_t(text.size()), room.begin(), wins.data(), counts.data());
+  const DrvWin *w = wins.data();
+  const int64_t *c = counts.data();
+  auto next = [&] { const DrvWin &x = *w++; return std::string_view(x.p, x.n); };
+  for (int64_t i = 0; i < c[0]; i++) {
+    std::string_view id = next(), path = next(), a = next(), hash = next();
     DerivationOutput o;
-    if (!algo.empty()) {
-      std::string_view a = algo;
+    if (!a.empty()) {
       o.method = FileIngestionMethod::Flat;
       if (a.rfind("r:", 0) == 0) { o.method = FileIngestionMethod::NixArchive; a = a.substr(2); }
       else if (a.rfind("text:", 0) == 0) { o.method = FileIngestionMethod::Text; a = a.substr(5); }
@@ -907,130 +874,52 @@ Derivation parseDerivation(std::string_view text, composite::Text name) {
       else if (!hash.empty()) {
         o.kind = DerivationOutput::CAFixed;
         o.hash = parseHash(hash, *ha);
-        o.path = composite::mv(path);
+        o.path = composite::Text(path);
       } else o.kind = DerivationOutput::CAFloating;
     } else if (path.empty()) {
       o.kind = DerivationOutput::Deferred;
     } else {
       o.kind = DerivationOutput::InputAddressed;
-      o.path = composite::mv(path);
+      o.path = composite::Text(path);
     }
     d.outputs[id] = composite::mv(o);
-    if (P.peek(',')) P.p++;
   }
-  P.expect("],[");
-  while (!P.peek(']')) {
-    P.expect("(");
-    composite::Text path = P.str();
-    P.expect(",");
-    auto outs = P.strs();
-    P.expect(")");
-    d.inputDrvs[path] = SortedSet(outs.begin(), outs.end());
-    if (P.peek(',')) P.p++;
+  if (fail >= 0) throw Error(composite::cat("invalid derivation (ATerm parse error at offset ", size_t(fail), ")"));
+  for (int64_t i = 0; i < c[1]; i++) {
+    std::string_view path = next();
+    SortedSet outs;
+    for (int64_t j = 0; j < c[5 + i]; j++) outs.insert(next());
+    d.inputDrvs[path] = composite::mv(outs);
   }
-  P.expect("],");
-  auto srcs = P.strs();
-  d.inputSrcs = SortedSet(srcs.begin(), srcs.end());
-  P.expect(",");
-  d.platform = P.str();
-  P.expect(",");
-  d.builder = P.str();
-  P.expect(",");
-  d.args = P.strs();
-  P.expect(",[");
-  while (!P.peek(']')) {
-    P.expect("(");
-    composite::Text k = P.str();
-    P.expect(",");
-    composite::Text v = P.str();
-    P.expect(")");
-    if (k == "__json") d.structuredAttrs = composite::mv(v);
-    else d.env[k] = composite::mv(v);
-    if (P.peek(',')) P.p++;
+  for (int64_t i = 0; i < c[2]; i++) d.inputSrcs.insert(next());
+  d.platform = composite::Text(next());
+  d.builder = composite::Text(next());
+  for (int64_t i = 0; i < c[3]; i++) d.args.append(composite::Text(next()));
+  for (int64_t i = 0; i < c[4]; i++) {
+    std::string_view k = next(), v = next();
+    if (k == "__json") d.structuredAttrs = composite::Text(v);
+    else d.env[k] = composite::Text(v);
   }
-  P.expect("])");
   return d;
 }
 
-composite::Text derivationToJSON(std::string_view storeDir, std::string_view drvPath,
-                                 const Derivation &drv) {
-  composite::Text j = composite::cat("{", jsonEscape(drvPath), ":{");
-  j += "\"args\":[";
-  for (size_t i = 0; i < drv.args.size(); i++) {
-    if (i) j += ',';
-    j += jsonEscape(drv.args[i]);
-  }
-  j += "],\"builder\":";
-  j += jsonEscape(drv.builder);
-  j += ",\"env\":{";
-  bool first = true;
-  auto env = drv.env;
-  if (drv.structuredAttrs) env["__json"] = drv.structuredAttrs->clone();
-  for (auto &[k, v] : env) {
-    if (!first) j += ',';
-    j += jsonEscape(k);
-    j += ':';
-    j += jsonEscape(v);
-    first = false;
-  }
-  j += "},\"inputDrvs\":{";
-  first = true;
-  for (auto &[p, outs] : drv.inputDrvs) {
-    if (!first) j += ',';
-    j += jsonEscape(p);
-    j += ":{\"dynamicOutputs\":{},\"outputs\":[";
-    bool f2 = true;
-    for (auto &o : outs) {
-      if (!f2) j += ',';
-      j += jsonEscape(o);
-      f2 = false;
-    }
-    j += "]}";
-    first = false;
-  }
-  j += "},\"inputSrcs\":[";
-  first = true;
-  for (auto &p : drv.inputSrcs) {
-    if (!first) j += ',';
-    j += jsonEscape(p);
-    first = false;
-  }
-  j += "],\"name\":";
-  j += jsonEscape(drv.name);
-  j += ",\"outputs\":{";
-  first = true;
-  for (auto &[n, o] : drv.outputs) {
-    if (!first) j += ',';
-    j += jsonEscape(n);
-    j += ":{";
-    first = false;
-    switch (o.kind) {
-    case DerivationOutput::InputAddressed:
-      j += "\"path\":";
-      j += jsonEscape(o.path);
-      break;
-    case DerivationOutput::CAFixed:
-      j += "\"hash\":";
-      j += jsonEscape(o.hash.to_string(HashFormat::Base16, false));
-      j += ",\"hashAlgo\":";
-      j += jsonEscape(o.methodAlgo());
-      j += ",\"path\":";
-      j += jsonEscape(o.path);
-      break;
-    case DerivationOutput::CAFloating:
-    case DerivationOutput::Impure:
-      j += "\"hashAlgo\":";
-      j += jsonEscape(o.methodAlgo());
-      break;
-    case DerivationOutput::Deferred: break;
-    }
-    j += "}";
-  }
-  j += "},\"system\":";
-  j += jsonEscape(drv.platform);
-  j += "}}";
+// derivationToJSON's whole composition is lowered/nixstore/DrvJson.mlir (fill-drain over the record arrays marshalDrv
+// makes with maskOutputs off, where __json sits in the env at its place in key order, plus each output's kind).
+extern "C" int64_t nixstore_ts_drvjson(const char *, int64_t, const DrvOut *, int64_t, const int64_t *, const DrvIn *,
+                                       int64_t, const DrvWin *, int64_t, const char *, int64_t, const char *, int64_t,
+                                       const char *, int64_t, const DrvWin *, int64_t, const DrvEnv *, int64_t, char *,
+                                       int64_t);
+
+composite::Text derivationToJSON(std::string_view storeDir, std::string_view drvPath, const Derivation &drv) {
+  DrvBuf b;
+  marshalDrv(drv, false, nullptr, b);
   (void)storeDir;
-  return j;
+  return drained(3 * b.bound + 6 * (drvPath.size() + drv.name.size()) + 128, [&](char *into, int64_t cap) {
+    return nixstore_ts_drvjson(drvPath.data(), drvPath.size(), b.outs.data(), b.outs.size(), b.kinds.data(),
+                               b.ins.data(), b.ins.size(), b.srcs.data(), b.srcs.size(), drv.name.data(),
+                               drv.name.size(), b.platform.p, b.platform.n, b.builder.p, b.builder.n, b.args.data(),
+                               b.args.size(), b.env.data(), b.env.size(), into, cap);
+  });
 }
 
 } // namespace nixstore
