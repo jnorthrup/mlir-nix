@@ -7,7 +7,11 @@
 //   !trikeshed.series<T>            memref<?xT, strided<[1], offset: ?>>: a series is materialised where it is made
 //                                   (series, alpha, where, project, sorted); a slice is a view at an offset
 //   !trikeshed.cursor<s, [T0..Tn]>  one such buffer per column (a 1:N conversion: a cursor argument becomes its columns)
-//   a pair of two i32 halves        one i64, the first half high (Pack.h's TwInt): Join<i32, i32>, Twin<i32>, TwinPacked<i32>
+//   a pair of two equal halves      `!trikeshed.twin`'s rule, for Join<T, T>, Twin<T> and TwinPacked<T> of an integer or
+//                                   a float T: 2 * width(T) <= 64 is one integer of that width, the first half high
+//                                   (Pack.h's TwInt: Twin<i32> an i64; Twin<f32> the two floats' bits in an i64); a
+//                                   wider T is its two halves apart (a 1:N conversion: a Twin<i64> is two i64, a series
+//                                   of them two buffers, read by size, at, series, alpha and slice only)
 //   trikeshed.key k                 read by `column` and `facet`, which take column k; erased once nothing reads it
 //   column(c, k)                    the k-th buffer of c
 //   size(xs), at(xs, i)             memref.dim, memref.load (an integer index is cast to index)
@@ -21,7 +25,8 @@
 //   compare(a, b) [unsigned]        a loop to the first difference, then the sizes: -1, 0 or 1
 //   sorted(xs) [by {a, b -> c}]     a stable bottom-up merge sort into a new buffer; the region is the comparator
 //   bisect(xs, k) [by {x, k -> c}]  a binary search: the index, or -(insertion) - 1
-//   j, first, second                shifts of the i64 that a pair of i32 halves is
+//   j, first, second                shifts of the word a packed pair is (a bitcast more for a float half); the halves
+//                                   themselves where the pair is split
 //   facet(c, k) {col -> r}          the region with col = column(c, k)
 //   drain(xs, into)                 a loop storing xs into `into`; the result is size(xs)
 //   combine(a, b, ..)               Combine.kt's view, rewritten before the conversion (Combine.kt's views, below):
@@ -38,7 +43,8 @@
 // buffers ends up passing the buffers.  A dialect below TrikeShed (confix: its index and its Columns facet) adds its
 // patterns through CursorLoweringInterface (Composite/CursorLowering.h).  Not lowered: groupBy, pivot, keyedJoin and the
 // other cursor combinators, joins, contains, zipnext, the lazy (unmaterialised) form of a series, and series whose
-// elements are neither builtin types nor pairs of two i32.
+// elements are neither builtin types nor pairs of two equal scalar halves.  trikeshed-route-twins (TwinRouting.cpp) runs
+// before this pass where a series of pairs should be laid out by how it is read, not by its width alone.
 //
 //===-----------------------------------------------------------------------------------------------------------------===//
 
@@ -75,36 +81,53 @@ Value newSeriesBuffer(OpBuilder &b, Location loc, Type element, Value n) {
 
 namespace {
 
-/// The half type of a pair of two equal 32-bit integers (Join<i32, i32>, Twin<i32>, TwinPacked<i32>), else null.
+/// The half type of a pair of two equal integers or floats (Join<T, T>, Twin<T>, TwinPacked<T>), else null.
 Type pairHalf(Type t) {
   Type a, b;
   if (auto j = dyn_cast<JoinType>(t)) a = j.getA(), b = j.getB();
   else if (auto w = dyn_cast<TwinType>(t)) a = b = w.getElement();
   else if (auto p = dyn_cast<TwinPackedType>(t)) a = b = p.getElement();
   else return {};
-  return a == b && a.isSignlessInteger(32) ? a : Type{};
+  return a == b && (a.isSignlessInteger() || isa<FloatType>(a)) ? a : Type{};
 }
+
+/// A machine word: two halves that fit it are packed into one integer, wider ones lie apart.
+constexpr unsigned kWordBits = 64;
 
 struct CursorTypes : TypeConverter {
   CursorTypes() {
     addConversion([](Type t) { return t; });
-    addConversion([](Type t) -> std::optional<Type> {
-      if (!isa<JoinType, TwinType, TwinPackedType>(t) || !pairHalf(t)) return std::nullopt;
-      return IntegerType::get(t.getContext(), 64);
-    });
-    addConversion([this](SeriesType t) -> std::optional<Type> {
-      Type e = convertType(t.getElement());
-      if (!e || !BaseMemRefType::isValidElementType(e)) return std::nullopt;
-      return seriesBuffer(e);
-    });
-    addConversion([this](CursorType t, SmallVectorImpl<Type> &out) -> std::optional<LogicalResult> {
-      for (Type column : t.getColumns()) {
-        Type e = convertType(column);
-        if (!e || !BaseMemRefType::isValidElementType(e)) return std::nullopt;
-        out.push_back(seriesBuffer(e));
-      }
+    // the width rule (TrikeShed.td, !trikeshed.twin): a TwinPacked is a word by its name, so a wider one does not lower
+    addConversion([](Type t, SmallVectorImpl<Type> &out) -> std::optional<LogicalResult> {
+      Type half = isa<JoinType, TwinType, TwinPackedType>(t) ? pairHalf(t) : Type{};
+      if (!half) return std::nullopt;
+      unsigned bits = 2 * half.getIntOrFloatBitWidth();
+      if (bits <= kWordBits) out.push_back(IntegerType::get(t.getContext(), bits));
+      else if (isa<TwinPackedType>(t)) return std::nullopt;
+      else out.append(2, half);
       return success();
     });
+    addConversion([this](SeriesType t, SmallVectorImpl<Type> &out) -> std::optional<LogicalResult> {
+      return buffers(t.getElement(), out) ? std::optional<LogicalResult>(success()) : std::nullopt;
+    });
+    addConversion([this](CursorType t, SmallVectorImpl<Type> &out) -> std::optional<LogicalResult> {
+      SmallVector<Type> columns;
+      for (Type column : t.getColumns())
+        if (!buffers(column, columns)) return std::nullopt;
+      out.append(columns);
+      return success();
+    });
+  }
+
+  /// The buffers of a series of `element`: one, or one a half where the element is a pair that lies apart.
+  bool buffers(Type element, SmallVectorImpl<Type> &out) const {
+    SmallVector<Type> es;
+    if (failed(convertType(element, es))) return false;
+    for (Type e : es) {
+      if (!BaseMemRefType::isValidElementType(e)) return false;
+      out.push_back(seriesBuffer(e));
+    }
+    return true;
   }
 };
 
@@ -121,8 +144,43 @@ void store(OpBuilder &b, Location loc, Value v, Value buffer, Value i) {
   memref::StoreOp::create(b, loc, v, buffer, ValueRange{toIndex(b, loc, i)});
 }
 
-/// The element type of a series after conversion.
+/// The element type of a series after conversion (null where the element is a pair that lies apart).
 Type elementOf(const TypeConverter &types, Type series) { return types.convertType(cast<SeriesType>(series).getElement()); }
+
+/// What `t` converts to: one type, or two for a pair that lies apart; none where it does not convert.
+SmallVector<Type, 2> converted(const TypeConverter &types, Type t) {
+  SmallVector<Type, 2> to;
+  if (failed(types.convertType(t, to))) to.clear();
+  return to;
+}
+
+/// A series' element as it lies in the series' buffers, one value a buffer: read, written, and fresh buffers for n of it.
+SmallVector<Value, 2> loadAll(OpBuilder &b, Location loc, ValueRange buffers, Value i) {
+  SmallVector<Value, 2> vs;
+  for (Value buffer : buffers) vs.push_back(load(b, loc, buffer, i));
+  return vs;
+}
+void storeAll(OpBuilder &b, Location loc, ValueRange vs, ValueRange buffers, Value i) {
+  for (auto [v, buffer] : llvm::zip_equal(vs, buffers)) store(b, loc, v, buffer, i);
+}
+SmallVector<Value, 2> newSeriesBuffers(OpBuilder &b, Location loc, ArrayRef<Type> elements, Value n) {
+  SmallVector<Value, 2> out;
+  for (Type e : elements) out.push_back(newSeriesBuffer(b, loc, e, n));
+  return out;
+}
+
+/// `op`, which has one result, replaced by the values that result lowers to.
+void replaceWith(ConversionPatternRewriter &rw, Operation *op, ValueRange values) {
+  SmallVector<SmallVector<Value>> to(1, SmallVector<Value>(values.begin(), values.end()));
+  rw.replaceOpWithMultiple(op, std::move(to));
+}
+
+/// The buffers of column i among a cursor's (a column of pairs that lie apart is two of them).
+ValueRange columnBuffers(const TypeConverter &types, CursorType c, unsigned i, ValueRange buffers) {
+  unsigned at = 0, n = 0;
+  for (unsigned k = 0; k <= i; ++k) at += n, n = converted(types, c.getColumns()[k]).size();
+  return buffers.slice(at, n);
+}
 
 /// The column a key names: its trikeshed.key, checked against the cursor's schema and width.
 FailureOr<unsigned> keyIndex(Operation *op, Value cursor, Value key, ConversionPatternRewriter &rw) {
@@ -137,14 +195,25 @@ FailureOr<unsigned> keyIndex(Operation *op, Value cursor, Value key, ConversionP
 
 /// Inline the one block of `region` at the rewriter's insertion point, its arguments replaced by `args`; the values its
 /// trikeshed.yield yielded, as the converted values (a pair yielded by a j that is lowered after this is the i64 the j
-/// becomes: the conversion casts it until then).  The region's argument types are converted first (a series argument
-/// becomes its buffer).
+/// becomes: the conversion casts it until then; a pair that lies apart is yielded as its two halves).  The region's
+/// argument types are converted first (a series argument becomes its buffer, a pair that lies apart two arguments).
 FailureOr<SmallVector<Value>> inlineBody(ConversionPatternRewriter &rw, const TypeConverter &types, Region &region, ValueRange args) {
   if (failed(rw.convertRegionTypes(&region, types))) return failure();
   Block *block = &region.front();
   auto yield = dyn_cast<YieldOp>(block->getTerminator());
   if (!yield) return failure();
-  SmallVector<Value> yielded(yield.getValues());
+  SmallVector<Value> yielded;
+  {
+    OpBuilder::InsertionGuard guard(rw);
+    rw.setInsertionPoint(yield);
+    for (Value v : yield.getValues()) {
+      auto to = converted(types, v.getType());
+      if (to.size() == 2) {
+        yielded.push_back(FirstOp::create(rw, yield.getLoc(), to[0], v));
+        yielded.push_back(SecondOp::create(rw, yield.getLoc(), to[1], v));
+      } else yielded.push_back(v);
+    }
+  }
   rw.eraseOp(yield);
   rw.inlineBlockBefore(block, rw.getInsertionBlock(), rw.getInsertionPoint(), args);
   SmallVector<Value> results;
@@ -186,7 +255,7 @@ struct ColumnLowering : Lowering<ColumnOp> {
   LogicalResult matchAndRewrite(ColumnOp op, OneToNOpAdaptor a, ConversionPatternRewriter &rw) const override {
     FailureOr<unsigned> i = keyIndex(op, op.getCursor(), op.getKey(), rw);
     if (failed(i)) return failure();
-    rw.replaceOp(op, a.getCursor()[*i]);
+    replaceWith(rw, op, columnBuffers(types(), cast<CursorType>(op.getCursor().getType()), *i, a.getCursor()));
     return success();
   }
 };
@@ -196,7 +265,7 @@ struct FacetLowering : Lowering<FacetOp> {
   LogicalResult matchAndRewrite(FacetOp op, OneToNOpAdaptor a, ConversionPatternRewriter &rw) const override {
     FailureOr<unsigned> i = keyIndex(op, op.getCursor(), op.getKey(), rw);
     if (failed(i)) return failure();
-    auto body = inlineBody(rw, types(), op.getCompute(), ValueRange{a.getCursor()[*i]});
+    auto body = inlineBody(rw, types(), op.getCompute(), columnBuffers(types(), cast<CursorType>(op.getCursor().getType()), *i, a.getCursor()));
     if (failed(body) || body->size() != 1) return rw.notifyMatchFailure(op, "a facet's region yields one value");
     rw.replaceOp(op, (*body)[0]);
     return success();
@@ -205,16 +274,17 @@ struct FacetLowering : Lowering<FacetOp> {
 
 struct SizeLowering : Lowering<SizeOp> {
   using Lowering::Lowering;
-  LogicalResult matchAndRewrite(SizeOp op, OpAdaptor a, ConversionPatternRewriter &rw) const override {
-    rw.replaceOp(op, length(rw, op.getLoc(), a.getSeries()));
+  LogicalResult matchAndRewrite(SizeOp op, OneToNOpAdaptor a, ConversionPatternRewriter &rw) const override {
+    rw.replaceOp(op, length(rw, op.getLoc(), a.getSeries()[0]));
     return success();
   }
 };
 
 struct AtLowering : Lowering<AtOp> {
   using Lowering::Lowering;
-  LogicalResult matchAndRewrite(AtOp op, OpAdaptor a, ConversionPatternRewriter &rw) const override {
-    rw.replaceOp(op, load(rw, op.getLoc(), a.getSeries(), a.getIndex()));
+  LogicalResult matchAndRewrite(AtOp op, OneToNOpAdaptor a, ConversionPatternRewriter &rw) const override {
+    if (a.getIndex().size() != 1) return rw.notifyMatchFailure(op, "an index is one value");
+    replaceWith(rw, op, loadAll(rw, op.getLoc(), a.getSeries(), a.getIndex()[0]));
     return success();
   }
 };
@@ -224,15 +294,16 @@ struct SeriesLowering : Lowering<SeriesOp> {
   using Lowering::Lowering;
   LogicalResult matchAndRewrite(SeriesOp op, OpAdaptor a, ConversionPatternRewriter &rw) const override {
     Location loc = op.getLoc();
-    Type element = elementOf(types(), op.getResult().getType());
-    Value n = a.getSize(), out = newSeriesBuffer(rw, loc, element, n);
+    auto elements = converted(types(), cast<SeriesType>(op.getResult().getType()).getElement());
+    Value n = a.getSize();
+    auto out = newSeriesBuffers(rw, loc, elements, n);
     auto loop = scf::ForOp::create(rw, loc, cIndex(rw, loc, 0), n, cIndex(rw, loc, 1));
     rw.setInsertionPoint(loop.getBody()->getTerminator());
     auto body = inlineBody(rw, types(), op.getAt(), ValueRange{loop.getInductionVar()});
-    if (failed(body) || body->size() != 1) return rw.notifyMatchFailure(op, "a series' region yields one value");
-    store(rw, loc, (*body)[0], out, loop.getInductionVar());
+    if (failed(body) || out.empty() || body->size() != out.size()) return rw.notifyMatchFailure(op, "a series' region yields one element");
+    storeAll(rw, loc, *body, out, loop.getInductionVar());
     rw.setInsertionPointAfter(loop);
-    rw.replaceOp(op, out);
+    replaceWith(rw, op, out);
     return success();
   }
 };
@@ -240,18 +311,20 @@ struct SeriesLowering : Lowering<SeriesOp> {
 /// alpha(xs) {x -> y}: a buffer of size(xs) filled by a loop over the region.
 struct AlphaLowering : Lowering<AlphaOp> {
   using Lowering::Lowering;
-  LogicalResult matchAndRewrite(AlphaOp op, OpAdaptor a, ConversionPatternRewriter &rw) const override {
+  LogicalResult matchAndRewrite(AlphaOp op, OneToNOpAdaptor a, ConversionPatternRewriter &rw) const override {
     Location loc = op.getLoc();
-    Type element = elementOf(types(), op.getResult().getType());
-    Value xs = a.getSeries(), n = length(rw, loc, xs), out = newSeriesBuffer(rw, loc, element, n);
+    auto elements = converted(types(), cast<SeriesType>(op.getResult().getType()).getElement());
+    ValueRange xs = a.getSeries();
+    Value n = length(rw, loc, xs[0]);
+    auto out = newSeriesBuffers(rw, loc, elements, n);
     auto loop = scf::ForOp::create(rw, loc, cIndex(rw, loc, 0), n, cIndex(rw, loc, 1));
     rw.setInsertionPoint(loop.getBody()->getTerminator());
-    Value x = load(rw, loc, xs, loop.getInductionVar());
-    auto body = inlineBody(rw, types(), op.getXform(), ValueRange{x});
-    if (failed(body) || body->size() != 1) return rw.notifyMatchFailure(op, "α's region yields one value");
-    store(rw, loc, (*body)[0], out, loop.getInductionVar());
+    auto x = loadAll(rw, loc, xs, loop.getInductionVar());
+    auto body = inlineBody(rw, types(), op.getXform(), x);
+    if (failed(body) || out.empty() || body->size() != out.size()) return rw.notifyMatchFailure(op, "α's region yields one element");
+    storeAll(rw, loc, *body, out, loop.getInductionVar());
     rw.setInsertionPointAfter(loop);
-    rw.replaceOp(op, out);
+    replaceWith(rw, op, out);
     return success();
   }
 };
@@ -318,13 +391,16 @@ struct TextLowering : Lowering<TextOp> {
 };
 struct SliceLowering : Lowering<SliceOp> {
   using Lowering::Lowering;
-  LogicalResult matchAndRewrite(SliceOp op, OpAdaptor a, ConversionPatternRewriter &rw) const override {
+  LogicalResult matchAndRewrite(SliceOp op, OneToNOpAdaptor a, ConversionPatternRewriter &rw) const override {
     Location loc = op.getLoc();
-    Value xs = a.getSeries();
-    Value view = memref::SubViewOp::create(rw, loc, xs, ArrayRef<OpFoldResult>{a.getOffset()}, ArrayRef<OpFoldResult>{a.getCount()},
-                                           ArrayRef<OpFoldResult>{rw.getIndexAttr(1)});
-    if (view.getType() != xs.getType()) view = memref::CastOp::create(rw, loc, xs.getType(), view);
-    rw.replaceOp(op, view);
+    if (a.getOffset().size() != 1 || a.getCount().size() != 1) return rw.notifyMatchFailure(op, "a range is two values");
+    SmallVector<Value, 2> views;
+    for (Value xs : a.getSeries()) {
+      Value view = memref::SubViewOp::create(rw, loc, xs, ArrayRef<OpFoldResult>{a.getOffset()[0]}, ArrayRef<OpFoldResult>{a.getCount()[0]},
+                                             ArrayRef<OpFoldResult>{rw.getIndexAttr(1)});
+      views.push_back(view.getType() != xs.getType() ? memref::CastOp::create(rw, loc, xs.getType(), view).getResult() : view);
+    }
+    replaceWith(rw, op, views);
     return success();
   }
 };
@@ -492,31 +568,50 @@ struct BisectLowering : Lowering<BisectOp> {
   }
 };
 
-/// a j b of two i32 halves: (a << 32) | b.
+/// a j b of two equal halves: (a << width) | b in the word that holds both, a float half as its bits; the two halves
+/// themselves where they do not fit a word.
 struct JLowering : Lowering<JOp> {
   using Lowering::Lowering;
   LogicalResult matchAndRewrite(JOp op, OpAdaptor a, ConversionPatternRewriter &rw) const override {
-    Type half = pairHalf(op.getResult().getType());
-    if (!half || a.getA().getType() != half || a.getB().getType() != half)
-      return rw.notifyMatchFailure(op, "only a pair of two i32 halves lowers");
+    Type pair = op.getResult().getType(), half = pairHalf(pair);
+    auto to = converted(types(), pair);
+    if (!half || a.getA().getType() != half || a.getB().getType() != half || to.empty() || to[0] == pair)
+      return rw.notifyMatchFailure(op, "only a pair of two equal integer or float halves lowers");
+    if (to.size() == 2) {
+      replaceWith(rw, op, ValueRange{a.getA(), a.getB()});
+      return success();
+    }
     Location loc = op.getLoc();
-    Type i64 = rw.getI64Type();
-    Value hi = arith::ShLIOp::create(rw, loc, arith::ExtUIOp::create(rw, loc, i64, a.getA()), cInt(rw, loc, i64, 32));
-    rw.replaceOp(op, arith::OrIOp::create(rw, loc, hi, arith::ExtUIOp::create(rw, loc, i64, a.getB())).getResult());
+    unsigned width = half.getIntOrFloatBitWidth();
+    auto widen = [&](Value v) -> Value {
+      if (!isa<IntegerType>(half)) v = arith::BitcastOp::create(rw, loc, rw.getIntegerType(width), v);
+      return arith::ExtUIOp::create(rw, loc, to[0], v);
+    };
+    Value hi = arith::ShLIOp::create(rw, loc, widen(a.getA()), cInt(rw, loc, to[0], width));
+    rw.replaceOp(op, arith::OrIOp::create(rw, loc, hi, widen(a.getB())).getResult());
     return success();
   }
 };
 
-/// first and second of a pair of two i32 halves: the high and the low word.
+/// first and second of a pair of two equal halves: the high and the low half of its word, or the half itself where the
+/// pair lies apart.
 template <class Op, bool High> struct HalfLowering : Lowering<Op> {
   using Lowering<Op>::Lowering;
-  LogicalResult matchAndRewrite(Op op, typename Op::Adaptor a, ConversionPatternRewriter &rw) const override {
+  LogicalResult matchAndRewrite(Op op, typename OpConversionPattern<Op>::OneToNOpAdaptor a, ConversionPatternRewriter &rw) const override {
     Type half = pairHalf(op.getJoin().getType());
-    if (!half || op->getResult(0).getType() != half) return rw.notifyMatchFailure(op, "only a pair of two i32 halves lowers");
+    ValueRange pair = a.getJoin();
+    if (!half || op->getResult(0).getType() != half) return rw.notifyMatchFailure(op, "only a pair of two equal integer or float halves lowers");
+    if (pair.size() == 2) {
+      rw.replaceOp(op, pair[High ? 0 : 1]);
+      return success();
+    }
     Location loc = op.getLoc();
-    Value word = a.getJoin();
-    if (High) word = arith::ShRUIOp::create(rw, loc, word, cInt(rw, loc, rw.getI64Type(), 32));
-    rw.replaceOp(op, arith::TruncIOp::create(rw, loc, half, word).getResult());
+    unsigned width = half.getIntOrFloatBitWidth();
+    Value word = pair[0];
+    if (!word.getType().isSignlessInteger(2 * width)) return rw.notifyMatchFailure(op, "the pair is not its word yet");
+    if (High) word = arith::ShRUIOp::create(rw, loc, word, cInt(rw, loc, word.getType(), width));
+    word = arith::TruncIOp::create(rw, loc, rw.getIntegerType(width), word);
+    rw.replaceOp(op, isa<IntegerType>(half) ? word : arith::BitcastOp::create(rw, loc, half, word).getResult());
     return success();
   }
 };
@@ -852,7 +947,9 @@ void rewriteViews(func::FuncOp f, const TypeConverter &types) {
     }
     if (!reads.empty()) (void)runRegionDCE(rw, f->getRegions());
     f.walk([&](Operation *op) {
-      if (isa<CombineOp, CombineAllOp>(op) && !llvm::all_of(op->getUses(), partOf)) views.push_back(op);
+      // (a view of pairs that lie apart is not made: it is left to fail the conversion, not to be allocated as one buffer)
+      if (isa<CombineOp, CombineAllOp>(op) && !llvm::all_of(op->getUses(), partOf) && elementOf(types, op->getResult(0).getType()))
+        views.push_back(op);
     });
     if (views.empty()) return;
     for (Operation *view : views) makeView(view, types);

@@ -24,6 +24,23 @@
 
 namespace composite {
 
+// The laws of j (TrikeShed.td): first(a j b) = a; second(a j b) = b; first(p) j second(p) = p.
+mlir::OpFoldResult FirstOp::fold(FoldAdaptor) {
+  auto j = getJoin().getDefiningOp<JOp>();
+  return j && j.getA().getType() == getA().getType() ? mlir::OpFoldResult(j.getA()) : nullptr;
+}
+
+mlir::OpFoldResult SecondOp::fold(FoldAdaptor) {
+  auto j = getJoin().getDefiningOp<JOp>();
+  return j && j.getB().getType() == getB().getType() ? mlir::OpFoldResult(j.getB()) : nullptr;
+}
+
+mlir::OpFoldResult JOp::fold(FoldAdaptor) {
+  auto a = getA().getDefiningOp<FirstOp>();
+  auto b = getB().getDefiningOp<SecondOp>();
+  return a && b && a.getJoin() == b.getJoin() && a.getJoin().getType() == getType() ? mlir::OpFoldResult(a.getJoin()) : nullptr;
+}
+
 mlir::LogicalResult ClusterOrderOp::verify() {
   for (auto type : {getKeys().getType(), getOrder().getType()}) {
     auto memref = llvm::cast<mlir::MemRefType>(type);

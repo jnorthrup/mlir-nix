@@ -72,6 +72,7 @@ def TS_JoinType : TS_Type<"Join", "join"> {
     Join.kt: two properties and nothing else.  Series.h: `composite::Join<A, B>`, made by `a |j| b`, destructured as
     `auto [x, y]`.  A Join of fixed-width scalars is ONE integer, first side high: Twin<i32> an i64, Join<i32,
     Twin<i32>> an i96, Twin<i64> an i128 (Pack.h's `static_assert`s: TwInt(7, 9) is 30064771081).
+    That is Pack.h's layout; the lowering packs a pair of equal halves only up to a machine word (`!trikeshed.twin`).
   }];
 }
 
@@ -79,7 +80,22 @@ def TS_TwinType : TS_Type<"Twin", "twin"> {
   let summary = "Twin<T> = Join<T, T>";
   let parameters = (ins "::mlir::Type":$element);
   let assemblyFormat = "`<` $element `>`";
-  let description = [{ Join.kt's `Twin<T>`, routed to the densest representation: `!trikeshed.twinpacked` for 32-bit pairs. }];
+  let description = [{
+    Join.kt's `Twin<T>`.  Its representation is a property of the type, chosen by one rule where Kotlin writes a value
+    class a width (TwInt, Twhort, Twhar, Twyte, TwFloat, TwBoolean) and boxes each of them behind `Twin<T>`:
+
+      two halves fit a machine word (2 * width(T) <= 64)   one integer of 2 * width(T) bits, the first half high:
+                                                           twin<i32> an i64, twin<i16> an i32, twin<i8> an i16,
+                                                           twin<i1> an i2, twin<f32> an i64 of the two floats' bits
+      otherwise                                            the two halves apart: two values, and a series of them
+                                                           two columns
+
+    `trikeshed-lower-cursors` applies the rule, so a `!trikeshed.series<!trikeshed.twin<i32>>` is one `memref<?xi64>`
+    through generic code as well.  A `Join<T, T>` is the same pair and follows the same rule.  Two limits belong to the
+    rule.  Float halves are packed as bits: arithmetic takes them apart first (a bitcast each), so what packing buys a
+    float pair is its layout and one load for both halves.  And packing is free only where the halves are read together:
+    `trikeshed-route-twins` splits a series whose every read takes one half into a column a half, whatever its width.
+  }];
 }
 
 def TS_TwinPackedType : TS_Type<"TwinPacked", "twinpacked"> {
@@ -174,10 +190,12 @@ def TS_JOp : TS_Op<"j", [Pure]> {
   let results = (outs TS_PairType:$result);
   let assemblyFormat = "$a `,` $b attr-dict `:` type($a) `,` type($b) `->` type($result)";
   let description = [{
-    Laws: first(a j b) = a; second(a j b) = b; first(p) j second(p) = p.  Series.h: `a |j| b`.  A pair of two 32-bit
-    halves is one 64-bit word, the first half high (Pack.h's TwInt): `trikeshed-lower-cursors` lowers j, first and second
-    on such pairs to shifts.
+    Laws: first(a j b) = a; second(a j b) = b; first(p) j second(p) = p.  Series.h: `a |j| b`.  The three laws are the
+    folds of j, first and second, so a pair made and taken apart again is never made, whatever it would lower to.  A pair
+    of two halves that fit a word is that word, the first half high (Pack.h's TwInt; `!trikeshed.twin` has the rule):
+    `trikeshed-lower-cursors` lowers j, first and second on such pairs to shifts, and on wider ones to the halves.
   }];
+  let hasFolder = 1;
 }
 
 def TS_FirstOp : TS_Op<"first", [Pure]> {
@@ -185,6 +203,7 @@ def TS_FirstOp : TS_Op<"first", [Pure]> {
   let arguments = (ins TS_PairType:$join);
   let results = (outs AnyType:$a);
   let assemblyFormat = "$join attr-dict `:` type($join) `->` type($a)";
+  let hasFolder = 1;
 }
 
 def TS_SecondOp : TS_Op<"second", [Pure]> {
@@ -192,6 +211,7 @@ def TS_SecondOp : TS_Op<"second", [Pure]> {
   let arguments = (ins TS_PairType:$join);
   let results = (outs AnyType:$b);
   let assemblyFormat = "$join attr-dict `:` type($join) `->` type($b)";
+  let hasFolder = 1;
 }
 
 def TS_DomainOp : TS_Op<"domain", [Pure]> {

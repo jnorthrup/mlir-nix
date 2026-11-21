@@ -179,7 +179,10 @@ Steps:
      arrays are series buffers and every read after the scan is a trikeshed op.  The scan itself is still confix.ll.
    - trikeshed-lower-cursors also lowers what the facets are read with: slice (a view: a series is now
      `memref<?xT, strided<[1], offset: ?>>`, the same descriptor, so a caller passing offset 0 sees no change), compare,
-     sorted (stable) and bisect with a comparator region, and j/first/second on a pair of two i32 (one i64, the first high).
+     sorted (stable) and bisect with a comparator region, and j/first/second on a pair of two equal halves, laid out by
+     `!trikeshed.twin`'s width rule (two halves that fit a word are one integer, the first high: two i32 an i64, two f32
+     their bits; wider halves lie apart, a series of them two columns). `trikeshed-route-twins` runs before it: the laws
+     of j as folds, and a series of pairs read a half at a time made a column a half (test/mlir/twin-routing.mlir).
      test/mlir/confix-index.mlir checks every column, both facets, and a sort and a search of the text's strings against a
      separate reader of the text.
    - Not done: Depths, KeyToChild for a key known only at run time, YAML (its retry on Room), groupBy.

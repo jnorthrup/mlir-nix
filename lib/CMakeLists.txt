@@ -39,6 +39,7 @@ add_mlir_dialect_library(MLIRTrikeShed
   Composite/TrikeShedDialect.cpp
   Composite/ClusterLowering.cpp
   Composite/CursorLowering.cpp
+  Composite/TwinRouting.cpp
   PARTIAL_SOURCES_INTENDED
   DEPENDS TrikeShedIncGen
   LINK_LIBS PUBLIC MLIRIR MLIRSideEffectInterfaces MLIRFuncDialect MLIRMemRefDialect MLIRPass

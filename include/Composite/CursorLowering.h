@@ -24,7 +24,7 @@ class TypeConverter;
 namespace composite {
 
 /// The buffer a `!trikeshed.series<T>` lowers to: `memref<?xT, strided<[1], offset: ?>>`, so that a slice is a view of
-/// the same buffer at an offset.  T is the element after conversion (a pair of 32-bit halves is an i64).
+/// the same buffer at an offset.  T is the element after conversion (a pair of two halves that fit a word is that word: Twin<i32> an i64).
 mlir::MemRefType seriesBuffer(mlir::Type element);
 
 /// A fresh buffer of n elements, as a series' buffer (allocated here, freed by --ownership-based-buffer-deallocation).
