@@ -39,22 +39,17 @@ namespace nixev {
 // Bindings
 //===----------------------------------------------------------------------===//
 
-static const auto attrName = [](const Attr &a) { return a.name; };
-
-const Attr *Bindings::get(Symbol s) const {
-  const Attr *r = cp::findRow(attrs, size_, s, attrName);
-  return r;
-}
+const Attr *Bindings::get(Symbol s) const { return cp::findRow(attrs, size_, s); }
 
 /// The union of two flat sorted sets, `y` winning on equal names, as a new flat set of exactly its size.
 /// One pass: the set is allocated with room for both (a name in both is one row, so a few rows may stay unused) and written by unionInto.
 static Bindings *mergeBindings(Arena &alloc, const Bindings *x, const Bindings *y) {
   // Counted first: the arena never takes back a tail, and an override over a large set shares most of its names (nixpkgs-73: 31 MB of
   // rows reserved and never written when the room was |x| + |y|).
-  size_t room = cp::unionSize(x->attrs, x->size_, y->attrs, y->size_, attrName);
+  size_t room = cp::unionSize(x->attrs, x->size_, y->attrs, y->size_);
   void *mem = alloc.Allocate(sizeof(Bindings) + room * sizeof(Attr), alignof(Bindings));
   auto *r = new (mem) Bindings();
-  r->size_ = uint32_t(cp::unionInto(x->attrs, x->size_, y->attrs, y->size_, r->attrs, attrName));
+  r->size_ = uint32_t(cp::unionInto(x->attrs, x->size_, y->attrs, y->size_, r->attrs));
   Bindings::merged++;
   Bindings::mergedCells += r->size_;
   return r;
@@ -1565,8 +1560,8 @@ PosIdx EvalState::positionBase(nd::AttrsOp op) {
 
 /// Rows by name, in place, the first of equal names kept (Composite/Rows.h): the rows left.
 static size_t sortRowsFirstWins(Attr *rows, size_t n) {
-  cp::sortRows(rows, n, [](const Attr &a, const Attr &b) { return a.name < b.name; });
-  return cp::uniqueFirst(rows, n, attrName);
+  cp::sortRowsByKey(rows, n);
+  return cp::uniqueFirst(rows, n);
 }
 
 // An op's operands are its node's: a select's are (base, dynamic keys, default), an attribute set's (values, dynamic names, dynamic values),
@@ -1601,8 +1596,8 @@ const AttrsShape *EvalState::attrsShapeOf(nd::AttrsOp op) {
   Row stackRows[32];
   Row *rows = n <= 32 ? stackRows : static_cast<Row *>(alloc.Allocate(n * sizeof(Row), alignof(Row)));
   for (uint32_t i = 0; i < n; i++) rows[i] = {symbolOf(names[i]), i};
-  cp::sortRows(rows, n, [](const Row &a, const Row &b) { return a.s < b.s; }); // stable: equal names keep their source order
-  uint32_t m = uint32_t(cp::uniqueFirst(rows, n, [](const Row &r) { return r.s; }));
+  cp::sortRowsByKey(rows, n); // stable: equal names keep their source order
+  uint32_t m = uint32_t(cp::uniqueFirst(rows, n));
   auto *shape = static_cast<AttrsShape *>(alloc.Allocate(sizeof(AttrsShape) + m * sizeof(AttrsShape::Row), alignof(AttrsShape)));
   shape->m = m;
   for (uint32_t k = 0; k < m; k++) {

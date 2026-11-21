@@ -136,6 +136,12 @@ function(mlnix_lower_trikeshed target mlir stem)
   target_sources(${target} PRIVATE ${o})
   set_source_files_properties(${o} PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
 endfunction()
+# Composite/Rows.h's row algorithms (findRow, sortRows, uniqueFirst, the union): their own library, linked by every library
+# that includes Rows.h (NixStore here, NixFrontend at its definition; NixEval and the tools through them).
+add_library(CompositeRows STATIC)
+set_target_properties(CompositeRows PROPERTIES LINKER_LANGUAGE CXX)
+mlnix_lower_trikeshed(CompositeRows lowered/composite/Rows.mlir Rows)
+target_link_libraries(NixStore PUBLIC CompositeRows)
 # nixstore::Hash::operator== (lib/Store/Hash.cpp's definition is gone; include/Nix/Store.h keeps the declaration).
 mlnix_lower_interface(NixStore lowered/nixstore/HashEq.mlir HashEq)
 # nixstore::isInStore (lib/Store/StorePaths.cpp's definition is gone; include/Nix/Store.h keeps the declaration).
@@ -193,7 +199,7 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/StoreGraph.mlir StoreGraph)
 
 add_library(NixFrontend STATIC Frontend/Parser.cpp Frontend/Source.cpp Frontend/Confix.cpp)
 add_dependencies(NixFrontend MLIRNixOpsIncGen TrikeShedIncGen)
-target_link_libraries(NixFrontend PUBLIC MLIRNix MLIRIR)
+target_link_libraries(NixFrontend PUBLIC MLIRNix MLIRIR CompositeRows)
 llvm_update_compile_flags(NixFrontend)
 target_precompile_headers(NixFrontend PRIVATE ${PROJECT_SOURCE_DIR}/include/Composite/Hot.h)
 # nixfe::canonPath's segment walk (Parser.cpp's body is gone; the bridge sizes the Text and calls this entry).  The walk
