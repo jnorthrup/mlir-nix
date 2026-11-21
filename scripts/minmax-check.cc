@@ -1,6 +1,8 @@
 // Recovered heap checks: exhaustive duplicate keys, mixed edge removal,
 // signed limits, and reused/full clusters. The stdlib is the reference only.
-// Build like scripts/inode-bench.cc, optionally with -fsanitize=address,undefined.
+// The algorithms are lowered/composite/ClusterOps.mlir, linked as its object:
+//   c++ -std=gnu++20 -O2 -I include scripts/minmax-check.cc build/lib/lowered/ClusterOps.o -o /tmp/minmax-check
+// optionally with -fsanitize=address,undefined.
 #include "Composite/MinMaxHeap.h"
 #include <algorithm>
 #include <cstdint>
@@ -83,8 +85,32 @@ static void clusters(bool duplicates) {
   }
   std::printf("clusters duplicates=%d: PASS, batches=100000\n", duplicates);
 }
+// The laws MinMaxHeap.h held at compile time while its algorithms were C++.  Equal child/grandchild keys preserve both
+// heap edges; a cluster filled out of order and drained emits the sorted stream, and a full cluster spills, intact.
+static void laws() {
+  const int input[] = {0, 0, 1, 0, 0, 0, 1}, expected[] = {0, 1, 0, 1, 0, 0, 0};
+  for (unsigned reverse = 0; reverse < 2; ++reverse) {
+    MinMaxHeap<int, 7> h;
+    for (int x : input) h.push(reverse ? -x : x);
+    for (unsigned i = 0; i < 7; ++i)
+      require((((i & 1) != reverse) ? h.popMax() : h.popMin()) == (reverse ? -expected[i] : expected[i]), "law: mixed edges");
+  }
+  const uint32_t seed[23] = {7, 3, 9, 1, 8, 12, 5, 14, 0, 11, 6, 13, 2, 10, 4, 20, 16, 18, 15, 19, 17, 22, 21};
+  auto rowOf = [&](uint32_t i) { return InodeRow::pack(100 + (seed[i] >> 3), uint8_t(1 + (seed[i] & 3)), seed[i] * 11, 100, seed[i]); };
+  Cluster<InodeRow, 15, 8> c;
+  for (uint32_t i = 0; i < 23; ++i) c.insert(rowOf(i));
+  require(c.insert(InodeRow::pack(999, 1, 0, 100, 999)) == 2 && c.size() == 23, "law: a full cluster spills, intact");
+  uint32_t k = 0;
+  c.drain([&](InodeRow r) {
+    uint32_t rank = 0;
+    for (uint32_t i = 0; i < 23; ++i) rank += rowOf(i) < r;
+    require(rank == k++, "law: a drained cluster emits the sorted stream");
+  });
+  require(k == 23 && c.size() == 0, "law: the drain empties the cluster");
+  std::puts("laws: PASS");
+}
 int main() {
-  binary(); mixed(false); mixed(true); clusters(false); clusters(true);
+  binary(); mixed(false); mixed(true); clusters(false); clusters(true); laws();
   Cluster<int64_t, 15, 8> c;
   std::vector<int64_t> ref = {std::numeric_limits<int64_t>::min(), 0, std::numeric_limits<int64_t>::max(), -1, 1}, out;
   for (auto v : ref) c.insert(v);

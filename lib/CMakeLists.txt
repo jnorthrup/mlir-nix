@@ -200,6 +200,18 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/StoreGraph.mlir StoreGraph)
 # storage, the value, copy and emit): the leaf walk, the key compare (trikeshed.compare), set's plan and link, prefix's
 # byte-order walk.  NixStore owns it; NixEval (Eval.h's tries) links NixStore.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/Patricia.mlir Patricia)
+# The btrfs ordering cluster (include/Composite/MinMaxHeap.h's heap, pegs and cluster, Funnel.h's level walk: the
+# headers keep the inline storage and are bridges, a row crossing as its bytes and its < / == as C callbacks).  The
+# heap's push/climb/sift and edge pops, the pegs' argMin, the cluster's insert/min/find/drain, clusterOrder's
+# fill-then-drain and Krapivin's put/get walk are scf over the caller's arrays.  NixStore carries it (drvByContent);
+# TrikeShedRuntime (trikeshed.cluster_order's kernel, a shared library) links a position-independent copy.
+mlnix_lower_trikeshed(NixStore lowered/composite/ClusterOps.mlir ClusterOps)
+add_custom_command(OUTPUT ${MLNIX_LOWERED_DIR}/ClusterOps.pic.o
+  COMMAND ${MLNIX_LOWER_CLANG} -O2 -fPIC -Wno-override-module -c ${MLNIX_LOWERED_DIR}/ClusterOps.ll -o ${MLNIX_LOWERED_DIR}/ClusterOps.pic.o
+  DEPENDS ${MLNIX_LOWERED_DIR}/ClusterOps.ll COMMENT "compiling lowered ClusterOps.pic.o")
+set_source_files_properties(${MLNIX_LOWERED_DIR}/ClusterOps.pic.o PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+add_dependencies(TrikeShedRuntime mlnix_lowered_ClusterOps)
+target_sources(TrikeShedRuntime PRIVATE ${MLNIX_LOWERED_DIR}/ClusterOps.pic.o)
 
 add_library(NixFrontend STATIC Frontend/Parser.cpp Frontend/Source.cpp Frontend/Confix.cpp)
 add_dependencies(NixFrontend MLIRNixOpsIncGen TrikeShedIncGen)

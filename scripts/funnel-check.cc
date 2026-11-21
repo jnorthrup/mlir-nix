@@ -1,5 +1,5 @@
 // The funnel table of clusters: correctness against a reference set, and the probe counts that make it O(1).
-// The stdlib is the oracle only.  Build like scripts/minmax-check.cc; -fsanitize=address,undefined works.
+// The stdlib is the oracle only.  Build like scripts/minmax-check.cc (with build/lib/lowered/ClusterOps.o); -fsanitize=address,undefined works.
 #include "Composite/Funnel.h"
 #include <cstdint>
 #include <cstdio>

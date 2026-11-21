@@ -1,6 +1,6 @@
 // trikeshed.cluster_order's kernel (composite::clusterOrder: a 15+8 cluster) against the small sorts at the op's own scale, 1..23 keys:
 // a stable insertion sort of the indices, and std::stable_sort.  Every way must give the same permutation.  docs/CLUSTER-SCALES.md.
-// Build: clang++ -std=c++20 -O3 -I include scripts/cluster-order-scales.cc -o build/cluster-order-scales
+// Build: clang++ -std=c++20 -O3 -I include scripts/cluster-order-scales.cc build/lib/lowered/ClusterOps.o -o build/cluster-order-scales
 #include "Composite/MinMaxHeap.h"
 
 #include <algorithm>
