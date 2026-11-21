@@ -1,6 +1,8 @@
 // Composite/Patricia.h against std::map: path-shaped keys with long shared prefixes, every key found, a value replaced, a key never
-// stored missed, the rows in byte order, and each prefix's rows exactly the map's range for it.
-//   clang++ -std=c++20 -O2 -g -fsanitize=address,undefined -I include scripts/patricia-check.cc -o /tmp/patricia-check && /tmp/patricia-check
+// stored missed, the rows in byte order, and each prefix's rows exactly the map's range for it.  The algorithms are the lowered
+// Patricia.mlir entries (mlnix_patricia_*), so the check links their object from the build:
+//   clang++ -std=c++20 -O2 -g -fsanitize=address,undefined -I include scripts/patricia-check.cc build/lib/lowered/Patricia.o
+//     -o /tmp/patricia-check && /tmp/patricia-check
 #include "Composite/Patricia.h"
 #include <cstdint>
 #include <cstdio>
