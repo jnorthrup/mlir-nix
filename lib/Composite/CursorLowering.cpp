@@ -36,14 +36,21 @@
 //   text(buffer)                    a constant's 1-D buffer, cast to the series' strided layout
 //   adjacency(from, to, n)          a counting sort: each node's (first, count) into the far ends, in edge order
 //   closure(parents, above)         ClosureIndex: two walks from each node over its parents (count, then write)
+//   joins, leftOf, rightOf, reify   a Series2 and a split as their two sides' buffers; zipnext, splitSelect and take
+//                                   rewritten by their laws into views, projects and ats (ReifiedSplitSeries2, below)
 //
 // Buffers are allocated and never freed here: run --ownership-based-buffer-deallocation after this pass.  A slice's offset
 // is an affine.apply once --expand-strided-metadata has run: run --lower-affine before --finalize-memref-to-llvm.  Casts the
 // conversion leaves between a cursor and its buffers are reconciled at the end, so a caller that built its cursor from
 // buffers ends up passing the buffers.  A dialect below TrikeShed (confix: its index and its Columns facet) adds its
+<<<<<<< HEAD
 // patterns through CursorLoweringInterface (Composite/CursorLowering.h).  groupBy and keyedJoin are rewritten first into
 // sorted, where, project, bisect and series (GroupBy.kt and KeyedJoin.kt, below).  Not lowered: pivot and the other cursor
 // combinators, joins, contains, zipnext, the lazy (unmaterialised) form of a series, and series whose
+=======
+// patterns through CursorLoweringInterface (Composite/CursorLowering.h).  Not lowered: groupBy, pivot, keyedJoin and the
+// other cursor combinators, contains, the lazy form of a series read otherwise than by at, size, slice and bisect, and series whose
+>>>>>>> 4c600201f1e006cc27392224e7bb8d310cab6229
 // elements are neither builtin types nor pairs of two equal scalar halves.  trikeshed-route-twins (TwinRouting.cpp) runs
 // before this pass where a series of pairs should be laid out by how it is read, not by its width alone.
 //
@@ -60,6 +67,8 @@
 #include "mlir/Dialect/SCF/Transforms/Patterns.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/IR/Matchers.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/RegionUtils.h"
@@ -1068,6 +1077,192 @@ struct SelectLowering : OpConversionPattern<arith::SelectOp> {
   }
 };
 
+//===-- ReifiedSplitSeries2: split rows, and series read where they are made --------------------------------------===//
+// A Series2<A, B> and a split (ReifiedSplitSeries2<A, B>) lower to A's buffers, then B's: the sides stored apart, so
+//   joins(a, b)            is a's buffers, then b's viewed to size(a) (Series.h joins: as many rows as a)
+//   leftOf, rightOf        the buffers of that side, no Join per element
+//   reify                  the same buffers: a Series2 already lies apart
+// Before the conversion, by the laws, nothing of their own:
+//   zipnext(xs)            joins(xs[0, n - m], xs[m, n - m]), m = min(n, 1): Series.kt zipWithNext, two views of xs
+//   splitSelect(s, idx)    reify(joins(project(leftOf(s), idx), project(rightOf(s), idx))): both sides in step
+//   take(s, i)             at(leftOf(s), i) (valueAt), or at(rightOf(s), i) (rightAt) where the result is B and not A;
+//                          take(c, i) of a cursor at a constant i is column(c, key i)
+//   series(n) {k -> x}     read in place where its region is pure ops without regions and only at, size, slice and bisect
+//                          read it (Series.kt: the region runs each time an element is read): at(.., i) is x at k = i, a
+//                          slice the series of its count at k + offset, a bisect probes x at its midpoints.  So a search
+//                          over keys read at a row stride reads log n of them and makes no buffer.
+std::pair<Type, Type> sidesOf(Type t) {
+  if (auto s = dyn_cast<SplitType>(t)) return {s.getA(), s.getB()};
+  auto s = cast<Series2Type>(t);
+  return {s.getA(), s.getB()};
+}
+
+void addSplitConversions(CursorTypes &types) {
+  auto sides = [&types](Type t, SmallVectorImpl<Type> &out) -> std::optional<LogicalResult> {
+    SmallVector<Type> bs;
+    auto [a, b] = sidesOf(t);
+    if (!types.buffers(a, bs) || !types.buffers(b, bs)) return std::nullopt;
+    out.append(bs);
+    return success();
+  };
+  types.addConversion([sides](Series2Type t, SmallVectorImpl<Type> &out) { return sides(t, out); });
+  types.addConversion([sides](SplitType t, SmallVectorImpl<Type> &out) { return sides(t, out); });
+}
+
+struct JoinsLowering : Lowering<JoinsOp> {
+  using Lowering::Lowering;
+  LogicalResult matchAndRewrite(JoinsOp op, OneToNOpAdaptor a, ConversionPatternRewriter &rw) const override {
+    Location loc = op.getLoc();
+    SmallVector<Value, 4> sides(a.getA());
+    Value n = length(rw, loc, sides[0]);
+    for (Value b : a.getB()) {
+      Value view = memref::SubViewOp::create(rw, loc, b, ArrayRef<OpFoldResult>{rw.getIndexAttr(0)}, ArrayRef<OpFoldResult>{n},
+                                             ArrayRef<OpFoldResult>{rw.getIndexAttr(1)});
+      sides.push_back(view.getType() != b.getType() ? memref::CastOp::create(rw, loc, b.getType(), view).getResult() : view);
+    }
+    replaceWith(rw, op, sides);
+    return success();
+  }
+};
+
+/// leftOf / rightOf (Left false) of a Series2 or a split, and reify (All): A's buffers come first.
+template <class Op, bool Left, bool All = false> struct SideLowering : Lowering<Op> {
+  using Lowering<Op>::Lowering;
+  LogicalResult matchAndRewrite(Op op, typename OpConversionPattern<Op>::OneToNOpAdaptor a, ConversionPatternRewriter &rw) const override {
+    ValueRange all = a.getSeries();
+    size_t n = converted(this->types(), sidesOf(op.getSeries().getType()).first).size();
+    if (!n || n >= all.size()) return rw.notifyMatchFailure(op, "a side whose elements do not lower");
+    replaceWith(rw, op, All ? all : Left ? all.take_front(n) : all.drop_front(n));
+    return success();
+  }
+};
+
+/// The one block of `region` cloned at the builder's insertion point with `args` for its arguments: what it yields.
+Value cloneWith(OpBuilder &b, Region &region, ValueRange args) {
+  IRMapping map;
+  map.map(region.getArguments(), args);
+  for (Operation &op : region.front().without_terminator()) b.clone(op, map);
+  return map.lookupOrDefault(cast<YieldOp>(region.front().getTerminator()).getValues()[0]);
+}
+
+/// zipnext, splitSelect and take, rewritten by the laws above.  A take this cannot place is left to fail the conversion.
+void rewriteSplits(func::FuncOp f) {
+  SmallVector<Operation *> ops;
+  f.walk([&](Operation *op) { if (isa<ZipNextOp, SplitSelectOp, TakeOp>(op)) ops.push_back(op); });
+  MLIRContext *ctx = f.getContext();
+  for (Operation *op : ops) {
+    OpBuilder b(op);
+    Location loc = op->getLoc();
+    auto side = [&](Value s, Type e, bool left) -> Value {
+      Type t = SeriesType::get(ctx, e);
+      return left ? LeftOfOp::create(b, loc, t, s).getResult() : RightOfOp::create(b, loc, t, s).getResult();
+    };
+    Value to;
+    if (auto z = dyn_cast<ZipNextOp>(op)) {
+      Value xs = z.getSeries(), n = sizeOf(b, loc, xs);
+      Value m = arith::MinUIOp::create(b, loc, n, cIndex(b, loc, 1)), count = arith::SubIOp::create(b, loc, n, m);
+      to = JoinsOp::create(b, loc, z.getType(), SliceOp::create(b, loc, xs.getType(), xs, cIndex(b, loc, 0), count),
+                           SliceOp::create(b, loc, xs.getType(), xs, m, count));
+    } else if (auto s = dyn_cast<SplitSelectOp>(op)) {
+      auto [ta, tb] = sidesOf(s.getSplit().getType());
+      Value l = ProjectOp::create(b, loc, SeriesType::get(ctx, ta), side(s.getSplit(), ta, true), s.getIndices());
+      Value r = ProjectOp::create(b, loc, SeriesType::get(ctx, tb), side(s.getSplit(), tb, false), s.getIndices());
+      to = ReifyOp::create(b, loc, s.getType(), JoinsOp::create(b, loc, Series2Type::get(ctx, ta, tb), l, r));
+    } else {
+      auto t = cast<TakeOp>(op);
+      Type of = t.getOf().getType(), r = t.getType();
+      APInt i;
+      if (auto c = dyn_cast<CursorType>(of); c && matchPattern(t.getColumn(), m_ConstantInt(&i))) {
+        Value k = KeyOp::create(b, loc, ColKeyType::get(ctx, c.getSchema()), b.getI64IntegerAttr(i.getZExtValue()));
+        to = ColumnOp::create(b, loc, r, t.getOf(), k);
+      } else if (isa<SplitType, Series2Type>(of) && (r == sidesOf(of).first || r == sidesOf(of).second)) {
+        to = AtOp::create(b, loc, r, side(t.getOf(), r, r == sidesOf(of).first), t.getColumn());
+      } else continue;
+    }
+    op->getResult(0).replaceAllUsesWith(to);
+    op->erase();
+  }
+  // leftOf / rightOf of a joins (through a reify): the side itself, b viewed to size(a); so zipnext's sides stay slices
+  SmallVector<Operation *> sides;
+  f.walk([&](Operation *op) { if (isa<LeftOfOp, RightOfOp>(op)) sides.push_back(op); });
+  for (Operation *op : sides) {
+    auto r = op->getOperand(0).getDefiningOp<ReifyOp>();
+    auto j = (r ? r.getSeries() : op->getOperand(0)).getDefiningOp<JoinsOp>();
+    if (!j) continue;
+    OpBuilder b(op);
+    Location loc = op->getLoc();
+    Value to = isa<LeftOfOp>(op) ? j.getA() : SliceOp::create(b, loc, j.getB().getType(), j.getB(), cIndex(b, loc, 0), sizeOf(b, loc, j.getA()));
+    op->getResult(0).replaceAllUsesWith(to);
+    op->erase();
+    if (r && r->use_empty()) r->erase();
+    if (j->use_empty()) j->erase();
+  }
+}
+
+/// A series made where it is read: its region pure ops without regions, and only at, size, slice and bisect read it.
+bool readInPlace(SeriesOp s) {
+  for (Operation &op : s.getAt().front().without_terminator())
+    if (op.getNumRegions() || !isMemoryEffectFree(&op)) return false;
+  return llvm::all_of(s->getUses(), [](OpOperand &u) { return u.getOperandNumber() == 0 && isa<AtOp, SizeOp, SliceOp, BisectOp>(u.getOwner()); });
+}
+
+/// bisect(series(n) {k -> x}, key): BisectLowering's search with x made at each midpoint (and the order cloned there).
+Value bisectInPlace(OpBuilder &b, BisectOp op, SeriesOp s) {
+  Location loc = op.getLoc();
+  Type idx = b.getIndexType(), i1 = b.getI1Type();
+  Value zero = cIndex(b, loc, 0), one = cIndex(b, loc, 1), z32 = cInt(b, loc, b.getI32Type(), 0);
+  SmallVector<Type> state{idx, idx, idx, i1}; // lo, hi, where it was found, found
+  SmallVector<Location> locs(4, loc);
+  auto search = scf::WhileOp::create(b, loc, TypeRange(state), ValueRange{zero, s.getSize(), zero, cInt(b, loc, i1, 0)});
+  Block *before = b.createBlock(&search.getBefore(), {}, TypeRange(state), locs);
+  Value open = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::ult, before->getArgument(0), before->getArgument(1));
+  Value notFound = arith::XOrIOp::create(b, loc, before->getArgument(3), cInt(b, loc, i1, 1));
+  scf::ConditionOp::create(b, loc, arith::AndIOp::create(b, loc, open, notFound), before->getArguments());
+  Block *after = b.createBlock(&search.getAfter(), {}, TypeRange(state), locs);
+  Value lo = after->getArgument(0), hi = after->getArgument(1);
+  Value mid = arith::ShRUIOp::create(b, loc, arith::AddIOp::create(b, loc, lo, hi), one);
+  Value x = cloneWith(b, s.getAt(), ValueRange{mid});
+  Value c = op.getOrder().empty() ? threeWay(b, loc, x, op.getKey()) : cloneWith(b, op.getOrder(), ValueRange{x, op.getKey()});
+  Value below = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::slt, c, z32);
+  Value above = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::sgt, c, z32);
+  Value equal = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::eq, c, z32);
+  Value lo2 = arith::SelectOp::create(b, loc, below, arith::AddIOp::create(b, loc, mid, one), lo);
+  scf::YieldOp::create(b, loc, ValueRange{lo2, arith::SelectOp::create(b, loc, above, mid, hi), mid, equal});
+  b.setInsertionPointAfter(search);
+  Value missing = arith::SubIOp::create(b, loc, arith::SubIOp::create(b, loc, zero, search.getResult(0)), one);
+  return arith::SelectOp::create(b, loc, search.getResult(3), search.getResult(2), missing);
+}
+
+void fuseSeriesReads(func::FuncOp f) {
+  for (bool again = true; again;) {
+    again = false;
+    SmallVector<SeriesOp> lazy;
+    f.walk([&](SeriesOp s) { if (readInPlace(s)) lazy.push_back(s); });
+    for (SeriesOp s : lazy) {
+      for (OpOperand &u : llvm::make_early_inc_range(s->getUses())) {
+        Operation *by = u.getOwner();
+        OpBuilder b(by);
+        Location loc = by->getLoc();
+        Value to;
+        if (auto at = dyn_cast<AtOp>(by)) to = cloneWith(b, s.getAt(), ValueRange{toIndex(b, loc, at.getIndex())});
+        else if (isa<SizeOp>(by)) to = s.getSize();
+        else if (auto bi = dyn_cast<BisectOp>(by)) to = bisectInPlace(b, bi, s);
+        else {
+          auto sl = cast<SliceOp>(by);
+          auto view = SeriesOp::create(b, loc, sl.getType(), sl.getCount());
+          Block *k = b.createBlock(&view.getAt(), {}, TypeRange{b.getIndexType()}, {loc});
+          YieldOp::create(b, loc, ValueRange{cloneWith(b, s.getAt(), ValueRange{arith::AddIOp::create(b, loc, k->getArgument(0), sl.getOffset())})});
+          to = view.getResult();
+          again = true;
+        }
+        by->getResult(0).replaceAllUsesWith(to);
+        by->erase();
+      }
+      s->erase();
+    }
+  }
+}
+
 struct LowerCursors : PassWrapper<LowerCursors, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LowerCursors)
   StringRef getArgument() const final { return "trikeshed-lower-cursors"; }
@@ -1087,6 +1282,9 @@ struct LowerCursors : PassWrapper<LowerCursors, OperationPass<ModuleOp>> {
         [&](func::FuncOp f) { return types.isSignatureLegal(f.getFunctionType()) && types.isLegal(&f.getBody()); });
     target.addDynamicallyLegalOp<func::ReturnOp, func::CallOp>([&](Operation *op) { return types.isLegal(op); });
 
+    // the split rows by their laws, and the series read where they are made (ReifiedSplitSeries2, below)
+    addSplitConversions(types);
+    getOperation().walk([&](func::FuncOp f) { rewriteSplits(f), fuseSeriesReads(f); });
     // combine and combineAll first, by Combine.kt's laws: what is left of them are the drains of their parts
     // groupBy and keyedJoin first, into the ops they decompose into (GroupBy.kt and KeyedJoin.kt, above)
     SmallVector<Operation *> joins;
@@ -1098,6 +1296,7 @@ struct LowerCursors : PassWrapper<LowerCursors, OperationPass<ModuleOp>> {
     patterns.add<ColumnLowering, FacetLowering, SizeLowering, AtLowering, SeriesLowering, AlphaLowering, WhereLowering,
                  ProjectLowering, SliceLowering, FoldLowering, CompareLowering, SortedLowering, BisectLowering, JLowering,
                  HalfLowering<FirstOp, true>, HalfLowering<SecondOp, false>, DrainLowering, PartsLowering, AdjacencyLowering, ClosureLowering, TextLowering>(types, ctx);
+    patterns.add<JoinsLowering, SideLowering<LeftOfOp, true>, SideLowering<RightOfOp, false>, SideLowering<ReifyOp, true, true>>(types, ctx);
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, types);
     populateReturnOpTypeConversionPattern(patterns, types);
     populateCallOpTypeConversionPattern(patterns, types);

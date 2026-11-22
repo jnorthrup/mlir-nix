@@ -380,10 +380,6 @@ struct Store {
                          composite::Maybe<Hash> expected = nullptr);
   composite::Text addTextToStore(std::string_view name, std::string_view text,
                              const SortedSet &refs);
-  /// Path addToStore would produce without writing anything.
-  composite::Text computeStorePathForPath(std::string_view name, std::string_view srcPath,
-                                      FileIngestionMethod method, HashAlgo algo,
-                                      const PathFilter &filter = nullptr);
 
   /// The derivation's path; the derivation moves into the cache (readDerivation hands it back by reference).
   composite::Text writeDerivation(Derivation &&drv);

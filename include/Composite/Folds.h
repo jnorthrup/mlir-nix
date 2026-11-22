@@ -26,6 +26,10 @@ template <uint32_t N, class F> constexpr auto vec(F f) {
   return out;
 }
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> 4c600201f1e006cc27392224e7bb8d310cab6229
 /// The index of the first element satisfying p, or size when none does (the Series' own bisect convention).
 template <class S, class P> constexpr uint32_t firstWhere(const S &xs, P p) {
   struct At { uint32_t i; bool hit; };

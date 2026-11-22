@@ -553,7 +553,6 @@ cp::Text EvalState::showPos(PosPtr pos) const {
   return cp::cat(f->file, ':', f->line, ':', f->col);
 }
 
-void EvalState::throwError(std::string_view msg, PosPtr pos) { throw EvalError(msg, pos); }
 
 void EvalState::warn(std::string_view msg) {
   cp::Text line = cp::cat("warning: ", msg);

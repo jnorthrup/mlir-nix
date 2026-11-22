@@ -1,13 +1,382 @@
-// Composite/Rows.h's row algorithms (neutral C ABI; Rows.h is the bridge).  The keyed family -- findRow's
-// branchless search, uniqueFirst, unionSize/unionInto (a merge walk, or a lower-bound search per y row when
-// y is a sixteenth of x or less) -- reads each row's leading u32 as its key (Attr::name, an attrs shape's
-// symbol); the row width is an operand.  sortRows is the kRun=24 insertion sort + bottom-up stable merge
-// (the right run only when strictly less) in two forms: mlnix_rows_sort calls the C++ comparator back for
-// each comparison in the order the template did (a throw unwinds through these frames; the bridge's RAII
-// temp is freed), mlnix_rows_sort_u32 compares the leading u32 keys itself.  The bridge owns the merge's
-// temp run (::operator new/delete); this module allocates nothing on the heap.  Plain scf/arith/llvm: rows
-// of any width are bytes at a stride, not a series of scalars.
+// Composite/Rows.h's row algorithms (neutral C ABI; Rows.h is the bridge).  Rows of any width are bytes at a stride:
+// keyed rows (Attr, an attrs shape's symbol: a leading u32 key, alignof >= 4) are w = rowBytes / 4 words each, so a row
+// set of n rows is a !trikeshed.series<i32> of n * w words, and a row is the slice [r * w, w) of it -- what
+// ReifiedSplitSeries2's reify/take/splitSelect state for a row of width w.  The keys are the series `n j {r -> words[r * w]}`,
+// pure, so trikeshed-lower-cursors reads it where the rows lie: a bisect over it reads log n keys, never a buffer of n.
+//   find          findRow's branchless search over the key series (trikeshed.at probes; the loop's trip count is n's alone,
+//                 so it stays as fast as the llvm port -- a bisect, whose exit depends on the keys, measured 2-5x slower
+//                 on Bindings::get's path): the last row whose key is <= k, if its key is k, or 0
+//   uniqueFirst   trikeshed.zipnext of the keys: row i + 1 is kept where its pair differs, drained to the front as a slice
+//                 of the words; zipnext's sides are slices of the key series, read in place, so nothing is allocated
+//   union         y winning on an equal key.  When y is a sixteenth of x or less, each y row's lower bound in x is a
+//                 bisect over a slice of x's keys from where the last one ended, and the run of x before it is ONE drain
+//                 of a slice; else a merge walk over the two key series, a row drained at a time, then the tails.
+//                 union_size is the same walks, counting.
+// Keys compare unsigned (u32).  The sorts (sortRows' comparator calls in the template's order, a throw unwinding
+// through these frames; sortRowsByKey's u32 form) stay scf/arith/llvm below: the comparator's call order is the contract.
+// Helper names are module-unique (rows_*, nx_rows_*): the pipeline exports func.func private as global symbols.
+!w = !trikeshed.series<i32>
+!z = !trikeshed.series2<i32, i32>
+!s = !trikeshed.series<i64>
+!m = memref<?xi32, strided<[1], offset: ?>>
+!d = !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
 
+// the descriptor of n i32 words at p (a struct: returning it allocates nothing and clones nothing)
+func.func private @rows_desc(%p: !llvm.ptr, %n: i64) -> !d {
+  %c0 = arith.constant 0 : i64
+  %c1 = arith.constant 1 : i64
+  %u = llvm.mlir.undef : !d
+  %a = llvm.insertvalue %p, %u[0] : !d
+  %b = llvm.insertvalue %p, %a[1] : !d
+  %c = llvm.insertvalue %c0, %b[2] : !d
+  %e = llvm.insertvalue %n, %c[3, 0] : !d
+  %f = llvm.insertvalue %c1, %e[4, 0] : !d
+  return %f : !d
+}
+
+func.func @mlnix_rows_find(%rows: !llvm.ptr, %rb: i64, %n: i64, %k: i64) -> i64 {
+  %c0 = arith.constant 0 : i64
+  %c4 = arith.constant 4 : i64
+  %i0 = arith.constant 0 : index
+  %i1 = arith.constant 1 : index
+  %w = arith.divui %rb, %c4 : i64
+  %nw = arith.muli %n, %w : i64
+  %d = func.call @rows_desc(%rows, %nw) : (!llvm.ptr, i64) -> !d
+  %dm = builtin.unrealized_conversion_cast %d : !d to !m
+  %words = builtin.unrealized_conversion_cast %dm : !m to !w
+  %wi = arith.index_cast %w : i64 to index
+  %ni = arith.index_cast %n : i64 to index
+  %keys = trikeshed.series %ni : !w {
+  ^bb0(%r: index):
+    %at = arith.muli %r, %wi : index
+    %key = trikeshed.at %words[%at] : !w, index -> i32
+    trikeshed.yield %key : i32
+  }
+  // findRow's branchless search: the base moves by half while the key there is <= k (the trip count is n's alone)
+  %k32 = arith.trunci %k : i64 to i32
+  %none = arith.cmpi eq, %ni, %i0 : index
+  %r = scf.if %none -> i64 {
+    scf.yield %c0 : i64
+  } else {
+    %s:2 = scf.while (%base = %i0, %nn = %ni) : (index, index) -> (index, index) {
+      %half = arith.shrui %nn, %i1 : index
+      %go = arith.cmpi ne, %half, %i0 : index
+      scf.condition(%go) %base, %nn : index, index
+    } do {
+    ^bb0(%base: index, %nn: index):
+      %half = arith.shrui %nn, %i1 : index
+      %probe = arith.addi %base, %half : index
+      %key = trikeshed.at %keys[%probe] : !w, index -> i32
+      %le = arith.cmpi ule, %key, %k32 : i32
+      %b2 = arith.select %le, %probe, %base : index
+      %n2 = arith.subi %nn, %half : index
+      scf.yield %b2, %n2 : index, index
+    }
+    %key = trikeshed.at %keys[%s#0] : !w, index -> i32
+    %eq = arith.cmpi eq, %key, %k32 : i32
+    %l64 = arith.index_cast %s#0 : index to i64
+    %off = arith.muli %l64, %rb : i64
+    %p = llvm.getelementptr %rows[%off] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+    %pi = llvm.ptrtoint %p : !llvm.ptr to i64
+    %v = arith.select %eq, %pi, %c0 : i64
+    scf.yield %v : i64
+  }
+  return %r : i64
+}
+
+func.func @mlnix_rows_unique_first(%rows: !llvm.ptr, %rb: i64, %n: i64) -> i64 {
+  %c0 = arith.constant 0 : i64
+  %c1 = arith.constant 1 : i64
+  %c4 = arith.constant 4 : i64
+  %i0 = arith.constant 0 : index
+  %i1 = arith.constant 1 : index
+  %w = arith.divui %rb, %c4 : i64
+  %nw = arith.muli %n, %w : i64
+  %d = func.call @rows_desc(%rows, %nw) : (!llvm.ptr, i64) -> !d
+  %dm = builtin.unrealized_conversion_cast %d : !d to !m
+  %words = builtin.unrealized_conversion_cast %dm : !m to !w
+  %wi = arith.index_cast %w : i64 to index
+  %ni = arith.index_cast %n : i64 to index
+  %keys = trikeshed.series %ni : !w {
+  ^bb0(%r: index):
+    %at = arith.muli %r, %wi : index
+    %key = trikeshed.at %words[%at] : !w, index -> i32
+    trikeshed.yield %key : i32
+  }
+  %z = trikeshed.zipnext %keys : !w -> !z
+  %l = trikeshed.leftOf %z : !z -> !w
+  %rt = trikeshed.rightOf %z : !z -> !w
+  %np = trikeshed.size %l : !w
+  // row i + 1 opens a run where its key differs from row i's, and is drained to the front there.  A step reads rows i and
+  // i + 1 before it writes, and a write lands at or before the row it copies, so every key read is its row's own.
+  %m = scf.for %i = %i0 to %np step %i1 iter_args(%mm = %i1) -> (index) {
+    %a = trikeshed.at %l[%i] : !w, index -> i32
+    %b = trikeshed.at %rt[%i] : !w, index -> i32
+    %ne = arith.cmpi ne, %a, %b : i32
+    %mm2 = scf.if %ne -> index {
+      %src = arith.addi %i, %i1 : index
+      %from = arith.muli %src, %wi : index
+      %to = arith.muli %mm, %wi : index
+      %row = trikeshed.slice %words[%from, %wi] : !w -> !w
+      %cells = memref.subview %dm[%to] [%wi] [1] : !m to !m
+      %e = trikeshed.drain %row, %cells : !w, !m -> index
+      %mp = arith.addi %mm, %i1 : index
+      scf.yield %mp : index
+    } else {
+      scf.yield %mm : index
+    }
+    scf.yield %mm2 : index
+  }
+  %any = arith.cmpi ugt, %n, %c0 : i64
+  %m64 = arith.index_cast %m : index to i64
+  %r = arith.select %any, %m64, %c0 : i64
+  return %r : i64
+}
+
+func.func @mlnix_rows_union_size(%x: !llvm.ptr, %rb: i64, %nx: i64, %y: !llvm.ptr, %ny: i64) -> i64 {
+  %c0 = arith.constant 0 : i64
+  %c1 = arith.constant 1 : i64
+  %c4 = arith.constant 4 : i64
+  %c16 = arith.constant 16 : i64
+  %i0 = arith.constant 0 : index
+  %i1 = arith.constant 1 : index
+  %w = arith.divui %rb, %c4 : i64
+  %wi = arith.index_cast %w : i64 to index
+  %nwx = arith.muli %nx, %w : i64
+  %nwy = arith.muli %ny, %w : i64
+  %dx = func.call @rows_desc(%x, %nwx) : (!llvm.ptr, i64) -> !d
+  %dy = func.call @rows_desc(%y, %nwy) : (!llvm.ptr, i64) -> !d
+  %dxm = builtin.unrealized_conversion_cast %dx : !d to !m
+  %dym = builtin.unrealized_conversion_cast %dy : !d to !m
+  %xw = builtin.unrealized_conversion_cast %dxm : !m to !w
+  %yw = builtin.unrealized_conversion_cast %dym : !m to !w
+  %nxi = arith.index_cast %nx : i64 to index
+  %nyi = arith.index_cast %ny : i64 to index
+  %xk = trikeshed.series %nxi : !w {
+  ^bb0(%r: index):
+    %at = arith.muli %r, %wi : index
+    %key = trikeshed.at %xw[%at] : !w, index -> i32
+    trikeshed.yield %key : i32
+  }
+  %yk = trikeshed.series %nyi : !w {
+  ^bb0(%r: index):
+    %at = arith.muli %r, %wi : index
+    %key = trikeshed.at %yw[%at] : !w, index -> i32
+    trikeshed.yield %key : i32
+  }
+  %ny16 = arith.muli %ny, %c16 : i64
+  %small = arith.cmpi ult, %ny16, %nx : i64
+  %res = scf.if %small -> i64 {
+    %sh:2 = scf.for %j = %i0 to %nyi step %i1 iter_args(%ii = %i0, %shared = %c0) -> (index, i64) {
+      %ky = trikeshed.at %yk[%j] : !w, index -> i32
+      %rest = arith.subi %nxi, %ii : index
+      %tail = trikeshed.slice %xk[%ii, %rest] : !w -> !w
+      %b = trikeshed.bisect %tail, %ky : !w, i32 -> index by {
+      ^bb0(%e: i32, %kk: i32):
+        %lt = arith.cmpi ult, %e, %kk : i32
+        %m1 = arith.constant -1 : i32
+        %p1 = arith.constant 1 : i32
+        %o = arith.select %lt, %m1, %p1 : i32
+        trikeshed.yield %o : i32
+      }
+      %neg = arith.subi %i0, %b : index
+      %ins = arith.subi %neg, %i1 : index
+      %lb = arith.addi %ii, %ins : index
+      %inx = arith.cmpi ult, %lb, %nxi : index
+      %eq = scf.if %inx -> i1 {
+        %kx = trikeshed.at %xk[%lb] : !w, index -> i32
+        %e = arith.cmpi eq, %kx, %ky : i32
+        scf.yield %e : i1
+      } else {
+        %f = arith.constant false
+        scf.yield %f : i1
+      }
+      %lb1 = arith.addi %lb, %i1 : index
+      %s1 = arith.addi %shared, %c1 : i64
+      %ii2 = arith.select %eq, %lb1, %lb : index
+      %sh2 = arith.select %eq, %s1, %shared : i64
+      scf.yield %ii2, %sh2 : index, i64
+    }
+    %t = arith.addi %nx, %ny : i64
+    %r = arith.subi %t, %sh#1 : i64
+    scf.yield %r : i64
+  } else {
+    %mw:3 = scf.while (%i = %i0, %j = %i0, %cnt = %c0) : (index, index, i64) -> (index, index, i64) {
+      %ic = arith.cmpi ult, %i, %nxi : index
+      %jc = arith.cmpi ult, %j, %nyi : index
+      %both = arith.andi %ic, %jc : i1
+      scf.condition(%both) %i, %j, %cnt : index, index, i64
+    } do {
+    ^bb0(%i: index, %j: index, %cnt: i64):
+      %kx = trikeshed.at %xk[%i] : !w, index -> i32
+      %ky = trikeshed.at %yk[%j] : !w, index -> i32
+      %eq = arith.cmpi eq, %kx, %ky : i32
+      %lt = arith.cmpi ult, %kx, %ky : i32
+      %ip = arith.addi %i, %i1 : index
+      %jp = arith.addi %j, %i1 : index
+      %ieq = arith.select %eq, %ip, %i : index
+      %jeq = arith.select %eq, %jp, %j : index
+      %i2 = arith.select %lt, %ip, %ieq : index
+      %j2 = arith.select %lt, %jeq, %jp : index
+      %cn = arith.addi %cnt, %c1 : i64
+      scf.yield %i2, %j2, %cn : index, index, i64
+    }
+    %i64 = arith.index_cast %mw#0 : index to i64
+    %j64 = arith.index_cast %mw#1 : index to i64
+    %ri = arith.subi %nx, %i64 : i64
+    %rj = arith.subi %ny, %j64 : i64
+    %s1 = arith.addi %mw#2, %ri : i64
+    %s2 = arith.addi %s1, %rj : i64
+    scf.yield %s2 : i64
+  }
+  return %res : i64
+}
+
+func.func @mlnix_rows_union_into(%x: !llvm.ptr, %rb: i64, %nx: i64, %y: !llvm.ptr, %ny: i64, %out: !llvm.ptr) -> i64 {
+  %c4 = arith.constant 4 : i64
+  %c16 = arith.constant 16 : i64
+  %i0 = arith.constant 0 : index
+  %i1 = arith.constant 1 : index
+  %w = arith.divui %rb, %c4 : i64
+  %wi = arith.index_cast %w : i64 to index
+  %nwx = arith.muli %nx, %w : i64
+  %nwy = arith.muli %ny, %w : i64
+  %nwo = arith.addi %nwx, %nwy : i64
+  %dx = func.call @rows_desc(%x, %nwx) : (!llvm.ptr, i64) -> !d
+  %dy = func.call @rows_desc(%y, %nwy) : (!llvm.ptr, i64) -> !d
+  %do = func.call @rows_desc(%out, %nwo) : (!llvm.ptr, i64) -> !d
+  %dxm = builtin.unrealized_conversion_cast %dx : !d to !m
+  %dym = builtin.unrealized_conversion_cast %dy : !d to !m
+  %om = builtin.unrealized_conversion_cast %do : !d to !m
+  %xw = builtin.unrealized_conversion_cast %dxm : !m to !w
+  %yw = builtin.unrealized_conversion_cast %dym : !m to !w
+  %nxi = arith.index_cast %nx : i64 to index
+  %nyi = arith.index_cast %ny : i64 to index
+  %xk = trikeshed.series %nxi : !w {
+  ^bb0(%r: index):
+    %at = arith.muli %r, %wi : index
+    %key = trikeshed.at %xw[%at] : !w, index -> i32
+    trikeshed.yield %key : i32
+  }
+  %yk = trikeshed.series %nyi : !w {
+  ^bb0(%r: index):
+    %at = arith.muli %r, %wi : index
+    %key = trikeshed.at %yw[%at] : !w, index -> i32
+    trikeshed.yield %key : i32
+  }
+  %ny16 = arith.muli %ny, %c16 : i64
+  %big = arith.cmpi uge, %ny16, %nx : i64
+  %res = scf.if %big -> index {
+    %uw:3 = scf.while (%i = %i0, %j = %i0, %k = %i0) : (index, index, index) -> (index, index, index) {
+      %ic = arith.cmpi ult, %i, %nxi : index
+      %jc = arith.cmpi ult, %j, %nyi : index
+      %both = arith.andi %ic, %jc : i1
+      scf.condition(%both) %i, %j, %k : index, index, index
+    } do {
+    ^bb0(%i: index, %j: index, %k: index):
+      %kx = trikeshed.at %xk[%i] : !w, index -> i32
+      %ky = trikeshed.at %yk[%j] : !w, index -> i32
+      %eq = arith.cmpi eq, %kx, %ky : i32
+      %lt = arith.cmpi ult, %kx, %ky : i32
+      %to = arith.muli %k, %wi : index
+      %cells = memref.subview %om[%to] [%wi] [1] : !m to !m
+      // x's row only where its key is strictly less; y's on an equal key or a greater one
+      scf.if %lt {
+        %from = arith.muli %i, %wi : index
+        %row = trikeshed.slice %xw[%from, %wi] : !w -> !w
+        %e = trikeshed.drain %row, %cells : !w, !m -> index
+      } else {
+        %from = arith.muli %j, %wi : index
+        %row = trikeshed.slice %yw[%from, %wi] : !w -> !w
+        %e = trikeshed.drain %row, %cells : !w, !m -> index
+      }
+      %ip = arith.addi %i, %i1 : index
+      %jp = arith.addi %j, %i1 : index
+      %kp = arith.addi %k, %i1 : index
+      %ieq = arith.select %eq, %ip, %i : index
+      %jeq = arith.select %eq, %jp, %j : index
+      %i2 = arith.select %lt, %ip, %ieq : index
+      %j2 = arith.select %lt, %jeq, %jp : index
+      scf.yield %i2, %j2, %kp : index, index, index
+    }
+    // the tails: what is left of x, then of y, one drain each
+    %rx = arith.subi %nxi, %uw#0 : index
+    %fx = arith.muli %uw#0, %wi : index
+    %cx = arith.muli %rx, %wi : index
+    %tx = arith.muli %uw#2, %wi : index
+    %xt = trikeshed.slice %xw[%fx, %cx] : !w -> !w
+    %ox = memref.subview %om[%tx] [%cx] [1] : !m to !m
+    %ex = trikeshed.drain %xt, %ox : !w, !m -> index
+    %k2 = arith.addi %uw#2, %rx : index
+    %ry = arith.subi %nyi, %uw#1 : index
+    %fy = arith.muli %uw#1, %wi : index
+    %cy = arith.muli %ry, %wi : index
+    %ty = arith.muli %k2, %wi : index
+    %yt = trikeshed.slice %yw[%fy, %cy] : !w -> !w
+    %oy = memref.subview %om[%ty] [%cy] [1] : !m to !m
+    %ey = trikeshed.drain %yt, %oy : !w, !m -> index
+    %k3 = arith.addi %k2, %ry : index
+    scf.yield %k3 : index
+  } else {
+    %ik:2 = scf.for %j = %i0 to %nyi step %i1 iter_args(%ii = %i0, %kk = %i0) -> (index, index) {
+      %ky = trikeshed.at %yk[%j] : !w, index -> i32
+      %rest = arith.subi %nxi, %ii : index
+      %tail = trikeshed.slice %xk[%ii, %rest] : !w -> !w
+      %b = trikeshed.bisect %tail, %ky : !w, i32 -> index by {
+      ^bb0(%e: i32, %kk2: i32):
+        %lt = arith.cmpi ult, %e, %kk2 : i32
+        %m1 = arith.constant -1 : i32
+        %p1 = arith.constant 1 : i32
+        %o = arith.select %lt, %m1, %p1 : i32
+        trikeshed.yield %o : i32
+      }
+      %neg = arith.subi %i0, %b : index
+      %run = arith.subi %neg, %i1 : index
+      %lb = arith.addi %ii, %run : index
+      // the run of x before it, one drain; then y's row
+      %fx = arith.muli %ii, %wi : index
+      %cx = arith.muli %run, %wi : index
+      %tx = arith.muli %kk, %wi : index
+      %xr = trikeshed.slice %xw[%fx, %cx] : !w -> !w
+      %ox = memref.subview %om[%tx] [%cx] [1] : !m to !m
+      %ex = trikeshed.drain %xr, %ox : !w, !m -> index
+      %ky1 = arith.addi %kk, %run : index
+      %fy = arith.muli %j, %wi : index
+      %ty = arith.muli %ky1, %wi : index
+      %yr = trikeshed.slice %yw[%fy, %wi] : !w -> !w
+      %oy = memref.subview %om[%ty] [%wi] [1] : !m to !m
+      %ey = trikeshed.drain %yr, %oy : !w, !m -> index
+      %k1 = arith.addi %ky1, %i1 : index
+      %inx = arith.cmpi ult, %lb, %nxi : index
+      %eq = scf.if %inx -> i1 {
+        %kx = trikeshed.at %xk[%lb] : !w, index -> i32
+        %e = arith.cmpi eq, %kx, %ky : i32
+        scf.yield %e : i1
+      } else {
+        %f = arith.constant false
+        scf.yield %f : i1
+      }
+      %lb1 = arith.addi %lb, %i1 : index
+      %ii2 = arith.select %eq, %lb1, %lb : index
+      scf.yield %ii2, %k1 : index, index
+    }
+    %rx = arith.subi %nxi, %ik#0 : index
+    %fx = arith.muli %ik#0, %wi : index
+    %cx = arith.muli %rx, %wi : index
+    %tx = arith.muli %ik#1, %wi : index
+    %xt = trikeshed.slice %xw[%fx, %cx] : !w -> !w
+    %ox = memref.subview %om[%tx] [%cx] [1] : !m to !m
+    %ex = trikeshed.drain %xt, %ox : !w, !m -> index
+    %k2 = arith.addi %ik#1, %rx : index
+    scf.yield %k2 : index
+  }
+  %r = arith.index_cast %res : index to i64
+  return %r : i64
+}
+
+// The sorts: kRun = 24 insertion-sorted runs merged bottom-up (stable: the right run only when strictly less),
+// mlnix_rows_sort calling the C++ comparator back for each comparison in the template's order, mlnix_rows_sort_u32
+// comparing the leading u32 keys itself; the bridge owns the merge's temp run.
 func.func private @nx_rows_copy1(%dst: !llvm.ptr, %src: !llvm.ptr, %rb: i64) {
   %k0 = arith.constant 8 : i64
   %k1 = arith.constant 16 : i64
@@ -29,340 +398,6 @@ func.func private @nx_rows_copy1(%dst: !llvm.ptr, %src: !llvm.ptr, %rb: i64) {
     }
   }
   return
-}
-
-func.func @mlnix_rows_find(%rows: !llvm.ptr, %rb: i64, %n: i64, %k: i64) -> i64 {
-  %k0 = arith.constant 0 : i64
-  %k1 = arith.constant 2 : i64
-  %is01 = arith.cmpi eq, %n, %k0 : i64
-  %r2 = scf.if %is01 -> i64 {
-    scf.yield %k0 : i64
-  } else {
-    %b03 = llvm.ptrtoint %rows : !llvm.ptr to i64
-    %w4:3 = scf.while (%base = %b03, %nn = %n) : (i64, i64) -> (i64, i64, i64) {
-      %half5 = arith.divui %nn, %k1 : i64
-      %go6 = arith.cmpi ne, %half5, %k0 : i64
-      scf.condition(%go6) %base, %nn, %half5 : i64, i64, i64
-    } do {
-    ^bb0(%base: i64, %nn: i64, %half: i64):
-      %bp7 = llvm.inttoptr %base : i64 to !llvm.ptr
-  %off8 = arith.muli %half, %rb : i64
-  %p9 = llvm.getelementptr %bp7[%off8] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %k3210 = llvm.load %p9 : !llvm.ptr -> i32
-  %key11 = arith.extui %k3210 : i32 to i64
-      %le12 = arith.cmpi ule, %key11, %k : i64
-      %adv13 = arith.muli %half, %rb : i64
-      %nb14 = arith.addi %base, %adv13 : i64
-      %b215 = arith.select %le12, %nb14, %base : i64
-      %nn216 = arith.subi %nn, %half : i64
-      scf.yield %b215, %nn216 : i64, i64
-    }
-    %bp17 = llvm.inttoptr %w4#0 : i64 to !llvm.ptr
-  %k3218 = llvm.load %bp17 : !llvm.ptr -> i32
-  %key19 = arith.extui %k3218 : i32 to i64
-    %eq20 = arith.cmpi eq, %key19, %k : i64
-    %ri21 = arith.select %eq20, %w4#0, %k0 : i64
-    scf.yield %ri21 : i64
-  }
-  return %r2 : i64
-}
-
-func.func @mlnix_rows_unique_first(%rows: !llvm.ptr, %rb: i64, %n: i64) -> i64 {
-  %k0 = arith.constant 0 : i64
-  %k1 = arith.constant 1 : i64
-  %k2 = arith.constant 0 : index
-  %k3 = arith.constant 1 : index
-  %k4 = arith.constant 0 : i1
-  %ix1 = arith.index_cast %n : i64 to index
-  %m2 = scf.for %i = %k2 to %ix1 step %k3 iter_args(%mm = %k0) -> i64 {
-  %i63 = arith.index_cast %i : index to i64
-    %mgt4 = arith.cmpi ugt, %mm, %k0 : i64
-    %eq5 = scf.if %mgt4 -> i1 {
-      %mm16 = arith.subi %mm, %k1 : i64
-  %off7 = arith.muli %mm16, %rb : i64
-  %p8 = llvm.getelementptr %rows[%off7] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %off9 = arith.muli %i63, %rb : i64
-  %p10 = llvm.getelementptr %rows[%off9] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %k3211 = llvm.load %p8 : !llvm.ptr -> i32
-  %key12 = arith.extui %k3211 : i32 to i64
-  %k3213 = llvm.load %p10 : !llvm.ptr -> i32
-  %key14 = arith.extui %k3213 : i32 to i64
-      %e15 = arith.cmpi eq, %key12, %key14 : i64
-      scf.yield %e15 : i1
-    } else {
-      scf.yield %k4 : i1
-    }
-    %nm16 = scf.if %eq5 -> i64 {
-      scf.yield %mm : i64
-    } else {
-  %off17 = arith.muli %mm, %rb : i64
-  %p18 = llvm.getelementptr %rows[%off17] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %off19 = arith.muli %i63, %rb : i64
-  %p20 = llvm.getelementptr %rows[%off19] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  func.call @nx_rows_copy1(%p18, %p20, %rb) : (!llvm.ptr, !llvm.ptr, i64) -> ()
-      %mp21 = arith.addi %mm, %k1 : i64
-      scf.yield %mp21 : i64
-    }
-    scf.yield %nm16 : i64
-  }
-  return %m2 : i64
-}
-
-func.func @mlnix_rows_union_size(%x: !llvm.ptr, %rb: i64, %nx: i64, %y: !llvm.ptr, %ny: i64) -> i64 {
-  %k0 = arith.constant 0 : i64
-  %k1 = arith.constant 1 : i64
-  %k2 = arith.constant 16 : i64
-  %k3 = arith.constant 0 : index
-  %k4 = arith.constant 1 : index
-  %k5 = arith.constant 0 : i1
-  %k6 = arith.constant 2 : i64
-  %ny161 = arith.muli %ny, %k2 : i64
-  %small2 = arith.cmpi ult, %ny161, %nx : i64
-  %res3 = scf.if %small2 -> i64 {
-  %ix4 = arith.index_cast %ny : i64 to index
-    %sh5:2 = scf.for %j = %k3 to %ix4 step %k4 iter_args(%ii = %k0, %shared = %k0) -> (i64, i64) {
-  %i66 = arith.index_cast %j : index to i64
-  %off7 = arith.muli %i66, %rb : i64
-  %p8 = llvm.getelementptr %y[%off7] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %k329 = llvm.load %p8 : !llvm.ptr -> i32
-  %key10 = arith.extui %k329 : i32 to i64
-      %lb11:2 = scf.while (%lo = %ii, %hh = %nx) : (i64, i64) -> (i64, i64) {
-        %go12 = arith.cmpi ult, %lo, %hh : i64
-        scf.condition(%go12) %lo, %hh : i64, i64
-      } do {
-      ^bb0(%lo: i64, %hh: i64):
-        %d13 = arith.subi %hh, %lo : i64
-        %hd14 = arith.divui %d13, %k6 : i64
-        %mid15 = arith.addi %lo, %hd14 : i64
-  %off16 = arith.muli %mid15, %rb : i64
-  %p17 = llvm.getelementptr %x[%off16] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %k3218 = llvm.load %p17 : !llvm.ptr -> i32
-  %key19 = arith.extui %k3218 : i32 to i64
-        %lt20 = arith.cmpi ult, %key19, %key10 : i64
-        %mp121 = arith.addi %mid15, %k1 : i64
-        %nlo22 = arith.select %lt20, %mp121, %lo : i64
-        %nhi23 = arith.select %lt20, %hh, %mid15 : i64
-        scf.yield %nlo22, %nhi23 : i64, i64
-      }
-      %inx24 = arith.cmpi ult, %lb11#0, %nx : i64
-      %eqsh25 = scf.if %inx24 -> i1 {
-  %off26 = arith.muli %lb11#0, %rb : i64
-  %p27 = llvm.getelementptr %x[%off26] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %k3228 = llvm.load %p27 : !llvm.ptr -> i32
-  %key29 = arith.extui %k3228 : i32 to i64
-        %e30 = arith.cmpi eq, %key29, %key10 : i64
-        scf.yield %e30 : i1
-      } else {
-        scf.yield %k5 : i1
-      }
-      %shn31:2 = scf.if %eqsh25 -> (i64, i64) {
-        %sp32 = arith.addi %shared, %k1 : i64
-        %ip33 = arith.addi %lb11#0, %k1 : i64
-        scf.yield %sp32, %ip33 : i64, i64
-      } else {
-        scf.yield %shared, %lb11#0 : i64, i64
-      }
-      scf.yield %shn31#1, %shn31#0 : i64, i64
-    }
-    %t134 = arith.addi %nx, %ny : i64
-    %r135 = arith.subi %t134, %sh5#1 : i64
-    scf.yield %r135 : i64
-  } else {
-    %mw36:3 = scf.while (%i = %k0, %j = %k0, %cnt = %k0) : (i64, i64, i64) -> (i64, i64, i64) {
-      %ic37 = arith.cmpi ult, %i, %nx : i64
-      %jc38 = arith.cmpi ult, %j, %ny : i64
-      %both39 = arith.andi %ic37, %jc38 : i1
-      scf.condition(%both39) %i, %j, %cnt : i64, i64, i64
-    } do {
-    ^bb0(%i: i64, %j: i64, %cnt: i64):
-  %off40 = arith.muli %i, %rb : i64
-  %p41 = llvm.getelementptr %x[%off40] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %k3242 = llvm.load %p41 : !llvm.ptr -> i32
-  %key43 = arith.extui %k3242 : i32 to i64
-  %off44 = arith.muli %j, %rb : i64
-  %p45 = llvm.getelementptr %y[%off44] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %k3246 = llvm.load %p45 : !llvm.ptr -> i32
-  %key47 = arith.extui %k3246 : i32 to i64
-      %eq48 = arith.cmpi eq, %key43, %key47 : i64
-      %lt49 = arith.cmpi ult, %key43, %key47 : i64
-      %ip50 = arith.addi %i, %k1 : i64
-      %jp51 = arith.addi %j, %k1 : i64
-      %ieq52 = arith.select %eq48, %ip50, %i : i64
-      %jeq53 = arith.select %eq48, %jp51, %j : i64
-      %ilt54 = arith.select %lt49, %ip50, %ieq52 : i64
-      %jlt55 = arith.select %lt49, %jeq53, %jp51 : i64
-      %cn56 = arith.addi %cnt, %k1 : i64
-      scf.yield %ilt54, %jlt55, %cn56 : i64, i64, i64
-    }
-    %ri57 = arith.subi %nx, %mw36#0 : i64
-    %rj58 = arith.subi %ny, %mw36#1 : i64
-    %s159 = arith.addi %mw36#2, %ri57 : i64
-    %s260 = arith.addi %s159, %rj58 : i64
-    scf.yield %s260 : i64
-  }
-  return %res3 : i64
-}
-
-func.func private @nx_rows_union_walk(%x: !llvm.ptr, %rb: i64, %nx: i64, %y: !llvm.ptr, %ny: i64, %out: !llvm.ptr) -> i64 {
-  %k0 = arith.constant 0 : i64
-  %k1 = arith.constant 1 : i64
-  %uw1:3 = scf.while (%i = %k0, %j = %k0, %k = %k0) : (i64, i64, i64) -> (i64, i64, i64) {
-    %ic2 = arith.cmpi ult, %i, %nx : i64
-    %jc3 = arith.cmpi ult, %j, %ny : i64
-    %both4 = arith.andi %ic2, %jc3 : i1
-    scf.condition(%both4) %i, %j, %k : i64, i64, i64
-  } do {
-  ^bb0(%i: i64, %j: i64, %k: i64):
-  %off5 = arith.muli %i, %rb : i64
-  %p6 = llvm.getelementptr %x[%off5] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %k327 = llvm.load %p6 : !llvm.ptr -> i32
-  %key8 = arith.extui %k327 : i32 to i64
-  %off9 = arith.muli %j, %rb : i64
-  %p10 = llvm.getelementptr %y[%off9] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %k3211 = llvm.load %p10 : !llvm.ptr -> i32
-  %key12 = arith.extui %k3211 : i32 to i64
-    %eq13 = arith.cmpi eq, %key8, %key12 : i64
-    %lt14 = arith.cmpi ult, %key8, %key12 : i64
-  %off15 = arith.muli %k, %rb : i64
-  %p16 = llvm.getelementptr %out[%off15] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-    scf.if %eq13 {
-  func.call @nx_rows_copy1(%p16, %p10, %rb) : (!llvm.ptr, !llvm.ptr, i64) -> ()
-    } else {
-      scf.if %lt14 {
-  func.call @nx_rows_copy1(%p16, %p6, %rb) : (!llvm.ptr, !llvm.ptr, i64) -> ()
-      } else {
-  func.call @nx_rows_copy1(%p16, %p10, %rb) : (!llvm.ptr, !llvm.ptr, i64) -> ()
-      }
-    }
-    %ip17 = arith.addi %i, %k1 : i64
-    %jp18 = arith.addi %j, %k1 : i64
-    %kp19 = arith.addi %k, %k1 : i64
-    %ieq20 = arith.select %eq13, %ip17, %i : i64
-    %jeq21 = arith.select %eq13, %jp18, %j : i64
-    %ilt22 = arith.select %lt14, %ip17, %ieq20 : i64
-    %jlt23 = arith.select %lt14, %jeq21, %jp18 : i64
-    scf.yield %ilt22, %jlt23, %kp19 : i64, i64, i64
-  }
-  %dx24:2 = scf.while (%i = %uw1#0, %k = %uw1#2) : (i64, i64) -> (i64, i64) {
-    %go25 = arith.cmpi ult, %i, %nx : i64
-    scf.condition(%go25) %i, %k : i64, i64
-  } do {
-  ^bb0(%i: i64, %k: i64):
-  %off26 = arith.muli %i, %rb : i64
-  %p27 = llvm.getelementptr %x[%off26] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %off28 = arith.muli %k, %rb : i64
-  %p29 = llvm.getelementptr %out[%off28] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  func.call @nx_rows_copy1(%p29, %p27, %rb) : (!llvm.ptr, !llvm.ptr, i64) -> ()
-    %ip30 = arith.addi %i, %k1 : i64
-    %kp31 = arith.addi %k, %k1 : i64
-    scf.yield %ip30, %kp31 : i64, i64
-  }
-  %dy32:2 = scf.while (%j = %uw1#1, %k = %dx24#1) : (i64, i64) -> (i64, i64) {
-    %go33 = arith.cmpi ult, %j, %ny : i64
-    scf.condition(%go33) %j, %k : i64, i64
-  } do {
-  ^bb0(%j: i64, %k: i64):
-  %off34 = arith.muli %j, %rb : i64
-  %p35 = llvm.getelementptr %y[%off34] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %off36 = arith.muli %k, %rb : i64
-  %p37 = llvm.getelementptr %out[%off36] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  func.call @nx_rows_copy1(%p37, %p35, %rb) : (!llvm.ptr, !llvm.ptr, i64) -> ()
-    %jp38 = arith.addi %j, %k1 : i64
-    %kp39 = arith.addi %k, %k1 : i64
-    scf.yield %jp38, %kp39 : i64, i64
-  }
-  return %dy32#1 : i64
-}
-
-func.func @mlnix_rows_union_into(%x: !llvm.ptr, %rb: i64, %nx: i64, %y: !llvm.ptr, %ny: i64, %out: !llvm.ptr) -> i64 {
-  %k0 = arith.constant 0 : i64
-  %k1 = arith.constant 1 : i64
-  %k2 = arith.constant 16 : i64
-  %k3 = arith.constant 0 : index
-  %k4 = arith.constant 1 : index
-  %k5 = arith.constant 0 : i1
-  %k6 = arith.constant 2 : i64
-  %ny161 = arith.muli %ny, %k2 : i64
-  %big2 = arith.cmpi uge, %ny161, %nx : i64
-  %res3 = scf.if %big2 -> i64 {
-    %ur4 = func.call @nx_rows_union_walk(%x, %rb, %nx, %y, %ny, %out) : (!llvm.ptr, i64, i64, !llvm.ptr, i64, !llvm.ptr) -> i64
-    scf.yield %ur4 : i64
-  } else {
-  %ix5 = arith.index_cast %ny : i64 to index
-    %ik6:2 = scf.for %j = %k3 to %ix5 step %k4 iter_args(%ii = %k0, %kk = %k0) -> (i64, i64) {
-  %i67 = arith.index_cast %j : index to i64
-  %off8 = arith.muli %i67, %rb : i64
-  %p9 = llvm.getelementptr %y[%off8] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %k3210 = llvm.load %p9 : !llvm.ptr -> i32
-  %key11 = arith.extui %k3210 : i32 to i64
-      %lb12:2 = scf.while (%lo = %ii, %hh = %nx) : (i64, i64) -> (i64, i64) {
-        %go13 = arith.cmpi ult, %lo, %hh : i64
-        scf.condition(%go13) %lo, %hh : i64, i64
-      } do {
-      ^bb0(%lo: i64, %hh: i64):
-        %d14 = arith.subi %hh, %lo : i64
-        %hd15 = arith.divui %d14, %k6 : i64
-        %mid16 = arith.addi %lo, %hd15 : i64
-  %off17 = arith.muli %mid16, %rb : i64
-  %p18 = llvm.getelementptr %x[%off17] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %k3219 = llvm.load %p18 : !llvm.ptr -> i32
-  %key20 = arith.extui %k3219 : i32 to i64
-        %lt21 = arith.cmpi ult, %key20, %key11 : i64
-        %mp122 = arith.addi %mid16, %k1 : i64
-        %nlo23 = arith.select %lt21, %mp122, %lo : i64
-        %nhi24 = arith.select %lt21, %hh, %mid16 : i64
-        scf.yield %nlo23, %nhi24 : i64, i64
-      }
-      %dr25:2 = scf.while (%i = %ii, %k = %kk) : (i64, i64) -> (i64, i64) {
-        %go26 = arith.cmpi ult, %i, %lb12#0 : i64
-        scf.condition(%go26) %i, %k : i64, i64
-      } do {
-      ^bb0(%i: i64, %k: i64):
-  %off27 = arith.muli %i, %rb : i64
-  %p28 = llvm.getelementptr %x[%off27] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %off29 = arith.muli %k, %rb : i64
-  %p30 = llvm.getelementptr %out[%off29] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  func.call @nx_rows_copy1(%p30, %p28, %rb) : (!llvm.ptr, !llvm.ptr, i64) -> ()
-        %ip31 = arith.addi %i, %k1 : i64
-        %kp32 = arith.addi %k, %k1 : i64
-        scf.yield %ip31, %kp32 : i64, i64
-      }
-  %off33 = arith.muli %dr25#1, %rb : i64
-  %p34 = llvm.getelementptr %out[%off33] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  func.call @nx_rows_copy1(%p34, %p9, %rb) : (!llvm.ptr, !llvm.ptr, i64) -> ()
-      %k135 = arith.addi %dr25#1, %k1 : i64
-      %inx36 = arith.cmpi ult, %dr25#0, %nx : i64
-      %eq37 = scf.if %inx36 -> i1 {
-  %off38 = arith.muli %dr25#0, %rb : i64
-  %p39 = llvm.getelementptr %x[%off38] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %k3240 = llvm.load %p39 : !llvm.ptr -> i32
-  %key41 = arith.extui %k3240 : i32 to i64
-        %e42 = arith.cmpi eq, %key41, %key11 : i64
-        scf.yield %e42 : i1
-      } else {
-        scf.yield %k5 : i1
-      }
-      %ip243 = arith.addi %dr25#0, %k1 : i64
-      %inew44 = arith.select %eq37, %ip243, %dr25#0 : i64
-      scf.yield %inew44, %k135 : i64, i64
-    }
-    %dt45:2 = scf.while (%i = %ik6#0, %k = %ik6#1) : (i64, i64) -> (i64, i64) {
-      %go46 = arith.cmpi ult, %i, %nx : i64
-      scf.condition(%go46) %i, %k : i64, i64
-    } do {
-    ^bb0(%i: i64, %k: i64):
-  %off47 = arith.muli %i, %rb : i64
-  %p48 = llvm.getelementptr %x[%off47] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %off49 = arith.muli %k, %rb : i64
-  %p50 = llvm.getelementptr %out[%off49] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  func.call @nx_rows_copy1(%p50, %p48, %rb) : (!llvm.ptr, !llvm.ptr, i64) -> ()
-      %ip51 = arith.addi %i, %k1 : i64
-      %kp52 = arith.addi %k, %k1 : i64
-      scf.yield %ip51, %kp52 : i64, i64
-    }
-    scf.yield %dt45#1 : i64
-  }
-  return %res3 : i64
 }
 
 func.func @mlnix_rows_sort(%src: !llvm.ptr, %dst: !llvm.ptr, %temp: !llvm.ptr, %n: i64, %rb: i64, %less: (!llvm.ptr, !llvm.ptr, !llvm.ptr) -> i32, %ctx: !llvm.ptr) {

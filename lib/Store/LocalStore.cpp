@@ -200,13 +200,6 @@ static void copyRecursive(const composite::Text &from, const composite::Text &to
   (void)top;
 }
 
-composite::Text Store::computeStorePathForPath(std::string_view name, std::string_view srcPath,
-                                               FileIngestionMethod method, HashAlgo algo,
-                                               const PathFilter &filter) {
-  Hash h = method == FileIngestionMethod::NixArchive ? hashPath(srcPath, filter, algo).a
-                                                     : hashFile(algo, srcPath);
-  return makeFixedOutputPath(settings.storeDir, name, method, h);
-}
 
 composite::Text Store::addToStore(std::string_view name, std::string_view srcPath, FileIngestionMethod method,
                                  HashAlgo algo, const PathFilter &filter,

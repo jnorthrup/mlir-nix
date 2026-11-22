@@ -609,9 +609,12 @@ def TS_CompareOp : TS_Op<"compare", [Pure]> {
 // Series2, the split, and the two projections that allocate nothing
 //===----------------------------------------------------------------------===//
 
+// ReifiedSplitSeries2 IS a Series2 (ReifiedSplitSeries2.kt), so the projections take either.
+def TS_Series2OrSplit : AnyTypeOf<[TS_Series2Type, TS_SplitType], "a Series2 or a split">;
+
 def TS_LeftOfOp : TS_Op<"leftOf", [Pure]> {
   let summary = "the left projection of a Series2 (a column, read where it lies)";
-  let arguments = (ins TS_Series2Type:$series);
+  let arguments = (ins TS_Series2OrSplit:$series);
   let results = (outs TS_SeriesType:$result);
   let assemblyFormat = "$series attr-dict `:` type($series) `->` type($result)";
   let description = [{
@@ -622,7 +625,7 @@ def TS_LeftOfOp : TS_Op<"leftOf", [Pure]> {
 
 def TS_RightOfOp : TS_Op<"rightOf", [Pure]> {
   let summary = "the right projection of a Series2, as leftOf projects the left";
-  let arguments = (ins TS_Series2Type:$series);
+  let arguments = (ins TS_Series2OrSplit:$series);
   let results = (outs TS_SeriesType:$result);
   let assemblyFormat = "$series attr-dict `:` type($series) `->` type($result)";
 }
