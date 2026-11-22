@@ -69,28 +69,23 @@ composite::Text absPath(std::string_view p) {
   return nixfe::canonPath(composite::cat(getcwd(buf, sizeof buf) ? buf : "/", '/', p));
 }
 
+/// The text algebra is lowered/tools/ToolOpts.mlir.  A text entry returns -need-2 when the room is short: size, then drain.
+template <class F> composite::Text drained(F f) {
+  composite::Text t;
+  int64_t r = f(nullptr, 0);
+  if (r < -1) { t.resize(size_t(-r - 2)); r = f(t.begin(), int64_t(t.size())); }
+  t.truncate(size_t(r));
+  return t;
+}
+
+extern "C" int64_t mlnix_ts_nixpath(const char *p, int64_t n, int64_t *recs, int64_t cap);
+/// NIX_PATH's elements as records (prefix off/len, path off/len) into s.
 composite::MutableSeries<SearchPathElem> parseNixPath(std::string_view s) {
+  int64_t need = mlnix_ts_nixpath(s.data(), s.size(), nullptr, 0); // -count-2, or 0 when there is none
+  composite::MutableSeries<int64_t> r(size_t(need < 0 ? -need - 2 : 0) * 4);
   composite::MutableSeries<SearchPathElem> res;
-  size_t i = 0;
-  while (i < s.size()) {
-    size_t j = i;
-    composite::Text elem;
-    while (j < s.size()) {
-      if (s[j] == ':') {
-        if (s.compare(j, 3, "://") == 0) { elem += "://"; j += 3; continue; }
-        break;
-      }
-      elem += s[j++];
-    }
-    if (!elem.empty()) {
-      SearchPathElem e;
-      auto eq = elem.find('=');
-      if (eq != composite::npos) { e.prefix = composite::Text(elem.substr(0, eq)); e.path = composite::Text(elem.substr(eq + 1)); }
-      else e.path = composite::mv(elem);
-      res.append(composite::mv(e));
-    }
-    i = j + 1;
-  }
+  for (int64_t k = 0, n = mlnix_ts_nixpath(s.data(), s.size(), r.data(), r.size() / 4); k < n; k++)
+    res.append({composite::Text(s.substr(r[4 * k], r[4 * k + 1])), composite::Text(s.substr(r[4 * k + 2], r[4 * k + 3]))});
   return res;
 }
 
@@ -565,6 +560,7 @@ int cmdInstantiate(int argc, char **argv, int start, bool build) {
   return runEvalCommand(o, build);
 }
 
+extern "C" int64_t mlnix_ts_printenv(const int64_t *envs, int64_t nenv, const int64_t *args, int64_t nargs, char *into, int64_t cap);
 int cmdStore(int argc, char **argv, int start) {
   Options o;
   std::string_view op;
@@ -696,10 +692,10 @@ int cmdStore(int argc, char **argv, int start) {
     } else if (op == "--print-env") {
       for (auto &a : args) {
         const auto &d = store.readDerivation(toStore(a));
-        for (auto &[k, v] : d.env) lineToStdout(composite::cat("export ", k, "; ", k, "='", v, "'"));
-        composite::Text args("export _args; _args='");
-        for (auto &x : d.args) args.put(x).put(' ');
-        lineToStdout(args + "'");
+        composite::MutableSeries<int64_t> envs, xs; // windows: (key, value) per variable, then the arguments
+        for (auto &[k, v] : d.env) for (const composite::Text *t : {&k, &v}) envs.append(int64_t(intptr_t(t->data()))), envs.append(t->size());
+        for (auto &x : d.args) xs.append(int64_t(intptr_t(x.data()))), xs.append(x.size());
+        nixsys::toStdout(drained([&](char *p, int64_t cap) { return mlnix_ts_printenv(envs.data(), d.env.size(), xs.data(), d.args.size(), p, cap); }));
       }
     } else {
       usage("no operation specified");
@@ -784,55 +780,19 @@ int cmdDerivationShow(int argc, char **argv, int start) {
   return 0;
 }
 
-void printHelp() {
-  static const char help[] = R"(mlnix - a Nix implementation built on an MLIR dialect
+extern "C" int64_t mlnix_ts_help(char *into, int64_t cap);
+void printHelp() { nixsys::toStdout(drained(mlnix_ts_help)); }
 
-Usage:
-  mlnix instantiate [options] [FILE | -E EXPR]...   (like nix-instantiate)
-  mlnix build       [options] [FILE | -E EXPR]...   (like nix-build)
-  mlnix eval        [options] [FILE | -E EXPR]      (= instantiate --eval --strict)
-  mlnix parse       [FILE | -E EXPR]                (= instantiate --parse)
-  mlnix emit-mlir   [--no-opt] [FILE | -E EXPR]     print the nix dialect IR
-  mlnix run-mlir    FILE.mlir [-A ATTR]             evaluate nix dialect IR
-  mlnix store       --add|--add-fixed|--realise|--query|--dump|--restore|--gc|--delete|--verify ...
-  mlnix hash        path|file|--to-base32|--to-base16|--to-sri [--type ALGO] [--sri|--base32] ...
-  mlnix derivation  show DRV...
-
-Common options:
-  -A ATTR  --arg NAME EXPR  --argstr NAME STR  -I PATH  --show-trace
-  --store-dir DIR   logical store directory (default /nix/store, or $NIX_STORE_DIR)
-  --store ROOT      physical root of a chroot store (local?root=ROOT), or dummy://
-  --readonly-mode   compute store paths without writing
-  --extra-experimental-features pipe-operators|parse-toml-timestamps
-
-When invoked as nix-instantiate, nix-build, nix-store or nix-hash, mlnix
-behaves like the corresponding Nix command.  Invoked as nix it is the nix command:
-  nix build|eval|run REF#ATTR, nix profile add|list|remove REF#ATTR, nix derivation|hash|store
-)";
-  nixsys::toStdout(help, sizeof help - 1);
-}
-
+extern "C" int64_t mlnix_ts_nixlist(const int64_t *wins, int64_t n, char *into, int64_t cap);
+extern "C" int64_t mlnix_ts_args(char **argv, int64_t argc, int64_t cmd, char **out);
 int realMain(int argc, char **argv) {
   composite::Text prog = nixstore::baseNameOf(argv[0]);
   if (prog == "nix") { // the nix command is Nix (lib/Corepkgs/cli.nix); here only its argument vector is made a Nix list
-    composite::Text list("[");
-    for (int i = 1; i < argc; i++) {
-      list.put(" \"");
-      for (const char *c = argv[i]; *c; c++) {
-        if (*c == '"' || *c == '\\') list.put('\\').put(*c);
-        else if (*c == '$' && c[1] == '{') list.put("\\$");
-        else if (*c == '\n') list.put("\\n");
-        else list.put(*c);
-      }
-      list.put('"');
-    }
-    list.put(" ]");
-    composite::Text expr = composite::cat("(import <nix/cli.nix>) { args = ", list, "; }");
-    composite::MutableSeries<char *> nargs;
-    nargs.append(argv[0]);
-    for (const char *a : {"--eval", "--raw", "--read-write-mode", "-E"}) nargs.append(const_cast<char *>(a));
-    nargs.append(const_cast<char *>(expr.c_str()));
-    return cmdInstantiate(nargs.size(), nargs.data(), 1, false);
+    composite::MutableSeries<int64_t> wins;
+    for (int i = 1; i < argc; i++) wins.append(int64_t(intptr_t(argv[i]))), wins.append(int64_t(strlen(argv[i])));
+    composite::Text expr = drained([&](char *p, int64_t cap) { return mlnix_ts_nixlist(wins.data(), argc - 1, p, cap); });
+    const char *nargs[] = {argv[0], "--eval", "--raw", "--read-write-mode", "-E", expr.c_str()};
+    return cmdInstantiate(6, const_cast<char **>(nargs), 1, false);
   }
   if (prog == "nix-instantiate") return cmdInstantiate(argc, argv, 1, false);
   if (prog == "nix-build") return cmdInstantiate(argc, argv, 1, true);
@@ -854,19 +814,10 @@ int realMain(int argc, char **argv) {
   }
   if (cmd == "instantiate") return cmdInstantiate(argc, argv, 2, false);
   if (cmd == "build") return cmdInstantiate(argc, argv, 2, true);
-  if (cmd == "eval" || cmd == "parse" || cmd == "emit-mlir" || cmd == "run-mlir") {
-    composite::MutableSeries<char *> args;
-    for (int ai = 0; ai < argc; ai++) args.append(argv[ai]);
-    composite::MutableSeries<composite::Text> extra;
-    if (cmd == "eval") extra = {"--eval", "--strict"};
-    if (cmd == "parse") extra = {"--parse"};
-    if (cmd == "emit-mlir") extra = {"--emit-mlir"};
-    if (cmd == "run-mlir") extra = {"--eval", "--strict"};
-    composite::MutableSeries<char *> nargs;
-    nargs.append(argv[0]);
-    for (auto &e : extra) nargs.append(const_cast<char *>(e.c_str()));
-    for (int i = 2; i < argc; i++) nargs.append(argv[i]);
-    return cmdInstantiate(nargs.size(), nargs.data(), 1, false);
+  if (cmd == "eval" || cmd == "parse" || cmd == "emit-mlir" || cmd == "run-mlir") { // argv[0], the command's flags, the rest
+    composite::MutableSeries<char *> nargs(size_t(argc) + 1);
+    int64_t n = mlnix_ts_args(argv, argc, cmd == "eval" ? 0 : cmd == "parse" ? 1 : cmd == "emit-mlir" ? 2 : 3, nargs.data());
+    return cmdInstantiate(int(n), nargs.data(), 1, false);
   }
   if (cmd == "primops") {
     // Dump the live primop registry ("<base-env key> <arity>"); the continent
