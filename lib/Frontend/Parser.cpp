@@ -2195,59 +2195,36 @@ void skim(Origin *origin, const ParseOptions &po) {
   Parser(Mode::Skip, origin, po, &bands).top();
 }
 
+// lexBands' layering is lowered/nixfe/BandLayers.mlir's: the tokens go in as a word each (kind | ch << 8 | offset << 16),
+// the rows {open, close, kind, first, count} and the ends come back in scratch, and are adopted here.  A lex error stops
+// the walk where the token loop stopped: before the token whose lookahead failed.
+extern "C" int64_t nixfe_lb_layers(const uint64_t *toks, uint64_t n, uint64_t total, uint64_t ebase, uint64_t *rows,
+                                   uint64_t *ends, uint64_t *stack, uint64_t *pend, uint64_t *counts);
+
 bool confix::lexBands(Origin *origin, const ParseOptions &opts, confix::Bands &out) {
+  composite::MutableSeries<uint64_t> toks;
+  bool threw = false;
   try {
     Lexer lx(origin, opts);
-    confix::Layers ls(out);
-    for (Token t = lx.nextToken(), n;; t = n) {
-      n = t.t == T_EOF ? t : lx.nextToken();
-      switch (t.t) {
-      case T_EOF: return ls.balanced();
-      case T_DOLLAR_CURLY: ls.open(confix::K_INTERP, t.offset); break;
-      case T_IND_STRING_OPEN: ls.open(confix::K_IND_STRING, t.offset); break;
-      case T_IND_STRING_CLOSE:
-        if (!ls.close(confix::K_IND_STRING, confix::K_IND_STRING, t.offset)) return false;
-        break;
-      case T_LET:
-        if (!(n.t == T_CHAR && n.ch == '{')) ls.open(confix::K_LET, t.offset);
-        break;
-      case T_IN:
-        if (!ls.close(confix::K_LET, confix::K_LET, t.offset)) return false;
-        break;
-      case T_WITH: case T_ASSERT: ls.owe(); break;
-      case T_CHAR:
-        switch (t.ch) {
-        case '{': ls.open(confix::K_BRACE, t.offset); break;
-        case '}':
-          if (!ls.close(confix::K_BRACE, confix::K_INTERP, t.offset)) return false;
-          break;
-        case '(': ls.open(confix::K_PAREN, t.offset); break;
-        case ')':
-          if (!ls.close(confix::K_PAREN, confix::K_PAREN, t.offset)) return false;
-          break;
-        case '[': ls.open(confix::K_BRACKET, t.offset); break;
-        case ']':
-          if (!ls.close(confix::K_BRACKET, confix::K_BRACKET, t.offset)) return false;
-          break;
-        case '"':
-          // Inside a string the next quote closes it (an interpolation would have opened a band of its own).
-          if (ls.inside(confix::K_STRING)) {
-            if (!ls.close(confix::K_STRING, confix::K_STRING, t.offset)) return false;
-          } else {
-            ls.open(confix::K_STRING, t.offset);
-          }
-          break;
-        case ';': ls.semi(t.offset); break;
-        case ',': ls.comma(t.offset); break;
-        default: break;
-        }
-        break;
-      default: break;
-      }
+    for (Token t = lx.nextToken();; t = lx.nextToken()) {
+      toks.append(uint64_t(t.t) | uint64_t(uint8_t(t.ch)) << 8 | uint64_t(t.offset) << 16);
+      if (t.t == T_EOF) break;
     }
   } catch (const ParseError &) {
-    return false;
+    threw = true;
   }
+  size_t n = toks.size(), walk = threw && n ? n - 1 : n;
+  composite::MutableSeries<uint64_t> scratch(10 * n + 1, 0);
+  uint64_t *rows = scratch.data(), *ends = rows + 5 * n, *stack = ends + n, *pend = stack + 3 * n, counts[2];
+  uint32_t base = out.rows.size();
+  bool ok = nixfe_lb_layers(toks.data(), walk, n, out.ends.size(), rows, ends, stack, pend, counts);
+  for (uint32_t r = 0; r < counts[0]; r++) {
+    const uint64_t *w = rows + 5 * r;
+    out.rows.append(join::TwInt(uint32_t(w[0]), uint32_t(w[1])), uint8_t(w[2]), join::TwInt(uint32_t(w[3]), uint32_t(w[4])));
+    out.opening.try_emplace(uint32_t(w[0]), base + r);
+  }
+  for (uint64_t e = 0; e < counts[1]; e++) out.ends.append(uint32_t(ends[e]));
+  return ok;
 }
 
 } // namespace nixfe
