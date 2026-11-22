@@ -4,10 +4,11 @@
 // kif-to-trikeshed and trikeshed-lower-cursors and run.
 //
 // RUN: d=%S/../kif; { mlnix-kif $d/taxonomy-a.kif $d/taxonomy-b.kif | sed '1d;$d'; cat %s; } | mlnix-opt --kif-to-trikeshed | FileCheck %s --check-prefix=TABLES
-// RUN: d=%S/../kif; { mlnix-kif $d/taxonomy-a.kif $d/taxonomy-b.kif | sed '1d;$d'; cat %s; } | mlnix-opt --kif-to-trikeshed --trikeshed-lower-cursors | mlir-opt --ownership-based-buffer-deallocation --canonicalize --buffer-deallocation-simplification --bufferization-lower-deallocations --convert-scf-to-cf --expand-strided-metadata --lower-affine --finalize-memref-to-llvm --convert-arith-to-llvm --convert-index-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts | mlir-runner -e main -entry-point-result=i32 -shared-libs=$(ls $(dirname $(which mlir-runner))/../lib/libmlir_runner_utils.* | head -1) | FileCheck %s
+// RUN: d=%S/../kif; mlnix-kif $d/taxonomy-a.kif $d/taxonomy-b.kif --query %s --pass kif-to-trikeshed,trikeshed-lower-cursors --emit-bytecode | mlir-opt --ownership-based-buffer-deallocation --canonicalize --buffer-deallocation-simplification --bufferization-lower-deallocations --convert-scf-to-cf --expand-strided-metadata --lower-affine --finalize-memref-to-llvm --convert-arith-to-llvm --convert-index-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts | mlir-runner -e main -entry-point-result=i32 -shared-libs=$(ls $(dirname $(which mlir-runner))/../lib/libmlir_runner_utils.* | head -1) | FileCheck %s
 //
-// The theory is mlnix-kif's @kb of the two files (its module's first and last lines cut, so it and this file are one
-// module).  The numbers are sumo.nix's, from its own evaluation (test/kif/taxonomy-oracle.nix):
+// The theory is mlnix-kif's @kb of the two files: printed, its module's first and last lines cut so that it and this file
+// are one module, for mlnix-opt (TABLES); or read with this file as a --query, laid out and lowered in mlnix-kif and
+// written as bytecode, never printed (the run).  The numbers are sumo.nix's, from its own evaluation (test/kif/taxonomy-oracle.nix):
 //   mlnix eval --strict --json --arg sumo <sumo-nix> --arg files '[ ./test/kif/taxonomy-a.kif ./test/kif/taxonomy-b.kif ]' test/kif/taxonomy-oracle.nix
 //   [[30,13,12,49,3,3,9],[5,2,5,2,6,6,9,4,1,5,1,3]]
 // forms, classes, withParent, ancestorLinks, things, relations, Human's ancestors; then each class with a parent, by name

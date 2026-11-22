@@ -22,7 +22,7 @@ mlnix_lower_trikeshed(mlnix lowered/tools/ToolOpts.mlir ToolOpts)
 
 # KIF files into a kif.theory, and the chase (lib/Dialect/KifImport.cpp, KifChase.cpp).
 add_executable(mlnix-kif mlnix-kif.cpp)
-target_link_libraries(mlnix-kif PRIVATE MLIRNix MLIRTrikeShed MLIRIR MLIRParser MLIRPass MLIRSupport)
+target_link_libraries(mlnix-kif PRIVATE MLIRNix MLIRTrikeShed MLIRIR MLIRParser MLIRPass MLIRSupport MLIRBytecodeWriter)
 llvm_update_compile_flags(mlnix-kif)
 
 # Parse a list of files in one process (scripts/parse-corpus.py compares two builds with it).
