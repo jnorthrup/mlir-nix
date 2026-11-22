@@ -161,13 +161,7 @@ func.func private @nixstore_nw_link(!llvm.ptr, i64) -> i64
 func.func private @nixstore_nw_odd(!llvm.ptr, i64)
 func.func private @nixstore_ts_sortwins(!llvm.ptr, i64, !llvm.ptr)
 
-// the n bytes at p as a series
-func.func private @narw_bytes(%p: !llvm.ptr, %n: i64) -> !b {
-  %d = func.call @nar_desc(%p, %n) : (!llvm.ptr, i64) -> !d
-  %m = builtin.unrealized_conversion_cast %d : !d to !m
-  %s = builtin.unrealized_conversion_cast %m : !m to !b
-  return %s : !b
-}
+memref.global "private" constant @narw_sep : memref<2xi8> = dense<[47, 0]>
 
 // `at` past the n bytes at p
 func.func private @narw_skip(%p: !llvm.ptr, %n: i64) -> !llvm.ptr {
@@ -193,19 +187,14 @@ func.func private @narw_put(%pb: !llvm.ptr, %from: i64, %pre: i64, %p: !llvm.ptr
   %w = arith.addi %len, %c1 : i64
   %need = arith.addi %from, %w : i64
   %base = func.call @nixstore_nar_room(%pb, %need) : (!llvm.ptr, i64) -> !llvm.ptr
-  %slash = trikeshed.series %one : !b {
-  ^bb0(%i: index):
-    %c47 = arith.constant 47 : i8
-    trikeshed.yield %c47 : i8
-  }
+  %sg = memref.get_global @narw_sep : memref<2xi8>
+  %sep = trikeshed.text %sg : memref<2xi8> -> !b
   %pre_i = arith.index_cast %pre : i64 to index
-  %lead = trikeshed.slice %slash[%c0i, %pre_i] : !b -> !b
-  %name = func.call @narw_bytes(%p, %n) : (!llvm.ptr, i64) -> !b
-  %nul = trikeshed.series %one : !b {
-  ^bb0(%i: index):
-    %z = arith.constant 0 : i8
-    trikeshed.yield %z : i8
-  }
+  %lead = trikeshed.slice %sep[%c0i, %pre_i] : !b -> !b
+  %name_d = func.call @nar_desc(%p, %n) : (!llvm.ptr, i64) -> !d
+  %name_m = builtin.unrealized_conversion_cast %name_d : !d to !m
+  %name = builtin.unrealized_conversion_cast %name_m : !m to !b
+  %nul = trikeshed.slice %sep[%one, %one] : !b -> !b
   %all = trikeshed.combine %lead, %name, %nul : !b, !b, !b -> !b
   %at = func.call @narw_skip(%base, %from) : (!llvm.ptr, i64) -> !llvm.ptr
   %od = func.call @nar_desc(%at, %w) : (!llvm.ptr, i64) -> !d
@@ -366,8 +355,8 @@ func.func private @nixstore_nr_dir(!llvm.ptr, i64)
 
 memref.global "private" constant @narr_dots : memref<2xi8> = dense<[46, 46]>
 
-// the token id's bytes (a slice of the blob) and their address
-func.func private @narr_tok(%id: i64) -> (!b, !llvm.ptr, i64) {
+// the token id's address in the blob and its length
+func.func private @narr_tok(%id: i64) -> (!llvm.ptr, i64) {
   %idi = arith.index_cast %id : i64 to index
   %og = memref.get_global @nar_toff : memref<14xi32>
   %offs = trikeshed.text %og : memref<14xi32> -> !i32s
@@ -376,42 +365,40 @@ func.func private @narr_tok(%id: i64) -> (!b, !llvm.ptr, i64) {
   %lg = memref.get_global @nar_tlen : memref<14xi32>
   %lens = trikeshed.text %lg : memref<14xi32> -> !i32s
   %len32 = trikeshed.at %lens[%idi] : !i32s, index -> i32
-  %len = arith.index_cast %len32 : i32 to index
   %len64 = arith.extui %len32 : i32 to i64
   %tg = memref.get_global @nar_tokens : memref<79xi8>
-  %blob = trikeshed.text %tg : memref<79xi8> -> !b
-  %tok = trikeshed.slice %blob[%off, %len] : !b -> !b
   %base = memref.extract_aligned_pointer_as_index %tg : memref<79xi8> -> index
   %at = arith.addi %base, %off : index
   %at64 = arith.index_cast %at : index to i64
   %p = llvm.inttoptr %at64 : i64 to !llvm.ptr
-  return %tok, %p, %len64 : !b, !llvm.ptr, i64
+  return %p, %len64 : !llvm.ptr, i64
 }
 
 // are the n bytes at nar + s the token id
 func.func private @narr_is(%nar: !llvm.ptr, %s: i64, %n: i64, %id: i64) -> i1 {
   %at = func.call @narw_skip(%nar, %s) : (!llvm.ptr, i64) -> !llvm.ptr
-  %xs = func.call @narw_bytes(%at, %n) : (!llvm.ptr, i64) -> !b
-  %tok, %tp, %tn = func.call @narr_tok(%id) : (i64) -> (!b, !llvm.ptr, i64)
+  %xs_d = func.call @nar_desc(%at, %n) : (!llvm.ptr, i64) -> !d
+  %xs_m = builtin.unrealized_conversion_cast %xs_d : !d to !m
+  %xs = builtin.unrealized_conversion_cast %xs_m : !m to !b
+  %tp, %tn = func.call @narr_tok(%id) : (i64) -> (!llvm.ptr, i64)
+  %tok_d = func.call @nar_desc(%tp, %tn) : (!llvm.ptr, i64) -> !d
+  %tok_m = builtin.unrealized_conversion_cast %tok_d : !d to !m
+  %tok = builtin.unrealized_conversion_cast %tok_m : !m to !b
   %c = trikeshed.compare %xs, %tok unsigned : !b, !b
   %z = arith.constant 0 : i32
   %eq = arith.cmpi eq, %c, %z : i32
   return %eq : i1
 }
 
-// str(): the string at p as (start, length) and the position after its pad
-func.func private @narr_str(%pb: !llvm.ptr, %nar: !llvm.ptr, %size: i64, %p: i64) -> (i64, i64, i64) {
+// the little-endian u64 at nar + p (its 8 shifted bytes or-folded; the series is freed before the caller goes on)
+func.func private @narr_word(%nar: !llvm.ptr, %p: i64) -> i64 {
   %c0 = arith.constant 0 : i64
   %c8 = arith.constant 8 : i64
   %c8i = arith.constant 8 : index
-  %null = llvm.inttoptr %c0 : i64 to !llvm.ptr
-  %p8 = arith.addi %p, %c8 : i64
-  %short = arith.cmpi ugt, %p8, %size : i64
-  scf.if %short {
-    func.call @nixstore_nr_fail(%pb, %c0, %null, %c0) : (!llvm.ptr, i64, !llvm.ptr, i64) -> ()
-  }
   %at = func.call @narw_skip(%nar, %p) : (!llvm.ptr, i64) -> !llvm.ptr
-  %xs = func.call @narw_bytes(%at, %c8) : (!llvm.ptr, i64) -> !b
+  %xs_d = func.call @nar_desc(%at, %c8) : (!llvm.ptr, i64) -> !d
+  %xs_m = builtin.unrealized_conversion_cast %xs_d : !d to !m
+  %xs = builtin.unrealized_conversion_cast %xs_m : !m to !b
   %w = trikeshed.series %c8i : !s64 {
   ^bb0(%i: index):
     %b = trikeshed.at %xs[%i] : !b, index -> i8
@@ -427,6 +414,20 @@ func.func private @narr_str(%pb: !llvm.ptr, %nar: !llvm.ptr, %size: i64, %p: i64
     %o = arith.ori %acc, %x : i64
     trikeshed.yield %o : i64
   }
+  return %n : i64
+}
+
+// str(): the string at p as (start, length) and the position after its pad
+func.func private @narr_str(%pb: !llvm.ptr, %nar: !llvm.ptr, %size: i64, %p: i64) -> (i64, i64, i64) {
+  %c0 = arith.constant 0 : i64
+  %c8 = arith.constant 8 : i64
+  %null = llvm.inttoptr %c0 : i64 to !llvm.ptr
+  %p8 = arith.addi %p, %c8 : i64
+  %short = arith.cmpi ugt, %p8, %size : i64
+  scf.if %short {
+    func.call @nixstore_nr_fail(%pb, %c0, %null, %c0) : (!llvm.ptr, i64, !llvm.ptr, i64) -> ()
+  }
+  %n = func.call @narr_word(%nar, %p) : (!llvm.ptr, i64) -> i64
   %end = arith.addi %p8, %n : i64
   %over = arith.cmpi ugt, %end, %size : i64
   scf.if %over {
@@ -449,7 +450,7 @@ func.func private @narr_expect(%pb: !llvm.ptr, %nar: !llvm.ptr, %size: i64, %p: 
   %eq = func.call @narr_is(%nar, %s, %n, %id) : (!llvm.ptr, i64, i64, i64) -> i1
   %ne = arith.xori %eq, %true : i1
   scf.if %ne {
-    %tok, %tp, %tn = func.call @narr_tok(%id) : (i64) -> (!b, !llvm.ptr, i64)
+    %tp, %tn = func.call @narr_tok(%id) : (i64) -> (!llvm.ptr, i64)
     %c1 = arith.constant 1 : i64
     func.call @nixstore_nr_fail(%pb, %c1, %tp, %tn) : (!llvm.ptr, i64, !llvm.ptr, i64) -> ()
   }
@@ -536,7 +537,9 @@ func.func private @narr_node(%pb: !llvm.ptr, %nar: !llvm.ptr, %size: i64, %p: i6
         %e2 = func.call @narr_expect(%pb, %nar, %size, %e1, %t_name) : (!llvm.ptr, !llvm.ptr, i64, i64, i64) -> i64
         %ns, %nn, %e3 = func.call @narr_str(%pb, %nar, %size, %e2) : (!llvm.ptr, !llvm.ptr, i64, i64) -> (i64, i64, i64)
         %np = func.call @narw_skip(%nar, %ns) : (!llvm.ptr, i64) -> !llvm.ptr
-        %name = func.call @narw_bytes(%np, %nn) : (!llvm.ptr, i64) -> !b
+        %name_d = func.call @nar_desc(%np, %nn) : (!llvm.ptr, i64) -> !d
+        %name_m = builtin.unrealized_conversion_cast %name_d : !d to !m
+        %name = builtin.unrealized_conversion_cast %name_m : !m to !b
         // the name is empty, ".", "..", or holds a '/'
         %dg = memref.get_global @narr_dots : memref<2xi8>
         %dots = trikeshed.text %dg : memref<2xi8> -> !b

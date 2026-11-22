@@ -226,6 +226,7 @@ struct NarWriter {
   composite::Text path;                  // the entry's path, a NUL after it (the walk writes it)
   composite::MutableSeries<NarDir> dirs; // a directory's names, by depth
   char out[PATH_MAX + 512], link[PATH_MAX];
+  NarWriter(const Sink &s, const PathFilter &f) : sink(s), filter(f) {}
   std::string_view at(int64_t n) const { return {path.data(), size_t(n)}; }
   void dump(std::string_view root) { nixstore_ts_nardump(this, &path, out, link, root.data(), int64_t(root.size())); }
 };
