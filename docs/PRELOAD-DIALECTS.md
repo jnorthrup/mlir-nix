@@ -185,7 +185,12 @@ Steps:
      of j as folds, and a series of pairs read a half at a time made a column a half (test/mlir/twin-routing.mlir).
      test/mlir/confix-index.mlir checks every column, both facets, and a sort and a search of the text's strings against a
      separate reader of the text.
-   - Not done: Depths, KeyToChild for a key known only at run time, YAML (its retry on Room), groupBy.
+   - groupBy (GroupBy.kt's groupClusters: each element's group and each group's first element, first-appearance order or
+     `ordered`) and keyedJoin (KeyedJoin.kt: each left element's (first, count) run among the equal elements of a right side
+     sorted by the order, the shape adjacency makes) are series ops with an order region; trikeshed-lower-cursors rewrites
+     them into sorted, where, project, bisect and series before its conversion (test/mlir/cursor-joins.mlir).  mlnixci's
+     columns.mlir is written in them: col_code is a groupBy ordered, mark a keyedJoin, etc_join a keyedJoin each way.
+   - Not done: Depths, KeyToChild for a key known only at run time, YAML (its retry on Room), pivot.
 6. kif and sumo as series and cursors.
    - KIF lowered out of the Nix reader (started): `mlnix-kif` reads KIF files into a `kif.theory` (lib/Dialect/KifImport.cpp,
      sumo-nix/kif.nix's tokens and forms; equal terms one node across all the files of a bag; `file` on each fact and rule).
