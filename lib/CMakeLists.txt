@@ -172,10 +172,17 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/PrefetchOps.mlir PrefetchOps)
 # turn the validity flag into the Maybe, parseRest's error wording stays).  trikeshed.at over the input series<i8>, a
 # constant reverse-alphabet table and guarded byte stores.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/Decoders.mlir Decoders)
-# The NAR framing byte emission of NarWriter (StorePaths.cpp's u64/pad/str bodies are gone; the bridges flush a stack
-# buffer to the Sink, the walk stays).  The little-endian prefix, the pad and the length+bytes+pad composition are
-# trikeshed.series / slice / combine / drain; the constant NAR tokens are a blob + off/len tables read with at.
+# The NAR: NarWriter's framing, its walk and restorePath's reader (StorePaths.cpp keeps lstat, the listing, the file's
+# bytes, readlink, the PathFilter, the Sink, the writes and the wording as callbacks).  The little-endian prefix, the pad
+# and the length+bytes+pad composition are trikeshed.series / slice / combine / drain; the constant NAR tokens are a blob
+# + off/len tables read with at; a directory's names are put in byte order by StoreGraph's sorted, each entry's path is
+# one combine drained at its parent's end; the reader compares each string with the token expected (compare) and checks
+# a name with compare and a fold.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/NarFraming.mlir NarFraming)
+# nixstore::jsonFloat (StorePaths.cpp's body is gone; the bridge keeps the snprintf callback and sizes the Text): the
+# shortest round-tripping "%.*e" digits (strtod called here) cut by where/alpha/fold, nlohmann's format_buffer cases as
+# the extents of one combine of slices (sign, literals, zeros, digits, the exponent's digits) drained once.
+mlnix_lower_trikeshed(NixStore lowered/nixstore/JsonFloat.mlir JsonFloat)
 # The store-path name algebra of StorePaths.cpp (makeStorePath's fingerprint `type:algo:hex:storeDir:name` and path
 # `storeDir/nix32-name`, makeType's `type[:ref]*[:self]`, runProgram's argv pointer fill are gone; the bridges keep
 # checkName/compressHash/hashString and the Text sizing).  Each is ONE lazy combine of the pieces drained once into a
