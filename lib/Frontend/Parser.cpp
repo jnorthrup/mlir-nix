@@ -365,6 +365,14 @@ struct Hdr {
   llvm::SmallVector<Formal, 8> fs; // ordered by name once read
 };
 
+// Parser.cpp's text algorithms are lowered/nixfe/TextParts.mlir (its header has each protocol); the parser keeps the
+// grammar actions, the nodes and the throws.
+extern "C" int64_t nixfe_ts_strparts(void *ctx);
+extern "C" int64_t nixfe_ts_strip(const uint64_t *recs, uint64_t n, char *out, uint64_t cap, uint64_t *wins);
+extern "C" int64_t nixfe_ts_path_kind(uint64_t home, const char *lit, uint64_t n);
+extern "C" int64_t nixfe_ts_path_msg(int64_t kind, const char *lit, uint64_t n, char *into, uint64_t cap);
+extern "C" int64_t nixfe_ts_path_home(const char *home, uint64_t hn, const char *lit, uint64_t n, char *into, uint64_t cap);
+
 struct Parser {
   Parser(Mode m, Origin *o, const ParseOptions &po, confix::Bands *bands,
          mlir::ModuleOp module = {}, const GenOptions *go = nullptr)
@@ -1927,39 +1935,13 @@ struct Parser {
     return Comp{Name(), std::move(e)};
   }
 
-  /// string_parts after an opening '"'; stops before the closing '"'.
+  /// string_parts after an opening '"'; stops before the closing '"'.  The loop is nixfe_ts_strparts
+  /// (lowered/nixfe/TextParts.mlir); the grammar actions are the nixfe_sp_* callbacks below, on a StrParts.
+  struct StrParts { Parser *p; llvm::SmallVector<Node, 4> parts; Name single; };
   Node parseStringParts(Pos pos) {
-    llvm::SmallVector<Node, 4> parts;
-    bool interpolated = false;
-    Name single;
-    bool haveSingle = false;
-    if (cur().t == T_STR) {
-      // The common string: one run of text, then the closing quote.  No parts, and no node but the result.
-      Token t = take();
-      Name s = nameOf(t);
-      if (atChar('"')) return strLit(s, pos);
-      parts.push_back(strLit(s, Pos{})); // interpolation or more text follows: this is its first part
-    } else if (atChar('"')) {
-      return strLit(Name::of(""), pos);
-    }
-    while (true) {
-      if (cur().t == T_STR) {
-        Token t = take();
-        single = nameOf(t);
-        haveSingle = true;
-        parts.push_back(strLit(single, Pos{}));
-      } else if (cur().t == T_DOLLAR_CURLY) {
-        take();
-        parts.push_back(parseExpr());
-        expectChar('}');
-        interpolated = true;
-      } else {
-        break;
-      }
-    }
-    if (!atChar('"')) unexpected("'\"'");
-    if (!interpolated) return strLit(haveSingle ? single : Name::of(""), pos);
-    return concat(pos, true, parts);
+    StrParts c{this, {}, {}};
+    int64_t k = nixfe_ts_strparts(&c); // 0 the empty literal, 1 c.single, 2 the interpolation of c.parts
+    return k == 2 ? concat(pos, true, c.parts) : strLit(k ? c.single : Name::of(""), pos);
   }
 
   Node parseSimple() {
@@ -2106,35 +2088,27 @@ struct Parser {
     if (opts.onWarning) opts.onWarning(e);
   }
 
+  /// The lint classification, the messages and the home path's text are TextParts.mlir's; canonPath is CanonPath.mlir's.
   Node makePath(const Token &t) {
     std::string_view lit = lx.text(t); // a slice of the input; the messages below copy it, and are built only when linting
-    if (t.t == T_HPATH) {
-      if (opts.lintAbsolutePaths != Lint::Ignore)
-        diagnose(opts.lintAbsolutePaths, "lint-absolute-path-literals",
-                 composite::cat("home path literals are not portable. Consider replacing path literal '", lit,
-                                "' by a string, relative path, or parameter"),
-                 t.pos);
-    } else if (lit[0] == '/') {
-      if (opts.lintAbsolutePaths != Lint::Ignore)
-        diagnose(opts.lintAbsolutePaths, "lint-absolute-path-literals",
-                 composite::cat("absolute path literals are not portable. Consider replacing path literal '", lit,
-                                "' by a string, relative path, or parameter"),
-                 t.pos);
-    } else if (lit[0] != '.') {
-      if (opts.lintShortPaths != Lint::Ignore)
-        diagnose(opts.lintShortPaths, "lint-short-path-literals",
-                 composite::cat("relative path literal '", lit, "' should be prefixed with '.' for clarity: './", lit, "'"),
-                 t.pos);
+    int64_t kind = nixfe_ts_path_kind(t.t == T_HPATH, lit.data(), lit.size()); // 1 home, 2 absolute, 3 short, 0 none
+    Lint lint = kind == 3 ? opts.lintShortPaths : opts.lintAbsolutePaths;
+    if (kind && lint != Lint::Ignore) {
+      composite::Text msg;
+      msg.resize(2 * lit.size() + 128);
+      msg.truncate(uint32_t(nixfe_ts_path_msg(kind, lit.data(), lit.size(), msg.begin(), msg.size())));
+      diagnose(lint, kind == 3 ? "lint-short-path-literals" : "lint-absolute-path-literals", composite::mv(msg), t.pos);
     }
     static thread_local composite::Text path; // the literal's canonical text, written here and copied once (into the arena, or a node)
     path.clear();
     Pos pos = t.pos;
-    if (t.t == T_HPATH) {
-      path.put(opts.home.data(), uint32_t(opts.home.size())).put(lit.data() + 1, uint32_t(lit.size() - 1));
+    if (kind == 1) {
+      path.resize(opts.home.size() + lit.size());
+      path.truncate(uint32_t(nixfe_ts_path_home(opts.home.data(), opts.home.size(), lit.data(), lit.size(), path.begin(), path.size())));
       pos = Pos{};
     } else {
       composite::Chars litChars = composite::chars(lit.data(), uint32_t(lit.size()));
-      if (lit[0] == '/') canonPath(path, litChars);
+      if (kind == 2) canonPath(path, litChars);
       else canonPath(path, composite::chars(origin->baseDir.data(), uint32_t(origin->baseDir.size())), litChars);
       if (lit.size() > 1 && lit.back() == '/') path.put('/');
     }
@@ -2142,75 +2116,51 @@ struct Parser {
     return mk(K_EXPR, pos, mode == Mode::Gen ? Value(nd::PathOp::create(b, noLoc(), composite::SeriesType::get(b.getContext(), b.getIntegerType(8)), Name::persist(llvm::StringRef(path.data(), path.size())))) : Value());
   }
 
+  /// The indentation is stripped by nixfe_ts_strip (TextParts.mlir) into `piece`: a record a part (its text, and kind 0
+  /// a literal with indent, 1 one without, 2 an antiquotation); it writes each literal's window, empty when dropped.
   Node stripIndentation(Pos pos, composite::MutableSeries<std::pair<Pos, std::variant<Node, Token>>> &es) {
     if (es.empty()) return strLit(Name::of(""), Pos{});
-    bool atStartOfLine = true;
-    size_t minIndent = 1000000, curIndent = 0;
+    llvm::SmallVector<uint64_t, 24> recs;
+    size_t total = 0;
     for (auto &[p, i] : es) {
-      auto *str = std::get_if<Token>(&i);
-      if (!str || !str->hasIndent) {
-        if (atStartOfLine) {
-          atStartOfLine = false;
-          if (curIndent < minIndent) minIndent = curIndent;
-        }
-        continue;
-      }
-      for (char c : lx.text(*str)) {
-        if (atStartOfLine) {
-          if (c == ' ') curIndent++;
-          else if (c == '\n') curIndent = 0;
-          else {
-            atStartOfLine = false;
-            if (curIndent < minIndent) minIndent = curIndent;
-          }
-        } else if (c == '\n') {
-          atStartOfLine = true;
-          curIndent = 0;
-        }
-      }
+      auto *t = std::get_if<Token>(&i);
+      std::string_view s = t ? lx.text(*t) : std::string_view();
+      recs.append({uint64_t(uintptr_t(s.data())), s.size(), t ? uint64_t(!t->hasIndent) : 2});
+      total += s.size();
     }
+    llvm::SmallVector<uint64_t, 16> wins(2 * es.size());
+    piece.resize(total);
+    piece.truncate(uint32_t(nixfe_ts_strip(recs.data(), es.size(), piece.begin(), total, wins.data())));
     llvm::SmallVector<Node, 4> es2;
-    atStartOfLine = true;
-    size_t curDropped = 0;
-    size_t n = es.size();
-    for (auto it = es.begin(); it != es.end(); ++it, --n) {
-      if (auto *e = std::get_if<Node>(&it->second)) {
-        atStartOfLine = false;
-        curDropped = 0;
-        es2.push_back(std::move(*e));
-        continue;
-      }
-      const Token &t = std::get<Token>(it->second);
-      composite::Text &s2 = piece;
-      s2.clear();
-      for (char c : lx.text(t)) {
-        if (atStartOfLine) {
-          if (c == ' ') {
-            if (curDropped++ >= minIndent) s2 += c;
-          } else if (c == '\n') {
-            curDropped = 0;
-            s2 += c;
-          } else {
-            atStartOfLine = false;
-            curDropped = 0;
-            s2 += c;
-          }
-        } else {
-          s2 += c;
-          if (c == '\n') atStartOfLine = true;
-        }
-      }
-      if (n == 1) {
-        auto p = s2.find_last_of('\n');
-        if (p != composite::npos && s2.find_first_not_of(' ', p + 1) == composite::npos) s2.truncate(p + 1);
-      }
-      if (!s2.empty()) es2.push_back(strLit(Name::persist(s2), Pos{}));
+    size_t k = 0;
+    for (auto &[p, i] : es) {
+      if (auto *e = std::get_if<Node>(&i)) es2.push_back(std::move(*e));
+      else if (wins[2 * k + 1]) es2.push_back(strLit(Name::persist(llvm::StringRef(piece.data() + wins[2 * k], wins[2 * k + 1])), Pos{}));
+      k++;
     }
     if (es2.empty()) return strLit(Name::of(""), Pos{});
     if (es2.size() == 1 && es2[0].k == K_STR) return std::move(es2[0]);
     return concat(pos, true, es2);
   }
 };
+
+/// parseStringParts' grammar actions, called back by nixfe_ts_strparts at the points the loop did them.
+static Parser::StrParts &sp(void *c) { return *static_cast<Parser::StrParts *>(c); }
+extern "C" int64_t nixfe_sp_peek(void *c) { // 0 T_STR, 1 '${', 2 '"', 3 anything else
+  const Token &t = sp(c).p->cur();
+  return t.t == T_STR ? 0 : t.t == T_DOLLAR_CURLY ? 1 : Parser::isChar(t, '"') ? 2 : 3;
+}
+extern "C" void nixfe_sp_str(void *c, int64_t push) {
+  sp(c).single = sp(c).p->nameOf(sp(c).p->take());
+  if (push) sp(c).parts.push_back(sp(c).p->strLit(sp(c).single, Pos{}));
+}
+extern "C" void nixfe_sp_push(void *c) { sp(c).parts.push_back(sp(c).p->strLit(sp(c).single, Pos{})); }
+extern "C" void nixfe_sp_expr(void *c) {
+  sp(c).p->take();
+  sp(c).parts.push_back(sp(c).p->parseExpr());
+  sp(c).p->expectChar('}');
+}
+extern "C" void nixfe_sp_close(void *c) { if (!sp(c).p->atChar('"')) sp(c).p->unexpected("'\"'"); }
 
 } // namespace
 
