@@ -1,0 +1,14 @@
+; The third file of sumo-masks.mlir's theory: disjointness (SumoClassifier's DISJOINT mask) over taxonomy-a's classes.
+(disjoint Animal Plant)
+(subclass Plant Organism)
+(subclass Tree Plant)
+(subclass Oak Tree)
+(partition Organism Animal Plant Fungus)
+(disjointDecomposition Mammal Primate Canine)
+(disjoint Primate (UnionFn Dog Cat))        ; a list argument: not a disjoint pair (sumo.nix's reading)
+(partition Agent ?X CognitiveAgent)        ; a variable is a string to sumo.nix: kept
+(disjoint Fungus Fungus)                   ; a class disjoint from itself is in its own mask
+(disjoint Rock)                            ; too few arguments
+(partition Mineral Rock)                   ; too few parts
+(instance Oak123 Oak)
+(instance Socrates Animal)

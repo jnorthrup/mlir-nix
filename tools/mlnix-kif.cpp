@@ -1,7 +1,7 @@
 //===- mlnix-kif.cpp - KIF files into kif theories, and the chase -----------===//
 //
 //   mlnix-kif [--ontology F.kif]... [--chase] [--dump] [--lean OUT.ndjson [--lean-piece N]] [--tptp OUT.p] [--stats]
-//             [-o OUT.mlir] F.kif...
+//             [--query Q.mlir]... [--pass PIPELINE]... [--emit-bytecode] [-o OUT.mlir] F.kif...
 //
 // The files after the options are one theory, @kb (a bag: equal terms of all of them are one node); --ontology files are a
 // second, @ontology, which @kb names (what `(instance X Class)` means in a premise).  --chase runs kif-chase; --dump prints
@@ -9,8 +9,11 @@
 // proofs as one Lean theorem in lean4export's format (KifLean.cpp; `-` is stdout), for a Lean kernel to check, or as
 // theorems of at most N lets each with --lean-piece N (a kernel's depth bounds one theorem); --tptp writes @kb as a TPTP
 // problem in FOF, as SigmaKEE translates a KB (KifTptp.cpp; a test's (query F) is the conjecture); --stats
-// prints counts, time and peak RSS to stderr; -o writes the module (default: nothing when --dump, --lean, --tptp or --stats
-// is given, else stdout).
+// prints counts, time and peak RSS to stderr; each --query reads a module of queries over the theories into the same module (a
+// kif.terms @kb is the theory read here, never printed and parsed again: PRELOAD-DIALECTS step 6), and each --pass runs a
+// pipeline on it after the chase (`--pass kif-to-trikeshed,trikeshed-lower-cursors` lays the tables out and lowers the
+// queries); -o writes the module (default: nothing when --dump, --lean, --tptp or --stats is given, else stdout), as
+// MLIR bytecode with --emit-bytecode (the tables' raw bytes, which mlir-opt reads as it reads text).
 //
 //===----------------------------------------------------------------------===//
 
@@ -18,9 +21,18 @@
 #include "NixDialect/NixDialect.h"
 #include "NixDialect/Sumo.h"
 
+#include "Composite/TrikeShed.h"
+
+#include "mlir/Bytecode/BytecodeWriter.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
+#include "mlir/IR/Verifier.h"
+#include "mlir/Parser/Parser.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "llvm/ADT/SmallVector.h"
@@ -51,8 +63,8 @@ static double peakMB() {
 }
 
 int main(int argc, char **argv) {
-  llvm::SmallVector<llvm::StringRef> kb, onto;
-  bool chase = false, dump = false, stats = false;
+  llvm::SmallVector<llvm::StringRef> kb, onto, queries, passes;
+  bool chase = false, dump = false, stats = false, bytecode = false;
   llvm::StringRef out, lean, tptp;
   unsigned piece = 0;
   for (int i = 1; i < argc; i++) {
@@ -60,6 +72,9 @@ int main(int argc, char **argv) {
     if (a == "--ontology" && i + 1 < argc) onto.push_back(argv[++i]);
     else if (a == "--lean" && i + 1 < argc) lean = argv[++i];
     else if (a == "--tptp" && i + 1 < argc) tptp = argv[++i];
+    else if (a == "--query" && i + 1 < argc) queries.push_back(argv[++i]);
+    else if (a == "--pass" && i + 1 < argc) passes.push_back(argv[++i]);
+    else if (a == "--emit-bytecode") bytecode = true;
     else if (a == "--lean-piece" && i + 1 < argc) {
       if (llvm::StringRef(argv[++i]).getAsInteger(10, piece) || !piece) {
         llvm::errs() << "mlnix-kif: --lean-piece takes a number of lets, more than 0\n";
@@ -77,10 +92,13 @@ int main(int argc, char **argv) {
   if (piece && lean.empty()) { llvm::errs() << "mlnix-kif: --lean-piece divides what --lean writes: give --lean too\n"; return 2; }
   double t0 = seconds();
   DialectRegistry registry;
-  registry.insert<kif::KifDialect, sumo::SumoDialect>();
+  registry.insert<kif::KifDialect, sumo::SumoDialect, arith::ArithDialect, func::FuncDialect, memref::MemRefDialect,
+                  scf::SCFDialect>();
+  composite::registerTrikeShedDialect(registry);
   MLIRContext ctx(registry);
   ctx.loadAllAvailableDialects();
   kif::registerKifPasses();
+  composite::registerTrikeShedPasses();
   OpBuilder b(&ctx);
   Location loc = UnknownLoc::get(&ctx);
   OwningOpRef<ModuleOp> module = ModuleOp::create(loc);
@@ -123,6 +141,15 @@ int main(int argc, char **argv) {
       llvm::errs() << llvm::format("chase: %llu derived, %.2f s, peak RSS %.0f MB\n", (unsigned long long)d, seconds() - t1, peakMB());
     }
   }
+  for (llvm::StringRef q : queries)
+    if (failed(parseSourceFile(q, module->getBody(), ParserConfig(&ctx, /*verifyAfterParse=*/false)))) return 1;
+  if (!queries.empty() && failed(verify(*module))) return 1; // once all of it is in one module: kif.terms names its theory
+  for (llvm::StringRef p : passes) {
+    double t4 = seconds();
+    PassManager pm(&ctx);
+    if (failed(parsePassPipeline(p, pm)) || failed(pm.run(*module))) return 1;
+    if (stats) llvm::errs() << llvm::format("%.*s: %.2f s, peak RSS %.0f MB\n", int(p.size()), p.data(), seconds() - t4, peakMB());
+  }
   if (dump)
     module->walk([&](kif::TheoryOp t) { if (t.getSymName() == "kb") kif::dumpClosure(t, llvm::outs()); });
   if (!lean.empty()) {
@@ -151,7 +178,9 @@ int main(int argc, char **argv) {
     std::error_code ec;
     llvm::ToolOutputFile f(out.empty() ? "-" : out, ec, llvm::sys::fs::OF_None);
     if (ec) { llvm::errs() << "mlnix-kif: " << out << ": " << ec.message() << "\n"; return 1; }
-    module->print(f.os());
+    if (bytecode) {
+      if (failed(writeBytecodeToFile(*module, f.os()))) return 1;
+    } else module->print(f.os());
     f.keep();
   }
   return 0;
