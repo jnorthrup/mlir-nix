@@ -10,9 +10,20 @@
 //                        3  framed: out = method [start, end), path [start, end) (the target to its '?'), body
 //                           [start, end) (end - start is what Content-Length says), route (rq_route's group, 0 none)
 // http.mlir answers each; its connection keeps the buffer, so a request is framed again as more of it arrives.
+//
+//   rq_body(rows, kids, text, want) -> (code, segments, value): a what-if's body {"path": [segments], "value": json} read
+//                        through its Confix index (index.mlir's rows and kids; KeyToChild is its ix_member): code 0 when
+//                        it is one, else what it lacks (2 not an object, 3 "path" not an array, 4 "path" empty, 5 a
+//                        segment not a string, 6 no "value" when one is wanted); each segment's inside (TwinPacked) and
+//                        the value as written.  (1, not JSON, is api.mlir's: there is no index.)
 
 !text = !trikeshed.series<i8>
 !s64 = !trikeshed.series<i64>
+!s32 = !trikeshed.series<i32>
+!tw = !trikeshed.twin<i32>
+!tp = !trikeshed.twinpacked<i32>
+!ix = !trikeshed.cursor<"ConfixIndex", [!tw, i8, !tp]>
+!ik = !trikeshed.colkey<"ConfixIndex">
 
 // Kursive.h's walk: the programs' steps and sets, the groups and loops they count, the text, where to start, whether the
 // whole text must match, the marks, the loop states, the checkpoints and a budget; 1 a match, 0 none, 2 out of room
@@ -299,4 +310,133 @@ func.func @rq_frame(%in: memref<?xi8>, %out: memref<?xi64>) -> i64 attributes {l
     scf.yield %v : i64
   }
   return %verdict : i64
+}
+
+// ---- a what-if's body, through its index
+
+// index.mlir's KeyToChild: the value row of the key, or -1
+func.func private @ix_member(!ix, !s32, !text, i64, !text) -> i64
+
+memref.global "private" constant @rq_path : memref<4xi8> = dense<"0x70617468">  // path
+memref.global "private" constant @rq_value : memref<5xi8> = dense<"0x76616C7565">  // value
+
+func.func @rq_body(%rows: !ix, %kids: !s32, %t: !text, %want: i64) -> (i64, !s64, i64) attributes {llvm.emit_c_interface} {
+  %c0 = arith.constant 0 : index
+  %z64 = arith.constant 0 : i64
+  %m1 = arith.constant -1 : i64
+  %v1 = arith.constant 1 : i64
+  %v2 = arith.constant 2 : i64
+  %v3 = arith.constant 3 : i64
+  %v4 = arith.constant 4 : i64
+  %v5 = arith.constant 5 : i64
+  %v6 = arith.constant 6 : i64
+  %v32 = arith.constant 32 : i64
+  %mask = arith.constant 4294967295 : i64
+  %one32 = arith.constant 1 : i32
+  %string = arith.constant 4 : i8
+  %object = arith.constant 5 : i8
+  %array = arith.constant 6 : i8
+  %k0 = trikeshed.key 0 : !ik
+  %k1 = trikeshed.key 1 : !ik
+  %k2 = trikeshed.key 2 : !ik
+  %spans = trikeshed.column %rows[%k0] : !ix, !ik -> !trikeshed.series<!tw>
+  %tags = trikeshed.column %rows[%k1] : !ix, !ik -> !trikeshed.series<i8>
+  %kc = trikeshed.column %rows[%k2] : !ix, !ik -> !trikeshed.series<!tp>
+  %pathG = memref.get_global @rq_path : memref<4xi8>
+  %kPath = trikeshed.text %pathG : memref<4xi8> -> !text
+  %valueG = memref.get_global @rq_value : memref<5xi8>
+  %kValue = trikeshed.text %valueG : memref<5xi8> -> !text
+  // the root an object, its "path" an array of strings, not empty
+  %tag0 = trikeshed.at %tags[%c0] : !trikeshed.series<i8>, index -> i8
+  %isObj = arith.cmpi eq, %tag0, %object : i8
+  %p = scf.if %isObj -> (i64) {
+    %r = func.call @ix_member(%rows, %kids, %t, %z64, %kPath) : (!ix, !s32, !text, i64, !text) -> i64
+    scf.yield %r : i64
+  } else {
+    scf.yield %m1 : i64
+  }
+  %hasP = arith.cmpi sge, %p, %z64 : i64
+  %isArr = scf.if %hasP -> (i1) {
+    %pt = trikeshed.at %tags[%p] : !trikeshed.series<i8>, i64 -> i8
+    %a = arith.cmpi eq, %pt, %array : i8
+    scf.yield %a : i1
+  } else {
+    %no = arith.constant false
+    scf.yield %no : i1
+  }
+  %first, %ns = scf.if %isArr -> (index, index) {
+    %fc = trikeshed.at %kc[%p] : !trikeshed.series<!tp>, i64 -> !tp
+    %f32 = trikeshed.first %fc : !tp -> i32
+    %n32 = trikeshed.second %fc : !tp -> i32
+    %f = arith.index_castui %f32 : i32 to index
+    %n = arith.index_castui %n32 : i32 to index
+    scf.yield %f, %n : index, index
+  } else {
+    scf.yield %c0, %c0 : index, index
+  }
+  %segRows = trikeshed.slice %kids[%first, %ns] : !s32 -> !s32
+  // each segment's inside, between its quotes, as TwinPacked (start << 32 | length)
+  %segs = trikeshed.series %ns : !s64 {
+  ^bb0(%k: index):
+    %row = trikeshed.at %segRows[%k] : !s32, index -> i32
+    %sp = trikeshed.at %spans[%row] : !trikeshed.series<!tw>, i32 -> !tw
+    %o = trikeshed.first %sp : !tw -> i32
+    %c = trikeshed.second %sp : !tw -> i32
+    %in = arith.addi %o, %one32 : i32
+    %s64 = arith.extui %in : i32 to i64
+    %e64 = arith.extui %c : i32 to i64
+    %len = arith.subi %e64, %s64 : i64
+    %lo = arith.andi %len, %mask : i64
+    %hi = arith.shli %s64, %v32 : i64
+    %tw = arith.ori %hi, %lo : i64
+    trikeshed.yield %tw : i64
+  }
+  %strings = trikeshed.fold %segRows, %v1 : !s32, i64 -> i64 {
+  ^bb0(%all: i64, %row: i32):
+    %st = trikeshed.at %tags[%row] : !trikeshed.series<i8>, i32 -> i8
+    %isS = arith.cmpi eq, %st, %string : i8
+    %s = arith.select %isS, %all, %z64 : i64
+    trikeshed.yield %s : i64
+  }
+  %ns64 = arith.index_cast %ns : index to i64
+  %empty = arith.cmpi eq, %ns64, %z64 : i64
+  %allStrings = arith.cmpi ne, %strings, %z64 : i64
+  %wanted = arith.cmpi ne, %want, %z64 : i64
+  %shaped = arith.andi %isArr, %allStrings : i1
+  %nonEmpty = arith.cmpi ne, %ns64, %z64 : i64
+  %pathOk = arith.andi %shaped, %nonEmpty : i1
+  %look = arith.andi %pathOk, %wanted : i1
+  %v = scf.if %look -> (i64) {
+    %r = func.call @ix_member(%rows, %kids, %t, %z64, %kValue) : (!ix, !s32, !text, i64, !text) -> i64
+    scf.yield %r : i64
+  } else {
+    scf.yield %m1 : i64
+  }
+  %hasV = arith.cmpi sge, %v, %z64 : i64
+  // the value as written: [open, close + 1)
+  %vt = scf.if %hasV -> (i64) {
+    %sp = trikeshed.at %spans[%v] : !trikeshed.series<!tw>, i64 -> !tw
+    %o = trikeshed.first %sp : !tw -> i32
+    %c = trikeshed.second %sp : !tw -> i32
+    %s64 = arith.extui %o : i32 to i64
+    %c64 = arith.extui %c : i32 to i64
+    %e64 = arith.addi %c64, %v1 : i64
+    %len = arith.subi %e64, %s64 : i64
+    %lo = arith.andi %len, %mask : i64
+    %hi = arith.shli %s64, %v32 : i64
+    %tw = arith.ori %hi, %lo : i64
+    scf.yield %tw : i64
+  } else {
+    scf.yield %z64 : i64
+  }
+  // what it lacks first: an object, an array, a segment, strings, a value
+  %noV = arith.cmpi slt, %v, %z64 : i64
+  %lacksV = arith.andi %look, %noV : i1
+  %e6 = arith.select %lacksV, %v6, %z64 : i64
+  %notStrings = arith.cmpi eq, %strings, %z64 : i64
+  %e5 = arith.select %notStrings, %v5, %e6 : i64
+  %e4 = arith.select %empty, %v4, %e5 : i64
+  %e3 = arith.select %isArr, %e4, %v3 : i64
+  %code = arith.select %isObj, %e3, %v2 : i64
+  return %code, %segs, %vt : i64, !s64, i64
 }

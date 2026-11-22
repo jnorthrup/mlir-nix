@@ -81,8 +81,6 @@ llvm.mlir.global internal constant @lit18("offset") : !llvm.array<6 x i8>
 llvm.mlir.global internal constant @lit19("limit") : !llvm.array<5 x i8>
 llvm.mlir.global internal constant @lit52("mlnix failed") : !llvm.array<12 x i8>
 llvm.mlir.global internal constant @lit53("cannot write ") : !llvm.array<13 x i8>
-llvm.mlir.global internal constant @lit54("path") : !llvm.array<4 x i8>
-llvm.mlir.global internal constant @lit55("value") : !llvm.array<5 x i8>
 llvm.mlir.global internal constant @lit56("request: not JSON") : !llvm.array<17 x i8>
 llvm.mlir.global internal constant @lit57("request: an object is required") : !llvm.array<30 x i8>
 llvm.mlir.global internal constant @lit58("request: \5C\22path\5C\22 is empty") : !llvm.array<26 x i8>
@@ -1131,97 +1129,43 @@ func.func @whatif(%next: !llvm.ptr, %nn: i64) {
 }
 
 // The request {"path": [segments], "value": json}: its index, the segments' coordinates (inside their quotes) and the
-// value's, all in the body; false, with the reply made, when it is not one.
+// value's, all in the body; false, with the reply made, when it is not one.  request.mlir's rq_body reads it through the
+// index (KeyToChild, the tags, the kids); what it lacks first is the reply (e: 1 not JSON, 2 not an object, 3 "path" not
+// an array, 4 "path" empty, 5 a segment not a string, 6 no "value").
+llvm.func @_mlir_ciface_rq_body(!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64)
 func.func @request(%bp: !llvm.ptr, %bn: i64, %want: i1) -> (!llvm.ptr, !llvm.ptr, i64, i64, i1) {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
-  %c2 = arith.constant 2 : i64
-  %c3 = arith.constant 3 : i64
-  %c4 = arith.constant 4 : i64
-  %c5 = arith.constant 5 : i64
-  %c6 = arith.constant 6 : i64
-  %c8 = arith.constant 8 : i64
-  %m1 = arith.constant -1 : i64
-  %true = arith.constant true
-  %false = arith.constant false
+  %one = arith.constant 1 : i32
+  %i0 = arith.constant 0 : i32
+  %i1 = arith.constant 1 : i32
+  %i2 = arith.constant 2 : i32
+  %i3 = arith.constant 3 : i32
   %null = llvm.mlir.zero : !llvm.ptr
   %f = func.call @cx_scan(%bp, %bn) : (!llvm.ptr, i64) -> !llvm.ptr
   %isNull = llvm.icmp "eq" %f, %null : !llvm.ptr
-  %e1 = arith.select %isNull, %c1, %c0 : i64
-  %tag0 = scf.if %isNull -> (i64) {
-    scf.yield %m1 : i64
+  %r:4 = scf.if %isNull -> (i64, !llvm.ptr, i64, i64) {
+    scf.yield %c1, %null, %c0, %c0 : i64, !llvm.ptr, i64, i64
   } else {
-    %t = func.call @cx_tag(%f, %c0) : (!llvm.ptr, i64) -> i64
-    scf.yield %t : i64
+    %res = llvm.alloca %one x !llvm.struct<(i64, struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>, i64)> : (i32) -> !llvm.ptr
+    %d0 = func.call @cx_d(%f, %i0) : (!llvm.ptr, i32) -> !llvm.ptr
+    %d1 = func.call @cx_d(%f, %i1) : (!llvm.ptr, i32) -> !llvm.ptr
+    %d2 = func.call @cx_d(%f, %i2) : (!llvm.ptr, i32) -> !llvm.ptr
+    %d3 = func.call @cx_d(%f, %i3) : (!llvm.ptr, i32) -> !llvm.ptr
+    %td = func.call @cx_text(%f) : (!llvm.ptr) -> !llvm.ptr
+    %w = arith.extui %want : i1 to i64
+    llvm.call @_mlir_ciface_rq_body(%res, %d0, %d1, %d2, %d3, %td, %w) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> ()
+    %pe = llvm.getelementptr %res[0, 0] : (!llvm.ptr) -> !llvm.ptr, !llvm.struct<(i64, struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>, i64)>
+    %e = llvm.load %pe : !llvm.ptr -> i64
+    %ps = llvm.getelementptr %res[0, 1, 0] : (!llvm.ptr) -> !llvm.ptr, !llvm.struct<(i64, struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>, i64)>
+    %segs = llvm.load %ps : !llvm.ptr -> !llvm.ptr
+    %pn = llvm.getelementptr %res[0, 1, 3, 0] : (!llvm.ptr) -> !llvm.ptr, !llvm.struct<(i64, struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>, i64)>
+    %ns = llvm.load %pn : !llvm.ptr -> i64
+    %pv = llvm.getelementptr %res[0, 2] : (!llvm.ptr) -> !llvm.ptr, !llvm.struct<(i64, struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>, i64)>
+    %vt = llvm.load %pv : !llvm.ptr -> i64
+    scf.yield %e, %segs, %ns, %vt : i64, !llvm.ptr, i64, i64
   }
-  %ok1 = arith.cmpi eq, %e1, %c0 : i64
-  %notObj = arith.cmpi ne, %tag0, %c5 : i64
-  %bad2 = arith.andi %ok1, %notObj : i1
-  %e2 = arith.select %bad2, %c2, %e1 : i64
-  %ok2 = arith.cmpi eq, %e2, %c0 : i64
-  %kpath = llvm.mlir.addressof @lit54 : !llvm.ptr
-  %kpath_n = arith.constant 4 : i64
-  %p = scf.if %ok2 -> (i64) {
-    %v = func.call @cx_member(%bp, %f, %c0, %kpath, %kpath_n) : (!llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64) -> i64
-    scf.yield %v : i64
-  } else {
-    scf.yield %m1 : i64
-  }
-  %hasP = arith.cmpi sge, %p, %c0 : i64
-  %pt = scf.if %hasP -> (i64) {
-    %t = func.call @cx_tag(%f, %p) : (!llvm.ptr, i64) -> i64
-    scf.yield %t : i64
-  } else {
-    scf.yield %m1 : i64
-  }
-  %notArr = arith.cmpi ne, %pt, %c6 : i64
-  %bad3 = arith.andi %ok2, %notArr : i1
-  %e3 = arith.select %bad3, %c3, %e2 : i64
-  %ok3 = arith.cmpi eq, %e3, %c0 : i64
-  %ns = scf.if %ok3 -> (i64) {
-    %k = func.call @cx_nkids(%f, %p) : (!llvm.ptr, i64) -> i64
-    scf.yield %k : i64
-  } else {
-    scf.yield %c0 : i64
-  }
-  %emptyP = arith.cmpi eq, %ns, %c0 : i64
-  %bad4 = arith.andi %ok3, %emptyP : i1
-  %e4 = arith.select %bad4, %c4, %e3 : i64
-  %ns1 = arith.maxsi %ns, %c1 : i64
-  %segs = llvm.call @calloc(%ns1, %c8) : (i64, i64) -> !llvm.ptr
-  %badSeg = scf.for %k = %c0 to %ns step %c1 iter_args(%bad = %false) -> (i1) : i64 {
-    %s = func.call @cx_kid(%f, %p, %k) : (!llvm.ptr, i64, i64) -> i64
-    %st = func.call @cx_tag(%f, %s) : (!llvm.ptr, i64) -> i64
-    %isS = arith.cmpi eq, %st, %c4 : i64
-    %in = func.call @cx_str(%f, %s) : (!llvm.ptr, i64) -> i64
-    func.call @st64(%segs, %k, %in) : (!llvm.ptr, i64, i64) -> ()
-    %notS = arith.xori %isS, %true : i1
-    %nb = arith.ori %bad, %notS : i1
-    scf.yield %nb : i1
-  }
-  %ok4 = arith.cmpi eq, %e4, %c0 : i64
-  %bad5 = arith.andi %ok4, %badSeg : i1
-  %e5 = arith.select %bad5, %c5, %e4 : i64
-  %ok5 = arith.cmpi eq, %e5, %c0 : i64
-  %look = arith.andi %ok5, %want : i1
-  %kvalue = llvm.mlir.addressof @lit55 : !llvm.ptr
-  %kvalue_n = arith.constant 5 : i64
-  %v = scf.if %look -> (i64) {
-    %r = func.call @cx_member(%bp, %f, %c0, %kvalue, %kvalue_n) : (!llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64) -> i64
-    scf.yield %r : i64
-  } else {
-    scf.yield %m1 : i64
-  }
-  %noV = arith.cmpi slt, %v, %c0 : i64
-  %bad6 = arith.andi %look, %noV : i1
-  %e6 = arith.select %bad6, %c6, %e5 : i64
-  %hasV = arith.cmpi sge, %v, %c0 : i64
-  %vt = scf.if %hasV -> (i64) {
-    %r = func.call @cx_raw(%f, %v) : (!llvm.ptr, i64) -> i64
-    scf.yield %r : i64
-  } else {
-    scf.yield %c0 : i64
-  }
+  %e6 = arith.addi %r#0, %c0 : i64
   %ok = arith.cmpi eq, %e6, %c0 : i64
   scf.if %ok {
   } else {
@@ -1255,7 +1199,7 @@ func.func @request(%bp: !llvm.ptr, %bn: i64, %want: i1) -> (!llvm.ptr, !llvm.ptr
     }
     func.call @fail_text(%c400, %why#0, %why#1, %why#0, %c0, %why#0, %c0, %why#0, %c0) : (i64, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64) -> ()
   }
-  return %f, %segs, %ns, %vt, %ok : !llvm.ptr, !llvm.ptr, i64, i64, i1
+  return %f, %r#1, %r#2, %r#3, %ok : !llvm.ptr, !llvm.ptr, i64, i64, i1
 }
 
 // The overlay's edits are text.mlir's: one combine of the overlay's slices, the body's and literals, made into a fresh
