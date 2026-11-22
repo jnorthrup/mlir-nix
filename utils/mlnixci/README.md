@@ -51,16 +51,30 @@ at mkForce priority 50, and the page reports what it changes.
   the options the what-if changed (`where` over the rows) with their values and states before and after, and a
   `combineAll` of the /etc files that differ (columns.mlir's `etc_join`, which also drains each side's members' pieces).
   Lowered as Combine.kt's views, a reply is one buffer that each piece is drained into once.
+- `src/load.mlir` makes a corpus at load, in TrikeShed's ops lowered the same way, as one function (`corpus_columns`):
+  the options (the `options` array's DirectChildren, a slice of the kids), and columns.mlir's facets composed over them
+  (`opt_members`, `opt_cells`, `opt_text`, four `col_code`s and `col_order`), with the three columns the server rewrites
+  later (whatif, match, baseOf) as `series`. The members' table and the cells no slot keeps are freed there, by the
+  deallocation pass.
+- `src/reads.mlir` reads a text's bytes where they lie, in TrikeShed's ops lowered the same way: a byte's first place
+  (`rd_find`, a `fold` carrying (found, reached)), a text's first place (`rd_search`, memmem's: fractal fill-drain over
+  the places it could start, in chunks of 16, or 256 in a long text: a chunk's bytes equal to the text's first are
+  counted by a branch-free `fold`, only the first chunk that has one is searched at the next scale, the places that
+  agree are `compare`d, and nothing after the chunk that found it is read), a decimal as atol reads one (`rd_number`:
+  three folds), two texts the same (`rd_same`), and an evaluation's errors without its warnings (`rd_kept`: the lines,
+  `parts` at '\n', kept by a `where`, then `combineAll`ed).
 - `src/*.mlir` is the rest of the server, written in the func/scf/arith/llvm dialects. The stock MLIR pipeline lowers it,
   and it links with libc and liburing-ffi only. There is no C++ and no C++ library.
   - `series.mlir`: coordinates into byte series (TrikeShed's TwinPacked: an i64, start << 32 | length, half-open), and
-    the reply builder, which leaves room for the head in front of the body; its escapes and digits are text.mlir's.
+    the reply builder, which leaves room for the head in front of the body; its escapes and digits are text.mlir's, and
+    its searches and reads (find, search, number, is, same) are reads.mlir's, over a view of the bytes.
   - `confix.mlir`: the handle of a JSON text's index (index.mlir's buffers, as descriptors) and the calls of index.mlir
-    the rest of the server makes with it. A text is never decoded: its strings are coordinates into it, and keys are
-    compared where they lie.
-  - `corpus.mlir`: mlnix's output as six dictionary-coded columns, plus the keys and the search text (columns.mlir's
-    `opt_text`), built once as series.
-  - `eval.mlir`: mlnix as a child process (posix_spawn). Its output and errors are read into growing series.
+    the rest of the server makes with it. A text is never decoded: its strings are coordinates into it (index.mlir's
+    `ix_raw` and `ix_str`, Spans as TwinPacked), and keys are compared where they lie.
+  - `corpus.mlir`: the corpus's record: mlnix's output as six dictionary-coded columns, plus the keys and the search
+    text, made once by load.mlir's `corpus_columns` and kept in its slots; the join with a base is columns.mlir's `mark`.
+  - `eval.mlir`: mlnix as a child process (posix_spawn). Its output and errors are read into growing series; a refusal's
+    errors are reads.mlir's `rd_kept` of them.
   - `api.mlir`: the routes. An overlay edit is a splice at the coordinates of the overlay's index. The query route
     counts and pages, then hands the columns to text.mlir's `query_reply` and writes what it made; the report hands
     the corpus, its base and etc_join's entries to `report_reply`.
