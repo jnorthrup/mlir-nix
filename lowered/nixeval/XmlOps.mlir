@@ -7,7 +7,8 @@
 //
 // nixev_ts_xml_tag(kind, depth, name, nn, keys, vals, nrows, into, cap): kind 0 open ('<name attrs>\n'), 1 close
 // ('</name>\n'), 2 empty ('<name attrs />\n'); depth indents 2*depth spaces.  keys/vals are composite::Chars windows
-// (16 bytes: u32 count @0, const char *data @8) of the rows' names and values, already sorted by name in the bridge.
+// (16 bytes: u32 count @0, const char *data @8) of the rows' names and values, sorted by name in FmtCompOps.mlir's
+// nixev_ts_xml_prep.
 // Each attribute value is escaped as Nix escapes it: " < > & and newline to &quot; &lt; &gt; &amp; &#xA;, every other
 // byte raw (the apostrophe, tab and carriage return are NOT escaped).  The escape table is 256 rows of 6 bytes (row b at
 // 6b) with a 256-byte length table; a value is one combineAll of slices of it, nested in the per-row combineAll.
