@@ -228,6 +228,10 @@ target_precompile_headers(NixFrontend PRIVATE ${PROJECT_SOURCE_DIR}/include/Comp
 # nixfe::canonPath's segment walk (Parser.cpp's body is gone; the bridge sizes the Text and calls this entry).  The walk
 # is trikeshed.at / slice / text / drain over the byte series.  NixFrontend owns it: mlnix-parse links NixFrontend alone.
 mlnix_lower_trikeshed(NixFrontend lowered/nixfe/CanonPath.mlir CanonPath)
+# Parser.cpp's text algorithms (the bodies are gone; the parser keeps bridges): stripIndentation's indent scan and its
+# kept segments drained once from one combineAll, parseStringParts' loop driving the grammar actions as callbacks, and
+# makePath's lint classification, messages (one combine each) and home path.  NixFrontend owns it, as CanonPath.
+mlnix_lower_trikeshed(NixFrontend lowered/nixfe/TextParts.mlir TextParts)
 # nixfe::printLiteralString's escaping (Source.cpp's body is gone; the bridge sizes the Text and calls this entry).
 # The quoting and per-byte escaping are trikeshed.combineAll / slice / at / text / combine / drain over a constant
 # escape table.  NixFrontend owns it: mlnix-parse links NixFrontend alone (Parser.cpp prints string literals too).
