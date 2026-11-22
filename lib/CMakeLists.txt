@@ -193,10 +193,10 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/DrvParse.mlir DrvParse)
 # marshalDrv's record arrays plus each output's kind).  One variadic trikeshed.combine of literal slices, escaped strings
 # (combineAll over Nix's JSON escape table) and list combineAlls, drained once into a pre-sized buffer (fill-drain).
 mlnix_lower_trikeshed(NixStore lowered/nixstore/DrvJson.mlir DrvJson)
-# The .attrs.json serialization of structuredAttrsFiles' dump and nixstore::jsonEscape (StructuredAttrs.cpp's and
-# StorePaths.cpp's loops are gone; the bridges size the Text and call these entries, the DOM stays C++ behind three
-# pure-read callbacks).  The stitching is one lazy combineAll over the children's cells drained once; the escape is
-# a combineAll of slices of one constant table (Nix's JSON rules, as PrintOps.mlir).
+# structuredAttrsFiles whole (.attrs.json and .attrs.sh; StructuredAttrs.cpp's DOM, parser and shell writer are gone, the
+# bridge keeps the record's arrays and the rooms) and nixstore::jsonEscape.  __json is read by confix.checked (JsonRead.mlir's
+# scan, linked into NixEval), each object's members put in key order by trikeshed.sorted, the placeholders rewritten by a
+# combineAll of gaps and paths per pass; each file is ONE combineAll drained once (events / lines of slices and escapes).
 mlnix_lower_trikeshed(NixStore lowered/nixstore/StructuredAttrsOps.mlir StructuredAttrsOps)
 # The local store's graph and content algorithms (LocalStore.cpp's bodies are gone; the bridges hand the sorted sets over as
 # windows and answer the store's reads and writes as callbacks): drvReferences' union (sorted + where), computeFSClosure's

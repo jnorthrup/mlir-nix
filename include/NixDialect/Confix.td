@@ -183,7 +183,9 @@ def Confix_BandsOp : Confix_Op<"bands"> {
 //   pend    ptr   --   [rowCap] of u32: the rows finished inside the open containers; npend i64
 //   at      i64   out  where the reading had got to when it stopped (the column of nlohmann's message is at + 1); for
 //                      Unsigned and Nul where the number or the string opens
-//   end     i64   out  for Unsigned and Nul, one past it
+//   end     i64   out  for Unsigned and Nul, one past it; in: nonzero for the store's reading of __json
+//                      (lowered/nixstore/StructuredAttrsOps.mlir), where an Unsigned is a Long row and a Nul a String row,
+//                      as nlohmann reads them, not faults
 //
 // When rows reach rowCap or sp reaches stackCap, the scan calls nixev_json_grow(rec, 0 or 1), which makes the arrays
 // larger and writes their places back.  The fault, 0 for none: 1 the text ended where a value was expected, 2 an invalid
