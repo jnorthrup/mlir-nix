@@ -93,13 +93,11 @@ memref.global "private" constant @r : memref<5xi32> = dense<[1, 3, 3, 5, 7]>
 func.func private @printMemrefI32(memref<*xi32>) attributes {llvm.emit_c_interface}
 
 func.func private @print(%b: !out, %n: index) {
-  %c0 = arith.constant 0 : index
   %v = memref.subview %b[0] [%n] [1] : !out to memref<?xi32, strided<[1]>>
   %copy = memref.alloc(%n) : !out
   memref.copy %v, %copy : memref<?xi32, strided<[1]>> to !out
   %u = memref.cast %copy : !out to memref<*xi32>
   func.call @printMemrefI32(%u) : (memref<*xi32>) -> ()
-  memref.dealloc %copy : !out
   return
 }
 
