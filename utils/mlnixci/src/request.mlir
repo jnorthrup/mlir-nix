@@ -16,6 +16,12 @@
 //                        it is one, else what it lacks (2 not an object, 3 "path" not an array, 4 "path" empty, 5 a
 //                        segment not a string, 6 no "value" when one is wanted); each segment's inside (TwinPacked) and
 //                        the value as written.  (1, not JSON, is api.mlir's: there is no index.)
+//   rq_query(rows, kids, text, out): a query's body {"select": {...}, "q": "...", "offset": N, "limit": N} through its
+//                        index: out = the select's row (-1 none), the q's inside (TwinPacked; nothing unless a string),
+//                        offset (atol, at least 0; 0 when absent) and limit (atol, 0 to 2000; 150 when absent)
+//   rq_pick(rows, kids, text, select, name, values, pieces, sel) -> picks: whether the select names column `name` with a
+//                        non-empty array; then sel[c] is whether one of its elements (a string's inside, else as written)
+//                        has the bytes of code c's name (pieces of values)
 
 !text = !trikeshed.series<i8>
 !s64 = !trikeshed.series<i64>
@@ -79,6 +85,45 @@ func.func private @rq_mark(%best: memref<?xi32>, %k: index) -> index {
   %m = memref.load %best[%k] : memref<?xi32>
   %i = arith.index_castui %m : i32 to index
   return %i : index
+}
+
+// atol's value of what rq_length or rq_number read: group 1 the sign, group 2 the digits (i64, wrapping as atol's loop
+// does)
+func.func private @rq_atol(%best: memref<?xi32>, %t: !text) -> i64 {
+  %c0 = arith.constant 0 : index
+  %c2 = arith.constant 2 : index
+  %c3 = arith.constant 3 : index
+  %c4 = arith.constant 4 : index
+  %c5 = arith.constant 5 : index
+  %z64 = arith.constant 0 : i64
+  %v10 = arith.constant 10 : i64
+  %v48 = arith.constant 48 : i64
+  %none32 = arith.constant -1 : i32
+  %s0 = memref.load %best[%c2] : memref<?xi32>
+  %s1 = memref.load %best[%c3] : memref<?xi32>
+  %signed0 = arith.cmpi ne, %s0, %none32 : i32
+  %signed1 = arith.cmpi ne, %s0, %s1 : i32
+  %negative = arith.andi %signed0, %signed1 : i1
+  %d0 = memref.load %best[%c4] : memref<?xi32>
+  %d1 = memref.load %best[%c5] : memref<?xi32>
+  %some = arith.cmpi ne, %d0, %none32 : i32
+  %ds = arith.index_castui %d0 : i32 to index
+  %de = arith.index_castui %d1 : i32 to index
+  %dl0 = arith.subi %de, %ds : index
+  %dl = arith.select %some, %dl0, %c0 : index
+  %dsx = arith.select %some, %ds, %c0 : index
+  %digits = trikeshed.slice %t[%dsx, %dl] : !text -> !text
+  %mag = trikeshed.fold %digits, %z64 : !text, i64 -> i64 {
+  ^bb0(%m: i64, %d: i8):
+    %d64 = arith.extui %d : i8 to i64
+    %dv = arith.subi %d64, %v48 : i64
+    %m10 = arith.muli %m, %v10 : i64
+    %next = arith.addi %m10, %dv : i64
+    trikeshed.yield %next : i64
+  }
+  %neg = arith.subi %z64, %mag : i64
+  %v = arith.select %negative, %neg, %mag : i64
+  return %v : i64
 }
 
 func.func @rq_frame(%in: memref<?xi8>, %out: memref<?xi64>) -> i64 attributes {llvm.emit_c_interface} {
@@ -204,30 +249,7 @@ func.func @rq_frame(%in: memref<?xi8>, %out: memref<?xi64>) -> i64 attributes {l
         %val = scf.if %bare -> (i64) {
           scf.yield %acc : i64
         } else {
-          %s0 = memref.load %best[%c2] : memref<?xi32>
-          %s1 = memref.load %best[%c3] : memref<?xi32>
-          %signed0 = arith.cmpi ne, %s0, %none32 : i32
-          %signed1 = arith.cmpi ne, %s0, %s1 : i32
-          %negative = arith.andi %signed0, %signed1 : i1
-          %d0 = memref.load %best[%c4] : memref<?xi32>
-          %d1 = memref.load %best[%c5] : memref<?xi32>
-          %some = arith.cmpi ne, %d0, %none32 : i32
-          %ds = arith.index_castui %d0 : i32 to index
-          %de = arith.index_castui %d1 : i32 to index
-          %dl0 = arith.subi %de, %ds : index
-          %dl = arith.select %some, %dl0, %c0 : index
-          %dsx = arith.select %some, %ds, %c0 : index
-          %digits = trikeshed.slice %t[%dsx, %dl] : !text -> !text
-          %mag = trikeshed.fold %digits, %z64 : !text, i64 -> i64 {
-          ^bb0(%m: i64, %d: i8):
-            %d64 = arith.extui %d : i8 to i64
-            %dv = arith.subi %d64, %v48 : i64
-            %m10 = arith.muli %m, %v10 : i64
-            %next = arith.addi %m10, %dv : i64
-            trikeshed.yield %next : i64
-          }
-          %neg = arith.subi %z64, %mag : i64
-          %signedv = arith.select %negative, %neg, %mag : i64
+          %signedv = func.call @rq_atol(%best, %t) : (memref<?xi32>, !text) -> i64
           scf.yield %signedv : i64
         }
         scf.yield %val : i64
@@ -439,4 +461,206 @@ func.func @rq_body(%rows: !ix, %kids: !s32, %t: !text, %want: i64) -> (i64, !s64
   %e3 = arith.select %isArr, %e4, %v3 : i64
   %code = arith.select %isObj, %e3, %v2 : i64
   return %code, %segs, %vt : i64, !s64, i64
+}
+
+// ---- a query's body, through its index
+
+memref.global "private" constant @rq_select : memref<6xi8> = dense<"0x73656C656374">  // select
+memref.global "private" constant @rq_q : memref<1xi8> = dense<"0x71">  // q
+memref.global "private" constant @rq_offset : memref<6xi8> = dense<"0x6F6666736574">  // offset
+memref.global "private" constant @rq_limit : memref<5xi8> = dense<"0x6C696D6974">  // limit
+
+// the element at row as written, [open, close + 1), read as atol reads it (rq_number), or `absent` when row is -1
+func.func private @rq_number_at(%spans: !trikeshed.series<!tw>, %t: !text, %row: i64, %absent: i64, %best: memref<?xi32>,
+                                %caps: memref<?xi32>, %loops: memref<?xi32>, %stack: memref<?xi32>, %cap: i32,
+                                %budget: memref<?xi64>, %ptext: !llvm.ptr) -> i64 {
+  %z64 = arith.constant 0 : i64
+  %one = arith.constant 1 : i32
+  %zero = arith.constant 0 : i32
+  %has = arith.cmpi sge, %row, %z64 : i64
+  %v = scf.if %has -> (i64) {
+    %sp = trikeshed.at %spans[%row] : !trikeshed.series<!tw>, i64 -> !tw
+    %o = trikeshed.first %sp : !tw -> i32
+    %c = trikeshed.second %sp : !tw -> i32
+    %e = arith.addi %c, %one : i32
+    %from = arith.index_castui %o : i32 to index
+    %to = arith.index_castui %e : i32 to index
+    %nsG = memref.get_global @rq_number_steps : memref<60xi32>
+    %nsS = memref.cast %nsG : memref<60xi32> to memref<?xi32>
+    %neG = memref.get_global @rq_number_sets : memref<12xi64>
+    %neS = memref.cast %neG : memref<12xi64> to memref<?xi64>
+    %nc = memref.get_global @rq_number_counts : memref<5xi32>
+    %r = func.call @rq_walk(%nsS, %neS, %nc, %ptext, %to, %from, %zero, %best, %caps, %loops, %stack, %cap, %budget)
+        : (memref<?xi32>, memref<?xi64>, memref<5xi32>, !llvm.ptr, index, index, i32, memref<?xi32>, memref<?xi32>,
+           memref<?xi32>, memref<?xi32>, i32, memref<?xi64>) -> i32
+    // (the pattern takes the empty prefix of anything, so it always matches)
+    %x = func.call @rq_atol(%best, %t) : (memref<?xi32>, !text) -> i64
+    scf.yield %x : i64
+  } else {
+    scf.yield %absent : i64
+  }
+  return %v : i64
+}
+
+func.func @rq_query(%rows: !ix, %kids: !s32, %body: memref<?xi8>, %out: memref<?xi64>) attributes {llvm.emit_c_interface} {
+  %t = trikeshed.text %body : memref<?xi8> -> !text
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c3 = arith.constant 3 : index
+  %c18 = arith.constant 18 : index
+  %c64 = arith.constant 64 : index
+  %c256 = arith.constant 256 : index
+  %z64 = arith.constant 0 : i64
+  %m1 = arith.constant -1 : i64
+  %v32 = arith.constant 32 : i64
+  %v150 = arith.constant 150 : i64
+  %v2000 = arith.constant 2000 : i64
+  %mask = arith.constant 4294967295 : i64
+  %one32 = arith.constant 1 : i32
+  %string = arith.constant 4 : i8
+  %k0 = trikeshed.key 0 : !ik
+  %k1 = trikeshed.key 1 : !ik
+  %spans = trikeshed.column %rows[%k0] : !ix, !ik -> !trikeshed.series<!tw>
+  %tags = trikeshed.column %rows[%k1] : !ix, !ik -> !trikeshed.series<i8>
+  %selectG = memref.get_global @rq_select : memref<6xi8>
+  %kSelect = trikeshed.text %selectG : memref<6xi8> -> !text
+  %qG = memref.get_global @rq_q : memref<1xi8>
+  %kQ = trikeshed.text %qG : memref<1xi8> -> !text
+  %offsetG = memref.get_global @rq_offset : memref<6xi8>
+  %kOffset = trikeshed.text %offsetG : memref<6xi8> -> !text
+  %limitG = memref.get_global @rq_limit : memref<5xi8>
+  %kLimit = trikeshed.text %limitG : memref<5xi8> -> !text
+  %select = func.call @ix_member(%rows, %kids, %t, %z64, %kSelect) : (!ix, !s32, !text, i64, !text) -> i64
+  // the text searched for: a string's inside, else nothing
+  %qr = func.call @ix_member(%rows, %kids, %t, %z64, %kQ) : (!ix, !s32, !text, i64, !text) -> i64
+  %hasQ = arith.cmpi sge, %qr, %z64 : i64
+  %qt = scf.if %hasQ -> (i64) {
+    %qtag = trikeshed.at %tags[%qr] : !trikeshed.series<i8>, i64 -> i8
+    %isStr = arith.cmpi eq, %qtag, %string : i8
+    %sp = trikeshed.at %spans[%qr] : !trikeshed.series<!tw>, i64 -> !tw
+    %o = trikeshed.first %sp : !tw -> i32
+    %c = trikeshed.second %sp : !tw -> i32
+    %in = arith.addi %o, %one32 : i32
+    %s64 = arith.extui %in : i32 to i64
+    %e64 = arith.extui %c : i32 to i64
+    %len = arith.subi %e64, %s64 : i64
+    %lo = arith.andi %len, %mask : i64
+    %hi = arith.shli %s64, %v32 : i64
+    %tw = arith.ori %hi, %lo : i64
+    %r = arith.select %isStr, %tw, %z64 : i64
+    scf.yield %r : i64
+  } else {
+    scf.yield %z64 : i64
+  }
+  // offset and limit, read as atol reads them
+  %or = func.call @ix_member(%rows, %kids, %t, %z64, %kOffset) : (!ix, !s32, !text, i64, !text) -> i64
+  %lr = func.call @ix_member(%rows, %kids, %t, %z64, %kLimit) : (!ix, !s32, !text, i64, !text) -> i64
+  %n = trikeshed.size %t : !text
+  %ptext = func.call @rq_p8(%body) : (memref<?xi8>) -> !llvm.ptr
+  %best = memref.alloc(%c18) : memref<?xi32>
+  %caps = memref.alloc(%c18) : memref<?xi32>
+  %loops = memref.alloc(%c64) : memref<?xi32>
+  %capN = arith.addi %n, %n : index
+  %capR = arith.addi %capN, %c256 : index
+  %cap = arith.index_cast %capR : index to i32
+  %stackN = arith.muli %capR, %c3 : index
+  %stack = memref.alloc(%stackN) : memref<?xi32>
+  %budget = memref.alloc(%c1) : memref<?xi64>
+  %b0 = arith.constant 17179869184 : i64
+  memref.store %b0, %budget[%c0] : memref<?xi64>
+  %off0 = func.call @rq_number_at(%spans, %t, %or, %z64, %best, %caps, %loops, %stack, %cap, %budget, %ptext)
+      : (!trikeshed.series<!tw>, !text, i64, i64, memref<?xi32>, memref<?xi32>, memref<?xi32>, memref<?xi32>, i32,
+         memref<?xi64>, !llvm.ptr) -> i64
+  %offset = arith.maxsi %off0, %z64 : i64
+  %lim0 = func.call @rq_number_at(%spans, %t, %lr, %v150, %best, %caps, %loops, %stack, %cap, %budget, %ptext)
+      : (!trikeshed.series<!tw>, !text, i64, i64, memref<?xi32>, memref<?xi32>, memref<?xi32>, memref<?xi32>, i32,
+         memref<?xi64>, !llvm.ptr) -> i64
+  %lim1 = arith.maxsi %lim0, %z64 : i64
+  %lim2 = arith.minsi %lim1, %v2000 : i64
+  %hasLim = arith.cmpi sge, %lr, %z64 : i64
+  %limit = arith.select %hasLim, %lim2, %v150 : i64
+  memref.store %select, %out[%c0] : memref<?xi64>
+  memref.store %qt, %out[%c1] : memref<?xi64>
+  memref.store %offset, %out[%c2] : memref<?xi64>
+  memref.store %limit, %out[%c3] : memref<?xi64>
+  return
+}
+
+func.func @rq_pick(%rows: !ix, %kids: !s32, %t: !text, %select: i64, %name: !text, %values: !text, %pieces: !trikeshed.series<!tp>,
+                   %sel: memref<?xi32>) -> i64 attributes {llvm.emit_c_interface} {
+  %c0 = arith.constant 0 : index
+  %z64 = arith.constant 0 : i64
+  %m1 = arith.constant -1 : i64
+  %v1 = arith.constant 1 : i64
+  %z32 = arith.constant 0 : i32
+  %one32 = arith.constant 1 : i32
+  %string = arith.constant 4 : i8
+  %array = arith.constant 6 : i8
+  %k0 = trikeshed.key 0 : !ik
+  %k1 = trikeshed.key 1 : !ik
+  %k2 = trikeshed.key 2 : !ik
+  %spans = trikeshed.column %rows[%k0] : !ix, !ik -> !trikeshed.series<!tw>
+  %tags = trikeshed.column %rows[%k1] : !ix, !ik -> !trikeshed.series<i8>
+  %kc = trikeshed.column %rows[%k2] : !ix, !ik -> !trikeshed.series<!tp>
+  %hasSel = arith.cmpi sge, %select, %z64 : i64
+  %vs = scf.if %hasSel -> (i64) {
+    %r = func.call @ix_member(%rows, %kids, %t, %select, %name) : (!ix, !s32, !text, i64, !text) -> i64
+    scf.yield %r : i64
+  } else {
+    scf.yield %m1 : i64
+  }
+  %hasVs = arith.cmpi sge, %vs, %z64 : i64
+  %first, %nk = scf.if %hasVs -> (index, index) {
+    %vt = trikeshed.at %tags[%vs] : !trikeshed.series<i8>, i64 -> i8
+    %isArr = arith.cmpi eq, %vt, %array : i8
+    %fc = trikeshed.at %kc[%vs] : !trikeshed.series<!tp>, i64 -> !tp
+    %f32 = trikeshed.first %fc : !tp -> i32
+    %n32 = trikeshed.second %fc : !tp -> i32
+    %f = arith.index_castui %f32 : i32 to index
+    %n = arith.index_castui %n32 : i32 to index
+    %nn = arith.select %isArr, %n, %c0 : index
+    scf.yield %f, %nn : index, index
+  } else {
+    scf.yield %c0, %c0 : index, index
+  }
+  %picks = arith.cmpi ugt, %nk, %c0 : index
+  scf.if %picks {
+    %elems = trikeshed.slice %kids[%first, %nk] : !s32 -> !s32
+    %k = trikeshed.size %pieces : !trikeshed.series<!tp>
+    // code c is selected when an element has its name's bytes
+    %on = trikeshed.series %k : !trikeshed.series<i32> {
+    ^bb0(%c: index):
+      %piece = trikeshed.at %pieces[%c] : !trikeshed.series<!tp>, index -> !tp
+      %ps32 = trikeshed.first %piece : !tp -> i32
+      %pl32 = trikeshed.second %piece : !tp -> i32
+      %ps = arith.index_castui %ps32 : i32 to index
+      %pl = arith.index_castui %pl32 : i32 to index
+      %code = trikeshed.slice %values[%ps, %pl] : !text -> !text
+      %any = trikeshed.fold %elems, %z32 : !s32, i32 -> i32 {
+      ^bb0(%acc: i32, %row: i32):
+        %et = trikeshed.at %tags[%row] : !trikeshed.series<i8>, i32 -> i8
+        %isStr = arith.cmpi eq, %et, %string : i8
+        %sp = trikeshed.at %spans[%row] : !trikeshed.series<!tw>, i32 -> !tw
+        %o = trikeshed.first %sp : !tw -> i32
+        %cl = trikeshed.second %sp : !tw -> i32
+        %in = arith.addi %o, %one32 : i32
+        %end = arith.addi %cl, %one32 : i32
+        %s = arith.select %isStr, %in, %o : i32
+        %e = arith.select %isStr, %cl, %end : i32
+        %l = arith.subi %e, %s : i32
+        %si = arith.index_castui %s : i32 to index
+        %li = arith.index_castui %l : i32 to index
+        %elem = trikeshed.slice %t[%si, %li] : !text -> !text
+        %order = trikeshed.compare %elem, %code : !text, !text
+        %same = arith.cmpi eq, %order, %z32 : i32
+        %hit = arith.select %same, %one32, %acc : i32
+        trikeshed.yield %hit : i32
+      }
+      trikeshed.yield %any : i32
+    }
+    %end = trikeshed.drain %on, %sel : !trikeshed.series<i32>, memref<?xi32> -> index
+  }
+  %r = arith.select %picks, %v1, %z64 : i64
+  return %r : i64
 }

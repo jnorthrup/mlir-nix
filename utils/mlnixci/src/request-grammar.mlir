@@ -8,6 +8,8 @@
 //              ' ' or '?'), the rest of the target, ' ' -- walked from the start of the head, its longest prefix
 //   rq_length  a header line that is Content-Length, its name in any case (strncasecmp), then atol's reading of its
 //              value: blanks, a sign (group 1), digits (group 2) -- walked from the start of each header line
+//   rq_number  atol's reading of a number as written (a query's "offset" and "limit"): blanks, a sign (group 1), digits
+//              (group 2) -- walked from the element's first byte
 //   rq_route   the method, ' ' and the path, whole: which route (the group that took part) -- the page (GET / or
 //              /index.html), the query (POST, or GET without a body), the report, the three what-if edits, the facets
 
@@ -75,4 +77,17 @@ kursive.regex @rq_route groups 8 {
   %r8 = kursive.group 8 %facet
   %route = kursive.or longest %r1, %r2, %r3, %r4, %r5, %r6, %r7, %r8
   kursive.yield %route
+}
+
+kursive.regex @rq_number groups 2 {
+  %blank = kursive.lit " "
+  %blanks = kursive.repeat %blank[0, -1]
+  %minus = kursive.lit "-"
+  %sign = kursive.repeat %minus[0, 1]
+  %g1 = kursive.group 1 %sign
+  %digit = kursive.set [287948901175001088, 0, 0, 0]           // [0-9]
+  %digits = kursive.repeat %digit[0, -1]
+  %g2 = kursive.group 2 %digits
+  %number = kursive.then %blanks, %g1, %g2
+  kursive.yield %number
 }

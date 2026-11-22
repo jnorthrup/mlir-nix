@@ -13,7 +13,6 @@ llvm.func @free(!llvm.ptr)
 llvm.func @memcpy(!llvm.ptr, !llvm.ptr, i64) -> !llvm.ptr
 llvm.func @strlen(!llvm.ptr) -> i64
 llvm.func @strcmp(!llvm.ptr, !llvm.ptr) -> i32
-llvm.func @strerror(i32) -> !llvm.ptr
 llvm.func @atoi(!llvm.ptr) -> i32
 llvm.func @getenv(!llvm.ptr) -> !llvm.ptr
 llvm.func @dprintf(i32, !llvm.ptr, ...) -> i32
