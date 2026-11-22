@@ -317,13 +317,15 @@ mlnix_lower_trikeshed(NixEval lowered/nixeval/PrintCompOps.mlir PrintCompOps)
 # lists and the meta-name join are nested combineAll.  The bridge reads the counters, formats the floats (snprintf),
 # ranks the tables and keeps the conditionals and the llvm::errs() write.
 mlnix_lower_trikeshed(NixEval lowered/nixeval/StatsOps.mlir StatsOps)
-# The XML byte emission: XMLWriter's tag lines (lib/Eval/Formats.cpp's indent/attrs/open/close/empty bodies are gone;
-# the bridge reserves room and adopts the drained bytes).  The indent, prefix, name, attributes and suffix are
-# trikeshed.series / slice / combine / combineAll / drain over a constant escape table.
+# builtins.toXML's drain: every tag line of the document (the indent, prefix, name, attributes and suffix) is one
+# trikeshed.combineAll of the walk's rows, each value a combineAll over a constant escape table or an integer's digits,
+# drained once into the bridge's Text.
 mlnix_lower_trikeshed(NixEval lowered/nixeval/XmlOps.mlir XmlOps)
-# The XML composition residue and fromTOML's array close (lib/Eval/Formats.cpp's Attrs::set scan, tag's row sort and
-# key/value windows, the formals' sorted names and the open array's elems fill are gone): the dedup scan an scf.while,
-# the rows and names trikeshed.sorted by unsigned bytes, the windows and room one scf.for, the elems one drain.
+# builtins.toXML's walk, the fill (lib/Eval/Formats.cpp's XMLWriter, element stack, toXML/showAttrsXML/posToXML
+# recursion and attribute rows are gone): the recursion func.call, the attributes and formals trikeshed.sorted by their
+# bytes, one row a tag; the callbacks keep the forcing, copyContext, isDerivation, the seen derivations and positions.
+mlnix_lower_trikeshed(NixEval lowered/nixeval/XmlWalk.mlir XmlWalk)
+# fromTOML's array close: the open array's elems drained once into the list's cells.
 mlnix_lower_trikeshed(NixEval lowered/nixeval/FmtCompOps.mlir FmtCompOps)
 # builtins.fromTOML's scan (lib/Eval/Formats.cpp's TomlParser lexing/syntax is gone; the bridge builds the tables from
 # its events in order and keeps the duplicate/redefinition checks).  A cf state machine over the input bytes with an
