@@ -8,6 +8,17 @@ llvm_update_compile_flags(mlnix-opt)
 add_executable(mlnix mlnix.cpp)
 target_link_libraries(mlnix PRIVATE NixEval NixFrontend NixStore MLIRNix MLIRIR MLIRParser MLIRPass MLIRSupport)
 llvm_update_compile_flags(mlnix)
+# The tool-scale fill-drain of mlnix.cpp (parseNixPath, printHelp, the nix argv-list escaping, the
+# eval/parse/emit-mlir/run-mlir argv splice, cmdStore --print-env) lowered into the executable.  mlower is defined in
+# lib/CMakeLists.txt; its find_program vars are cache-global, but these two are lib-directory-scoped, so mirror them
+# here (the lowered objects share build/lib/lowered).
+set(MLNIX_LOWERED_DIR ${PROJECT_BINARY_DIR}/lib/lowered)
+set(MLNIX_TRIKESHED_PIPELINE
+  --ownership-based-buffer-deallocation --canonicalize --buffer-deallocation-simplification
+  --bufferization-lower-deallocations --convert-scf-to-cf --expand-strided-metadata --lower-affine
+  --finalize-memref-to-llvm --convert-scf-to-cf --convert-arith-to-llvm --convert-index-to-llvm
+  --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts)
+mlnix_lower_trikeshed(mlnix lowered/tools/ToolOpts.mlir ToolOpts)
 
 # KIF files into a kif.theory, and the chase (lib/Dialect/KifImport.cpp, KifChase.cpp).
 add_executable(mlnix-kif mlnix-kif.cpp)
