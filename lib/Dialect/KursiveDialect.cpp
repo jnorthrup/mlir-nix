@@ -403,8 +403,8 @@ struct Reader {
         if (ok()) atom(GroupOp::create(b, loc, T(), inner, g));
         continue;
       }
-      if (!k) return bad(Invalid), Value(); // a '\' before an ordinary character, or at the end (Nix's strict libstdc++)
       endAtom(f);
+      if (!k) return bad(Invalid), Value(); // a '\' before an ordinary character, or at the end (Nix's strict libstdc++)
       if (k == Byte || k == Esc) { // a byte: in the run, or a set of its own if a repetition follows
         unsigned c = (unsigned char)s[k == Esc ? m[2 * Escaped] : p];
         p = end, set(), node();
