@@ -6,16 +6,18 @@
 // makes a string.  A piece is read where it lies, compared where it lies, and copied only into the builder, whose buffer
 // can start with room for a reply's head, so that the head is written in front of the body and nothing moves.  What the
 // builder writes besides pieces, a string's escapes, text.mlir makes in TrikeShed's ops, as it makes the query's and the
-// report's replies whole.
+// report's replies whole.  A piece is searched and read (a byte's place, a text's place, a decimal, two pieces the same)
+// by reads.mlir's folds, over a view of its bytes (@view, the descriptor the LLVM lowering lays a series out as).
 
-llvm.func @malloc(i64) -> !llvm.ptr
 llvm.func @realloc(!llvm.ptr, i64) -> !llvm.ptr
 llvm.func @free(!llvm.ptr)
 llvm.func @memcpy(!llvm.ptr, !llvm.ptr, i64) -> !llvm.ptr
-llvm.func @memcmp(!llvm.ptr, !llvm.ptr, i64) -> i32
-llvm.func @memchr(!llvm.ptr, i32, i64) -> !llvm.ptr
-llvm.func @memmem(!llvm.ptr, i64, !llvm.ptr, i64) -> !llvm.ptr
+// text.mlir's and reads.mlir's C interfaces (TrikeShed's ops)
 llvm.func @_mlir_ciface_json_escape(!llvm.ptr, !llvm.ptr) -> i64
+llvm.func @_mlir_ciface_rd_find(!llvm.ptr, i8) -> i64
+llvm.func @_mlir_ciface_rd_search(!llvm.ptr, !llvm.ptr) -> i64
+llvm.func @_mlir_ciface_rd_number(!llvm.ptr) -> i64
+llvm.func @_mlir_ciface_rd_same(!llvm.ptr, !llvm.ptr) -> i1
 
 // ---- coordinates
 
@@ -70,34 +72,31 @@ func.func @view(%d: !llvm.ptr, %p: !llvm.ptr, %n: i64) {
   return
 }
 
-// ---- bytes where they lie
-
-func.func @at(%p: !llvm.ptr, %i: i64) -> i8 {
-  %q = llvm.getelementptr %p[%i] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %c = llvm.load %q : !llvm.ptr -> i8
-  return %c : i8
-}
+// ---- bytes where they lie: reads.mlir's folds over a view of them
 
 func.func @off(%p: !llvm.ptr, %i: i64) -> !llvm.ptr {
   %q = llvm.getelementptr %p[%i] : (!llvm.ptr, i64) -> !llvm.ptr, i8
   return %q : !llvm.ptr
 }
 
+// the n bytes at p + from, as a descriptor in d
+func.func @sr_window(%d: !llvm.ptr, %p: !llvm.ptr, %from: i64, %n: i64) {
+  %q = func.call @off(%p, %from) : (!llvm.ptr, i64) -> !llvm.ptr
+  func.call @view(%d, %q, %n) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+  return
+}
+
 // the piece of a at ta has the bytes of the n bytes at b
 func.func @is(%a: !llvm.ptr, %ta: i64, %b: !llvm.ptr, %n: i64) -> i1 {
+  %one = arith.constant 1 : i32
+  %c0 = arith.constant 0 : i64
+  %s = func.call @tw_s(%ta) : (i64) -> i64
   %la = func.call @tw_n(%ta) : (i64) -> i64
-  %same = arith.cmpi eq, %la, %n : i64
-  %r = scf.if %same -> (i1) {
-    %s = func.call @tw_s(%ta) : (i64) -> i64
-    %pa = func.call @off(%a, %s) : (!llvm.ptr, i64) -> !llvm.ptr
-    %c = llvm.call @memcmp(%pa, %b, %n) : (!llvm.ptr, !llvm.ptr, i64) -> i32
-    %z = arith.constant 0 : i32
-    %eq = arith.cmpi eq, %c, %z : i32
-    scf.yield %eq : i1
-  } else {
-    %f = arith.constant false
-    scf.yield %f : i1
-  }
+  %da = llvm.alloca %one x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
+  func.call @sr_window(%da, %a, %s, %la) : (!llvm.ptr, !llvm.ptr, i64, i64) -> ()
+  %db = llvm.alloca %one x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
+  func.call @sr_window(%db, %b, %c0, %n) : (!llvm.ptr, !llvm.ptr, i64, i64) -> ()
+  %r = llvm.call @_mlir_ciface_rd_same(%da, %db) : (!llvm.ptr, !llvm.ptr) -> i1
   return %r : i1
 }
 
@@ -112,137 +111,58 @@ func.func @same(%a: !llvm.ptr, %ta: i64, %b: !llvm.ptr, %tb: i64) -> i1 {
 
 // the first byte b in [from, to), or -1
 func.func @find(%p: !llvm.ptr, %from: i64, %to: i64, %b: i8) -> i64 {
-  %m1 = arith.constant -1 : i64
-  %n = arith.subi %to, %from : i64
+  %one = arith.constant 1 : i32
   %c0 = arith.constant 0 : i64
-  %none = arith.cmpi sle, %n, %c0 : i64
-  %r = scf.if %none -> (i64) {
-    scf.yield %m1 : i64
-  } else {
-    %start = func.call @off(%p, %from) : (!llvm.ptr, i64) -> !llvm.ptr
-    %bi = arith.extui %b : i8 to i32
-    %hit = llvm.call @memchr(%start, %bi, %n) : (!llvm.ptr, i32, i64) -> !llvm.ptr
-    %null = llvm.mlir.zero : !llvm.ptr
-    %miss = llvm.icmp "eq" %hit, %null : !llvm.ptr
-    %ri = scf.if %miss -> (i64) {
-      scf.yield %m1 : i64
-    } else {
-      %hi = llvm.ptrtoint %hit : !llvm.ptr to i64
-      %pi = llvm.ptrtoint %p : !llvm.ptr to i64
-      %d = arith.subi %hi, %pi : i64
-      scf.yield %d : i64
-    }
-    scf.yield %ri : i64
-  }
+  %n0 = arith.subi %to, %from : i64
+  %n = arith.maxsi %n0, %c0 : i64
+  %d = llvm.alloca %one x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
+  func.call @sr_window(%d, %p, %from, %n) : (!llvm.ptr, !llvm.ptr, i64, i64) -> ()
+  %i = llvm.call @_mlir_ciface_rd_find(%d, %b) : (!llvm.ptr, i8) -> i64
+  %r = func.call @sr_placed(%from, %i) : (i64, i64) -> i64
   return %r : i64
 }
 
-// the last byte b in [from, to), or -1
-func.func @rfind(%p: !llvm.ptr, %from: i64, %to: i64, %b: i8) -> i64 {
+// a place in a window from `from` as a place in its text, or -1
+func.func @sr_placed(%from: i64, %i: i64) -> i64 {
+  %c0 = arith.constant 0 : i64
   %m1 = arith.constant -1 : i64
-  %c1 = arith.constant 1 : i64
-  %r = scf.while (%i = %to) : (i64) -> i64 {
-    %more = arith.cmpi sgt, %i, %from : i64
-    %j = arith.subi %i, %c1 : i64
-    %go = scf.if %more -> (i1) {
-      %x = func.call @at(%p, %j) : (!llvm.ptr, i64) -> i8
-      %ne = arith.cmpi ne, %x, %b : i8
-      scf.yield %ne : i1
-    } else {
-      %f = arith.constant false
-      scf.yield %f : i1
-    }
-    %res = arith.select %more, %j, %m1 : i64
-    scf.condition(%go) %res : i64
-  } do {
-  ^bb0(%j: i64):
-    scf.yield %j : i64
-  }
+  %found = arith.cmpi sge, %i, %c0 : i64
+  %at = arith.addi %from, %i : i64
+  %r = arith.select %found, %at, %m1 : i64
   return %r : i64
 }
 
 // the first place the n bytes at q appear in [from, to), or -1
 func.func @search(%p: !llvm.ptr, %from: i64, %to: i64, %q: !llvm.ptr, %n: i64) -> i64 {
+  %one = arith.constant 1 : i32
+  %c0 = arith.constant 0 : i64
   %m1 = arith.constant -1 : i64
   %len = arith.subi %to, %from : i64
   %short = arith.cmpi slt, %len, %n : i64
   %r = scf.if %short -> (i64) {
     scf.yield %m1 : i64
   } else {
-    %start = func.call @off(%p, %from) : (!llvm.ptr, i64) -> !llvm.ptr
-    %hit = llvm.call @memmem(%start, %len, %q, %n) : (!llvm.ptr, i64, !llvm.ptr, i64) -> !llvm.ptr
-    %null = llvm.mlir.zero : !llvm.ptr
-    %miss = llvm.icmp "eq" %hit, %null : !llvm.ptr
-    %ri = scf.if %miss -> (i64) {
-      scf.yield %m1 : i64
-    } else {
-      %hi = llvm.ptrtoint %hit : !llvm.ptr to i64
-      %pi = llvm.ptrtoint %p : !llvm.ptr to i64
-      %d = arith.subi %hi, %pi : i64
-      scf.yield %d : i64
-    }
-    scf.yield %ri : i64
+    %d = llvm.alloca %one x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
+    func.call @sr_window(%d, %p, %from, %len) : (!llvm.ptr, !llvm.ptr, i64, i64) -> ()
+    %dq = llvm.alloca %one x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
+    func.call @sr_window(%dq, %q, %c0, %n) : (!llvm.ptr, !llvm.ptr, i64, i64) -> ()
+    %i = llvm.call @_mlir_ciface_rd_search(%d, %dq) : (!llvm.ptr, !llvm.ptr) -> i64
+    %at = func.call @sr_placed(%from, %i) : (i64, i64) -> i64
+    scf.yield %at : i64
   }
   return %r : i64
 }
 
 // a decimal at [from, to), read as atol reads one: blanks, a minus, digits; the first other byte ends it
 func.func @number(%p: !llvm.ptr, %from: i64, %to: i64) -> i64 {
+  %one = arith.constant 1 : i32
   %c0 = arith.constant 0 : i64
-  %c1 = arith.constant 1 : i64
-  %c9 = arith.constant 9 : i64
-  %c10 = arith.constant 10 : i64
-  %c48 = arith.constant 48 : i64
-  %sp = arith.constant 32 : i8
-  %minus = arith.constant 45 : i8
-  %false = arith.constant false
-  %i0 = scf.while (%i = %from) : (i64) -> i64 {
-    %in = arith.cmpi slt, %i, %to : i64
-    %go = scf.if %in -> (i1) {
-      %x = func.call @at(%p, %i) : (!llvm.ptr, i64) -> i8
-      %b = arith.cmpi eq, %x, %sp : i8
-      scf.yield %b : i1
-    } else {
-      scf.yield %false : i1
-    }
-    scf.condition(%go) %i : i64
-  } do {
-  ^bb0(%i: i64):
-    %n = arith.addi %i, %c1 : i64
-    scf.yield %n : i64
-  }
-  %in0 = arith.cmpi slt, %i0, %to : i64
-  %neg = scf.if %in0 -> (i1) {
-    %x = func.call @at(%p, %i0) : (!llvm.ptr, i64) -> i8
-    %m = arith.cmpi eq, %x, %minus : i8
-    scf.yield %m : i1
-  } else {
-    scf.yield %false : i1
-  }
-  %i0n = arith.addi %i0, %c1 : i64
-  %i1 = arith.select %neg, %i0n, %i0 : i64
-  %res:3 = scf.while (%i = %i1, %v = %c0) : (i64, i64) -> (i64, i64, i64) {
-    %in = arith.cmpi slt, %i, %to : i64
-    %dig:2 = scf.if %in -> (i1, i64) {
-      %x = func.call @at(%p, %i) : (!llvm.ptr, i64) -> i8
-      %xz = arith.extui %x : i8 to i64
-      %d = arith.subi %xz, %c48 : i64
-      %isd = arith.cmpi ule, %d, %c9 : i64
-      scf.yield %isd, %d : i1, i64
-    } else {
-      scf.yield %false, %c0 : i1, i64
-    }
-    scf.condition(%dig#0) %i, %v, %dig#1 : i64, i64, i64
-  } do {
-  ^bb0(%i: i64, %v: i64, %d: i64):
-    %n = arith.addi %i, %c1 : i64
-    %v10 = arith.muli %v, %c10 : i64
-    %nv = arith.addi %v10, %d : i64
-    scf.yield %n, %nv : i64, i64
-  }
-  %negv = arith.subi %c0, %res#1 : i64
-  %r = arith.select %neg, %negv, %res#1 : i64
-  return %r : i64
+  %n0 = arith.subi %to, %from : i64
+  %n = arith.maxsi %n0, %c0 : i64
+  %d = llvm.alloca %one x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
+  func.call @sr_window(%d, %p, %from, %n) : (!llvm.ptr, !llvm.ptr, i64, i64) -> ()
+  %v = llvm.call @_mlir_ciface_rd_number(%d) : (!llvm.ptr) -> i64
+  return %v : i64
 }
 
 // ---- the builder: one growing buffer; a reply is taken out of it whole
@@ -295,12 +215,6 @@ func.func @ob_len() -> i64 {
   return %n : i64
 }
 
-func.func @ob_base() -> !llvm.ptr {
-  %pp = llvm.mlir.addressof @ob_p : !llvm.ptr
-  %p = llvm.load %pp : !llvm.ptr -> !llvm.ptr
-  return %p : !llvm.ptr
-}
-
 // begin again with gap bytes of room in front
 func.func @ob_start(%gap: i64) {
   %np = llvm.mlir.addressof @ob_n : !llvm.ptr
@@ -340,14 +254,6 @@ func.func @ob_piece(%base: !llvm.ptr, %t: i64) {
   return
 }
 
-func.func @ob_byte(%c: i8) {
-  %c1 = arith.constant 1 : i64
-  %end = func.call @ob_room(%c1) : (i64) -> !llvm.ptr
-  llvm.store %c, %end : i8, !llvm.ptr
-  func.call @ob_used(%c1) : (i64) -> ()
-  return
-}
-
 // the piece as the inside of a JSON string: text.mlir's json_escape, written into the room (six bytes a byte at most)
 func.func @ob_esc(%base: !llvm.ptr, %t: i64) {
   %one = arith.constant 1 : i32
@@ -365,13 +271,3 @@ func.func @ob_esc(%base: !llvm.ptr, %t: i64) {
   func.call @ob_used(%k) : (i64) -> ()
   return
 }
-
-// the piece as a JSON string: "..." escaped
-func.func @ob_quoted(%base: !llvm.ptr, %t: i64) {
-  %q = arith.constant 34 : i8
-  func.call @ob_byte(%q) : (i8) -> ()
-  func.call @ob_esc(%base, %t) : (!llvm.ptr, i64) -> ()
-  func.call @ob_byte(%q) : (i8) -> ()
-  return
-}
-
