@@ -410,7 +410,6 @@ struct EvalSettings {
   /// time; the op carries a pool row and the body is generated on first call.
   bool deferBodies = false;
   unsigned maxCallDepth = 10000;
-  bool dumpMLIR = false;
   nixfe::Lint lintAbsolutePaths = nixfe::Lint::Ignore, lintShortPaths = nixfe::Lint::Ignore,
               lintUrls = nixfe::Lint::Ignore;
 };
@@ -641,7 +640,6 @@ struct EvalState {
 
   // -- Errors -----------------------------------------------------------------
   [[noreturn]] void throwTypeError(const char *expected, Value &v, PosPtr pos, std::string_view ctx = "");
-  [[noreturn]] void throwError(std::string_view msg, PosPtr pos = nullptr);
   void warn(std::string_view msg);
   composite::Text showPos(PosPtr pos) const;
 

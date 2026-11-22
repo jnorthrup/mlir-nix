@@ -33,7 +33,6 @@ struct Set {
   constexpr bool has(uint8_t c) const { return (w[c >> 6] >> (c & 63)) & 1; }
   constexpr void add(uint8_t c) { w[c >> 6] |= uint64_t(1) << (c & 63); }
   constexpr void range(uint8_t a, uint8_t b) { for (unsigned c = a; c <= b; c++) add(uint8_t(c)); }
-  constexpr void invert() { for (auto &x : w) x = ~x; }
 };
 
 /// One step.  Char: the byte at the cursor is in sets[x].  Alt: x, then y.  Rep: the body at x (loop slot z), then the way out at y.

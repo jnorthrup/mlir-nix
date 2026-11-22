@@ -1092,6 +1092,21 @@ void rewriteSplits(func::FuncOp f) {
     op->getResult(0).replaceAllUsesWith(to);
     op->erase();
   }
+  // leftOf / rightOf of a joins (through a reify): the side itself, b viewed to size(a); so zipnext's sides stay slices
+  SmallVector<Operation *> sides;
+  f.walk([&](Operation *op) { if (isa<LeftOfOp, RightOfOp>(op)) sides.push_back(op); });
+  for (Operation *op : sides) {
+    auto r = op->getOperand(0).getDefiningOp<ReifyOp>();
+    auto j = (r ? r.getSeries() : op->getOperand(0)).getDefiningOp<JoinsOp>();
+    if (!j) continue;
+    OpBuilder b(op);
+    Location loc = op->getLoc();
+    Value to = isa<LeftOfOp>(op) ? j.getA() : SliceOp::create(b, loc, j.getB().getType(), j.getB(), cIndex(b, loc, 0), sizeOf(b, loc, j.getA()));
+    op->getResult(0).replaceAllUsesWith(to);
+    op->erase();
+    if (r && r->use_empty()) r->erase();
+    if (j->use_empty()) j->erase();
+  }
 }
 
 /// A series made where it is read: its region pure ops without regions, and only at, size, slice and bisect read it.

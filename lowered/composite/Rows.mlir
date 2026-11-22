@@ -6,8 +6,8 @@
 //   find          findRow's branchless search over the key series (trikeshed.at probes; the loop's trip count is n's alone,
 //                 so it stays as fast as the llvm port -- a bisect, whose exit depends on the keys, measured 2-5x slower
 //                 on Bindings::get's path): the last row whose key is <= k, if its key is k, or 0
-//   uniqueFirst   trikeshed.zipnext of the keys: row i + 1 is kept where its pair differs (trikeshed.where), the kept rows
-//                 drained to the front as slices of the words (each one row later or more than where it goes)
+//   uniqueFirst   trikeshed.zipnext of the keys: row i + 1 is kept where its pair differs, drained to the front as a slice
+//                 of the words; zipnext's sides are slices of the key series, read in place, so nothing is allocated
 //   union         y winning on an equal key.  When y is a sixteenth of x or less, each y row's lower bound in x is a
 //                 bisect over a slice of x's keys from where the last one ended, and the run of x before it is ONE drain
 //                 of a slice; else a merge walk over the two key series, a row drained at a time, then the tails.
@@ -107,36 +107,29 @@ func.func @mlnix_rows_unique_first(%rows: !llvm.ptr, %rb: i64, %n: i64) -> i64 {
   %l = trikeshed.leftOf %z : !z -> !w
   %rt = trikeshed.rightOf %z : !z -> !w
   %np = trikeshed.size %l : !w
-  %after = trikeshed.series %np : !s {
-  ^bb0(%i: index):
-    %k = arith.addi %i, %i1 : index
-    %k64 = arith.index_cast %k : index to i64
-    trikeshed.yield %k64 : i64
-  }
-  // row i + 1 opens a run where its key differs from row i's
-  %kept = trikeshed.where %after : !s -> !s {
-  ^bb0(%k: i64):
-    %i = arith.subi %k, %c1 : i64
-    %a = trikeshed.at %l[%i] : !w, i64 -> i32
-    %b = trikeshed.at %rt[%i] : !w, i64 -> i32
+  // row i + 1 opens a run where its key differs from row i's, and is drained to the front there.  A step reads rows i and
+  // i + 1 before it writes, and a write lands at or before the row it copies, so every key read is its row's own.
+  %m = scf.for %i = %i0 to %np step %i1 iter_args(%mm = %i1) -> (index) {
+    %a = trikeshed.at %l[%i] : !w, index -> i32
+    %b = trikeshed.at %rt[%i] : !w, index -> i32
     %ne = arith.cmpi ne, %a, %b : i32
-    trikeshed.yield %ne : i1
-  }
-  %nk = trikeshed.size %kept : !s
-  scf.for %t = %i0 to %nk step %i1 {
-    %src = trikeshed.at %kept[%t] : !s, index -> i64
-    %si = arith.index_cast %src : i64 to index
-    %from = arith.muli %si, %wi : index
-    %dst = arith.addi %t, %i1 : index
-    %to = arith.muli %dst, %wi : index
-    %row = trikeshed.slice %words[%from, %wi] : !w -> !w
-    %cells = memref.subview %dm[%to] [%wi] [1] : !m to !m
-    %e = trikeshed.drain %row, %cells : !w, !m -> index
+    %mm2 = scf.if %ne -> index {
+      %src = arith.addi %i, %i1 : index
+      %from = arith.muli %src, %wi : index
+      %to = arith.muli %mm, %wi : index
+      %row = trikeshed.slice %words[%from, %wi] : !w -> !w
+      %cells = memref.subview %dm[%to] [%wi] [1] : !m to !m
+      %e = trikeshed.drain %row, %cells : !w, !m -> index
+      %mp = arith.addi %mm, %i1 : index
+      scf.yield %mp : index
+    } else {
+      scf.yield %mm : index
+    }
+    scf.yield %mm2 : index
   }
   %any = arith.cmpi ugt, %n, %c0 : i64
-  %nk64 = arith.index_cast %nk : index to i64
-  %m = arith.addi %nk64, %c1 : i64
-  %r = arith.select %any, %m, %c0 : i64
+  %m64 = arith.index_cast %m : index to i64
+  %r = arith.select %any, %m64, %c0 : i64
   return %r : i64
 }
 

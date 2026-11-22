@@ -1,4 +1,4 @@
-//===- Folds.h - the transforms built on fold: iota, vec, foldN, firstWhere, argMin ---===//
+//===- Folds.h - the transforms built on fold: iota, vec, firstWhere, argMin ---===//
 
 #ifndef COMPOSITE_FOLDS_H
 #define COMPOSITE_FOLDS_H
@@ -26,11 +26,6 @@ template <uint32_t N, class F> constexpr auto vec(F f) {
   return out;
 }
 
-/// foldN<N>(init, f): the fold of f over the indices 0..N-1, with N a constant.  It is the fold of iotaN<N>(), so the premark
-/// (Marks) sends it down the straight-line path: there is one unroller, in fold.
-template <uint32_t N, class T, class F> constexpr T foldN(T init, F f) {
-  return fold(iotaN<N>(), mv(init), [&](T state, uint32_t k) -> T { return f(mv(state), k); });
-}
 
 /// The index of the first element satisfying p, or size when none does (the Series' own bisect convention).
 template <class S, class P> constexpr uint32_t firstWhere(const S &xs, P p) {
