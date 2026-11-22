@@ -139,57 +139,16 @@ composite::Text jsonEscape(std::string_view s) {
   return o;
 }
 
+// jsonFloat is lowered/nixstore/JsonFloat.mlir (the shortest round-tripping digits, format_buffer's layout, one combine
+// drained once); the snprintf, a variadic call, is this callback.
+extern "C" int64_t nixstore_jf_sci(double d, int64_t prec, char *buf) { return snprintf(buf, 64, "%.*e", int(prec - 1), d); }
+extern "C" int64_t nixstore_ts_jsonfloat(double, char *, char *);
+
 composite::Text jsonFloat(double d) {
-  if (std::isnan(d) || std::isinf(d)) return "null";
-  if (d == 0) return std::signbit(d) ? "-0.0" : "0.0";
-  // Shortest representation that round-trips (what grisu2 produces).
   char buf[64];
-  int prec;
-  for (prec = 1; prec <= 17; prec++) {
-    snprintf(buf, sizeof buf, "%.*e", prec - 1, d);
-    if (strtod(buf, nullptr) == d) break;
-  }
-  // buf: [-]d.ddde[+-]XX ; extract digits and exponent.
-  std::string_view s = buf; // a window on buf, which lives to the end of the function
-  bool neg = s[0] == '-';
-  if (neg) s = s.substr(1);
-  auto epos = s.find('e');
-  int exp10 = int(nixsys::readSigned(s.substr(epos + 1)).value);
-  composite::Text digits;
-  for (size_t i = 0; i < epos; i++)
-    if (isdigit((unsigned char)s[i])) digits += s[i];
-  while (digits.size() > 1 && digits.back() == '0') digits.pop_back();
-  // nlohmann::detail::format_buffer: k = number of digits, n = exp10 + 1
-  int k = (int)digits.size();
-  int n = exp10 + 1;
   composite::Text out;
-  if (neg) out += '-';
-  const int minExp = -4, maxExp = 15;
-  if (k <= n && n <= maxExp) {
-    out.put(digits);
-    out.put(size_t(n - k), '0');
-    out += ".0";
-  } else if (0 < n && n <= maxExp) {
-    out.put(digits.substr(0, n));
-    out += '.';
-    out.put(digits.substr(n));
-  } else if (minExp < n && n <= 0) {
-    out += "0.";
-    out.put(size_t(-n), '0');
-    out.put(digits);
-  } else {
-    out.put(digits.substr(0, 1));
-    if (k > 1) {
-      out += '.';
-      out.put(digits.substr(1));
-    }
-    out += "e";
-    int e = n - 1;
-    out += e < 0 ? '-' : '+';
-    int ae = std::abs(e);
-    if (ae < 10) out += "0";
-    out.putInt(ae);
-  }
+  out.resize(32);
+  out.truncate(size_t(nixstore_ts_jsonfloat(d, out.begin(), buf)));
   return out;
 }
 
@@ -251,106 +210,80 @@ int runProgram(std::string_view prog, const composite::MutableSeries<composite::
 // NAR
 //===----------------------------------------------------------------------===//
 
-namespace {
-// The NAR framing (u64 little-endian, pad, the length-prefix + bytes + pad composition, the constant tokens) is in
-// lowered/nixstore/NarFraming.mlir, as trikeshed series/slice/combine/drain over byte series.  The bridges reserve a
-// stack buffer, let the entry fill it and flush it to the sink; the walk below stays here (it is the filesystem I/O).
-extern "C" int64_t mlnix_nar_u64(uint64_t n, char *into);
-extern "C" int64_t mlnix_nar_pad(uint64_t n, char *into);
-extern "C" int64_t mlnix_nar_str(const char *p, size_t n, char *into);
-extern "C" int64_t mlnix_nar_tok(int64_t id, char *into);
-enum NarTok { NT_OPEN, NT_TYPE, NT_REGULAR, NT_EXEC, NT_EMPTY, NT_CONTENTS, NT_DIR, NT_ENTRY, NT_NAME, NT_NODE, NT_SYMLINK, NT_TARGET, NT_CLOSE, NT_MAGIC };
+// The NAR is lowered/nixstore/NarFraming.mlir: the framing (u64, pad, str, the tokens) and the walk (nixstore_ts_nardump:
+// a node's type decides its framing, a directory's names are put in byte order, each entry's path `path/name` is composed
+// into `path` with a NUL after it, the filter is asked, a kept entry framed and walked).  What stays here is what the walk
+// asks for: lstat, the listing, the file's bytes, readlink, the PathFilter, the prefetch notes, the Sink and the wording.
+// The framing of a node is flushed to the Sink before each call that may throw, as the tokens were.
+struct NarWin { const char *p; int64_t n; };
+struct NarDir { composite::MutableSeries<composite::Text> names; composite::MutableSeries<NarWin> wins; composite::MutableSeries<int64_t> order; };
+struct NarWriter;
+extern "C" void nixstore_ts_nardump(NarWriter *, composite::Text *, char *, char *, const char *, int64_t);
 struct NarWriter {
   const Sink &sink;
   const PathFilter &filter;
   bool noteKept = false; // a recorded run's first walk of a filtered tree: each entry the filter keeps goes into the list
-  void u64(uint64_t n) { char b[8]; sink(std::string_view(b, size_t(mlnix_nar_u64(n, b)))); }
-  void pad(uint64_t n) { char b[8]; size_t k = size_t(mlnix_nar_pad(n, b)); if (k) sink(std::string_view(b, k)); }
-  void str(std::string_view s) { char b[PATH_MAX + 16]; sink(std::string_view(b, size_t(mlnix_nar_str(s.data(), s.size(), b)))); } // entry names and symlink targets: at most PATH_MAX bytes
-  void tok(NarTok t) { char b[32]; sink(std::string_view(b, size_t(mlnix_nar_tok(t, b)))); }
-  void dump(const composite::Text &path) {
-    struct stat st;
-    nixprefetch::note('L', path.c_str());
-    if (lstat(path.c_str(), &st) != 0)
-      throw Error(composite::cat("getting attributes of path '", path, "': ", strerror(errno)));
-    tok(NT_OPEN);
-    if (S_ISREG(st.st_mode)) {
-      tok(NT_TYPE);
-      tok(NT_REGULAR);
-      if (st.st_mode & S_IXUSR) {
-        tok(NT_EXEC);
-        tok(NT_EMPTY);
-      }
-      tok(NT_CONTENTS);
-      u64(st.st_size);
-      nixprefetch::note('F', path.c_str());
-      int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
-      if (fd < 0) throw Error(composite::cat("opening file '", path, "': ", strerror(errno)));
-      char buf[65536];
-      uint64_t left = st.st_size;
-      while (left) {
-        ssize_t n = read(fd, buf, std::min<uint64_t>(sizeof buf, left));
-        if (n <= 0) { close(fd); throw Error(composite::cat("reading file '", path, "'")); }
-        sink(std::string_view(buf, n));
-        left -= n;
-      }
-      close(fd);
-      pad(st.st_size);
-    } else if (S_ISDIR(st.st_mode)) {
-      tok(NT_TYPE);
-      tok(NT_DIR);
-      composite::MutableSeries<composite::Text> names;
-      nixprefetch::note('D', path.c_str());
-      DIR *d = opendir(path.c_str());
-      if (!d) throw Error(composite::cat("opening directory '", path, "': ", strerror(errno)));
-      while (auto *e = readdir(d)) {
-        std::string_view n = e->d_name;
-        if (n == "." || n == "..") continue;
-        names.append(composite::Text(n));
-      }
-      closedir(d);
-      composite::MutableSeries<const composite::Text *> order; // the names stay where they are: rows of pointers to them are sorted
-      for (auto &n : names) order.append(&n);
-      composite::sortRows(order.data(), order.size(), [](const composite::Text *a, const composite::Text *b) {
-        return composite::lessChars(composite::series(a->data(), uint32_t(a->size())), composite::series(b->data(), uint32_t(b->size())));
-      });
-      for (const composite::Text *np : order) {
-        const composite::Text &n = *np;
-        composite::Text child;
-        child.reserve(size_t(path.size()) + 1 + n.size()); // `path/name`, in one allocation
-        child += path;
-        child += '/';
-        child += n;
-        if (filter && !filter(child, {})) continue;
-        if (noteKept) nixprefetch::noteKept(child.c_str());
-        tok(NT_ENTRY);
-        tok(NT_OPEN);
-        tok(NT_NAME);
-        str(n);
-        tok(NT_NODE);
-        dump(child);
-        tok(NT_CLOSE);
-      }
-    } else if (S_ISLNK(st.st_mode)) {
-      tok(NT_TYPE);
-      tok(NT_SYMLINK);
-      tok(NT_TARGET);
-      char buf[PATH_MAX + 1];
-      ssize_t n = readlink(path.c_str(), buf, PATH_MAX);
-      if (n < 0) throw Error(composite::cat("reading symlink '", path, "'"));
-      str(std::string_view(buf, n));
-    } else {
-      throw Error(composite::cat("file '", path, "' has an unsupported type"));
-    }
-    tok(NT_CLOSE);
-  }
+  composite::Text path;                  // the entry's path, a NUL after it (the walk writes it)
+  composite::MutableSeries<NarDir> dirs; // a directory's names, by depth
+  char out[PATH_MAX + 512], link[PATH_MAX];
+  std::string_view at(int64_t n) const { return {path.data(), size_t(n)}; }
+  void dump(std::string_view root) { nixstore_ts_nardump(this, &path, out, link, root.data(), int64_t(root.size())); }
 };
-} // namespace
+extern "C" char *nixstore_nar_room(composite::Text *t, int64_t need) {
+  if (t->size() < size_t(need)) t->resize(size_t(need) < 256 ? 256 : size_t(need) * 2);
+  return t->begin();
+}
+extern "C" void nixstore_nw_sink(NarWriter *w, int64_t n) { w->sink(std::string_view(w->out, size_t(n))); }
+extern "C" int64_t nixstore_nw_stat(NarWriter *w, int64_t n, int64_t *size) {
+  struct stat st;
+  nixprefetch::note('L', w->path.data());
+  if (lstat(w->path.data(), &st) != 0) throw Error(composite::cat("getting attributes of path '", w->at(n), "': ", strerror(errno)));
+  *size = int64_t(st.st_size);
+  return S_ISREG(st.st_mode) ? (st.st_mode & S_IXUSR ? 1 : 0) : S_ISDIR(st.st_mode) ? 2 : S_ISLNK(st.st_mode) ? 3 : 4;
+}
+extern "C" void nixstore_nw_file(NarWriter *w, int64_t n, uint64_t left) {
+  nixprefetch::note('F', w->path.data());
+  int fd = open(w->path.data(), O_RDONLY | O_CLOEXEC);
+  if (fd < 0) throw Error(composite::cat("opening file '", w->at(n), "': ", strerror(errno)));
+  char buf[65536];
+  while (left) {
+    ssize_t k = read(fd, buf, std::min<uint64_t>(sizeof buf, left));
+    if (k <= 0) { close(fd); throw Error(composite::cat("reading file '", w->at(n), "'")); }
+    w->sink(std::string_view(buf, k));
+    left -= k;
+  }
+  close(fd);
+}
+extern "C" int64_t nixstore_nw_dir(NarWriter *w, int64_t depth, int64_t n, void **wo) {
+  while (w->dirs.size() <= size_t(depth)) w->dirs.append(NarDir{});
+  NarDir &d = w->dirs[depth];
+  d.names.clear(), d.wins.clear();
+  nixprefetch::note('D', w->path.data());
+  DIR *dp = opendir(w->path.data());
+  if (!dp) throw Error(composite::cat("opening directory '", w->at(n), "': ", strerror(errno)));
+  while (auto *e = readdir(dp))
+    if (std::string_view s = e->d_name; s != "." && s != "..") d.names.append(composite::Text(s));
+  closedir(dp);
+  for (const composite::Text &s : d.names) d.wins.append(NarWin{s.data(), int64_t(s.size())});
+  d.order.resize(d.names.size());
+  wo[0] = d.wins.data(), wo[1] = d.order.data();
+  return d.names.size();
+}
+extern "C" int64_t nixstore_nw_keep(NarWriter *w, int64_t n) {
+  if (w->filter && !w->filter(w->at(n), {})) return 0;
+  if (w->noteKept) nixprefetch::noteKept(w->path.data());
+  return 1;
+}
+extern "C" int64_t nixstore_nw_link(NarWriter *w, int64_t n) {
+  ssize_t k = readlink(w->path.data(), w->link, PATH_MAX);
+  if (k < 0) throw Error(composite::cat("reading symlink '", w->at(n), "'"));
+  return k;
+}
+extern "C" void nixstore_nw_odd(NarWriter *w, int64_t n) { throw Error(composite::cat("file '", w->at(n), "' has an unsupported type")); }
 
 void dumpPath(std::string_view path, const Sink &sink, const PathFilter &filter) {
   NarWriter w{sink, filter};
-  w.tok(NT_MAGIC);
-  w.dump(composite::Text(path));
+  w.dump(path);
 }
 
 namespace {
@@ -451,7 +384,6 @@ void startPrehash() {
         Sink sink = update;
         PathFilter keep = keepIt, none;
         NarWriter w{sink, p->filtered ? keep : none};
-        w.tok(NT_MAGIC);
         w.dump(p->root);
         p->size = hs.bytes();
         p->hash = hs.finish();
@@ -496,72 +428,37 @@ composite::Join<Hash, uint64_t> hashPath(std::string_view path, const PathFilter
   Sink sink = update;
   const PathFilter &f = answered ? answered : filter;
   NarWriter w{sink, f};
-  composite::Text root(path);
-  w.noteKept = algo == HashAlgo::SHA256 && nixprefetch::noteRoot(filter ? 'G' : 'H', root.c_str()) && filter;
-  w.tok(NT_MAGIC);
-  w.dump(root);
+  w.noteKept = algo == HashAlgo::SHA256 && nixprefetch::noteRoot(filter ? 'G' : 'H', nixsys::CStr(path)) && filter;
+  w.dump(path);
   uint64_t n = hs.bytes();
   return {hs.finish(), n};
 }
 
+// restorePath's reader is lowered/nixstore/NarFraming.mlir's nixstore_ts_narrestore (the strings, their bounds, the
+// tokens expected, the names checked, `dst/name` composed into `dst`); the files, links and directories it makes and the
+// wording of its errors are these callbacks.
+extern "C" void nixstore_ts_narrestore(composite::Text *, const char *, int64_t, const char *, int64_t);
+extern "C" [[noreturn]] void nixstore_nr_fail(composite::Text *, int64_t code, const char *p, int64_t n) {
+  std::string_view s(p, size_t(n));
+  if (code == 0) throw Error("NAR truncated");
+  if (code == 1) throw Error(composite::cat("bad NAR: expected '", s, "'"));
+  if (code == 3) throw Error(composite::cat("NAR contains invalid file name '", s, "'"));
+  throw Error(code == 2 ? "bad NAR" : "bad NAR: unknown file type");
+}
+extern "C" void nixstore_nr_file(composite::Text *dst, int64_t n, const char *p, int64_t k, int64_t exec) {
+  writeFile(std::string_view(dst->data(), size_t(n)), std::string_view(p, size_t(k)), exec ? 0755 : 0644);
+}
+extern "C" void nixstore_nr_link(composite::Text *dst, int64_t n, const char *p, int64_t k) {
+  if (symlink(nixsys::CStr(std::string_view(p, size_t(k))), dst->data()) != 0)
+    throw Error(composite::cat("creating symlink '", std::string_view(dst->data(), size_t(n)), "'"));
+}
+extern "C" void nixstore_nr_dir(composite::Text *dst, int64_t n) {
+  if (mkdir(dst->data(), 0755) != 0) throw Error(composite::cat("creating directory '", std::string_view(dst->data(), size_t(n)), "'"));
+}
+
 void restorePath(std::string_view path, std::string_view nar) {
-  size_t p = 0;
-  auto u64 = [&]() -> uint64_t {
-    if (p + 8 > nar.size()) throw Error("NAR truncated");
-    uint64_t n = 0;
-    for (int i = 0; i < 8; i++) n |= uint64_t((unsigned char)nar[p + i]) << (8 * i);
-    p += 8;
-    return n;
-  };
-  auto str = [&]() -> std::string_view {
-    uint64_t n = u64();
-    if (p + n > nar.size()) throw Error("NAR truncated");
-    std::string_view s = nar.substr(p, n);
-    p += n;
-    if (n % 8) p += 8 - n % 8;
-    return s;
-  };
-  auto expect = [&](std::string_view s) {
-    if (str() != s) throw Error(composite::cat("bad NAR: expected '", s, "'"));
-  };
-  auto node = [&](auto &self, const composite::Text &dst) -> void {
-    expect("(");
-    expect("type");
-    auto t = str();
-    if (t == "regular") {
-      auto tag = str();
-      bool exec = false;
-      if (tag == "executable") { str(); exec = true; tag = str(); }
-      if (tag != "contents") throw Error("bad NAR");
-      auto c = str();
-      writeFile(dst, c, exec ? 0755 : 0644);
-      expect(")");
-    } else if (t == "symlink") {
-      expect("target");
-      nixsys::CStr tgt(str());
-      if (symlink(tgt, dst.c_str()) != 0) throw Error(composite::cat("creating symlink '", dst, "'"));
-      expect(")");
-    } else if (t == "directory") {
-      if (mkdir(dst.c_str(), 0755) != 0) throw Error(composite::cat("creating directory '", dst, "'"));
-      while (true) {
-        auto tag = str();
-        if (tag == ")") break;
-        if (tag != "entry") throw Error("bad NAR");
-        expect("(");
-        expect("name");
-        std::string_view name = str(); // a window on `nar`, which outlives the walk
-        if (name.empty() || name == "." || name == ".." || name.find('/') != std::string_view::npos)
-          throw Error(composite::cat("NAR contains invalid file name '", name, "'"));
-        expect("node");
-        self(self, composite::cat(dst, '/', name));
-        expect(")");
-      }
-    } else {
-      throw Error("bad NAR: unknown file type");
-    }
-  };
-  expect("nix-archive-1");
-  node(node, composite::Text(path));
+  composite::Text dst;
+  nixstore_ts_narrestore(&dst, nar.data(), int64_t(nar.size()), path.data(), int64_t(path.size()));
 }
 
 //===----------------------------------------------------------------------===//
