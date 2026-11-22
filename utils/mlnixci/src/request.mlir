@@ -664,3 +664,259 @@ func.func @rq_pick(%rows: !ix, %kids: !s32, %t: !text, %select: i64, %name: !tex
   %r = arith.select %picks, %v1, %z64 : i64
   return %r : i64
 }
+
+// ---- the what-if overlay's edits, through the overlay's index: where a path's member is, and what an edit splices
+
+// index.mlir's KeyToChild: the key's place among the object's children, or -1
+func.func private @ix_find(!ix, !s32, !text, i64, !text) -> i64
+
+// The path (segments: the insides of the body's strings) walked down the overlay's objects: out = kind, level, a, b --
+// kind 1: the member at segment `level` is absent from the deepest object the path has, so the members the path lacks go
+// in at a (after that object's last member, or after its '{'), with a ", " first when b is 1; kind 2: the member is
+// there, its value spans [a, b); kind 3: segment `level` names something that is not an object.
+func.func @ov_set_walk(%rows: !ix, %kids: !s32, %ov: !text, %body: !text, %segs: !trikeshed.series<!tp>, %out: memref<?xi64>)
+    attributes {llvm.emit_c_interface} {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c3 = arith.constant 3 : index
+  %z64 = arith.constant 0 : i64
+  %v1 = arith.constant 1 : i64
+  %v2 = arith.constant 2 : i64
+  %v3 = arith.constant 3 : i64
+  %m1 = arith.constant -1 : i64
+  %object = arith.constant 5 : i8
+  %k0 = trikeshed.key 0 : !ik
+  %k1 = trikeshed.key 1 : !ik
+  %k2 = trikeshed.key 2 : !ik
+  %spans = trikeshed.column %rows[%k0] : !ix, !ik -> !trikeshed.series<!tw>
+  %tags = trikeshed.column %rows[%k1] : !ix, !ik -> !trikeshed.series<i8>
+  %kc = trikeshed.column %rows[%k2] : !ix, !ik -> !trikeshed.series<!tp>
+  %ns = trikeshed.size %segs : !trikeshed.series<!tp>
+  %ns64 = arith.index_cast %ns : index to i64
+  // kind 0 while walking
+  %w:4 = scf.while (%i = %z64, %obj = %z64, %kind = %z64, %v = %m1) : (i64, i64, i64, i64) -> (i64, i64, i64, i64) {
+    %go = arith.cmpi eq, %kind, %z64 : i64
+    scf.condition(%go) %i, %obj, %kind, %v : i64, i64, i64, i64
+  } do {
+  ^bb0(%i: i64, %obj: i64, %kind: i64, %v: i64):
+    %seg = trikeshed.at %segs[%i] : !trikeshed.series<!tp>, i64 -> !tp
+    %s32 = trikeshed.first %seg : !tp -> i32
+    %l32 = trikeshed.second %seg : !tp -> i32
+    %s = arith.index_castui %s32 : i32 to index
+    %l = arith.index_castui %l32 : i32 to index
+    %key = trikeshed.slice %body[%s, %l] : !text -> !text
+    %vv = func.call @ix_member(%rows, %kids, %ov, %obj, %key) : (!ix, !s32, !text, i64, !text) -> i64
+    %absent = arith.cmpi slt, %vv, %z64 : i64
+    %i1 = arith.addi %i, %v1 : i64
+    %last = arith.cmpi eq, %i1, %ns64 : i64
+    %isObj = scf.if %absent -> (i1) {
+      %no = arith.constant false
+      scf.yield %no : i1
+    } else {
+      %t = trikeshed.at %tags[%vv] : !trikeshed.series<i8>, i64 -> i8
+      %o = arith.cmpi eq, %t, %object : i8
+      scf.yield %o : i1
+    }
+    %k3 = arith.select %isObj, %z64, %v3 : i64
+    %k2x = arith.select %last, %v2, %k3 : i64
+    %k1x = arith.select %absent, %v1, %k2x : i64
+    %walk = arith.cmpi eq, %k1x, %z64 : i64
+    %nobj = arith.select %walk, %vv, %obj : i64
+    %ni = arith.select %walk, %i1, %i : i64
+    scf.yield %ni, %nobj, %k1x, %vv : i64, i64, i64, i64
+  }
+  %isInsert = arith.cmpi eq, %w#2, %v1 : i64
+  %isReplace = arith.cmpi eq, %w#2, %v2 : i64
+  %a, %b = scf.if %isInsert -> (i64, i64) {
+    %fc = trikeshed.at %kc[%w#1] : !trikeshed.series<!tp>, i64 -> !tp
+    %f32 = trikeshed.first %fc : !tp -> i32
+    %n32 = trikeshed.second %fc : !tp -> i32
+    %zero = arith.constant 0 : i32
+    %empty = arith.cmpi eq, %n32, %zero : i32
+    %at = scf.if %empty -> (i64) {
+      %sp = trikeshed.at %spans[%w#1] : !trikeshed.series<!tw>, i64 -> !tw
+      %o = trikeshed.first %sp : !tw -> i32
+      %o64 = arith.extui %o : i32 to i64
+      %a1 = arith.addi %o64, %v1 : i64
+      scf.yield %a1 : i64
+    } else {
+      %one = arith.constant 1 : i32
+      %lk = arith.addi %f32, %n32 : i32
+      %lk1 = arith.subi %lk, %one : i32
+      %lastKid = trikeshed.at %kids[%lk1] : !s32, i32 -> i32
+      %sp = trikeshed.at %spans[%lastKid] : !trikeshed.series<!tw>, i32 -> !tw
+      %c = trikeshed.second %sp : !tw -> i32
+      %c64 = arith.extui %c : i32 to i64
+      %a1 = arith.addi %c64, %v1 : i64
+      scf.yield %a1 : i64
+    }
+    %comma = arith.select %empty, %z64, %v1 : i64
+    scf.yield %at, %comma : i64, i64
+  } else {
+    %r:2 = scf.if %isReplace -> (i64, i64) {
+      %sp = trikeshed.at %spans[%w#3] : !trikeshed.series<!tw>, i64 -> !tw
+      %o = trikeshed.first %sp : !tw -> i32
+      %c = trikeshed.second %sp : !tw -> i32
+      %o64 = arith.extui %o : i32 to i64
+      %c64 = arith.extui %c : i32 to i64
+      %e = arith.addi %c64, %v1 : i64
+      scf.yield %o64, %e : i64, i64
+    } else {
+      scf.yield %z64, %z64 : i64, i64
+    }
+    scf.yield %r#0, %r#1 : i64, i64
+  }
+  memref.store %w#2, %out[%c0] : memref<?xi64>
+  memref.store %w#0, %out[%c1] : memref<?xi64>
+  memref.store %a, %out[%c2] : memref<?xi64>
+  memref.store %b, %out[%c3] : memref<?xi64>
+  return
+}
+
+// The path walked down the overlay's objects for a reset: out = [from, to), what the edit cuts -- the deepest member on
+// the path whose object keeps another member (or the top level's), with one comma beside it -- or [end, end) when the
+// path is not there (absent, or through something that is not an object).
+func.func @ov_cut_walk(%rows: !ix, %kids: !s32, %ov: !text, %body: !text, %segs: !trikeshed.series<!tp>, %out: memref<?xi64>)
+    attributes {llvm.emit_c_interface} {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %z64 = arith.constant 0 : i64
+  %v1 = arith.constant 1 : i64
+  %v2 = arith.constant 2 : i64
+  %object = arith.constant 5 : i8
+  %k0 = trikeshed.key 0 : !ik
+  %k1 = trikeshed.key 1 : !ik
+  %k2 = trikeshed.key 2 : !ik
+  %spans = trikeshed.column %rows[%k0] : !ix, !ik -> !trikeshed.series<!tw>
+  %tags = trikeshed.column %rows[%k1] : !ix, !ik -> !trikeshed.series<i8>
+  %kc = trikeshed.column %rows[%k2] : !ix, !ik -> !trikeshed.series<!tp>
+  %ns = trikeshed.size %segs : !trikeshed.series<!tp>
+  %ns64 = arith.index_cast %ns : index to i64
+  %ns1 = arith.addi %ns, %c1 : index
+  // each level's object, key, value and the key's place among the object's children
+  %objs = memref.alloc(%ns1) : memref<?xi64>
+  %keys = memref.alloc(%ns1) : memref<?xi64>
+  %vals = memref.alloc(%ns1) : memref<?xi64>
+  %idxs = memref.alloc(%ns1) : memref<?xi64>
+  memref.store %z64, %objs[%c0] : memref<?xi64>
+  // state 0 while walking, 1 absent, 2 found
+  %w:2 = scf.while (%i = %c0, %state = %z64) : (index, i64) -> (index, i64) {
+    %go = arith.cmpi eq, %state, %z64 : i64
+    scf.condition(%go) %i, %state : index, i64
+  } do {
+  ^bb0(%i: index, %state: i64):
+    %o = memref.load %objs[%i] : memref<?xi64>
+    %seg = trikeshed.at %segs[%i] : !trikeshed.series<!tp>, index -> !tp
+    %s32 = trikeshed.first %seg : !tp -> i32
+    %l32 = trikeshed.second %seg : !tp -> i32
+    %s = arith.index_castui %s32 : i32 to index
+    %l = arith.index_castui %l32 : i32 to index
+    %key = trikeshed.slice %body[%s, %l] : !text -> !text
+    %ix = func.call @ix_find(%rows, %kids, %ov, %o, %key) : (!ix, !s32, !text, i64, !text) -> i64
+    %absent = arith.cmpi slt, %ix, %z64 : i64
+    %r:2 = scf.if %absent -> (index, i64) {
+      scf.yield %i, %v1 : index, i64
+    } else {
+      %fc = trikeshed.at %kc[%o] : !trikeshed.series<!tp>, i64 -> !tp
+      %f32 = trikeshed.first %fc : !tp -> i32
+      %f64 = arith.extui %f32 : i32 to i64
+      %at = arith.addi %f64, %ix : i64
+      %at1 = arith.addi %at, %v1 : i64
+      %kr = trikeshed.at %kids[%at] : !s32, i64 -> i32
+      %vr = trikeshed.at %kids[%at1] : !s32, i64 -> i32
+      %kr64 = arith.extui %kr : i32 to i64
+      %vr64 = arith.extui %vr : i32 to i64
+      memref.store %kr64, %keys[%i] : memref<?xi64>
+      memref.store %vr64, %vals[%i] : memref<?xi64>
+      memref.store %ix, %idxs[%i] : memref<?xi64>
+      %i1 = arith.addi %i, %c1 : index
+      %last = arith.cmpi eq, %i1, %ns : index
+      %r2:2 = scf.if %last -> (index, i64) {
+        scf.yield %i, %v2 : index, i64
+      } else {
+        %vt = trikeshed.at %tags[%vr] : !trikeshed.series<i8>, i32 -> i8
+        %vObj = arith.cmpi eq, %vt, %object : i8
+        memref.store %vr64, %objs[%i1] : memref<?xi64>
+        %st = arith.select %vObj, %z64, %v1 : i64
+        scf.yield %i1, %st : index, i64
+      }
+      scf.yield %r2#0, %r2#1 : index, i64
+    }
+    scf.yield %r#0, %r#1 : index, i64
+  }
+  %found = arith.cmpi eq, %w#1, %v2 : i64
+  %end = trikeshed.size %ov : !text
+  %end64 = arith.index_cast %end : index to i64
+  %from, %to = scf.if %found -> (i64, i64) {
+    // the deepest member whose object keeps another member (or the top level's)
+    %top = arith.subi %ns, %c1 : index
+    %level = scf.while (%l = %top) : (index) -> index {
+      %deep = arith.cmpi ugt, %l, %c0 : index
+      %alone = scf.if %deep -> (i1) {
+        %o = memref.load %objs[%l] : memref<?xi64>
+        %fc = trikeshed.at %kc[%o] : !trikeshed.series<!tp>, i64 -> !tp
+        %n32 = trikeshed.second %fc : !tp -> i32
+        %two = arith.constant 2 : i32
+        %t = arith.cmpi eq, %n32, %two : i32
+        scf.yield %t : i1
+      } else {
+        %no = arith.constant false
+        scf.yield %no : i1
+      }
+      scf.condition(%alone) %l : index
+    } do {
+    ^bb0(%l: index):
+      %up = arith.subi %l, %c1 : index
+      scf.yield %up : index
+    }
+    %o = memref.load %objs[%level] : memref<?xi64>
+    %kr = memref.load %keys[%level] : memref<?xi64>
+    %vr = memref.load %vals[%level] : memref<?xi64>
+    %pos = memref.load %idxs[%level] : memref<?xi64>
+    %fc = trikeshed.at %kc[%o] : !trikeshed.series<!tp>, i64 -> !tp
+    %f32 = trikeshed.first %fc : !tp -> i32
+    %n32 = trikeshed.second %fc : !tp -> i32
+    %f64 = arith.extui %f32 : i32 to i64
+    %nk = arith.extui %n32 : i32 to i64
+    %p2 = arith.addi %pos, %v2 : i64
+    %hasNext = arith.cmpi slt, %p2, %nk : i64
+    %hasPrev = arith.cmpi sgt, %pos, %z64 : i64
+    %ksp = trikeshed.at %spans[%kr] : !trikeshed.series<!tw>, i64 -> !tw
+    %kopen = trikeshed.first %ksp : !tw -> i32
+    %kopen64 = arith.extui %kopen : i32 to i64
+    // [from, to) is cut: the member and one comma beside it
+    %cut:2 = scf.if %hasNext -> (i64, i64) {
+      %na = arith.addi %f64, %p2 : i64
+      %nextKey = trikeshed.at %kids[%na] : !s32, i64 -> i32
+      %nsp = trikeshed.at %spans[%nextKey] : !trikeshed.series<!tw>, i32 -> !tw
+      %no = trikeshed.first %nsp : !tw -> i32
+      %no64 = arith.extui %no : i32 to i64
+      scf.yield %kopen64, %no64 : i64, i64
+    } else {
+      %vsp = trikeshed.at %spans[%vr] : !trikeshed.series<!tw>, i64 -> !tw
+      %vc = trikeshed.second %vsp : !tw -> i32
+      %vc64 = arith.extui %vc : i32 to i64
+      %t = arith.addi %vc64, %v1 : i64
+      %fr = scf.if %hasPrev -> (i64) {
+        %pa0 = arith.addi %f64, %pos : i64
+        %pa = arith.subi %pa0, %v1 : i64
+        %prevVal = trikeshed.at %kids[%pa] : !s32, i64 -> i32
+        %psp = trikeshed.at %spans[%prevVal] : !trikeshed.series<!tw>, i32 -> !tw
+        %pc = trikeshed.second %psp : !tw -> i32
+        %pc64 = arith.extui %pc : i32 to i64
+        %f = arith.addi %pc64, %v1 : i64
+        scf.yield %f : i64
+      } else {
+        scf.yield %kopen64 : i64
+      }
+      scf.yield %fr, %t : i64, i64
+    }
+    scf.yield %cut#0, %cut#1 : i64, i64
+  } else {
+    scf.yield %end64, %end64 : i64, i64
+  }
+  memref.store %from, %out[%c0] : memref<?xi64>
+  memref.store %to, %out[%c1] : memref<?xi64>
+  return
+}
