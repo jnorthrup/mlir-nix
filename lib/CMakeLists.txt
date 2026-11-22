@@ -370,11 +370,7 @@ mlnix_lower_trikeshed(NixEval lowered/nixeval/ConcatOps.mlir ConcatOps)
 # Kursive's walk (include/Composite/Kursive.h detail::walk is gone; matchAll/search forward to this entry).  The
 # backtracking state machine over the Step program — checkpoint stack push/pop, step dispatch, the step budget — is one
 # scf.while over the caller's arrays; the bridge keeps the primop forcing/coercion, kursiveRun's checkpoint retry,
-# pieceOf interning and Nix's error wording.  The pattern compiler is KursiveCompile.mlir below.
+# pieceOf interning and Nix's error wording.  The pattern compiler is the kursive combinator dialect (--re2mlir reads a
+# pattern into combinators, --kursive-to-program generates the Step program from them).
 mlnix_lower_trikeshed(NixEval lowered/nixeval/KursiveOps.mlir KursiveOps)
-# Kursive's pattern compiler (Kursive.h detail::Compiler + compile are gone; compile() is a one-line bridge): the
-# extended-regex parser over the pattern as a trikeshed series (at, slice, compare for [:class:] names) building the tree
-# in the caller's Node pool, then the generator writing the Step program and the Sets into the caller's arrays; the
-# grammar's recursion is func.call recursion in the module, the parser's blocks are a cf machine lifted to scf.
-mlnix_lower_trikeshed(NixEval lowered/nixeval/KursiveCompile.mlir KursiveCompile --lift-cf-to-scf --convert-ub-to-llvm)
 
