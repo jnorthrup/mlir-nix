@@ -375,6 +375,20 @@ mlnix_lower_trikeshed(NixEval lowered/nixeval/ConcatOps.mlir ConcatOps)
 # backtracking state machine over the Step program — checkpoint stack push/pop, step dispatch, the step budget — is one
 # scf.while over the caller's arrays; the bridge keeps the primop forcing/coercion, kursiveRun's checkpoint retry,
 # pieceOf interning and Nix's error wording.  The pattern compiler is the kursive combinator dialect (--re2mlir reads a
-# pattern into combinators, --kursive-to-program generates the Step program from them).
-mlnix_lower_trikeshed(NixEval lowered/nixeval/KursiveOps.mlir KursiveOps)
+# pattern into combinators, --kursive-to-program generates the Step program from them).  The walk is MLIRNix's: re2mlir
+# reads each pattern with it, by the ERE grammar written in the combinators (lowered/kursive/Ere.mlir, compiled once by
+# kursive-to-program in-process, so its text is carried in the library).  mlnix-opt links MLIRNix, so the walk (scf,
+# memref and llvm ops, no trikeshed) is lowered by mlir-opt alone; NixEval and the tools have it through MLIRNix.
+set(KURSIVE_WALK ${MLNIX_LOWERED_DIR}/KursiveOps)
+add_custom_command(OUTPUT ${KURSIVE_WALK}.o
+  COMMAND ${MLNIX_MLIR_OPT} ${PROJECT_SOURCE_DIR}/lowered/nixeval/KursiveOps.mlir ${MLNIX_TRIKESHED_PIPELINE} -o ${KURSIVE_WALK}.lowered.mlir
+  COMMAND ${MLNIX_MLIR_TRANSLATE} --mlir-to-llvmir ${KURSIVE_WALK}.lowered.mlir -o ${KURSIVE_WALK}.ll
+  COMMAND ${MLNIX_LOWER_CLANG} -O2 -fPIC -Wno-override-module -c ${KURSIVE_WALK}.ll -o ${KURSIVE_WALK}.o
+  DEPENDS ${PROJECT_SOURCE_DIR}/lowered/nixeval/KursiveOps.mlir COMMENT "lowering the kursive walk")
+set_source_files_properties(${KURSIVE_WALK}.o PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+target_sources(MLIRNix PRIVATE ${KURSIVE_WALK}.o)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/lowered/kursive/Ere.mlir)
+file(READ ${PROJECT_SOURCE_DIR}/lowered/kursive/Ere.mlir KURSIVE_ERE)
+file(CONFIGURE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/KursiveEre.inc CONTENT "R\"kursive(@KURSIVE_ERE@)kursive\"\n" @ONLY)
+target_include_directories(MLIRNix PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
