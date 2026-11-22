@@ -790,12 +790,27 @@ def TS_CursorJoinsOp : TS_Op<"cursorJoins", [Pure]> {
 }
 
 def TS_GroupByOp : TS_Op<"groupBy", [Pure]> {
-  let summary = "group a cursor's rows by a column: one row per group, holding its row indices";
-  let arguments = (ins TS_CursorType:$cursor, TS_ColKeyType:$key);
-  let results = (outs TS_CursorType:$result);
+  let summary = "group a series' elements by an order: each element's group, and each group's first element";
+  let arguments = (ins TS_SeriesType:$series, UnitAttr:$ordered);
+  let results = (outs TS_SeriesType:$codes, TS_SeriesType:$exemplars);
+  let regions = (region MaxSizedRegion<1>:$order);
+  let assemblyFormat = [{
+    $series (`ordered` $ordered^)? attr-dict `:` type($series) `->` type($codes) `,` type($exemplars) (`by` $order^)?
+  }];
   let description = [{
-    GroupBy.kt: a group holds the INDICES of its rows (a Series), not copies of them, so grouping never moves a cell.
-    Laws: every input row is in exactly one group; the groups are in first-appearance order.
+    GroupBy.kt's `groupClusters`: two elements are in one group when the order yields 0 for them.  A group holds the
+    INDICES of its elements, not copies, so grouping never moves a cell: codes[i] is element i's group, exemplars[g]
+    the index of group g's first element (Kotlin's exemplar `rows[0]`).  The groups are in first-appearance order;
+    `ordered`, in the order's order (Cursor.ordered, then groupClusters: ColumnCursor.kt's DictColumn, whose names
+    keep their places as the counts change).  The members of each group, in index order, are
+    `adjacency(codes, 0 ..< size(codes), size(exemplars))`.  A cursor is grouped by a series of its row indices whose
+    order compares the key columns, so the key may be any number of columns.
+
+    The order is the region, when there is one: `^bb0(%a: T, %b: T)` yields an i32 as sorted's does.  Without it the
+    elements are integers, compared signed.  Lowered (trikeshed-lower-cursors) it is the decomposition: the indices
+    sorted (stable), the starts of the runs of equal elements (where), each run's first index (project), sorted again
+    for first-appearance order, and each element's group found by bisect.  codes and exemplars are series of an integer.
+    Laws: every element is in exactly one group; codes[exemplars[g]] = g; exemplars[codes[i]] <= i.
   }];
 }
 
@@ -807,12 +822,28 @@ def TS_PivotOp : TS_Op<"pivot", [Pure]> {
 }
 
 def TS_KeyedJoinOp : TS_Op<"keyedJoin", [Pure]> {
-  let summary = "join two cursors on a key column";
-  let arguments = (ins TS_CursorType:$a, TS_CursorType:$b, TS_ColKeyType:$key);
-  let results = (outs TS_CursorType:$result);
+  let summary = "join each element of one series to the run of equal elements of another, sorted by the order";
+  let arguments = (ins TS_SeriesType:$left, TS_SeriesType:$right);
+  let results = (outs TS_SeriesType:$matches);
+  let regions = (region MaxSizedRegion<1>:$order);
+  let assemblyFormat = [{
+    $left `,` $right attr-dict `:` type($left) `,` type($right) `->` type($matches) (`by` $order^)?
+  }];
   let description = [{
-    KeyedJoin.kt.  Laws: one row per matching pair, in a's row order then b's; a key with no match contributes no row.
-    The index over the smaller side is built once (a Series of row indices, as GroupBy does).
+    KeyedJoin.kt's `join(left, right, on, outer)`: the right side is the build side and left the probe.  Kotlin builds a
+    hash index of the right; here the index is the right side sorted by the order (a trikeshed.sorted of its row
+    indices, written once and probed by as many joins as read it), and matches[l] is the TwinPacked (first, count) of
+    the elements of right equal to left[l]: the shape adjacency and closure make.  So the pairs of the inner join are
+    (l, right[first(l) + i]) for i < count(l), in left's order and, within one left element, right's; a left element
+    with count 0 is the outer join's unmatched row; first(l) is how many elements of right sort below left[l], so a
+    full outer join ranks an element by its own place plus first.
+
+    The order is the region, when there is one: `^bb0(%x: R, %key: L)` yields an i32, negative when the right element
+    sorts before the left one, as bisect's does.  Without it the elements are integers of one type, compared signed.
+    Lowered (trikeshed-lower-cursors) each left element is two bisects, the lower and the upper bound.  The matches are
+    a series of a pair of two equal integers.
+    Laws: right[first(l) + i] is equal to left[l] for i < count(l), and no other element of right is; the matches of
+    an element that sorts above all of right are (size(right), 0).
   }];
 }
 

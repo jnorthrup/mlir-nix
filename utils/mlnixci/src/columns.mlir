@@ -5,14 +5,15 @@
 // coordinates); two pieces are in the order of their bytes, compared unsigned as Kotlin compares Chars (a UTF-8 text in
 // code point order), then the shorter first.
 //   col_order   Cursor.ordered (GroupBy.kt): the rows by their pieces, a stable sort, so equal pieces keep their rows' order
-//   col_code    DictColumn (ColumnCursor.kt) with its names in that order: groupClusters over the ordered rows (a run
-//               starts where a piece differs from the one before it), each name as its first row's piece, and each row's
-//               code its name's place among them (bisect), so a name keeps its place as the counts change
-//   mark        KeyedJoin (KeyedJoin.kt) of a corpus with its base on their keys, base's col_order the index over base:
-//               each row's base row, and whether the option changed
+//   col_code    DictColumn (ColumnCursor.kt) with its names in that order: trikeshed.groupBy ordered (GroupBy.kt's
+//               groupClusters over the ordered rows), each name its group's first row's piece and each row's code its
+//               name's place among them, so a name keeps its place as the counts change
+//   mark        trikeshed.keyedJoin (KeyedJoin.kt) of a corpus with its base on their keys, base's col_order the index
+//               over base: each row's base row, and whether the option changed
 //   etc_join    the same join made full outer, of two objects' members by name (the /etc files of the base and of the
-//               what-if): each side the index over the other (both are in name order), the entries the report shows in
-//               name order
+//               what-if): a keyedJoin each way, each side the index over the other (both are in name order), the entries
+//               the report shows ranked by their own place plus the other side's names below them (the first of their
+//               matches)
 //   opt_cells   the cells a facet counts, read off each option's members as pieces of the text: the section (the first
 //               segment of the path), the value when it is shown, the state, the kind (the type's name: its first part at
 //               ' ', Series.div) and the module (the place of the first declaration: two levels below its last
@@ -101,7 +102,7 @@ func.func @col_order(%t: !text, %pieces: !pieces) -> !s32 attributes {llvm.emit_
   return %order : !s32
 }
 
-// each row's code, and each code's name (its first row's piece)
+// each row's code, and each code's name (its first row's piece): groupBy ordered, the rows grouped by their pieces
 func.func @col_code(%t: !text, %pieces: !pieces) -> (!s32, !pieces) attributes {llvm.emit_c_interface} {
   %n = trikeshed.size %pieces : !pieces
   %rows = trikeshed.series %n : !s32 {
@@ -109,42 +110,12 @@ func.func @col_code(%t: !text, %pieces: !pieces) -> (!s32, !pieces) attributes {
     %r = arith.index_cast %i : index to i32
     trikeshed.yield %r : i32
   }
-  %order = trikeshed.sorted %rows : !s32 -> !s32 by {
+  %codes, %names = trikeshed.groupBy %rows ordered : !s32 -> !s32, !s32 by {
   ^bb0(%a: i32, %b: i32):
     %c = func.call @piece_order(%t, %pieces, %a, %b) : (!text, !pieces, i32, i32) -> i32
     trikeshed.yield %c : i32
   }
-  // the places in that order where a name's run starts
-  %starts = trikeshed.where %rows : !s32 -> !s32 {
-  ^bb0(%i: i32):
-    %zero = arith.constant 0 : i32
-    %first = arith.cmpi eq, %i, %zero : i32
-    %start = scf.if %first -> (i1) {
-      %yes = arith.constant true
-      scf.yield %yes : i1
-    } else {
-      %one = arith.constant 1 : i32
-      %ip = arith.subi %i, %one : i32
-      %r = trikeshed.at %order[%i] : !s32, i32 -> i32
-      %rp = trikeshed.at %order[%ip] : !s32, i32 -> i32
-      %c = func.call @piece_order(%t, %pieces, %rp, %r) : (!text, !pieces, i32, i32) -> i32
-      %differs = arith.cmpi ne, %c, %zero : i32
-      scf.yield %differs : i1
-    }
-    trikeshed.yield %start : i1
-  }
-  %names = trikeshed.project %order[%starts] : !s32, !s32 -> !s32
   %dict = trikeshed.project %pieces[%names] : !pieces, !s32 -> !pieces
-  %codes = trikeshed.alpha %rows : !s32 -> !s32 {
-  ^bb0(%r: i32):
-    %at = trikeshed.bisect %names, %r : !s32, i32 -> index by {
-    ^bb0(%x: i32, %key: i32):
-      %c = func.call @piece_order(%t, %pieces, %x, %key) : (!text, !pieces, i32, i32) -> i32
-      trikeshed.yield %c : i32
-    }
-    %code = arith.index_cast %at : index to i32
-    trikeshed.yield %code : i32
-  }
   return %codes, %dict : !s32, !pieces
 }
 
@@ -173,40 +144,27 @@ func.func @mark(%keysC: !text, %keyC: !pieces, %tc: !text, %valC: !pieces, %stC:
                 %keysB: !text, %keyB: !pieces, %ordB: !s32, %tb: !text, %valB: !pieces, %stB: !pieces,
                 %baseOf: memref<?xi32>, %whatif: memref<?xi32>) attributes {llvm.emit_c_interface} {
   %n = trikeshed.size %keyC : !pieces
-  %nb = trikeshed.size %ordB : !s32
-  %nb32 = arith.index_cast %nb : index to i32
   %rows = trikeshed.series %n : !s32 {
   ^bb0(%i: index):
     %r = arith.index_cast %i : index to i32
     trikeshed.yield %r : i32
   }
-  %match = trikeshed.alpha %rows : !s32 -> !s32 {
-  ^bb0(%r: i32):
+  %matches = trikeshed.keyedJoin %keyC, %ordB : !pieces, !s32 -> !pieces by {
+  ^bb0(%b: i32, %k: !tp):
+    %kb = trikeshed.at %keyB[%b] : !pieces, i32 -> !tp
+    %c = func.call @order_of(%keysB, %kb, %keysC, %k) : (!text, !tp, !text, !tp) -> i32
+    trikeshed.yield %c : i32
+  }
+  %match = trikeshed.alpha %matches : !pieces -> !s32 {
+  ^bb0(%m: !tp):
     %zero = arith.constant 0 : i32
     %none = arith.constant -1 : i32
-    %kr = trikeshed.at %keyC[%r] : !pieces, i32 -> !tp
-    %at = trikeshed.bisect %ordB, %kr : !s32, !tp -> index by {
-    ^bb0(%b: i32, %k: !tp):
-      %z = arith.constant 0 : i32
-      %before = arith.constant -1 : i32
-      %after = arith.constant 1 : i32
-      %kb = trikeshed.at %keyB[%b] : !pieces, i32 -> !tp
-      %c = func.call @order_of(%keysB, %kb, %keysC, %k) : (!text, !tp, !text, !tp) -> i32
-      %below = arith.cmpi slt, %c, %z : i32
-      %o = arith.select %below, %before, %after : i32
-      trikeshed.yield %o : i32
-    }
-    // never equal: the search ends at -(lower bound) - 1
-    %at32 = arith.index_cast %at : index to i32
-    %lb = arith.subi %none, %at32 : i32
-    %inB = arith.cmpi slt, %lb, %nb32 : i32
-    %found = scf.if %inB -> (i32) {
-      %b = trikeshed.at %ordB[%lb] : !s32, i32 -> i32
-      %kb = trikeshed.at %keyB[%b] : !pieces, i32 -> !tp
-      %c = func.call @order_of(%keysB, %kb, %keysC, %kr) : (!text, !tp, !text, !tp) -> i32
-      %same = arith.cmpi eq, %c, %zero : i32
-      %v = arith.select %same, %b, %none : i32
-      scf.yield %v : i32
+    %first = trikeshed.first %m : !tp -> i32
+    %count = trikeshed.second %m : !tp -> i32
+    %has = arith.cmpi sgt, %count, %zero : i32
+    %found = scf.if %has -> (i32) {
+      %b = trikeshed.at %ordB[%first] : !s32, i32 -> i32
+      scf.yield %b : i32
     } else {
       scf.yield %none : i32
     }
@@ -314,63 +272,6 @@ func.func private @member_pieces(%spans: !trikeshed.series<!tw>, %kids: !s32, %f
   return %names, %values : !pieces, !pieces
 }
 
-// For each name of one side (pieces of ta), how many names of the other side (pieces of tb, in name order) sort below it
-// (a lower bound: bisect with an order that is never equal), and that name's place on the other side when it is there,
-// else -1.
-func.func private @index_into(%ta: !text, %names: !pieces, %tb: !text, %others: !pieces) -> (!s32, !s32) {
-  %n = trikeshed.size %names : !pieces
-  %m = trikeshed.size %others : !pieces
-  %m32 = arith.index_cast %m : index to i32
-  %rows = trikeshed.series %n : !s32 {
-  ^bb0(%i: index):
-    %r = arith.index_cast %i : index to i32
-    trikeshed.yield %r : i32
-  }
-  %places = trikeshed.series %m : !s32 {
-  ^bb0(%i: index):
-    %r = arith.index_cast %i : index to i32
-    trikeshed.yield %r : i32
-  }
-  %below = trikeshed.alpha %rows : !s32 -> !s32 {
-  ^bb0(%r: i32):
-    %key = trikeshed.at %names[%r] : !pieces, i32 -> !tp
-    %at = trikeshed.bisect %places, %key : !s32, !tp -> index by {
-    ^bb0(%p: i32, %k: !tp):
-      %z = arith.constant 0 : i32
-      %before = arith.constant -1 : i32
-      %after = arith.constant 1 : i32
-      %pk = trikeshed.at %others[%p] : !pieces, i32 -> !tp
-      %c = func.call @order_of(%tb, %pk, %ta, %k) : (!text, !tp, !text, !tp) -> i32
-      %lt = arith.cmpi slt, %c, %z : i32
-      %o = arith.select %lt, %before, %after : i32
-      trikeshed.yield %o : i32
-    }
-    %at32 = arith.index_cast %at : index to i32
-    %m1 = arith.constant -1 : i32
-    %lb = arith.subi %m1, %at32 : i32
-    trikeshed.yield %lb : i32
-  }
-  %match = trikeshed.alpha %rows : !s32 -> !s32 {
-  ^bb0(%r: i32):
-    %none = arith.constant -1 : i32
-    %zero = arith.constant 0 : i32
-    %lb = trikeshed.at %below[%r] : !s32, i32 -> i32
-    %in = arith.cmpi slt, %lb, %m32 : i32
-    %found = scf.if %in -> (i32) {
-      %key = trikeshed.at %names[%r] : !pieces, i32 -> !tp
-      %pk = trikeshed.at %others[%lb] : !pieces, i32 -> !tp
-      %c = func.call @order_of(%tb, %pk, %ta, %key) : (!text, !tp, !text, !tp) -> i32
-      %same = arith.cmpi eq, %c, %zero : i32
-      %v = arith.select %same, %lb, %none : i32
-      scf.yield %v : i32
-    } else {
-      scf.yield %none : i32
-    }
-    trikeshed.yield %found : i32
-  }
-  return %below, %match : !s32, !s32
-}
-
 // The members of the objects at row ea of index A (text ta: the base's /etc) and row eb of index B (text tb: the what-if's),
 // -1 for none, joined by name -- KeyedJoin with each side the index over the other, made full outer.  The entries the report
 // shows, in name order: A's members whose name B lacks or whose value's bytes differ from B's member of that name, and B's
@@ -393,8 +294,32 @@ func.func @etc_join(%rowsA: !ix, %kidsA: !s32, %ta: !text, %ea: i64, %rowsB: !ix
   %fB, %nB = func.call @members_of(%kcB, %eb) : (!pieces, i64) -> (i32, i32)
   %namesA, %valuesA = func.call @member_pieces(%spansA, %kidsA, %fA, %nA) : (!trikeshed.series<!tw>, !s32, i32, i32) -> (!pieces, !pieces)
   %namesB, %valuesB = func.call @member_pieces(%spansB, %kidsB, %fB, %nB) : (!trikeshed.series<!tw>, !s32, i32, i32) -> (!pieces, !pieces)
-  %belowA, %matchA = func.call @index_into(%ta, %namesA, %tb, %namesB) : (!text, !pieces, !text, !pieces) -> (!s32, !s32)
-  %belowB, %matchB = func.call @index_into(%tb, %namesB, %ta, %namesA) : (!text, !pieces, !text, !pieces) -> (!s32, !s32)
+  // each side's names joined to the other's: the matches of A's member i, (how many of B's names sort below its name, 1
+  // when B has that name else 0), and B's likewise
+  %nAi = arith.index_cast %nA : i32 to index
+  %nBi = arith.index_cast %nB : i32 to index
+  %placesA = trikeshed.series %nAi : !s32 {
+  ^bb0(%i: index):
+    %p = arith.index_cast %i : index to i32
+    trikeshed.yield %p : i32
+  }
+  %placesB = trikeshed.series %nBi : !s32 {
+  ^bb0(%i: index):
+    %p = arith.index_cast %i : index to i32
+    trikeshed.yield %p : i32
+  }
+  %byA = trikeshed.keyedJoin %namesA, %placesB : !pieces, !s32 -> !pieces by {
+  ^bb0(%p: i32, %k: !tp):
+    %pk = trikeshed.at %namesB[%p] : !pieces, i32 -> !tp
+    %c = func.call @order_of(%tb, %pk, %ta, %k) : (!text, !tp, !text, !tp) -> i32
+    trikeshed.yield %c : i32
+  }
+  %byB = trikeshed.keyedJoin %namesB, %placesA : !pieces, !s32 -> !pieces by {
+  ^bb0(%p: i32, %k: !tp):
+    %pk = trikeshed.at %namesA[%p] : !pieces, i32 -> !tp
+    %c = func.call @order_of(%ta, %pk, %tb, %k) : (!text, !tp, !text, !tp) -> i32
+    trikeshed.yield %c : i32
+  }
   %all32 = arith.addi %nA, %nB : i32
   %all = arith.index_cast %all32 : i32 to index
   %es = trikeshed.series %all : !s32 {
@@ -404,16 +329,17 @@ func.func @etc_join(%rowsA: !ix, %kidsA: !s32, %ta: !text, %ea: i64, %rowsB: !ix
   }
   %shown = trikeshed.where %es : !s32 -> !s32 {
   ^bb0(%e: i32):
-    %none = arith.constant -1 : i32
     %zero = arith.constant 0 : i32
     %inA = arith.cmpi slt, %e, %nA : i32
     %keep = scf.if %inA -> (i1) {
-      %b = trikeshed.at %matchA[%e] : !s32, i32 -> i32
-      %lacks = arith.cmpi eq, %b, %none : i32
+      %m = trikeshed.at %byA[%e] : !pieces, i32 -> !tp
+      %count = trikeshed.second %m : !tp -> i32
+      %lacks = arith.cmpi eq, %count, %zero : i32
       %k = scf.if %lacks -> (i1) {
         %yes = arith.constant true
         scf.yield %yes : i1
       } else {
+        %b = trikeshed.first %m : !tp -> i32
         %va = trikeshed.at %valuesA[%e] : !pieces, i32 -> !tp
         %vb = trikeshed.at %valuesB[%b] : !pieces, i32 -> !tp
         %c = func.call @order_of(%ta, %va, %tb, %vb) : (!text, !tp, !text, !tp) -> i32
@@ -423,16 +349,17 @@ func.func @etc_join(%rowsA: !ix, %kidsA: !s32, %ta: !text, %ea: i64, %rowsB: !ix
       scf.yield %k : i1
     } else {
       %j = arith.subi %e, %nA : i32
-      %a = trikeshed.at %matchB[%j] : !s32, i32 -> i32
-      %lacks = arith.cmpi eq, %a, %none : i32
+      %m = trikeshed.at %byB[%j] : !pieces, i32 -> !tp
+      %count = trikeshed.second %m : !tp -> i32
+      %lacks = arith.cmpi eq, %count, %zero : i32
       scf.yield %lacks : i1
     }
     trikeshed.yield %keep : i1
   }
   %ordered = trikeshed.sorted %shown : !s32 -> !s32 by {
   ^bb0(%x: i32, %y: i32):
-    %rx = func.call @join_rank(%x, %nA, %belowA, %belowB) : (i32, i32, !s32, !s32) -> i32
-    %ry = func.call @join_rank(%y, %nA, %belowA, %belowB) : (i32, i32, !s32, !s32) -> i32
+    %rx = func.call @join_rank(%x, %nA, %byA, %byB) : (i32, i32, !pieces, !pieces) -> i32
+    %ry = func.call @join_rank(%y, %nA, %byA, %byB) : (i32, i32, !pieces, !pieces) -> i32
     %lt = arith.cmpi slt, %rx, %ry : i32
     %gt = arith.cmpi sgt, %rx, %ry : i32
     %m1 = arith.constant -1 : i32
@@ -445,10 +372,15 @@ func.func @etc_join(%rowsA: !ix, %kidsA: !s32, %ta: !text, %ea: i64, %rowsB: !ix
   %others = trikeshed.alpha %ordered : !s32 -> !s32 {
   ^bb0(%e: i32):
     %none = arith.constant -1 : i32
+    %zero = arith.constant 0 : i32
     %inA = arith.cmpi slt, %e, %nA : i32
     %o = scf.if %inA -> (i32) {
-      %b = trikeshed.at %matchA[%e] : !s32, i32 -> i32
-      scf.yield %b : i32
+      %m = trikeshed.at %byA[%e] : !pieces, i32 -> !tp
+      %b = trikeshed.first %m : !tp -> i32
+      %count = trikeshed.second %m : !tp -> i32
+      %has = arith.cmpi sgt, %count, %zero : i32
+      %v = arith.select %has, %b, %none : i32
+      scf.yield %v : i32
     } else {
       scf.yield %none : i32
     }
@@ -464,16 +396,19 @@ func.func @etc_join(%rowsA: !ix, %kidsA: !s32, %ta: !text, %ea: i64, %rowsB: !ix
   return %count : i64
 }
 
-// an entry's place in the merge of the two sides' names (etc_join)
-func.func private @join_rank(%e: i32, %nA: i32, %belowA: !s32, %belowB: !s32) -> i32 {
+// an entry's place in the merge of the two sides' names (etc_join): its own place plus the other side's names below it,
+// the first of its matches
+func.func private @join_rank(%e: i32, %nA: i32, %byA: !pieces, %byB: !pieces) -> i32 {
   %inA = arith.cmpi slt, %e, %nA : i32
   %r = scf.if %inA -> (i32) {
-    %b = trikeshed.at %belowA[%e] : !s32, i32 -> i32
+    %m = trikeshed.at %byA[%e] : !pieces, i32 -> !tp
+    %b = trikeshed.first %m : !tp -> i32
     %v = arith.addi %e, %b : i32
     scf.yield %v : i32
   } else {
     %j = arith.subi %e, %nA : i32
-    %a = trikeshed.at %belowB[%j] : !s32, i32 -> i32
+    %m = trikeshed.at %byB[%j] : !pieces, i32 -> !tp
+    %a = trikeshed.first %m : !tp -> i32
     %v = arith.addi %j, %a : i32
     scf.yield %v : i32
   }
