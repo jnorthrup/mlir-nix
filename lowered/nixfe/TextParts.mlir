@@ -16,7 +16,10 @@
 //   nixfe_ts_path_msg(kind, lit, n, into, cap) -> written -- the lint message as ONE combine of blob-word slices
 //     and the literal's windows (the short-path message names it twice), drained once.
 //   nixfe_ts_path_home(home, hn, lit, n, into, cap) -> written -- the home path's text: home + the literal past
-//     its '~', one combine drained once.  canonPath (CanonPath.mlir) and the trailing '/' stay in the bridge.
+//     its '~', one combine drained once.
+//   nixfe_ts_path_text(kind, home, hn, base, bn, lit, n, into, cap) -> written -- makePath's whole text: the home
+//     path, or canonPath (CanonPath.mlir) of the literal or of base + literal, its trailing '/' kept.
+//   nixfe_ts_partloop(ctx) -- the indented string's and the path's part loops: tp_strloop under the bridge's mode.
 !s = !trikeshed.series<i8>
 !m = memref<?xi8, strided<[1], offset: ?>>
 !d = !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
@@ -451,4 +454,62 @@ func.func @nixfe_ts_path_home(%home: !llvm.ptr, %hn: i64, %p: !llvm.ptr, %n: i64
   scf.yield %neg_22 : i64
     }
   return %written_17 : i64
+}
+
+// ---- the part loops of an indented string and of a path (parseSimple's T_IND_STRING_OPEN and T_PATH arms): the
+// same driver as string_parts' (tp_strloop: text and '${' parts until neither comes, then the close), the bridge's
+// mode choosing the text token, where a part goes and the close (T_IND_STRING_CLOSE / T_PATH_END, taken).
+func.func @nixfe_ts_partloop(%ctx: !llvm.ptr) -> i64 {
+  %c0_i64 = arith.constant 0 : i64
+  %k = func.call @tp_strloop(%ctx, %c0_i64) : (!llvm.ptr, i64) -> i64
+  return %k : i64
+}
+
+// ---- makePath's text: the home path (nixfe_ts_path_home) for kind 1; otherwise the canonical path
+// (CanonPath.mlir's walk) of the literal (kind 2, absolute) or of the base directory then the literal, and the
+// literal's trailing '/' kept when it has more than one byte.  `into` has room for home + base + literal + 2.
+func.func private @nixfe_ts_canonpath(!llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64) -> i64
+
+func.func @nixfe_ts_path_text(%kind: i64, %home: !llvm.ptr, %hn: i64, %base: !llvm.ptr, %bn: i64, %p: !llvm.ptr,
+                              %n: i64, %into: !llvm.ptr, %cap: i64) -> i64 {
+  %c0_i64 = arith.constant 0 : i64
+  %c1_i64 = arith.constant 1 : i64
+  %c2_i64 = arith.constant 2 : i64
+  %slash = arith.constant 47 : i8
+  %ish = arith.cmpi eq, %kind, %c1_i64 : i64
+  %w = scf.if %ish -> (i64) {
+    %h = func.call @nixfe_ts_path_home(%home, %hn, %p, %n, %into, %cap) : (!llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64) -> i64
+    scf.yield %h : i64
+  } else {
+    %abs = arith.cmpi eq, %kind, %c2_i64 : i64
+    %ap = arith.select %abs, %p, %base : !llvm.ptr
+    %an = arith.select %abs, %n, %bn : i64
+    %bl = arith.select %abs, %c0_i64, %n : i64
+    %cw = func.call @nixfe_ts_canonpath(%ap, %an, %p, %bl, %into, %c0_i64) : (!llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64) -> i64
+    %more = arith.cmpi ugt, %n, %c1_i64 : i64
+    %t = scf.if %more -> (i64) {
+      %litd = func.call @tp_desc(%p, %n) : (!llvm.ptr, i64) -> !d
+      %litm = builtin.unrealized_conversion_cast %litd : !d to !m
+      %lit = builtin.unrealized_conversion_cast %litm : !m to !s
+      %nm1 = arith.subi %n, %c1_i64 : i64
+      %li = arith.index_cast %nm1 : i64 to index
+      %last = trikeshed.at %lit[%li] : !s, index -> i8
+      %sl = arith.cmpi eq, %last, %slash : i8
+      %one = arith.extui %sl : i1 to i64
+      scf.yield %one : i64
+    } else {
+      scf.yield %c0_i64 : i64
+    }
+    %trail = arith.cmpi ne, %t, %c0_i64 : i64
+    scf.if %trail {
+      %cw1 = arith.addi %cw, %c1_i64 : i64
+      %od = func.call @tp_desc(%into, %cw1) : (!llvm.ptr, i64) -> !d
+      %om = builtin.unrealized_conversion_cast %od : !d to !m
+      %wi = arith.index_cast %cw : i64 to index
+      memref.store %slash, %om[%wi] : !m
+    }
+    %all = arith.addi %cw, %t : i64
+    scf.yield %all : i64
+  }
+  return %w : i64
 }

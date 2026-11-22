@@ -368,6 +368,10 @@ mlnix_lower_trikeshed(NixEval lowered/nixeval/PathBounds.mlir PathBounds)
 # gone from lib/Eval/Builtins.cpp; the bridge keeps forceValue/forceFloat/mkInt and Nix's error wording).  llvm dialect:
 # llvm.intr.ceil / llvm.intr.floor (generic form), the ordered range fcmp and fptosi.
 mlnix_lower_interface(NixEval lowered/nixeval/Rounding.mlir Rounding)
+# Eval.cpp's error text (appendCodeLines, chomp and the position headers are gone; the bridge reads the source and
+# keeps the traces' walk): the "at file:line:col:" line and the code lines around it as one combine and one
+# combineAll over the newline offsets (trikeshed.where), and the message's continuation indent, each drained once.
+mlnix_lower_trikeshed(NixEval lowered/nixeval/ErrorText.mlir ErrorText)
 # __parseDrvName's dash scan (Builtins.cpp's loop is gone; the bridge keeps forceStringNoCtx and the mkString/mkAttrs of
 # the two windows).  The first '-' followed by a non-letter is trikeshed.at over the byte series (C-locale isalpha).
 mlnix_lower_trikeshed(NixEval lowered/nixeval/DrvNameOps.mlir DrvNameOps)
