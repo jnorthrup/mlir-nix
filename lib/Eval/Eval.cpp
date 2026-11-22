@@ -2758,20 +2758,6 @@ cp::Text EvalState::findFile(Value &searchPath, std::string_view name, PosPtr po
 // Error formatting
 //===----------------------------------------------------------------------===//
 
-// The position line and the code lines around it are lowered/nixeval/ErrorText.mlir's (one combine and one combineAll,
-// drained once): "\n" indent "at file:line:col:", then, `with` the source, lines line-1..line+1 chomped and the caret.
-extern "C" int64_t nixev_et_pos(const char *file, uint64_t fn, uint64_t line, uint64_t col, uint64_t indent, uint64_t with,
-                                const char *text, uint64_t tn, char *into, uint64_t cap);
-extern "C" int64_t nixev_et_indent(const char *msg, uint64_t n, char *into, uint64_t cap);
-
-static void putPos(cp::Text &out, std::string_view file, unsigned line, unsigned col, unsigned indent, bool with,
-                   std::string_view text) {
-  size_t at = out.size(), room = file.size() + text.size() + 5 * size_t(indent) + col + 128; // always enough
-  out.resize(at + room);
-  out.truncate(at + size_t(nixev_et_pos(file.data(), file.size(), line, col, indent, with, text.data(), text.size(),
-                                        out.begin() + at, room)));
-}
-
 static cp::Text sourceFor(EvalState *state, std::string_view file) {
   if (state)
     for (auto &o : state->origins)
@@ -2785,42 +2771,59 @@ static cp::Text sourceFor(EvalState *state, std::string_view file) {
   return "";
 }
 
-static void appendPos(cp::Text &out, EvalState *state, std::string_view file, unsigned line, unsigned col) {
-  cp::Text text = sourceFor(state, file);
-  putPos(out, file, line, col, 7, !text.empty(), text);
+// formatError and formatParseError are lowered/nixeval/ErrorText.mlir's nixev_et_error, one fill-drain over records: a
+// trace, the error or a parse error, its message and its position (with the code lines when its source is known).  The
+// bridge decodes the positions, reads the sources and sizes the room; every byte of the composition is made there.
+struct ErrRec {
+  uint64_t kind; // 0 a trace, 1 the error, 2 the error after traces, 3 a parse error (label ": " message), 4 "error:"
+  const char *msg;
+  uint64_t mn;
+  const char *label;
+  uint64_t ln, hasPos;
+  const char *file;
+  uint64_t fn, line, col, indent, with;
+  const char *text;
+  uint64_t tn;
+};
+extern "C" int64_t nixev_et_error(const ErrRec *recs, uint64_t n, char *into, uint64_t cap);
+
+static cp::Text errorText(const cp::MutableSeries<ErrRec> &rs) {
+  size_t room = 64;
+  for (const ErrRec &r : rs) room += 8 * r.mn + r.ln + r.fn + r.tn + 5 * r.indent + r.col + 128; // always enough
+  cp::Text out;
+  out.resize(room);
+  out.truncate(size_t(nixev_et_error(rs.data(), rs.size(), out.begin(), room)));
+  return out;
 }
 
 cp::Text formatError(EvalState *state, const EvalError &e) {
-  cp::Text out;
-  // Traces are printed outermost first.
-  if (state && state->settings.showTrace) {
-    for (auto *it = e.traces.end(); it != e.traces.begin();) {
-      --it;
-      out.put("\n       … ").put(it->msg);
-      if (auto f = nd::decodePos(it->pos)) {
-        appendPos(out, state, f->file, f->line, f->col);
-        out += "\n";
-      } else {
-        out += "\n";
-      }
-    }
+  // Traces are printed outermost first, then the error; each position's source is read here and kept for the call.
+  size_t nt = state && state->settings.showTrace ? e.traces.size() : 0;
+  cp::MutableSeries<std::optional<nd::SrcPos>> at;
+  for (size_t i = nt; i > 0; i--) at.append(nd::decodePos(e.traces.begin()[i - 1].pos));
+  at.append(nd::decodePos(e.pos));
+  cp::MutableSeries<cp::Text> srcs;
+  for (auto &f : at) srcs.append(f ? sourceFor(state, f->file) : cp::Text());
+  cp::MutableSeries<ErrRec> rs;
+  if (nt) rs.append(ErrRec{4});
+  for (size_t k = 0; k <= nt; k++) {
+    const cp::Text &m = k == nt ? e.msg : e.traces.begin()[nt - 1 - k].msg;
+    const auto &f = at.begin()[k];
+    const cp::Text &src = srcs.begin()[k];
+    rs.append(ErrRec{k < nt ? 0u : nt ? 2u : 1u, m.data(), m.size(), nullptr, 0, f.has_value(), f ? f->file.data() : nullptr,
+                     f ? f->file.size() : 0, f ? f->line : 0, f ? f->col : 0, 7, !src.empty(), src.data(), src.size()});
   }
-  const cp::Text &msg = e.msg;
-  cp::Text ind; // the message, its continuation lines indented (ErrorText.mlir)
-  ind.resize(8 * msg.size());
-  ind.truncate(size_t(nixev_et_indent(msg.data(), msg.size(), ind.begin(), ind.size())));
-  cp::Text res = out.empty() ? cp::cat("error: ", ind) : cp::cat("error:", out, "\n       error: ", ind);
-  if (auto f = nd::decodePos(e.pos)) appendPos(res, state, f->file, f->line, f->col);
-  return res;
+  return errorText(rs);
 }
 
 cp::Text formatParseError(const nixfe::ParseError &e, const char *kind) {
-  unsigned indent = strlen(kind) + 2;
-  cp::Text res = cp::cat(kind, ": ", e.what());
-  if (e.pos.valid() && e.origin)
-    putPos(res, e.origin->name, e.pos.line, e.pos.col, indent, e.origin->text,
-           e.origin->text ? e.origin->text->view() : std::string_view());
-  return res;
+  bool has = e.pos.valid() && e.origin;
+  std::string_view what = e.what(), text = has && e.origin->text ? e.origin->text->view() : std::string_view();
+  cp::MutableSeries<ErrRec> rs;
+  rs.append(ErrRec{3, what.data(), what.size(), kind, strlen(kind), has, has ? e.origin->name.data() : nullptr,
+                   has ? e.origin->name.size() : 0, e.pos.line, e.pos.col, strlen(kind) + 2, has && e.origin->text, text.data(),
+                   text.size()});
+  return errorText(rs);
 }
 
 int runWithLargeStack(cp::Fn<int()> fn) {

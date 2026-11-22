@@ -488,7 +488,9 @@ func.func @nixfe_ts_path_text(%kind: i64, %home: !llvm.ptr, %hn: i64, %base: !ll
     %cw = func.call @nixfe_ts_canonpath(%ap, %an, %p, %bl, %into, %c0_i64) : (!llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64) -> i64
     %more = arith.cmpi ugt, %n, %c1_i64 : i64
     %t = scf.if %more -> (i64) {
-      %lit = func.call @tp_text(%p, %n) : (!llvm.ptr, i64) -> !s
+      %litd = func.call @tp_desc(%p, %n) : (!llvm.ptr, i64) -> !d
+      %litm = builtin.unrealized_conversion_cast %litd : !d to !m
+      %lit = builtin.unrealized_conversion_cast %litm : !m to !s
       %nm1 = arith.subi %n, %c1_i64 : i64
       %li = arith.index_cast %nm1 : i64 to index
       %last = trikeshed.at %lit[%li] : !s, index -> i8
@@ -510,11 +512,4 @@ func.func @nixfe_ts_path_text(%kind: i64, %home: !llvm.ptr, %hn: i64, %base: !ll
     scf.yield %all : i64
   }
   return %w : i64
-}
-
-func.func private @tp_text(%p: !llvm.ptr, %n: i64) -> !s {
-  %dd = func.call @tp_desc(%p, %n) : (!llvm.ptr, i64) -> !d
-  %mm = builtin.unrealized_conversion_cast %dd : !d to !m
-  %ss = builtin.unrealized_conversion_cast %mm : !m to !s
-  return %ss : !s
 }
