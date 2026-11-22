@@ -16,7 +16,6 @@ namespace nd = mlir::nix;
 namespace nixev {
 
 using A = Value **;
-static composite::Text str(std::string_view s) { return composite::Text(s); }
 
 //===----------------------------------------------------------------------===//
 // JSON output
@@ -227,7 +226,7 @@ void nixev_xw_lambda(XmlWalk *x, Value *v, int64_t *rec) {
   auto lam = cast<nd::LambdaOp>(v->thunk.node->def);
   auto arg = lam.getArgName();
   x->names.clear();
-  if (lam.getFormals()) for (Attribute f : *lam.getFormals()) x->names.append(cast<StringAttr>(f).getValue());
+  if (auto fs = lam.getFormals()) for (Attribute f : ArrayAttr(*fs)) x->names.append(cast<StringAttr>(f).getValue());
   int64_t r[7] = {int64_t(nd::posOfOp(lam)), lam.getFormals() ? 1 : 0, arg ? int64_t(arg->data()) : 0, arg ? int64_t(arg->size()) : -1,
                   lam.getEllipsis() ? 1 : 0, int64_t(x->names.size()), int64_t(x->names.data())};
   for (int64_t k = 0; k < 7; k++) rec[k] = r[k];
@@ -238,7 +237,7 @@ static_assert(sizeof(llvm::StringRef) == 16 && sizeof(Attr) == 16 && offsetof(Bi
 // The rows filled before an error are drained too: mlnix eval --xml shows the part written before it.
 void EvalState::printValueAsXML(composite::Text &out, Value &v, bool strict, bool location, NixStringContext &ctx) {
   out.put("<?xml version='1.0' encoding='utf-8'?>\n");
-  XmlWalk x{*this, ctx};
+  XmlWalk x{*this, ctx, {}, {}, {}, {}, {}};
   auto drain = [&] {
     size_t at = out.size(), total = size_t(nixev_ts_xml_text(x.rows.data(), x.rows.size() / 20, nullptr, 0));
     out.resize(at + total);
