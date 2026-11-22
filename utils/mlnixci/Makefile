@@ -31,9 +31,10 @@ LOWER_BUFFERS = --ownership-based-buffer-deallocation --canonicalize --buffer-de
 all: $(BUILD)/mlnixci
 
 # Written in TrikeShed's ops (and confix's index): query.mlir (the facets), src/index.mlir (a JSON text's index),
-# src/columns.mlir (the columns' codes, the rows' order) and src/text.mlir (a string's escapes, a number's digits)
+# src/columns.mlir (the columns' codes, the rows' order), src/text.mlir (a string's escapes, a number's digits),
+# src/load.mlir (a corpus's columns, made at load) and src/reads.mlir (a text's bytes searched and read)
 # -> scf/arith/memref (mlnix-opt) -> LLVM dialect -> LLVM IR.
-TRIKESHED = index columns text
+TRIKESHED = index columns text load reads
 $(BUILD)/query.ll: query.mlir
 	mkdir -p $(BUILD)
 	$(MLNIX_OPT) $< --trikeshed-lower-cursors > $(BUILD)/query.lowered.mlir

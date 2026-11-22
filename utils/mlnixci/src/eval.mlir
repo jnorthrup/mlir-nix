@@ -28,16 +28,11 @@ llvm.func @posix_spawnattr_setsigmask(!llvm.ptr, !llvm.ptr) -> i32
 llvm.func @posix_spawnattr_setflags(!llvm.ptr, i16) -> i32
 llvm.func @posix_spawnp(!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr) -> i32
 llvm.mlir.global external @environ() : !llvm.ptr
+// reads.mlir (TrikeShed's ops): the lines of the errors kept
+llvm.func @_mlir_ciface_rd_kept(!llvm.ptr, !llvm.ptr)
 
-func.func private @tw(i64, i64) -> i64
 func.func private @off(!llvm.ptr, i64) -> !llvm.ptr
-func.func private @find(!llvm.ptr, i64, i64, i8) -> i64
-func.func private @is(!llvm.ptr, i64, !llvm.ptr, i64) -> i1
-func.func private @ob_start(i64)
-func.func private @ob_len() -> i64
-func.func private @ob_take() -> !llvm.ptr
-func.func private @ob_bytes(!llvm.ptr, i64)
-func.func private @ob_piece(!llvm.ptr, i64)
+func.func private @view(!llvm.ptr, !llvm.ptr, i64)
 
 llvm.mlir.global internal constant @k_instantiate("instantiate\00") : !llvm.array<12 x i8>
 llvm.mlir.global internal constant @k_eval("--eval\00") : !llvm.array<7 x i8>
@@ -46,7 +41,6 @@ llvm.mlir.global internal constant @k_json("--json\00") : !llvm.array<7 x i8>
 llvm.mlir.global internal constant @k_arg("--arg\00") : !llvm.array<6 x i8>
 llvm.mlir.global internal constant @k_overlay("overlay\00") : !llvm.array<8 x i8>
 llvm.mlir.global internal constant @k_request("request\00") : !llvm.array<8 x i8>
-llvm.mlir.global internal constant @k_warning("evaluation warning:") : !llvm.array<19 x i8>
 llvm.mlir.global internal constant @k_cannotrun("cannot run ") : !llvm.array<11 x i8>
 llvm.mlir.global internal constant @k_colon(": ") : !llvm.array<2 x i8>
 llvm.mlir.global internal constant @k_tmp(".tmp\00") : !llvm.array<5 x i8>
@@ -434,55 +428,29 @@ func.func @drain_pipes(%outR: i32, %errR: i32) {
   return
 }
 
-// keep the lines of the errors that do not begin "evaluation warning:"
+// keep the lines of the errors that do not begin "evaluation warning:" (reads.mlir's rd_kept: the errors' parts at '\n'
+// kept by a where and combined, a NUL after them); they are the errors now
 func.func @drop_warnings() {
-  %c0 = arith.constant 0 : i64
+  %one = arith.constant 1 : i32
   %c1 = arith.constant 1 : i64
-  %c19 = arith.constant 19 : i64
-  %nl = arith.constant 10 : i8
   %err = llvm.mlir.addressof @r_err : !llvm.ptr
   %p = llvm.load %err : !llvm.ptr -> !llvm.ptr
   %pl = llvm.getelementptr %err[1] : (!llvm.ptr) -> !llvm.ptr, i64
+  %pc = llvm.getelementptr %err[2] : (!llvm.ptr) -> !llvm.ptr, i64
   %n = llvm.load %pl : !llvm.ptr -> i64
-  %kw = llvm.mlir.addressof @k_warning : !llvm.ptr
-  %kept = llvm.alloca %c1 x !llvm.array<3 x i64> : (i64) -> !llvm.ptr
-  %zero = llvm.mlir.zero : !llvm.array<3 x i64>
-  llvm.store %zero, %kept : !llvm.array<3 x i64>, !llvm.ptr
-  %end = scf.while (%from = %c0) : (i64) -> i64 {
-    %more = arith.cmpi slt, %from, %n : i64
-    scf.condition(%more) %from : i64
-  } do {
-  ^bb0(%from: i64):
-    %q = func.call @find(%p, %from, %n, %nl) : (!llvm.ptr, i64, i64, i8) -> i64
-    %none = arith.cmpi slt, %q, %c0 : i64
-    %lineEnd = arith.select %none, %n, %q : i64
-    %len = arith.subi %lineEnd, %from : i64
-    %long = arith.cmpi sge, %len, %c19 : i64
-    %head = arith.addi %from, %c19 : i64
-    %ht = func.call @tw(%from, %head) : (i64, i64) -> i64
-    %warn = scf.if %long -> (i1) {
-      %w = func.call @is(%p, %ht, %kw, %c19) : (!llvm.ptr, i64, !llvm.ptr, i64) -> i1
-      scf.yield %w : i1
-    } else {
-      %f = arith.constant false
-      scf.yield %f : i1
-    }
-    scf.if %warn {
-    } else {
-      %src = func.call @off(%p, %from) : (!llvm.ptr, i64) -> !llvm.ptr
-      func.call @grow(%kept, %src, %len) : (!llvm.ptr, !llvm.ptr, i64) -> ()
-      %one = arith.constant 1 : i32
-      %nlp = llvm.alloca %one x i8 : (i32) -> !llvm.ptr
-      llvm.store %nl, %nlp : i8, !llvm.ptr
-      func.call @grow(%kept, %nlp, %c1) : (!llvm.ptr, !llvm.ptr, i64) -> ()
-    }
-    %next = arith.addi %lineEnd, %c1 : i64
-    scf.yield %next : i64
-  }
-  // the kept lines are the errors now
+  %from = llvm.alloca %one x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
+  func.call @view(%from, %p, %n) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+  %res = llvm.alloca %one x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
+  llvm.call @_mlir_ciface_rd_kept(%res, %from) : (!llvm.ptr, !llvm.ptr) -> ()
   llvm.call @free(%p) : (!llvm.ptr) -> ()
-  %k = llvm.load %kept : !llvm.ptr -> !llvm.array<3 x i64>
-  llvm.store %k, %err : !llvm.array<3 x i64>, !llvm.ptr
+  // a fresh buffer: its allocation is its data; its last byte is the NUL
+  %kept = llvm.load %res : !llvm.ptr -> !llvm.ptr
+  %psize = llvm.getelementptr %res[0, 3, 0] : (!llvm.ptr) -> !llvm.ptr, !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+  %size = llvm.load %psize : !llvm.ptr -> i64
+  %k = arith.subi %size, %c1 : i64
+  llvm.store %kept, %err : !llvm.ptr, !llvm.ptr
+  llvm.store %k, %pl : i64, !llvm.ptr
+  llvm.store %size, %pc : i64, !llvm.ptr
   return
 }
 

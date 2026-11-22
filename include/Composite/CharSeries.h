@@ -157,7 +157,6 @@ constexpr unsigned digitValue(char c) {
   return c >= '0' && c <= '9' ? unsigned(c - '0') : c >= 'a' && c <= 'z' ? unsigned(c - 'a' + 10) : unsigned(c - 'A' + 10);
 }
 constexpr bool isAsciiDigit(char c) { return c >= '0' && c <= '9'; }
-constexpr bool isAsciiAlnum(char c) { return isAsciiDigit(c) || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
 
 template <class K> constexpr typename K::R facet(const CharSeries &s);
 

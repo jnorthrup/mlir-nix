@@ -53,6 +53,34 @@ func.func @ix_close(%rows: !ix, %r: i64) -> i64 attributes {llvm.emit_c_interfac
   return %z : i64
 }
 
+// Spans as coordinates (TwinPacked (start, length), series.mlir's): the element as written, [open, close + 1), and a
+// string's inside, between its quotes, [open + 1, close)
+func.func @ix_raw(%rows: !ix, %r: i64) -> !tp attributes {llvm.emit_c_interface} {
+  %k0 = trikeshed.key 0 : !ik
+  %spans = trikeshed.column %rows[%k0] : !ix, !ik -> !trikeshed.series<!tw>
+  %s = trikeshed.at %spans[%r] : !trikeshed.series<!tw>, i64 -> !tw
+  %o = trikeshed.first %s : !tw -> i32
+  %c = trikeshed.second %s : !tw -> i32
+  %one = arith.constant 1 : i32
+  %c1 = arith.addi %c, %one : i32
+  %n = arith.subi %c1, %o : i32
+  %t = trikeshed.j %o, %n : i32, i32 -> !tp
+  return %t : !tp
+}
+
+func.func @ix_str(%rows: !ix, %r: i64) -> !tp attributes {llvm.emit_c_interface} {
+  %k0 = trikeshed.key 0 : !ik
+  %spans = trikeshed.column %rows[%k0] : !ix, !ik -> !trikeshed.series<!tw>
+  %s = trikeshed.at %spans[%r] : !trikeshed.series<!tw>, i64 -> !tw
+  %o = trikeshed.first %s : !tw -> i32
+  %c = trikeshed.second %s : !tw -> i32
+  %one = arith.constant 1 : i32
+  %in = arith.addi %o, %one : i32
+  %n = arith.subi %c, %in : i32
+  %t = trikeshed.j %in, %n : i32, i32 -> !tp
+  return %t : !tp
+}
+
 // DirectChildren: how many, and the i-th
 func.func @ix_nkids(%rows: !ix, %r: i64) -> i64 attributes {llvm.emit_c_interface} {
   %k2 = trikeshed.key 2 : !ik
