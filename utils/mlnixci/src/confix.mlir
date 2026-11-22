@@ -17,12 +17,13 @@ llvm.func @_mlir_ciface_ix_rows(!llvm.ptr, !llvm.ptr, !llvm.ptr) -> i64
 llvm.func @_mlir_ciface_ix_tag(!llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> i64
 llvm.func @_mlir_ciface_ix_open(!llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> i64
 llvm.func @_mlir_ciface_ix_close(!llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> i64
+llvm.func @_mlir_ciface_ix_raw(!llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> i64
+llvm.func @_mlir_ciface_ix_str(!llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> i64
 llvm.func @_mlir_ciface_ix_nkids(!llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> i64
 llvm.func @_mlir_ciface_ix_kid(!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64) -> i64
 llvm.func @_mlir_ciface_ix_find(!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr) -> i64
 llvm.func @_mlir_ciface_ix_member(!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr) -> i64
 
-func.func private @tw(i64, i64) -> i64
 func.func private @tw_s(i64) -> i64
 func.func private @tw_n(i64) -> i64
 func.func private @off(!llvm.ptr, i64) -> !llvm.ptr
@@ -135,23 +136,27 @@ func.func @cx_close(%h: !llvm.ptr, %r: i64) -> i64 {
   return %v : i64
 }
 
-// the element as written: [open, close + 1)
+// the element as written, [open, close + 1), and a string's inside, between its quotes, [open + 1, close): index.mlir's
+// Spans read as coordinates
 func.func @cx_raw(%h: !llvm.ptr, %r: i64) -> i64 {
-  %c1 = arith.constant 1 : i64
-  %o = func.call @cx_open(%h, %r) : (!llvm.ptr, i64) -> i64
-  %c = func.call @cx_close(%h, %r) : (!llvm.ptr, i64) -> i64
-  %e = arith.addi %c, %c1 : i64
-  %t = func.call @tw(%o, %e) : (i64, i64) -> i64
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %c2 = arith.constant 2 : i32
+  %d0 = func.call @cx_d(%h, %c0) : (!llvm.ptr, i32) -> !llvm.ptr
+  %d1 = func.call @cx_d(%h, %c1) : (!llvm.ptr, i32) -> !llvm.ptr
+  %d2 = func.call @cx_d(%h, %c2) : (!llvm.ptr, i32) -> !llvm.ptr
+  %t = llvm.call @_mlir_ciface_ix_raw(%d0, %d1, %d2, %r) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> i64
   return %t : i64
 }
 
-// a string's inside, between its quotes: [open + 1, close)
 func.func @cx_str(%h: !llvm.ptr, %r: i64) -> i64 {
-  %c1 = arith.constant 1 : i64
-  %o = func.call @cx_open(%h, %r) : (!llvm.ptr, i64) -> i64
-  %c = func.call @cx_close(%h, %r) : (!llvm.ptr, i64) -> i64
-  %s = arith.addi %o, %c1 : i64
-  %t = func.call @tw(%s, %c) : (i64, i64) -> i64
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %c2 = arith.constant 2 : i32
+  %d0 = func.call @cx_d(%h, %c0) : (!llvm.ptr, i32) -> !llvm.ptr
+  %d1 = func.call @cx_d(%h, %c1) : (!llvm.ptr, i32) -> !llvm.ptr
+  %d2 = func.call @cx_d(%h, %c2) : (!llvm.ptr, i32) -> !llvm.ptr
+  %t = llvm.call @_mlir_ciface_ix_str(%d0, %d1, %d2, %r) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> i64
   return %t : i64
 }
 
