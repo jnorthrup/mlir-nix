@@ -203,6 +203,12 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/StructuredAttrsOps.mlir Structur
 # worklist and visited set (bisect + insert), collectGarbage's dead set and referrer-safe rounds, allValidPaths' order,
 # queryPathInfo's lines (parts), contentFingerprint (a fold through XXH3-64, written here) and sameContent's walk.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/StoreGraph.mlir StoreGraph)
+# The local store's builder (LocalStore.cpp; the fork, the exec, the walks and the reads stay there): runBuilder's
+# environment and argv as one combineAll of `k=v` NUL pieces each, drained once, the pointer table the coordinates;
+# scanForReferences' table (the hash parts sorted, the last of equal ones kept) and its scan (32-digit nix32 windows
+# bisected into it); registerValidPath's info file as one combine drained once.  runBuilder's placeholders are
+# StructuredAttrsOps' rewrite (nixstore_ts_rewrite, through rewritePlaceholders).
+mlnix_lower_trikeshed(NixStore lowered/nixstore/BuilderOps.mlir BuilderOps)
 # The crit-bit trie of include/Composite/Patricia.h (its algorithms are gone from the header; the template keeps the
 # storage, the value, copy and emit): the leaf walk, the key compare (trikeshed.compare), set's plan and link, prefix's
 # byte-order walk.  NixStore owns it; NixEval (Eval.h's tries) links NixStore.

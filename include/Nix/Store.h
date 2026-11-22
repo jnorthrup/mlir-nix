@@ -487,6 +487,8 @@ struct JsonRec {
 composite::Join<composite::Text, composite::Text> structuredAttrsFiles(std::string_view json,
                                                          const SortedMap<composite::Text> &outputs,
                                                          const SortedMap<composite::Text> &rewrites);
+/// s with every placeholder of `rewrites` (placeholder -> path, each in turn) replaced, left to right without overlap.
+composite::Text rewritePlaceholders(std::string_view s, const SortedMap<composite::Text> &rewrites);
 
 /// Helpers.
 composite::Text readFile(std::string_view path);
