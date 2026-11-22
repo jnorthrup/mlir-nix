@@ -655,3 +655,195 @@ func.func @report_reply(%ov: !text, %msb: f64, %msc: f64, %text: !text, %keys: !
     : !text, !text, !text, !text, !text, !text, !text, !text, !text, !text, !text -> !text
   return %reply : !text
 }
+
+// ---- the head of every reply, the error replies, and the what-if overlay's edits (api.mlir's and http.mlir's builder
+// calls before; each is one combine of slices and literals, drained once)
+
+// the head, as http.mlir's snprintf("HTTP/1.1 %ld %s\r\nContent-Type: %s\r\nContent-Length: %ld\r\n...") wrote it
+memref.global "private" constant @h_http : memref<9xi8> = dense<"0x485454502F312E3120">  // HTTP/1.1
+memref.global "private" constant @h_sp : memref<1xi8> = dense<"0x20">  // ' '
+memref.global "private" constant @h_type : memref<16xi8> = dense<"0x0D0A436F6E74656E742D547970653A20">  // \r\nContent-Type:
+memref.global "private" constant @h_length : memref<18xi8> = dense<"0x0D0A436F6E74656E742D4C656E6774683A20">  // \r\nContent-Length:
+memref.global "private" constant @h_tail : memref<48xi8> = dense<"0x0D0A43616368652D436F6E74726F6C3A206E6F2D73746F72650D0A436F6E6E656374696F6E3A20636C6F73650D0A0D0A">  // \r\nCache-Control: no-store\r\nConnection: close\r\n\r\n
+// the reasons of 200, 400, 404, 413, 422 and any other status (500), one after another; the two content types
+memref.global "private" constant @h_reasons : memref<80xi8> = dense<"0x4F4B42616420526571756573744E6F7420466F756E645061796C6F616420546F6F204C61726765556E70726F6365737361626C6520456E74697479496E7465726E616C20536572766572204572726F72">  // OK, Bad Request, Not Found, Payload Too Large, Unprocessable Entity, Internal Server Error
+memref.global "private" constant @h_reason_at : memref<7xi64> = dense<[0, 2, 13, 22, 39, 59, 80]>
+memref.global "private" constant @h_statuses : memref<5xi64> = dense<[200, 400, 404, 413, 422]>
+memref.global "private" constant @h_types : memref<40xi8> = dense<"0x746578742F68746D6C3B20636861727365743D7574662D386170706C69636174696F6E2F6A736F6E">  // text/html; charset=utf-8, application/json
+// {"error":"...", and the overlay's punctuation
+memref.global "private" constant @e_open : memref<10xi8> = dense<"0x7B226572726F72223A22">  // {"error":"
+memref.global "private" constant @e_close : memref<2xi8> = dense<"0x227D">  // "}
+memref.global "private" constant @o_sep : memref<2xi8> = dense<"0x2C20">  // ", "
+memref.global "private" constant @o_open : memref<2xi8> = dense<"0x7B22">  // {"
+memref.global "private" constant @o_key : memref<3xi8> = dense<"0x223A20">  // ": (quote, colon, space)
+memref.global "private" constant @o_close : memref<1xi8> = dense<"0x7D">  // }
+
+// A reply's head: its status and reason, its type (html, else JSON), its body's length; drained into `into` (the room in
+// front of the body is 256 bytes, more than any head): how many bytes were written.
+func.func @head_reply(%status: i64, %html: i64, %bodyLen: i64, %into: memref<?xi8>) -> index
+    attributes {llvm.emit_c_interface} {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c5 = arith.constant 5 : index
+  %c16 = arith.constant 16 : index
+  %c24 = arith.constant 24 : index
+  %z64 = arith.constant 0 : i64
+  %httpG = memref.get_global @h_http : memref<9xi8>
+  %Lhttp = trikeshed.text %httpG : memref<9xi8> -> !text
+  %spG = memref.get_global @h_sp : memref<1xi8>
+  %Lsp = trikeshed.text %spG : memref<1xi8> -> !text
+  %typeG = memref.get_global @h_type : memref<16xi8>
+  %Ltype = trikeshed.text %typeG : memref<16xi8> -> !text
+  %lengthG = memref.get_global @h_length : memref<18xi8>
+  %Llength = trikeshed.text %lengthG : memref<18xi8> -> !text
+  %tailG = memref.get_global @h_tail : memref<48xi8>
+  %Ltail = trikeshed.text %tailG : memref<48xi8> -> !text
+  %reasonsG = memref.get_global @h_reasons : memref<80xi8>
+  %reasons = trikeshed.text %reasonsG : memref<80xi8> -> !text
+  %reasonAtG = memref.get_global @h_reason_at : memref<7xi64>
+  %reasonAt = trikeshed.text %reasonAtG : memref<7xi64> -> !s64
+  %statusesG = memref.get_global @h_statuses : memref<5xi64>
+  %statuses = trikeshed.text %statusesG : memref<5xi64> -> !s64
+  %typesG = memref.get_global @h_types : memref<40xi8>
+  %types = trikeshed.text %typesG : memref<40xi8> -> !text
+  // the status's place among the five with a reason of their own, else the sixth's (500's)
+  %places = trikeshed.series %c5 : !s64 {
+  ^bb0(%k: index):
+    %k64 = arith.index_cast %k : index to i64
+    trikeshed.yield %k64 : i64
+  }
+  %which = trikeshed.fold %places, %c5 : !s64, index -> index {
+  ^bb0(%acc: index, %k64: i64):
+    %k = arith.index_cast %k64 : i64 to index
+    %s = trikeshed.at %statuses[%k] : !s64, index -> i64
+    %is = arith.cmpi eq, %s, %status : i64
+    %unseen = arith.cmpi eq, %acc, %c5 : index
+    %first = arith.andi %is, %unseen : i1
+    %r = arith.select %first, %k, %acc : index
+    trikeshed.yield %r : index
+  }
+  %which1 = arith.addi %which, %c1 : index
+  %rs64 = trikeshed.at %reasonAt[%which] : !s64, index -> i64
+  %re64 = trikeshed.at %reasonAt[%which1] : !s64, index -> i64
+  %rs = arith.index_cast %rs64 : i64 to index
+  %re = arith.index_cast %re64 : i64 to index
+  %rl = arith.subi %re, %rs : index
+  %reason = trikeshed.slice %reasons[%rs, %rl] : !text -> !text
+  %isHtml = arith.cmpi ne, %html, %z64 : i64
+  %ts = arith.select %isHtml, %c0, %c24 : index
+  %tl = arith.select %isHtml, %c24, %c16 : index
+  %type = trikeshed.slice %types[%ts, %tl] : !text -> !text
+  %ds = func.call @digits(%status) : (i64) -> !text
+  %dl = func.call @digits(%bodyLen) : (i64) -> !text
+  %head = trikeshed.combine %Lhttp, %ds, %Lsp, %reason, %Ltype, %type, %Llength, %dl, %Ltail
+    : !text, !text, !text, !text, !text, !text, !text, !text, !text -> !text
+  %end = trikeshed.drain %head, %into : !text, memref<?xi8> -> index
+  return %end : index
+}
+
+// {"error":"<lead><a escaped><mid><b escaped>"}: lead and mid are written as they are (literals already JSON), a and b
+// escaped as json_escape escapes (a request's method and path, a file's name, mlnix's errors).  A fresh buffer.
+func.func @error_reply(%lead: !text, %a: !text, %mid: !text, %b: !text) -> !text attributes {llvm.emit_c_interface} {
+  %six = arith.constant 6 : index
+  %openG = memref.get_global @e_open : memref<10xi8>
+  %Lopen = trikeshed.text %openG : memref<10xi8> -> !text
+  %closeG = memref.get_global @e_close : memref<2xi8>
+  %Lclose = trikeshed.text %closeG : memref<2xi8> -> !text
+  %eg = memref.get_global @escapes : memref<1536xi8>
+  %table = trikeshed.text %eg : memref<1536xi8> -> !text
+  %lg = memref.get_global @escape_lengths : memref<256xi8>
+  %lengths = trikeshed.text %lg : memref<256xi8> -> !text
+  %na = trikeshed.size %a : !text
+  %ea, %eaAt = trikeshed.combineAll %na : !text, !pieces {
+  ^bb0(%k: index):
+    %x = trikeshed.at %a[%k] : !text, index -> i8
+    %xi = arith.index_castui %x : i8 to index
+    %l = trikeshed.at %lengths[%xi] : !text, index -> i8
+    %li = arith.index_castui %l : i8 to index
+    %at = arith.muli %xi, %six : index
+    %part = trikeshed.slice %table[%at, %li] : !text -> !text
+    trikeshed.yield %part : !text
+  }
+  %nb = trikeshed.size %b : !text
+  %eb, %ebAt = trikeshed.combineAll %nb : !text, !pieces {
+  ^bb0(%k: index):
+    %x = trikeshed.at %b[%k] : !text, index -> i8
+    %xi = arith.index_castui %x : i8 to index
+    %l = trikeshed.at %lengths[%xi] : !text, index -> i8
+    %li = arith.index_castui %l : i8 to index
+    %at = arith.muli %xi, %six : index
+    %part = trikeshed.slice %table[%at, %li] : !text -> !text
+    trikeshed.yield %part : !text
+  }
+  %reply = trikeshed.combine %Lopen, %lead, %ea, %mid, %eb, %Lclose : !text, !text, !text, !text, !text, !text -> !text
+  return %reply : !text
+}
+
+// The overlay with [from, to) replaced by the body's [vs, vs + vl): a member's value set (its old value's span), a member
+// cut (with one comma beside it; vl 0), or the overlay as it was (from = to = its end).  A fresh buffer.
+func.func @overlay_put(%ov: !text, %from: index, %to: index, %body: !text, %vs: index, %vl: index) -> !text
+    attributes {llvm.emit_c_interface} {
+  %c0 = arith.constant 0 : index
+  %n = trikeshed.size %ov : !text
+  %head = trikeshed.slice %ov[%c0, %from] : !text -> !text
+  %value = trikeshed.slice %body[%vs, %vl] : !text -> !text
+  %tl = arith.subi %n, %to : index
+  %tail = trikeshed.slice %ov[%to, %tl] : !text -> !text
+  %next = trikeshed.combine %head, %value, %tail : !text, !text, !text -> !text
+  return %next : !text
+}
+
+// The overlay with the members a path lacks inserted at `at` (after the last member of the deepest object that exists,
+// a ", " first when it has one): "<segment level>": {"<segment>": ... <the body's value> } ... -- each segment the
+// inside of its string in the body, as written.  A fresh buffer.
+func.func @overlay_insert(%ov: !text, %at: index, %comma: index, %body: !text, %segs: !coords, %level: index, %vs: index,
+                          %vl: index) -> !text attributes {llvm.emit_c_interface} {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %sepG = memref.get_global @o_sep : memref<2xi8>
+  %Lsep = trikeshed.text %sepG : memref<2xi8> -> !text
+  %openG = memref.get_global @o_open : memref<2xi8>
+  %Lopen = trikeshed.text %openG : memref<2xi8> -> !text
+  %keyG = memref.get_global @o_key : memref<3xi8>
+  %Lkey = trikeshed.text %keyG : memref<3xi8> -> !text
+  %closeG = memref.get_global @o_close : memref<1xi8>
+  %Lclose = trikeshed.text %closeG : memref<1xi8> -> !text
+  %quoteG = memref.get_global @r_quote : memref<1xi8>
+  %Lquote = trikeshed.text %quoteG : memref<1xi8> -> !text
+  %n = trikeshed.size %ov : !text
+  %ns = trikeshed.size %segs : !coords
+  %head = trikeshed.slice %ov[%c0, %at] : !text -> !text
+  %sl = arith.muli %comma, %c2 : index
+  %sep = trikeshed.slice %Lsep[%c0, %sl] : !text -> !text
+  %seg = trikeshed.at %segs[%level] : !coords, index -> !tp
+  %ks32 = trikeshed.first %seg : !tp -> i32
+  %kl32 = trikeshed.second %seg : !tp -> i32
+  %ks = arith.index_cast %ks32 : i32 to index
+  %kl = arith.index_cast %kl32 : i32 to index
+  %key = trikeshed.slice %body[%ks, %kl] : !text -> !text
+  %from = arith.addi %level, %c1 : index
+  %deeper = arith.subi %ns, %from : index
+  %opens, %opensAt = trikeshed.combineAll %deeper : !text, !pieces {
+  ^bb0(%j: index):
+    %i = arith.addi %from, %j : index
+    %sj = trikeshed.at %segs[%i] : !coords, index -> !tp
+    %ss32 = trikeshed.first %sj : !tp -> i32
+    %sl32 = trikeshed.second %sj : !tp -> i32
+    %ss = arith.index_cast %ss32 : i32 to index
+    %sln = arith.index_cast %sl32 : i32 to index
+    %name = trikeshed.slice %body[%ss, %sln] : !text -> !text
+    %part = trikeshed.combine %Lopen, %name, %Lkey : !text, !text, !text -> !text
+    trikeshed.yield %part : !text
+  }
+  %value = trikeshed.slice %body[%vs, %vl] : !text -> !text
+  %closes, %closesAt = trikeshed.combineAll %deeper : !text, !pieces {
+  ^bb0(%j: index):
+    trikeshed.yield %Lclose : !text
+  }
+  %tl = arith.subi %n, %at : index
+  %tail = trikeshed.slice %ov[%at, %tl] : !text -> !text
+  %next = trikeshed.combine %head, %sep, %Lquote, %key, %Lkey, %opens, %value, %closes, %tail
+    : !text, !text, !text, !text, !text, !text, !text, !text, !text -> !text
+  return %next : !text
+}

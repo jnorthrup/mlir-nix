@@ -461,7 +461,6 @@ struct Store {
   const composite::Text *sameDerivation(const Derivation &drv, uint64_t &fingerprint) const;
   void rememberDerivation(uint64_t fingerprint, std::string_view drvPath);
   composite::Text infoFile(std::string_view path) const;
-  void makeStoreWritable();
   SortedMap<composite::Text> realise(std::string_view drvPath,
                                              SortedSet &visiting);
   void runBuilder(std::string_view drvPath, const Derivation &drv,

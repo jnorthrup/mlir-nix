@@ -13,7 +13,7 @@
 //   fold               the one loop; Marks<S> is the premark it dispatches on.
 //
 // Only the hot aliases live here.  The mix-ins that need them are separate headers, so none of them sits on the include path of the
-// types every file names: Folds.h (iota, vec, foldN, firstWhere, argMin), Views.h (take/drop/... and joins/combine/drain), Mutable.h
+// types every file names: Folds.h (iota, vec, firstWhere, argMin), Views.h (take/drop/... and joins/combine/drain), Mutable.h
 // (MutableSeries and its bodies), Pool.h (select, Sel, Cursor, anchor), Laws.h (the self-tests); All.h includes the lot.
 //
 //===----------------------------------------------------------------------===//

@@ -100,3 +100,19 @@ install: $(BUILD)/mlnixci
 	systemctl daemon-reload
 
 .PHONY: all check facet-check install
+
+# src/request.mlir: the request's framing and route, read as kursive combinators (src/request-grammar.mlir, made Step
+# programs by --kursive-to-program) walked by mlir-nix's mlnix_kursive_walk (lowered/nixeval/KursiveOps.mlir), the lines
+# in TrikeShed's ops; lowered as the TrikeShed modules are.  The walk is linked as an object of its own.
+$(BUILD)/request.ll: src/request.mlir src/request-grammar.mlir
+	mkdir -p $(BUILD)
+	{ $(MLNIX_OPT) src/request-grammar.mlir --kursive-to-program | sed '/^module {$$/d;/^}$$/d'; cat src/request.mlir; } \
+	  | $(MLNIX_OPT) --trikeshed-lower-cursors > $(BUILD)/request.lowered.mlir
+	! grep -q -E '(trikeshed|confix|kursive)\.' $(BUILD)/request.lowered.mlir
+	$(LLVM_BIN)/mlir-opt $(BUILD)/request.lowered.mlir $(LOWER_BUFFERS) | $(LLVM_BIN)/mlir-translate --mlir-to-llvmir -o $@
+
+$(BUILD)/kursive-walk.ll: $(MLIR_NIX)/lowered/nixeval/KursiveOps.mlir
+	mkdir -p $(BUILD)
+	$(LLVM_BIN)/mlir-opt $< $(LOWER_BUFFERS) | $(LLVM_BIN)/mlir-translate --mlir-to-llvmir -o $@
+
+$(BUILD)/mlnixci: $(BUILD)/request.o $(BUILD)/kursive-walk.o

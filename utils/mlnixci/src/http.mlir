@@ -13,11 +13,8 @@ llvm.func @free(!llvm.ptr)
 llvm.func @memcpy(!llvm.ptr, !llvm.ptr, i64) -> !llvm.ptr
 llvm.func @strlen(!llvm.ptr) -> i64
 llvm.func @strcmp(!llvm.ptr, !llvm.ptr) -> i32
-llvm.func @strncasecmp(!llvm.ptr, !llvm.ptr, i64) -> i32
-llvm.func @strerror(i32) -> !llvm.ptr
 llvm.func @atoi(!llvm.ptr) -> i32
 llvm.func @getenv(!llvm.ptr) -> !llvm.ptr
-llvm.func @snprintf(!llvm.ptr, i64, !llvm.ptr, ...) -> i32
 llvm.func @dprintf(i32, !llvm.ptr, ...) -> i32
 llvm.func @socket(i32, i32, i32) -> i32
 llvm.func @setsockopt(i32, i32, i32, !llvm.ptr, i32) -> i32
@@ -46,9 +43,7 @@ llvm.func @io_uring_sqe_set_data64(!llvm.ptr, i64)
 
 func.func private @tw(i64, i64) -> i64
 func.func private @off(!llvm.ptr, i64) -> !llvm.ptr
-func.func private @find(!llvm.ptr, i64, i64, i8) -> i64
-func.func private @search(!llvm.ptr, i64, i64, !llvm.ptr, i64) -> i64
-func.func private @number(!llvm.ptr, i64, i64) -> i64
+func.func private @view(!llvm.ptr, !llvm.ptr, i64)
 func.func private @ob_len() -> i64
 func.func private @ob_take() -> !llvm.ptr
 func.func private @getp(!llvm.ptr, i64) -> !llvm.ptr
@@ -59,7 +54,7 @@ func.func private @grow(!llvm.ptr, !llvm.ptr, i64)
 func.func private @api_init(!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr)
 func.func private @api_status() -> i64
 func.func private @api_html() -> i64
-func.func private @route(!llvm.ptr, i64, i64, i64)
+func.func private @route(!llvm.ptr, i64, i64, i64, i64)
 func.func private @fail_with(i64, !llvm.ptr, i64)
 func.func private @eval_settings(!llvm.ptr, !llvm.ptr, !llvm.ptr, i64)
 func.func private @evaluate(!llvm.ptr)
@@ -73,18 +68,6 @@ func.func private @corpus_load(!llvm.ptr, i64, f64) -> !llvm.ptr
 func.func private @corpus_why() -> !llvm.ptr
 func.func private @corpus_why_n() -> i64
 
-llvm.mlir.global internal constant @lit0("OK\00") : !llvm.array<3 x i8>
-llvm.mlir.global internal constant @lit1("Bad Request\00") : !llvm.array<12 x i8>
-llvm.mlir.global internal constant @lit2("Not Found\00") : !llvm.array<10 x i8>
-llvm.mlir.global internal constant @lit3("Payload Too Large\00") : !llvm.array<18 x i8>
-llvm.mlir.global internal constant @lit4("Unprocessable Entity\00") : !llvm.array<21 x i8>
-llvm.mlir.global internal constant @lit5("Internal Server Error\00") : !llvm.array<22 x i8>
-llvm.mlir.global internal constant @lit6("text/html; charset=utf-8\00") : !llvm.array<25 x i8>
-llvm.mlir.global internal constant @lit7("application/json\00") : !llvm.array<17 x i8>
-llvm.mlir.global internal constant @lit8("HTTP/1.1 %ld %s\0D\0AContent-Type: %s\0D\0AContent-Length: %ld\0D\0ACache-Control: no-store\0D\0AConnection: close\0D\0A\0D\0A\00") : !llvm.array<103 x i8>
-llvm.mlir.global internal constant @lit9("\0D\0A\0D\0A") : !llvm.array<4 x i8>
-llvm.mlir.global internal constant @lit10("\0D\0A") : !llvm.array<2 x i8>
-llvm.mlir.global internal constant @lit11("content-length:") : !llvm.array<15 x i8>
 llvm.mlir.global internal constant @lit12("request too large") : !llvm.array<17 x i8>
 llvm.mlir.global internal constant @lit13("bad request line") : !llvm.array<16 x i8>
 llvm.mlir.global internal constant @lit14("mlnixci: cannot listen on port %ld\0A\00") : !llvm.array<36 x i8>
@@ -217,7 +200,9 @@ func.func @close_conn(%c: !llvm.ptr) {
   return
 }
 
-// the reply made by the route: its head written into the room in front of its body, then sent
+// the reply made by the route: its head (text.mlir's head_reply: the status, its reason, the type, the body's length)
+// written into the room in front of its body, then sent
+llvm.func @_mlir_ciface_head_reply(i64, i64, i64, !llvm.ptr) -> i64
 func.func @respond(%c: !llvm.ptr) {
   %c4 = arith.constant 4 : i64
   %c5 = arith.constant 5 : i64
@@ -228,46 +213,11 @@ func.func @respond(%c: !llvm.ptr) {
   %total = func.call @ob_len() : () -> i64
   %buf = func.call @ob_take() : () -> !llvm.ptr
   %bodyLen = arith.subi %total, %gap : i64
-  %r200 = llvm.mlir.addressof @lit0 : !llvm.ptr
-  %r200_n = arith.constant 3 : i64
-  %r400 = llvm.mlir.addressof @lit1 : !llvm.ptr
-  %r400_n = arith.constant 12 : i64
-  %r404 = llvm.mlir.addressof @lit2 : !llvm.ptr
-  %r404_n = arith.constant 10 : i64
-  %r413 = llvm.mlir.addressof @lit3 : !llvm.ptr
-  %r413_n = arith.constant 18 : i64
-  %r422 = llvm.mlir.addressof @lit4 : !llvm.ptr
-  %r422_n = arith.constant 21 : i64
-  %r500 = llvm.mlir.addressof @lit5 : !llvm.ptr
-  %r500_n = arith.constant 22 : i64
-  %s200 = arith.constant 200 : i64
-  %s400 = arith.constant 400 : i64
-  %s404 = arith.constant 404 : i64
-  %s413 = arith.constant 413 : i64
-  %s422 = arith.constant 422 : i64
-  %is200 = arith.cmpi eq, %status, %s200 : i64
-  %is400 = arith.cmpi eq, %status, %s400 : i64
-  %is404 = arith.cmpi eq, %status, %s404 : i64
-  %is413 = arith.cmpi eq, %status, %s413 : i64
-  %is422 = arith.cmpi eq, %status, %s422 : i64
-  %q5 = arith.select %is422, %r422, %r500 : !llvm.ptr
-  %q4 = arith.select %is413, %r413, %q5 : !llvm.ptr
-  %q3 = arith.select %is404, %r404, %q4 : !llvm.ptr
-  %q2 = arith.select %is400, %r400, %q3 : !llvm.ptr
-  %reason = arith.select %is200, %r200, %q2 : !llvm.ptr
-  %tHtml = llvm.mlir.addressof @lit6 : !llvm.ptr
-  %tHtml_n = arith.constant 25 : i64
-  %tJson = llvm.mlir.addressof @lit7 : !llvm.ptr
-  %tJson_n = arith.constant 17 : i64
-  %c0 = arith.constant 0 : i64
-  %isHtml = arith.cmpi ne, %html, %c0 : i64
-  %type = arith.select %isHtml, %tHtml, %tJson : !llvm.ptr
-  %fmt = llvm.mlir.addressof @lit8 : !llvm.ptr
-  %fmt_n = arith.constant 103 : i64
   %one = arith.constant 1 : i32
   %head = llvm.alloca %one x !llvm.array<256 x i8> : (i32) -> !llvm.ptr
-  %hl32 = llvm.call @snprintf(%head, %gap, %fmt, %status, %reason, %type, %bodyLen) vararg(!llvm.func<i32 (ptr, i64, ptr, ...)>) : (!llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, !llvm.ptr, i64) -> i32
-  %hl = arith.extsi %hl32 : i32 to i64
+  %into = llvm.alloca %one x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
+  func.call @view(%into, %head, %gap) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+  %hl = llvm.call @_mlir_ciface_head_reply(%status, %html, %bodyLen, %into) : (i64, i64, i64, !llvm.ptr) -> i64
   %start = arith.subi %gap, %hl : i64
   %dst = func.call @off(%buf, %start) : (!llvm.ptr, i64) -> !llvm.ptr
   %x = llvm.call @memcpy(%dst, %head, %hl) : (!llvm.ptr, !llvm.ptr, i64) -> !llvm.ptr
@@ -278,107 +228,65 @@ func.func @respond(%c: !llvm.ptr) {
   return
 }
 
-// Answer once the head and the body (Content-Length) have arrived; false while more is to come.
+// Answer once the head and the body (Content-Length) have arrived; false while more is to come.  The framing is
+// request.mlir's rq_frame (kursive combinators walked over the request where it lies): not all here, too large (413),
+// no request line (400), or the method, path, body and the route they name.
+llvm.func @_mlir_ciface_rq_frame(!llvm.ptr, !llvm.ptr) -> i64
 func.func @complete(%c: !llvm.ptr) -> i1 {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
   %c2 = arith.constant 2 : i64
+  %c3 = arith.constant 3 : i64
   %c4 = arith.constant 4 : i64
-  %c15 = arith.constant 15 : i64
-  %m1 = arith.constant -1 : i64
+  %c5 = arith.constant 5 : i64
+  %c6 = arith.constant 6 : i64
+  %c7 = arith.constant 7 : i64
   %true = arith.constant true
   %false = arith.constant false
+  %one = arith.constant 1 : i32
   %in = func.call @getp(%c, %c1) : (!llvm.ptr, i64) -> !llvm.ptr
   %n = func.call @geti(%c, %c2) : (!llvm.ptr, i64) -> i64
-  %crlf2 = llvm.mlir.addressof @lit9 : !llvm.ptr
-  %crlf2_n = arith.constant 4 : i64
-  %crlf = llvm.mlir.addressof @lit10 : !llvm.ptr
-  %crlf_n = arith.constant 2 : i64
-  %cl = llvm.mlir.addressof @lit11 : !llvm.ptr
-  %cl_n = arith.constant 15 : i64
-  %end = func.call @search(%in, %c0, %n, %crlf2, %crlf2_n) : (!llvm.ptr, i64, i64, !llvm.ptr, i64) -> i64
-  %noHead = arith.cmpi slt, %end, %c0 : i64
-  %done = scf.if %noHead -> (i1) {
+  %d = llvm.alloca %one x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
+  func.call @view(%d, %in, %n) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+  %out = llvm.alloca %one x !llvm.array<7 x i64> : (i32) -> !llvm.ptr
+  %od = llvm.alloca %one x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
+  func.call @view(%od, %out, %c7) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+  %v = llvm.call @_mlir_ciface_rq_frame(%d, %od) : (!llvm.ptr, !llvm.ptr) -> i64
+  %which = arith.index_cast %v : i64 to index
+  %done = scf.index_switch %which -> i1
+  case 0 {
     scf.yield %false : i1
-  } else {
-    // the header lines between the request line and the blank line
-    %first = func.call @search(%in, %c0, %n, %crlf, %crlf_n) : (!llvm.ptr, i64, i64, !llvm.ptr, i64) -> i64
-    %w:2 = scf.while (%p = %first, %len = %c0) : (i64, i64) -> (i64, i64) {
-      %more = arith.cmpi slt, %p, %end : i64
-      scf.condition(%more) %p, %len : i64, i64
-    } do {
-    ^bb0(%p: i64, %len: i64):
-      %from = arith.addi %p, %c2 : i64
-      %e2 = arith.addi %end, %c2 : i64
-      %q = func.call @search(%in, %from, %e2, %crlf, %crlf_n) : (!llvm.ptr, i64, i64, !llvm.ptr, i64) -> i64
-      %ll = arith.subi %q, %from : i64
-      %long = arith.cmpi sgt, %ll, %c15 : i64
-      %nl = scf.if %long -> (i64) {
-        %lp = func.call @off(%in, %from) : (!llvm.ptr, i64) -> !llvm.ptr
-        %k = llvm.call @strncasecmp(%lp, %cl, %c15) : (!llvm.ptr, !llvm.ptr, i64) -> i32
-        %z = arith.constant 0 : i32
-        %is = arith.cmpi eq, %k, %z : i32
-        %v0 = arith.addi %from, %c15 : i64
-        %v = func.call @number(%in, %v0, %q) : (!llvm.ptr, i64, i64) -> i64
-        %r = arith.select %is, %v, %len : i64
-        scf.yield %r : i64
-      } else {
-        scf.yield %len : i64
-      }
-      scf.yield %q, %nl : i64, i64
-    }
-    %length = arith.addi %w#1, %c0 : i64
-    %max = arith.constant 1048576 : i64
-    %tooBig = arith.cmpi sgt, %length, %max : i64
-    %r = scf.if %tooBig -> (i1) {
-      %c413 = arith.constant 413 : i64
-      %big = llvm.mlir.addressof @lit12 : !llvm.ptr
-      %big_n = arith.constant 17 : i64
-      func.call @fail_with(%c413, %big, %big_n) : (i64, !llvm.ptr, i64) -> ()
-      func.call @respond(%c) : (!llvm.ptr) -> ()
-      scf.yield %true : i1
-    } else {
-      %bodyAt = arith.addi %end, %c4 : i64
-      %need = arith.addi %bodyAt, %length : i64
-      %short = arith.cmpi slt, %n, %need : i64
-      %r2 = scf.if %short -> (i1) {
-        scf.yield %false : i1
-      } else {
-        %sp = arith.constant 32 : i8
-        %qm = arith.constant 63 : i8
-        %sp1 = func.call @find(%in, %c0, %n, %sp) : (!llvm.ptr, i64, i64, i8) -> i64
-        %has1 = arith.cmpi sge, %sp1, %c0 : i64
-        %sp1n = arith.addi %sp1, %c1 : i64
-        %sp2 = scf.if %has1 -> (i64) {
-          %f = func.call @find(%in, %sp1n, %n, %sp) : (!llvm.ptr, i64, i64, i8) -> i64
-          scf.yield %f : i64
-        } else {
-          scf.yield %m1 : i64
-        }
-        %has2 = arith.cmpi sge, %sp2, %c0 : i64
-        %inHead = arith.cmpi sle, %sp2, %end : i64
-        %line0 = arith.andi %has1, %has2 : i1
-        %line = arith.andi %line0, %inHead : i1
-        scf.if %line {
-          %method = func.call @tw(%c0, %sp1) : (i64, i64) -> i64
-          %qp = func.call @find(%in, %sp1n, %sp2, %qm) : (!llvm.ptr, i64, i64, i8) -> i64
-          %hasQ = arith.cmpi sge, %qp, %c0 : i64
-          %pe = arith.select %hasQ, %qp, %sp2 : i64
-          %path = func.call @tw(%sp1n, %pe) : (i64, i64) -> i64
-          %body = func.call @tw(%bodyAt, %need) : (i64, i64) -> i64
-          func.call @route(%in, %method, %path, %body) : (!llvm.ptr, i64, i64, i64) -> ()
-        } else {
-          %c400 = arith.constant 400 : i64
-          %badLine = llvm.mlir.addressof @lit13 : !llvm.ptr
-          %badLine_n = arith.constant 16 : i64
-          func.call @fail_with(%c400, %badLine, %badLine_n) : (i64, !llvm.ptr, i64) -> ()
-        }
-        func.call @respond(%c) : (!llvm.ptr) -> ()
-        scf.yield %true : i1
-      }
-      scf.yield %r2 : i1
-    }
-    scf.yield %r : i1
+  }
+  case 1 {
+    %c413 = arith.constant 413 : i64
+    %big = llvm.mlir.addressof @lit12 : !llvm.ptr
+    %big_n = arith.constant 17 : i64
+    func.call @fail_with(%c413, %big, %big_n) : (i64, !llvm.ptr, i64) -> ()
+    func.call @respond(%c) : (!llvm.ptr) -> ()
+    scf.yield %true : i1
+  }
+  case 2 {
+    %c400 = arith.constant 400 : i64
+    %badLine = llvm.mlir.addressof @lit13 : !llvm.ptr
+    %badLine_n = arith.constant 16 : i64
+    func.call @fail_with(%c400, %badLine, %badLine_n) : (i64, !llvm.ptr, i64) -> ()
+    func.call @respond(%c) : (!llvm.ptr) -> ()
+    scf.yield %true : i1
+  }
+  default {
+    %ms = func.call @geti(%out, %c0) : (!llvm.ptr, i64) -> i64
+    %me = func.call @geti(%out, %c1) : (!llvm.ptr, i64) -> i64
+    %ps = func.call @geti(%out, %c2) : (!llvm.ptr, i64) -> i64
+    %pe = func.call @geti(%out, %c3) : (!llvm.ptr, i64) -> i64
+    %bs = func.call @geti(%out, %c4) : (!llvm.ptr, i64) -> i64
+    %be = func.call @geti(%out, %c5) : (!llvm.ptr, i64) -> i64
+    %route = func.call @geti(%out, %c6) : (!llvm.ptr, i64) -> i64
+    %method = func.call @tw(%ms, %me) : (i64, i64) -> i64
+    %path = func.call @tw(%ps, %pe) : (i64, i64) -> i64
+    %body = func.call @tw(%bs, %be) : (i64, i64) -> i64
+    func.call @route(%in, %method, %path, %body, %route) : (!llvm.ptr, i64, i64, i64, i64) -> ()
+    func.call @respond(%c) : (!llvm.ptr) -> ()
+    scf.yield %true : i1
   }
   return %done : i1
 }
