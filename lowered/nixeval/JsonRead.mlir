@@ -29,7 +29,8 @@
 // the arrays and writes their new places back.  The faults (also Confix.td): 1 EndOfInput, 2 InvalidLiteral,
 // 3 ExpectedKey, 4 ExpectedColon, 5 ExpectedBrace, 6 ExpectedBracket, 7 Trailing, 8 MissingQuote, 9 ControlChar,
 // 10 InvalidString, 11 Hex4, 12 Surrogate, 13 Backslash, 14 Unsigned, 15 Nul; `at` the offset (for Unsigned and Nul
-// where the number or the string opens, and `end` one past it).  The tags: 0 Nothing, 1 Boolean, 2 Long, 3 Double,
+// where the number or the string opens, and `end` one past it; `end` nonzero on entry is the store's reading of __json,
+// StructuredAttrsOps.mlir's, where those two are a Long and a String).  The tags: 0 Nothing, 1 Boolean, 2 Long, 3 Double,
 // 4 String, 5 Object, 6 Array.
 !s8 = !trikeshed.series<i8>
 !s64 = !trikeshed.series<i64>
@@ -415,7 +416,11 @@ func.func private @js_string(%rec: !llvm.ptr, %src: !llvm.ptr, %n: i64, %from: i
   %lok, %lv, %lp = func.call @js_hex4(%src, %n, %hp2) : (!llvm.ptr, i64, i64) -> (i1, i32, i64)
   cf.cond_br %lok, ^run(%lp, %nul : i64, i64), ^fail(%f11, %lp : i32, i64)
 ^closed(%cp: i64, %cnul: i64):
-  %isnul = arith.cmpi ne, %cnul, %c0 : i64
+  %anynul = arith.cmpi ne, %cnul, %c0 : i64
+  // word 15 set on entry: the store's reading of __json, where a NUL is a byte of the string
+  %storew = func.call @js_rd(%rec, %c15) : (!llvm.ptr, i64) -> i64
+  %evalw = arith.cmpi eq, %storew, %c0 : i64
+  %isnul = arith.andi %anynul, %evalw : i1
   cf.cond_br %isnul, ^nul, ^good
 ^nul:
   func.call @js_wr(%rec, %c14, %from) : (!llvm.ptr, i64, i64) -> ()
@@ -521,7 +526,12 @@ func.func private @js_number(%rec: !llvm.ptr, %src: !llvm.ptr, %n: i64, %from: i
     %k = arith.select %frac, %k1, %k0 : i32
     scf.yield %k : i32
   }
-  %isuns = arith.cmpi eq, %kind, %k2 : i32
+  %anyuns = arith.cmpi eq, %kind, %k2 : i32
+  // word 15 set on entry: the store's reading of __json, where such an integer is a Long row
+  %storew = func.call @js_rd(%rec, %c15) : (!llvm.ptr, i64) -> i64
+  %z64 = arith.constant 0 : i64
+  %evalw = arith.cmpi eq, %storew, %z64 : i64
+  %isuns = arith.andi %anyuns, %evalw : i1
   %f = scf.if %isuns -> (i32) {
     func.call @js_wr(%rec, %c14, %from) : (!llvm.ptr, i64, i64) -> ()
     func.call @js_wr(%rec, %c15, %p3) : (!llvm.ptr, i64, i64) -> ()

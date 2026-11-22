@@ -469,6 +469,20 @@ struct Store {
   void builtinFetchurl(const Derivation &drv, const SortedMap<composite::Text> &outputs);
 };
 
+/// confix.checked's record (Confix.td): src, n, rows, rowCap, span, tag, kids, kid, nkid, stack, sp, stackCap, pend, npend, at, end; its
+/// arrays here, grown when the scan asks (nixev_json_grow, StructuredAttrs.cpp).  builtins.fromJSON and the structured attributes read JSON so.
+struct JsonRec {
+  uint64_t w[16] = {};
+  composite::MutableSeries<uint64_t> span, kids, stack;
+  composite::MutableSeries<uint8_t> tag;
+  composite::MutableSeries<uint32_t> kid, pend;
+  void size(uint64_t rows, uint64_t depth) {
+    span.resize(rows), kids.resize(rows), tag.resize(rows), kid.resize(rows), pend.resize(rows), stack.resize(depth);
+    w[3] = rows, w[4] = uint64_t(span.data()), w[5] = uint64_t(tag.data()), w[6] = uint64_t(kids.data()), w[7] = uint64_t(kid.data());
+    w[9] = uint64_t(stack.data()), w[11] = depth, w[12] = uint64_t(pend.data());
+  }
+};
+
 /// (.attrs.json, .attrs.sh) contents for a structured-attrs derivation.
 composite::Join<composite::Text, composite::Text> structuredAttrsFiles(std::string_view json,
                                                          const SortedMap<composite::Text> &outputs,

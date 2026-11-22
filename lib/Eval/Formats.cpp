@@ -141,26 +141,12 @@ void EvalState::printValueAsJSON(JsonOut &out, Value &v, bool strict, NixStringC
 // builtins.fromJSON's reader is hollowed into lowered/nixeval/JsonRead.mlir (the confix dialect's confix.checked: the scan
 // into the rows of an index, checked as the reader before checked, the open containers a stack in the record; then the
 // strings decoded, the numbers read and a Value made for each row, an object's members in key order by trikeshed.sorted).
-// Here: the record's arrays, grown when the scan asks; the arena (allocValue, mkString, the BindingsBuilder); the words.
-namespace {
-/// confix.checked's record (Confix.td): src, n, rows, rowCap, span, tag, kids, kid, nkid, stack, sp, stackCap, pend, npend, at, end.
-struct JsonRec {
-  uint64_t w[16] = {};
-  composite::MutableSeries<uint64_t> span, kids, stack;
-  composite::MutableSeries<uint8_t> tag;
-  composite::MutableSeries<uint32_t> kid, pend;
-  void size(uint64_t rows, uint64_t depth) {
-    span.resize(rows), kids.resize(rows), tag.resize(rows), kid.resize(rows), pend.resize(rows), stack.resize(depth);
-    w[3] = rows, w[4] = uint64_t(span.data()), w[5] = uint64_t(tag.data()), w[6] = uint64_t(kids.data()), w[7] = uint64_t(kid.data());
-    w[9] = uint64_t(stack.data()), w[11] = depth, w[12] = uint64_t(pend.data());
-  }
-};
-} // namespace
+// Here: the arena (allocValue, mkString, the BindingsBuilder); the words.  The record and its arrays are nixstore::JsonRec (Store.h).
+using nixstore::JsonRec;
 extern "C" {
 int32_t nixev_json_read(JsonRec *r, EvalState *st, Value *root);
 uint64_t nixev_json_decode(const char *s, uint64_t from, uint64_t to, char *into, int64_t shown);
 const char *nixev_json_what(int64_t fault, uint64_t *len);
-void nixev_json_grow(JsonRec *r, int64_t stack) { stack ? r->size(r->w[3], 2 * r->w[11]) : r->size(2 * r->w[3], r->w[11]); }
 Value *nixev_json_value(EvalState *st) { return st->allocValue(); }
 void nixev_json_string(EvalState *st, Value *v, const char *p, uint64_t n) { st->mkString(*v, std::string_view(p, n)); }
 void nixev_json_attrs(EvalState *st, Value *v, const composite::Chars *keys, Value **vals, uint64_t n) {
