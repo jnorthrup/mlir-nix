@@ -182,170 +182,75 @@ void parseJSON(EvalState &state, std::string_view json, Value &v) {
 // XML output
 //===----------------------------------------------------------------------===//
 
+// builtins.toXML is a fill-drain: lowered/nixeval/XmlWalk.mlir walks the value (forcing order, the element nesting, the
+// attributes' and formals' sorted order, a derivation's drvPath/outPath and «repeated») and fills rows of 20 i64, one a
+// tag line; lowered/nixeval/XmlOps.mlir drains them into the text once.  Here: the evaluator, as the walk's callbacks.
 namespace {
-// The XML byte emission is hollowed into lowered/nixeval/XmlOps.mlir (one entry writes a whole tag line into room
-// reserved here); the composition around it -- the attribute rows' dedup scan, their sort into the tag's key/value
-// windows and room, the formals' sorted names -- is lowered/nixeval/FmtCompOps.mlir.  The element stack stays here,
-// as does the recursion/forcing of toXML below.
-extern "C" {
-size_t nixev_ts_xml_tag(int64_t kind, int64_t depth, const char *name, int64_t nn,
-                        const composite::Chars *keys, const composite::Chars *vals, int64_t nrows,
-                        char *into, size_t cap);
-int64_t nixev_ts_xml_find(const void *rows, int64_t stride, int64_t n, const char *k);
-int64_t nixev_ts_xml_prep(const void *rows, int64_t stride, int64_t n, int64_t depth, int64_t nn,
-                          composite::Chars *keys, composite::Chars *vals);
-void nixev_ts_xml_formals(void *doc, const llvm::StringRef *wins, int64_t n);
-}
-
-struct XMLWriter {
-  composite::Text &out;
-  composite::MutableSeries<composite::Text> stack{};
-  /// An element's attributes: a few rows, written in name order (as Nix's std::map wrote them); a name set again is replaced.
-  struct Attrs {
-    struct Row {
-      const char *k;
-      composite::Text v;
-    };
-    composite::MutableSeries<Row, composite::Spill<Row, 4>> rows;
-    Attrs() = default;
-    Attrs(const char *k, composite::Text v) { set(k, composite::mv(v)); }
-    void set(const char *k, composite::Text v) {
-      int64_t at = nixev_ts_xml_find(rows.data(), int64_t(sizeof(Row)), int64_t(rows.size()), k);
-      if (at >= 0) rows[uint32_t(at)].v = composite::mv(v);
-      else rows.append(Row{k, composite::mv(v)});
-    }
-  };
-  static_assert(sizeof(Attrs::Row) == 24 && offsetof(Attrs::Row, k) == 0 && sizeof(composite::Text) == 16);
-  /// One tag line: the rows sorted by name and their windows (FmtCompOps), the room the emission needs, drained
-  /// into the Text's own buffer and adopted (resize before, truncate after, the PathOps way).  kind 0 open, 1 close, 2 empty.
-  void tag(int64_t kind, size_t depth, std::string_view n, const Attrs &as) {
-    composite::MutableSeries<composite::Chars> keys, vals;
-    keys.resize(as.rows.size()); vals.resize(as.rows.size());
-    size_t room = size_t(nixev_ts_xml_prep(as.rows.data(), int64_t(sizeof(Attrs::Row)), int64_t(as.rows.size()),
-                                           int64_t(depth), int64_t(n.size()), keys.data(), vals.data()));
-    size_t at = out.size();
-    out.resize(at + room);
-    out.truncate(at + nixev_ts_xml_tag(kind, int64_t(depth), n.data(), int64_t(n.size()), keys.data(), vals.data(),
-                                       int64_t(keys.size()), out.begin() + at, room));
-  }
-  void open(std::string_view n, const Attrs &as = {}) { tag(0, stack.size(), n, as); stack.append(composite::Text(n)); }
-  void close() { tag(1, stack.size() - 1, stack.back(), {}); stack.pop(); }
-  void empty(std::string_view n, const Attrs &as = {}) { tag(2, stack.size(), n, as); }
+struct XmlWalk {
+  EvalState &st;
+  NixStringContext &ctx;
+  composite::TextSet seen;                                       // the derivations met, by drvPath
+  composite::MutableSeries<int64_t> rows;                        // the fill
+  composite::MutableSeries<composite::MutableSeries<int64_t>> cells; // each set's sorted order, through its children's walk
+  composite::MutableSeries<llvm::StringRef> names;               // the latest lambda's formals
+  composite::Bump bytes;                                         // the floats' text
 };
-
-void posToXML(EvalState &st, XMLWriter::Attrs &as, PosPtr pos) {
-  auto loc = nd::decodePos(pos);
-  if (!loc) return;
-  if (!loc->file.empty() && loc->file[0] == '/') as.set("path", composite::Text(loc->file));
-  as.set("line", composite::str(loc->line));
-  as.set("column", composite::str(loc->col));
-}
-
-void toXML(EvalState &st, XMLWriter &doc, Value &v, bool strict, bool location, NixStringContext &ctx, composite::TextSet &drvsSeen,
-           PosPtr pos);
-
-void showAttrsXML(EvalState &st, XMLWriter &doc, Bindings *attrs, bool strict, bool location, NixStringContext &ctx,
-                  composite::TextSet &drvsSeen) {
-  for (const Attr *a : attrs->lexicographicOrder(st.symbols)) {
-    XMLWriter::Attrs as("name", composite::Text(st.symbols[a->name]));
-    if (location) posToXML(st, as, st.positionOf(*a));
-    doc.open("attr", as);
-    toXML(st, doc, *a->value, strict, location, ctx, drvsSeen, st.positionOf(*a));
-    doc.close();
-  }
-}
-
-composite::Text fmtFloatXML(double d) {
-  composite::Text t;
-  nixfe::printFloat(t, d);
-  return t;
-}
-
-void toXML(EvalState &st, XMLWriter &doc, Value &v, bool strict, bool location, NixStringContext &ctx, composite::TextSet &drvsSeen,
-           PosPtr pos) {
-  if (strict) st.forceValue(v, pos);
-  switch (v.type) {
-  case VType::Int: doc.empty("int", XMLWriter::Attrs("value", composite::str(v.integer))); break;
-  case VType::Bool: doc.empty("bool", XMLWriter::Attrs("value", v.boolean ? "true" : "false")); break;
-  case VType::String:
-    st.copyContext(v, ctx);
-    doc.empty("string", XMLWriter::Attrs("value", str(v.sv())));
-    break;
-  case VType::Path: doc.empty("path", XMLWriter::Attrs("value", str(v.pathView()))); break;
-  case VType::Null: doc.empty("null"); break;
-  case VType::Attrs:
-    if (st.isDerivation(v)) {
-      XMLWriter::Attrs as;
-      composite::Text drvPath;
-      if (const Attr *a = v.attrs->get(st.s.drvPath)) {
-        if (strict) st.forceValue(*a->value, st.positionOf(*a));
-        if (a->value->type == VType::String) {
-          drvPath = str(a->value->sv());
-          as.set("drvPath", drvPath.clone());
-        }
-      }
-      if (const Attr *a = v.attrs->get(st.s.outPath)) {
-        if (strict) st.forceValue(*a->value, st.positionOf(*a));
-        if (a->value->type == VType::String) as.set("outPath", str(a->value->sv()));
-      }
-      doc.open("derivation", as);
-      if (!drvPath.empty() && drvsSeen.insert(drvPath.data(), uint32_t(drvPath.size())))
-        showAttrsXML(st, doc, v.attrs, strict, location, ctx, drvsSeen);
-      else
-        doc.empty("repeated");
-      doc.close();
-    } else {
-      doc.open("attrs");
-      showAttrsXML(st, doc, v.attrs, strict, location, ctx, drvsSeen);
-      doc.close();
-    }
-    break;
-  case VType::List:
-    doc.open("list");
-    for (size_t i = 0; i < v.listSize(); i++) toXML(st, doc, *v.list.elems[i], strict, location, ctx, drvsSeen, pos);
-    doc.close();
-    break;
-  case VType::Lambda: {
-    auto lam = cast<nd::LambdaOp>(v.thunk.node->def);
-    XMLWriter::Attrs as;
-    if (location) posToXML(st, as, nd::posOfOp(lam));
-    doc.open("function", as);
-    if (lam.getFormals()) {
-      XMLWriter::Attrs pa;
-      if (auto n = lam.getArgName()) pa.set("name", composite::Text(*n));
-      if (lam.getEllipsis()) pa.set("ellipsis", "1");
-      doc.open("attrspat", pa);
-      composite::MutableSeries<llvm::StringRef> names; // the formals' bytes are the attributes' own: windows on them are sorted
-      ArrayAttr formals = *lam.getFormals();
-      for (Attribute f : formals) names.append(cast<StringAttr>(f).getValue());
-      nixev_ts_xml_formals(&doc, names.data(), int64_t(names.size()));
-      doc.close();
-    } else {
-      doc.empty("varpat", XMLWriter::Attrs("name", composite::Text(lam.getArgName() ? *lam.getArgName() : llvm::StringRef(""))));
-    }
-    doc.close();
-    break;
-  }
-  case VType::PrimOp: case VType::PrimOpApp: doc.empty("unevaluated"); break;
-  case VType::Float: doc.empty("float", XMLWriter::Attrs("value", fmtFloatXML(v.fpoint))); break;
-  default: doc.empty("unevaluated"); break;
-  }
-}
 } // namespace
-
-// The formals' emission loop is FmtCompOps.mlir's (the windows sorted there, one call a name); the tag's bytes XmlOps'.
-static_assert(sizeof(llvm::StringRef) == 2 * sizeof(void *)); // {data ptr @0, len @8}, as fc_win_cmp reads it
-extern "C" void nixev_xml_formal(void *doc, const llvm::StringRef *names, int64_t k) {
-  static_cast<XMLWriter *>(doc)->empty("attr", XMLWriter::Attrs("name", composite::Text(names[uint32_t(k)])));
+extern "C" {
+void nixev_ts_xml_walk(XmlWalk *x, Value *v, int32_t strict, int32_t location);
+int64_t nixev_ts_xml_text(const int64_t *rows, int64_t n, char *into, int64_t cap);
+int64_t *nixev_xw_row(XmlWalk *x) { x->rows.resize(x->rows.size() + 20); return x->rows.end() - 20; }
+int64_t *nixev_xw_cells(XmlWalk *x, int64_t n) { return x->cells[x->cells.append(composite::MutableSeries<int64_t>(size_t(n)))].data(); }
+void nixev_xw_force(XmlWalk *x, Value *v, PosPtr pos) { x->st.forceValue(*v, pos); }
+void nixev_xw_ctx(XmlWalk *x, Value *v) { x->st.copyContext(*v, x->ctx); }
+int32_t nixev_xw_isdrv(XmlWalk *x, Value *v) { return x->st.isDerivation(*v); }
+Value *nixev_xw_drvattr(XmlWalk *x, Value *v, int64_t out, int32_t strict) {
+  const Attr *a = v->attrs->get(out ? x->st.s.outPath : x->st.s.drvPath);
+  if (a && strict) x->st.forceValue(*a->value, x->st.positionOf(*a));
+  return a ? a->value : nullptr;
 }
+int32_t nixev_xw_seen(XmlWalk *x, const char *p, int64_t n) { return x->seen.insert(p, uint32_t(n)); }
+const char *nixev_xw_sym(XmlWalk *x, uint32_t s, int64_t *n) { llvm::StringRef r = x->st.symbols[s]; *n = int64_t(r.size()); return r.data(); }
+PosPtr nixev_xw_apos(XmlWalk *x, const Attr *a) { return x->st.positionOf(*a); }
+int32_t nixev_xw_pos(XmlWalk *x, PosPtr pos, int64_t *out) {
+  auto loc = nd::decodePos(pos);
+  if (loc) out[0] = int64_t(loc->file.data()), out[1] = int64_t(loc->file.size()), out[2] = loc->line, out[3] = loc->col;
+  return loc.has_value();
+}
+const char *nixev_xw_float(XmlWalk *x, Value *v, int64_t *n) {
+  composite::Text t;
+  nixfe::printFloat(t, v->fpoint);
+  *n = int64_t(t.size());
+  return x->bytes.copy(t.data(), uint32_t(t.size()));
+}
+void nixev_xw_lambda(XmlWalk *x, Value *v, int64_t *rec) {
+  auto lam = cast<nd::LambdaOp>(v->thunk.node->def);
+  auto arg = lam.getArgName();
+  x->names.clear();
+  if (lam.getFormals()) for (Attribute f : *lam.getFormals()) x->names.append(cast<StringAttr>(f).getValue());
+  int64_t r[7] = {int64_t(nd::posOfOp(lam)), lam.getFormals() ? 1 : 0, arg ? int64_t(arg->data()) : 0, arg ? int64_t(arg->size()) : -1,
+                  lam.getEllipsis() ? 1 : 0, int64_t(x->names.size()), int64_t(x->names.data())};
+  for (int64_t k = 0; k < 7; k++) rec[k] = r[k];
+}
+}
+static_assert(sizeof(llvm::StringRef) == 16 && sizeof(Attr) == 16 && offsetof(Bindings, attrs) == 16); // as XmlWalk.mlir reads them
 
+// The rows filled before an error are drained too: mlnix eval --xml shows the part written before it.
 void EvalState::printValueAsXML(composite::Text &out, Value &v, bool strict, bool location, NixStringContext &ctx) {
   out.put("<?xml version='1.0' encoding='utf-8'?>\n");
-  XMLWriter doc{out};
-  doc.open("expr");
-  composite::TextSet drvsSeen;
-  toXML(*this, doc, v, strict, location, ctx, drvsSeen, nullptr);
-  doc.close();
+  XmlWalk x{*this, ctx};
+  auto drain = [&] {
+    size_t at = out.size(), total = size_t(nixev_ts_xml_text(x.rows.data(), x.rows.size() / 20, nullptr, 0));
+    out.resize(at + total);
+    nixev_ts_xml_text(x.rows.data(), x.rows.size() / 20, out.begin() + at, int64_t(total));
+  };
+  try {
+    nixev_ts_xml_walk(&x, &v, strict, location);
+  } catch (...) {
+    drain();
+    throw;
+  }
+  drain();
 }
 
 //===----------------------------------------------------------------------===//
