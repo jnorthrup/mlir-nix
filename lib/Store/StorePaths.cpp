@@ -193,6 +193,10 @@ composite::Text jsonFloat(double d) {
   return out;
 }
 
+// runProgram's argv pointer fill is lowered/nixstore/StorePathOps.mlir (allocation-free, it runs in the fork child):
+// into[0]=prog, into[k+1]=args[k].c_str() (the Text row's NUL-terminated data ptr), into[n+1]=null.
+extern "C" int64_t nixstore_ts_argv(const char *, const void *, int64_t, char **);
+
 int runProgram(std::string_view prog, const composite::MutableSeries<composite::Text> &args, composite::Text *out,
                const composite::Text *input, std::string_view cwd) {
   int outPipe[2], inPipe[2];
@@ -214,10 +218,8 @@ int runProgram(std::string_view prog, const composite::MutableSeries<composite::
       int nul = open("/dev/null", O_RDONLY);
       dup2(nul, 0);
     }
-    composite::MutableSeries<char *> argv;
-    argv.append(const_cast<char *>(progC.c_str()));
-    for (auto &a : args) argv.append(const_cast<char *>(a.c_str()));
-    argv.append(nullptr);
+    composite::MutableSeries<char *> argv(args.size() + 2);
+    nixstore_ts_argv(progC.c_str(), args.data(), int64_t(args.size()), argv.data());
     execvp(progC, argv.data());
     _exit(127);
   }
@@ -589,42 +591,50 @@ void checkName(std::string_view name) {
   throw Error(composite::cat("name ", q(name), " contains illegal character '", name[bad], "'"));
 }
 
+// The store-path name algebra is lowered/nixstore/StorePathOps.mlir (one lazy combine of the pieces drained once,
+// fill-drain): the fingerprint `type:algo:hex:storeDir:name`, the path `storeDir/nix32-name`, makeType's
+// `type[:ref]*[:self]`.  The hex/nix32 digits are composed in the entry; checkName/compressHash/hashString and the
+// error wording stay here.  The store path hashes stay byte-identical (the fingerprint is what is hashed).
+extern "C" int64_t nixstore_ts_pathfp(const char *, int64_t, const char *, int64_t, const char *, int64_t,
+                                           const char *, int64_t, const char *, int64_t, char *, int64_t);
+extern "C" int64_t nixstore_ts_storepath(const char *, int64_t, const char *, int64_t, const char *, int64_t, char *, int64_t);
+extern "C" int64_t nixstore_ts_maketype(const char *, int64_t, const void *, int64_t, int64_t, char *, int64_t);
+static_assert(sizeof(composite::Text) == 16 && offsetof(composite::Growable<char>, n) == 8, "Text row layout the entry reads");
+namespace {
+// A Text drained by an entry that answers the bytes written, or -needed when the room (bound) is short.
+template <class F> composite::Text drained(size_t bound, F call) {
+  composite::Text s;
+  s.resize(bound);
+  int64_t w = call(s.begin(), int64_t(bound));
+  if (w < 0) { s.resize(size_t(-w)); w = call(s.begin(), -w); }
+  s.truncate(size_t(w));
+  return s;
+}
+} // namespace
+
 composite::Text makeStorePath(std::string_view storeDir, std::string_view type, const Hash &hash,
                               std::string_view name) {
   checkName(name);
-  // The fingerprint `type:algo:hex:storeDir:name` and the path `storeDir/nix32-name`, each built in one string.
   std::string_view algo = algoName(hash.algo);
+  size_t hn = hash.size();
   composite::Text s;
-  s.reserve(type.size() + algo.size() + 2 * hash.size() + storeDir.size() + name.size() + 4);
-  s.append(type);
-  s += ':';
-  s += algo;
-  s += ':';
-  appendBase16(s, hash.bytes, hash.size());
-  s += ':';
-  s += storeDir;
-  s += ':';
-  s.append(name);
+  s.resize(type.size() + algo.size() + 2 * hn + storeDir.size() + name.size() + 4);
+  s.truncate(size_t(nixstore_ts_pathfp(type.data(), type.size(), algo.data(), algo.size(),
+      reinterpret_cast<const char *>(hash.bytes), int64_t(hn), storeDir.data(), storeDir.size(), name.data(),
+      name.size(), s.begin(), s.size())));
   Hash h = compressHash(hashString(HashAlgo::SHA256, s), 20);
   composite::Text path;
-  path.reserve(storeDir.size() + 34 + name.size());
-  path += storeDir;
-  path += '/';
-  appendNix32(path, h.bytes, 20);
-  path += '-';
-  path.append(name);
+  path.resize(storeDir.size() + 34 + name.size());
+  path.truncate(size_t(nixstore_ts_storepath(storeDir.data(), storeDir.size(),
+      reinterpret_cast<const char *>(h.bytes), 20, name.data(), name.size(), path.begin(), path.size())));
   return path;
 }
 
 composite::Text makeType(std::string_view storeDir, std::string_view type, const SortedSet &refs,
                          bool hasSelfRef) {
-  composite::Text t(type);
-  for (auto &r : refs) {
-    t += ":";
-    t += r;
-  }
-  if (hasSelfRef) t += ":self";
-  return t;
+  return drained(type.size() + 5, [&](char *into, int64_t cap) {
+    return nixstore_ts_maketype(type.data(), type.size(), refs.rows.data(), int64_t(refs.size()), hasSelfRef, into, cap);
+  });
 }
 
 composite::Text makeTextPath(std::string_view storeDir, std::string_view name, const Hash &hash,
@@ -812,15 +822,6 @@ void marshalDrv(const Derivation &d, bool maskOutputs, const DrvInputs *actualIn
   for (const DrvWin &a : b.args) { bytes += a.n; fields += 1; }
   for (const DrvEnv &e : b.env) { bytes += e.key.n + e.val.n; fields += 2; }
   b.bound = 2 * bytes + 2 * fields + 16 * (b.outs.size() + b.ins.size() + b.srcs.size() + b.args.size() + b.env.size() + 1) + 64;
-}
-// A Text drained by an entry that answers the bytes written, or -needed when the room (bound) is short.
-template <class F> composite::Text drained(size_t bound, F call) {
-  composite::Text s;
-  s.resize(bound);
-  int64_t w = call(s.begin(), int64_t(bound));
-  if (w < 0) { s.resize(size_t(-w)); w = call(s.begin(), -w); }
-  s.truncate(size_t(w));
-  return s;
 }
 } // namespace
 

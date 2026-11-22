@@ -172,6 +172,12 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/Decoders.mlir Decoders)
 # buffer to the Sink, the walk stays).  The little-endian prefix, the pad and the length+bytes+pad composition are
 # trikeshed.series / slice / combine / drain; the constant NAR tokens are a blob + off/len tables read with at.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/NarFraming.mlir NarFraming)
+# The store-path name algebra of StorePaths.cpp (makeStorePath's fingerprint `type:algo:hex:storeDir:name` and path
+# `storeDir/nix32-name`, makeType's `type[:ref]*[:self]`, runProgram's argv pointer fill are gone; the bridges keep
+# checkName/compressHash/hashString and the Text sizing).  Each is ONE lazy combine of the pieces drained once into a
+# pre-sized buffer (fill-drain); the hex/nix32 digits are the Encoders algebra inlined as a piece.  Store hashes stay
+# byte-identical.  The argv fill reads the Text rows' data pointers, allocation-free (it runs in the fork child).
+mlnix_lower_trikeshed(NixStore lowered/nixstore/StorePathOps.mlir StorePathOps)
 # The derivation ATerm writer nixstore::unparseTo (StorePaths.cpp's composition loop, TextOut/HashOut and the
 # escapeInto/appendEscaped helpers are gone; the bridges marshal the Derivation into record arrays, apply maskOutputs
 # and slot __json, size the Text and call this entry).  The whole ATerm composition is trikeshed.combineAll / combine /
