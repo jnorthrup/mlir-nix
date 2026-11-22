@@ -31,8 +31,8 @@
 namespace nixstore {
 
 // The store's graph and content algorithms are lowered/nixstore/StoreGraph.mlir (built into NixStore by lib/CMakeLists.txt): the set
-// algebra, computeFSClosure's worklist, collectGarbage's rounds, contentFingerprint (xxh3 too) and sameContent, allValidPaths' order and
-// queryPathInfo's lines.  What stays here hands the sorted sets over as windows and answers the callbacks, which read and write the store.
+// algebra, computeFSClosure's worklist, collectGarbage's rounds, contentFingerprint (xxh3 too) and sameContent, and
+// queryPathInfo's lines; the builder's are BuilderOps.mlir, allValidPaths' order SortedRows.mlir.  What stays here hands the sorted sets over as windows and answers the callbacks, which read and write the store.
 namespace {
 struct GWin { const char *p; int64_t n; };
 template <class C> composite::MutableSeries<GWin> wins(const C &texts) {
@@ -105,19 +105,21 @@ composite::Maybe<PathInfo> Store::queryPathInfo(std::string_view path) {
   return info;
 }
 
+// The info file's lines (BuilderOps.mlir, one combine drained once); the room is the Text's.
+extern "C" char *nixbo_room(composite::Text *t, uint64_t n) { t->resize(n); return t->begin(); }
+extern "C" int64_t nixstore_ts_infotext(composite::Text *t, const char *, int64_t, const char *, int64_t, uint64_t narSize,
+                                        const composite::Text *refs, int64_t, const char *, int64_t, const char *, int64_t);
 void Store::registerValidPath(const PathInfo &info) {
   createDirs(settings.stateDir + "/info");
-  composite::Text s = composite::cat("path: ", info.path, "\nnarHash: ", info.narHash.to_string(HashFormat::Nix32, true),
-                                     "\nnarSize: ", info.narSize, "\n");
-  for (auto &r : info.references) s.put("ref: ").put(r).put("\n");
-  if (!info.deriver.empty()) s.put("deriver: ").put(info.deriver).put("\n");
-  if (!info.ca.empty()) s.put("ca: ").put(info.ca).put("\n");
+  composite::Text s, h = info.narHash.to_string(HashFormat::Nix32, true);
+  nixstore_ts_infotext(&s, info.path.data(), info.path.size(), h.data(), h.size(), info.narSize, info.references.begin(),
+                       info.references.size(), info.deriver.data(), info.deriver.size(), info.ca.data(), info.ca.size());
   composite::Text tmp = infoFile(info.path) + ".tmp";
   writeFile(tmp, s);
   rename(tmp.c_str(), infoFile(info.path).c_str());
 }
 
-extern "C" void nixstore_ts_sortwins(const GWin *w, int64_t n, int64_t *order); // the windows' indices in byte order
+extern "C" void nixstore_ts_rowsort(void *rows, int64_t n, int64_t stride);
 composite::MutableSeries<composite::Text> Store::allValidPaths() {
   composite::MutableSeries<composite::Text> res;
   DIR *d = opendir((settings.stateDir + "/info").c_str());
@@ -129,12 +131,8 @@ composite::MutableSeries<composite::Text> Store::allValidPaths() {
     if (pathExists(toReal(p))) res.append(composite::mv(p));
   }
   closedir(d);
-  composite::MutableSeries<int64_t> order(res.size()); // the paths' order is sorted, then each path moves once, into its place
-  nixstore_ts_sortwins(wins(res).data(), res.size(), order.data());
-  composite::MutableSeries<composite::Text> sorted;
-  sorted.reserve(res.size());
-  for (int64_t i : order) sorted.append(composite::mv(res[uint32_t(i)]));
-  return sorted;
+  nixstore_ts_rowsort(res.data(), res.size(), sizeof(composite::Text)); // byte order, each path moved once (SortedRows.mlir)
+  return res;
 }
 
 SortedSet Store::queryReferrers(std::string_view path) {
@@ -541,11 +539,17 @@ SortedSet Store::computeFSClosure(const SortedSet &paths, bool includeOutputs) {
 // Building
 //===----------------------------------------------------------------------===//
 
-static SortedSet scanForReferences(const composite::Text &path,
-                                               const SortedSet &candidates) {
-  SortedMap<composite::Text> byHash;
-  for (auto &c : candidates) byHash[storePathHashPart(c)] = c.clone();
-  SortedSet found;
+// The scan of an output's bytes for its references is BuilderOps.mlir's: the candidates' hash parts sorted once (refindex),
+// then each file's 32-digit nix32 windows bisected into them (refscan).  The walk and the reads stay here.
+extern "C" int64_t nixstore_ts_refindex(const GWin *w, int64_t n, int64_t *order);
+extern "C" int64_t nixstore_ts_refscan(const char *p, int64_t n, const GWin *w, const int64_t *order, int64_t nu, uint8_t *found);
+static SortedSet scanForReferences(const composite::Text &path, const SortedSet &candidates) {
+  composite::MutableSeries<composite::Text> hashes; // each candidate's hash part, in the candidates' order
+  for (auto &c : candidates) hashes.append(storePathHashPart(c));
+  composite::MutableSeries<GWin> w = wins(hashes);
+  composite::MutableSeries<int64_t> order(w.size());
+  composite::MutableSeries<uint8_t> found(w.size(), 0);
+  int64_t nu = nixstore_ts_refindex(w.data(), w.size(), order.data());
   auto scan = [&](auto &self, const composite::Text &p) -> void { // a walk that calls itself: no std::function to hold it
     struct stat st;
     if (lstat(p.c_str(), &st) != 0) return;
@@ -567,29 +571,13 @@ static SortedSet scanForReferences(const composite::Text &path,
       for (auto &n : names) self(self, p + "/" + n);
       return;
     }
-    // Scan for 32-character runs of nix32 characters.
-    static bool isNix32[256] = {false};
-    static bool init = false;
-    if (!init) {
-      for (const char *c = nix32Chars; *c; c++) isNix32[(unsigned char)*c] = true;
-      init = true;
-    }
-    size_t run = 0;
-    for (size_t i = 0; i < data.size(); i++) {
-      if (isNix32[(unsigned char)data[i]]) {
-        run++;
-        if (run >= 32) {
-          std::string_view h = data.substr(i + 1 - 32, 32);
-          auto it = byHash.find(h);
-          if (it != byHash.end()) found.insert(it->second);
-        }
-      } else {
-        run = 0;
-      }
-    }
+    nixstore_ts_refscan(data.data(), data.size(), w.data(), order.data(), nu, found.data());
   };
   scan(scan, path);
-  return found;
+  SortedSet refs; // the candidates are sorted, so the found ones are appended in order
+  for (uint32_t i = 0; i < found.size(); i++)
+    if (found[i]) refs.rows.append(candidates.rows[i].clone());
+  return refs;
 }
 
 void Store::ensurePath(std::string_view path) {
@@ -686,6 +674,7 @@ SortedMap<composite::Text> Store::realise(std::string_view drvPath,
 }
 
 
+extern "C" int64_t nixstore_ts_cstrs(composite::Text *t, const void *rows, int64_t n, int64_t pairs, char **ptrs);
 void Store::runBuilder(std::string_view drvPath, const Derivation &drv,
                        const SortedMap<composite::Text> &outputs) {
   const char *tmp = getenv("TMPDIR");
@@ -724,19 +713,7 @@ void Store::runBuilder(std::string_view drvPath, const Derivation &drv,
   // output paths in the environment, arguments and structured attributes.
   SortedMap<composite::Text> rewrites;
   for (auto &[n, p] : outputs) rewrites[hashPlaceholder(n)] = p.clone();
-  auto rewrite = [&](std::string_view in) {
-    composite::Text s(in);
-    for (auto &[from, to] : rewrites) {
-      size_t pos = 0;
-      while ((pos = s.find(from, pos)) != composite::npos) {
-        s.erase(pos, from.size());
-        s.insert(pos, to);
-        pos += to.size();
-      }
-    }
-    return s;
-  };
-  for (auto &[k, v] : drv.env) env[k] = rewrite(v);
+  for (auto &[k, v] : drv.env) env[k] = rewritePlaceholders(v, rewrites);
   if (drv.structuredAttrs) {
     auto [json, sh] = structuredAttrsFiles(*drv.structuredAttrs, outputs, rewrites);
     writeFile(top + "/.attrs.json", json);
@@ -745,18 +722,13 @@ void Store::runBuilder(std::string_view drvPath, const Derivation &drv,
     env["NIX_ATTRS_SH_FILE"] = top + "/.attrs.sh";
   }
 
-  composite::MutableSeries<composite::Text> envStrs;
-  for (auto &[k, v] : env) envStrs.append(composite::cat(k, "=", v));
-  composite::MutableSeries<char *> envp;
-  for (auto &s : envStrs) envp.append(const_cast<char *>(s.c_str()));
-  envp.append(nullptr);
-  composite::MutableSeries<char *> argv;
-  composite::Text builderBase = baseNameOf(drv.builder);
-  argv.append(const_cast<char *>(builderBase.c_str()));
-  composite::MutableSeries<composite::Text> args;
-  for (auto &a : drv.args) args.append(rewrite(a));
-  for (auto &a : args) argv.append(const_cast<char *>(a.c_str()));
-  argv.append(nullptr);
+  composite::MutableSeries<composite::Text> args; // argv: the builder's base name, then the arguments, rewritten
+  args.append(baseNameOf(drv.builder));
+  for (auto &a : drv.args) args.append(rewritePlaceholders(a, rewrites));
+  composite::Text envBlock, argBlock; // the strings, `k=v` and the arguments, each NUL-ended in one room (BuilderOps.mlir)
+  composite::MutableSeries<char *> envp(env.size() + 1), argv(args.size() + 1);
+  nixstore_ts_cstrs(&envBlock, env.rows.data(), env.size(), 1, envp.data());
+  nixstore_ts_cstrs(&argBlock, args.data(), args.size(), 0, argv.data());
 
   pid_t pid = fork();
   if (pid < 0) throw Error("fork failed");

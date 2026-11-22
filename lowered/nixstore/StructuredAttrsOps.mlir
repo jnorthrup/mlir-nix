@@ -73,11 +73,33 @@ func.func private @nx_sa_desc8(%p: !llvm.ptr, %n: i64) -> !d {
   return %f : !d
 }
 
-// word k of the i64 words at p (the record, the outputs' and the rewrites' windows)
+// word k of the i64 words at p (the record, the record's words)
 func.func private @nx_sa_w(%p: !llvm.ptr, %k: i64) -> i64 {
   %q = llvm.getelementptr %p[%k] : (!llvm.ptr, i64) -> !llvm.ptr, i64
   %v = llvm.load %q : !llvm.ptr -> i64
   return %v : i64
+}
+
+// row j of a SortedMap<Text>'s rows (Store.h: Row {Text first, second}, 32 bytes; a Text is {char *p, uint32 n, cap}):
+// the outputs (name, path) and the rewrites (placeholder, path) as the bridges hold them, read in place.  A Text that
+// never held a byte has p null; its window is empty, so no byte of it is read.
+func.func private @nx_sa_row(%rows: !llvm.ptr, %j: i64) -> (i64, i64, i64, i64) {
+  %c8 = arith.constant 8 : i64
+  %c16 = arith.constant 16 : i64
+  %c24 = arith.constant 24 : i64
+  %c32 = arith.constant 32 : i64
+  %off = arith.muli %j, %c32 : i64
+  %r = llvm.getelementptr %rows[%off] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+  %fp = llvm.load %r : !llvm.ptr -> i64
+  %flp = llvm.getelementptr %r[%c8] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+  %fl32 = llvm.load %flp : !llvm.ptr -> i32
+  %fl = arith.extui %fl32 : i32 to i64
+  %tpp = llvm.getelementptr %r[%c16] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+  %tp = llvm.load %tpp : !llvm.ptr -> i64
+  %tlp = llvm.getelementptr %r[%c24] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+  %tl32 = llvm.load %tlp : !llvm.ptr -> i32
+  %tl = arith.extui %tl32 : i32 to i64
+  return %fp, %fl, %tp, %tl : i64, i64, i64, i64
 }
 
 // s (n bytes at p) as a JSON string: the opening quote, each byte's escape (a slice of one constant table, its
@@ -370,14 +392,7 @@ func.func private @nx_sa_members(%rec: !llvm.ptr, %outs: !llvm.ptr, %nout: i64, 
   %noi = arith.index_cast %nout : i64 to index
   scf.for %oi = %z to %noi step %one {
     %oi64 = arith.index_cast %oi : index to i64
-    %w0 = arith.muli %oi64, %c4 : i64
-    %w1 = arith.addi %w0, %c1 : i64
-    %w2 = arith.addi %w0, %c2 : i64
-    %w3 = arith.addi %w0, %c3 : i64
-    %namep = func.call @nx_sa_w(%outs, %w0) : (!llvm.ptr, i64) -> i64
-    %namel = func.call @nx_sa_w(%outs, %w1) : (!llvm.ptr, i64) -> i64
-    %pathp = func.call @nx_sa_w(%outs, %w2) : (!llvm.ptr, i64) -> i64
-    %pathl = func.call @nx_sa_w(%outs, %w3) : (!llvm.ptr, i64) -> i64
+    %namep, %namel, %pathp, %pathl = func.call @nx_sa_row(%outs, %oi64) : (!llvm.ptr, i64) -> (i64, i64, i64, i64)
     %odst = arith.addi %mo, %oi64 : i64
     %odsti = arith.index_cast %odst : i64 to index
     %r1 = arith.addi %rows, %c1 : i64
@@ -395,150 +410,162 @@ func.func private @nx_sa_members(%rec: !llvm.ptr, %outs: !llvm.ptr, %nout: i64, 
   return
 }
 
-// ---- the output placeholders rewritten in every string of the text (not in keys: a key's window is the member
-// table's, taken before), each rewrite in turn: its occurrences left to right without overlap, then the gaps and the
-// replacement as one combineAll drained into a room of the new length.  An empty placeholder rewrites nothing.
-func.func private @nx_sa_rewrite(%ctx: !llvm.ptr, %rec: !llvm.ptr, %rws: !llvm.ptr, %nrw: i64, %nkind: memref<?xi64>,
-                                 %nptr: memref<?xi64>, %nlen: memref<?xi64>) {
+// ---- the output placeholders: one string's rewrites (p, l: its window, as ptr bits and a length): each placeholder in turn (rewrites' order), its
+// occurrences left to right without overlap, then the gaps and the replacement as one combineAll drained into a room of
+// the new length.  An empty placeholder rewrites nothing; a string none occurs in keeps its window.
+func.func private @nx_sa_rewrite1(%ctx: !llvm.ptr, %rws: !llvm.ptr, %nrw: i64, %p0: i64, %l0: i64) -> (i64, i64) {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
-  %c2 = arith.constant 2 : i64
-  %c3 = arith.constant 3 : i64
-  %c4 = arith.constant 4 : i64
   %zero32 = arith.constant 0 : i32
   %no = arith.constant 0 : i1
   %z = arith.constant 0 : index
   %one = arith.constant 1 : index
   %two = arith.constant 2 : index
+  %nrwi = arith.index_cast %nrw : i64 to index
+  %pl:2 = scf.for %j = %z to %nrwi step %one iter_args(%p = %p0, %l = %l0) -> (i64, i64) {
+    %j64 = arith.index_cast %j : index to i64
+    %fpw, %fl, %tpw, %tl = func.call @nx_sa_row(%rws, %j64) : (!llvm.ptr, i64) -> (i64, i64, i64, i64)
+    %fne = arith.cmpi ne, %fl, %c0 : i64
+    %fits = arith.cmpi ule, %fl, %l : i64
+    %try = arith.andi %fne, %fits : i1
+    %res:2 = scf.if %try -> (i64, i64) {
+      %cap0 = arith.divui %l, %fl : i64
+      %cap = arith.addi %cap0, %c1 : i64
+      %capi = arith.index_cast %cap : i64 to index
+      %pos = memref.alloc(%capi) : memref<?xi64>
+      %pp = llvm.inttoptr %p : i64 to !llvm.ptr
+      %sd = func.call @nx_sa_desc8(%pp, %l) : (!llvm.ptr, i64) -> !d
+      %sm = builtin.unrealized_conversion_cast %sd : !d to !m8
+      %s = builtin.unrealized_conversion_cast %sm : !m8 to !s8
+      %fpp = llvm.inttoptr %fpw : i64 to !llvm.ptr
+      %fd = func.call @nx_sa_desc8(%fpp, %fl) : (!llvm.ptr, i64) -> !d
+      %fm = builtin.unrealized_conversion_cast %fd : !d to !m8
+      %fs = builtin.unrealized_conversion_cast %fm : !m8 to !s8
+      %f0 = trikeshed.at %fs[%z] : !s8, index -> i8
+      %li = arith.index_cast %l : i64 to index
+      %fli = arith.index_cast %fl : i64 to index
+      // the occurrences, left to right; after one, the search goes on past it
+      %found:2 = scf.while (%qa = %z, %ma = %c0) : (index, i64) -> (index, i64) {
+        %qe = arith.addi %qa, %fli : index
+        %go = arith.cmpi ule, %qe, %li : index
+        scf.condition(%go) %qa, %ma : index, i64
+      } do {
+      ^bb0(%qb: index, %mb: i64):
+        %bq = trikeshed.at %s[%qb] : !s8, index -> i8
+        %h0 = arith.cmpi eq, %bq, %f0 : i8
+        %hit = scf.if %h0 -> (i1) {
+          %win = trikeshed.slice %s[%qb, %fli] : !s8 -> !s8
+          %cw = trikeshed.compare %win, %fs unsigned : !s8, !s8
+          %eq0 = arith.cmpi eq, %cw, %zero32 : i32
+          scf.yield %eq0 : i1
+        } else {
+          scf.yield %no : i1
+        }
+        %nx:2 = scf.if %hit -> (index, i64) {
+          %mbi = arith.index_cast %mb : i64 to index
+          %qb64 = arith.index_cast %qb : index to i64
+          memref.store %qb64, %pos[%mbi] : memref<?xi64>
+          %qn = arith.addi %qb, %fli : index
+          %mn = arith.addi %mb, %c1 : i64
+          scf.yield %qn, %mn : index, i64
+        } else {
+          %qn1 = arith.addi %qb, %one : index
+          scf.yield %qn1, %mb : index, i64
+        }
+        scf.yield %nx#0, %nx#1 : index, i64
+      }
+      %m = arith.addi %found#1, %c0 : i64
+      %none = arith.cmpi eq, %m, %c0 : i64
+      %w:2 = scf.if %none -> (i64, i64) {
+        scf.yield %p, %l : i64, i64
+      } else {
+        %dl = arith.subi %tl, %fl : i64
+        %grow = arith.muli %m, %dl : i64
+        %nl = arith.addi %l, %grow : i64
+        %out = func.call @nixsa_room(%ctx, %nl) : (!llvm.ptr, i64) -> !llvm.ptr
+        %tpp = llvm.inttoptr %tpw : i64 to !llvm.ptr
+        %tdd = func.call @nx_sa_desc8(%tpp, %tl) : (!llvm.ptr, i64) -> !d
+        %tmm = builtin.unrealized_conversion_cast %tdd : !d to !m8
+        %ts = builtin.unrealized_conversion_cast %tmm : !m8 to !s8
+        %mi2 = arith.index_cast %m : i64 to index
+        %last = arith.subi %mi2, %one : index
+        %m2 = arith.muli %mi2, %two : index
+        %np2 = arith.addi %m2, %one : index
+        // piece 2g: the gap before occurrence g (after the last, the rest); piece 2g + 1: the replacement
+        %view, %where = trikeshed.combineAll %np2 : !s8, !pieces {
+        ^bb0(%k: index):
+          %g = arith.divui %k, %two : index
+          %odd0 = arith.remui %k, %two : index
+          %isodd = arith.cmpi ne, %odd0, %z : index
+          %has = arith.cmpi ugt, %g, %z : index
+          %gm1 = arith.subi %g, %one : index
+          %gp = arith.select %has, %gm1, %z : index
+          %prev = memref.load %pos[%gp] : memref<?xi64>
+          %prevend = arith.addi %prev, %fl : i64
+          %start = arith.select %has, %prevend, %c0 : i64
+          %islast = arith.cmpi eq, %g, %mi2 : index
+          %ge = arith.minui %g, %last : index
+          %cur = memref.load %pos[%ge] : memref<?xi64>
+          %en = arith.select %islast, %l, %cur : i64
+          %gap = arith.subi %en, %start : i64
+          %gapl = arith.select %isodd, %c0, %gap : i64
+          %tol = arith.select %isodd, %tl, %c0 : i64
+          %starti = arith.index_cast %start : i64 to index
+          %gapli = arith.index_cast %gapl : i64 to index
+          %toli = arith.index_cast %tol : i64 to index
+          %gs = trikeshed.slice %s[%starti, %gapli] : !s8 -> !s8
+          %tsl = trikeshed.slice %ts[%z, %toli] : !s8 -> !s8
+          %part = trikeshed.combine %gs, %tsl : !s8, !s8 -> !s8
+          trikeshed.yield %part : !s8
+        }
+        %od = func.call @nx_sa_desc8(%out, %nl) : (!llvm.ptr, i64) -> !d
+        %om = builtin.unrealized_conversion_cast %od : !d to !m8
+        %e = trikeshed.drain %view, %om : !s8, !m8 -> index
+        %outw = llvm.ptrtoint %out : !llvm.ptr to i64
+        scf.yield %outw, %nl : i64, i64
+      }
+      scf.yield %w#0, %w#1 : i64, i64
+    } else {
+      scf.yield %p, %l : i64, i64
+    }
+    scf.yield %res#0, %res#1 : i64, i64
+  }
+  return %pl#0, %pl#1 : i64, i64
+}
+
+// every string of the text rewritten (not the keys: a key's window is the member table's, taken before)
+func.func private @nx_sa_rewrite(%ctx: !llvm.ptr, %rec: !llvm.ptr, %rws: !llvm.ptr, %nrw: i64, %nkind: memref<?xi64>,
+                                 %nptr: memref<?xi64>, %nlen: memref<?xi64>) {
+  %c2 = arith.constant 2 : i64
+  %c4 = arith.constant 4 : i64
+  %z = arith.constant 0 : index
+  %one = arith.constant 1 : index
   %rows = func.call @nx_sa_w(%rec, %c2) : (!llvm.ptr, i64) -> i64
   %ri = arith.index_cast %rows : i64 to index
-  %nrwi = arith.index_cast %nrw : i64 to index
   scf.for %r = %z to %ri step %one {
     %kind = memref.load %nkind[%r] : memref<?xi64>
     %isstr = arith.cmpi eq, %kind, %c4 : i64
     scf.if %isstr {
       %p0 = memref.load %nptr[%r] : memref<?xi64>
       %l0 = memref.load %nlen[%r] : memref<?xi64>
-      %pl:2 = scf.for %j = %z to %nrwi step %one iter_args(%p = %p0, %l = %l0) -> (i64, i64) {
-        %j64 = arith.index_cast %j : index to i64
-        %w0 = arith.muli %j64, %c4 : i64
-        %w1 = arith.addi %w0, %c1 : i64
-        %w2 = arith.addi %w0, %c2 : i64
-        %w3 = arith.addi %w0, %c3 : i64
-        %fpw = func.call @nx_sa_w(%rws, %w0) : (!llvm.ptr, i64) -> i64
-        %fl = func.call @nx_sa_w(%rws, %w1) : (!llvm.ptr, i64) -> i64
-        %tpw = func.call @nx_sa_w(%rws, %w2) : (!llvm.ptr, i64) -> i64
-        %tl = func.call @nx_sa_w(%rws, %w3) : (!llvm.ptr, i64) -> i64
-        %fne = arith.cmpi ne, %fl, %c0 : i64
-        %fits = arith.cmpi ule, %fl, %l : i64
-        %try = arith.andi %fne, %fits : i1
-        %res:2 = scf.if %try -> (i64, i64) {
-          %cap0 = arith.divui %l, %fl : i64
-          %cap = arith.addi %cap0, %c1 : i64
-          %capi = arith.index_cast %cap : i64 to index
-          %pos = memref.alloc(%capi) : memref<?xi64>
-          %pp = llvm.inttoptr %p : i64 to !llvm.ptr
-          %sd = func.call @nx_sa_desc8(%pp, %l) : (!llvm.ptr, i64) -> !d
-          %sm = builtin.unrealized_conversion_cast %sd : !d to !m8
-          %s = builtin.unrealized_conversion_cast %sm : !m8 to !s8
-          %fpp = llvm.inttoptr %fpw : i64 to !llvm.ptr
-          %fd = func.call @nx_sa_desc8(%fpp, %fl) : (!llvm.ptr, i64) -> !d
-          %fm = builtin.unrealized_conversion_cast %fd : !d to !m8
-          %fs = builtin.unrealized_conversion_cast %fm : !m8 to !s8
-          %f0 = trikeshed.at %fs[%z] : !s8, index -> i8
-          %li = arith.index_cast %l : i64 to index
-          %fli = arith.index_cast %fl : i64 to index
-          // the occurrences, left to right; after one, the search goes on past it
-          %found:2 = scf.while (%qa = %z, %ma = %c0) : (index, i64) -> (index, i64) {
-            %qe = arith.addi %qa, %fli : index
-            %go = arith.cmpi ule, %qe, %li : index
-            scf.condition(%go) %qa, %ma : index, i64
-          } do {
-          ^bb0(%qb: index, %mb: i64):
-            %bq = trikeshed.at %s[%qb] : !s8, index -> i8
-            %h0 = arith.cmpi eq, %bq, %f0 : i8
-            %hit = scf.if %h0 -> (i1) {
-              %win = trikeshed.slice %s[%qb, %fli] : !s8 -> !s8
-              %cw = trikeshed.compare %win, %fs unsigned : !s8, !s8
-              %eq0 = arith.cmpi eq, %cw, %zero32 : i32
-              scf.yield %eq0 : i1
-            } else {
-              scf.yield %no : i1
-            }
-            %nx:2 = scf.if %hit -> (index, i64) {
-              %mbi = arith.index_cast %mb : i64 to index
-              %qb64 = arith.index_cast %qb : index to i64
-              memref.store %qb64, %pos[%mbi] : memref<?xi64>
-              %qn = arith.addi %qb, %fli : index
-              %mn = arith.addi %mb, %c1 : i64
-              scf.yield %qn, %mn : index, i64
-            } else {
-              %qn1 = arith.addi %qb, %one : index
-              scf.yield %qn1, %mb : index, i64
-            }
-            scf.yield %nx#0, %nx#1 : index, i64
-          }
-          %m = arith.addi %found#1, %c0 : i64
-          %none = arith.cmpi eq, %m, %c0 : i64
-          %w:2 = scf.if %none -> (i64, i64) {
-            scf.yield %p, %l : i64, i64
-          } else {
-            %dl = arith.subi %tl, %fl : i64
-            %grow = arith.muli %m, %dl : i64
-            %nl = arith.addi %l, %grow : i64
-            %out = func.call @nixsa_room(%ctx, %nl) : (!llvm.ptr, i64) -> !llvm.ptr
-            %tpp = llvm.inttoptr %tpw : i64 to !llvm.ptr
-            %tdd = func.call @nx_sa_desc8(%tpp, %tl) : (!llvm.ptr, i64) -> !d
-            %tmm = builtin.unrealized_conversion_cast %tdd : !d to !m8
-            %ts = builtin.unrealized_conversion_cast %tmm : !m8 to !s8
-            %mi2 = arith.index_cast %m : i64 to index
-            %last = arith.subi %mi2, %one : index
-            %m2 = arith.muli %mi2, %two : index
-            %np2 = arith.addi %m2, %one : index
-            // piece 2g: the gap before occurrence g (after the last, the rest); piece 2g + 1: the replacement
-            %view, %where = trikeshed.combineAll %np2 : !s8, !pieces {
-            ^bb0(%k: index):
-              %g = arith.divui %k, %two : index
-              %odd0 = arith.remui %k, %two : index
-              %isodd = arith.cmpi ne, %odd0, %z : index
-              %has = arith.cmpi ugt, %g, %z : index
-              %gm1 = arith.subi %g, %one : index
-              %gp = arith.select %has, %gm1, %z : index
-              %prev = memref.load %pos[%gp] : memref<?xi64>
-              %prevend = arith.addi %prev, %fl : i64
-              %start = arith.select %has, %prevend, %c0 : i64
-              %islast = arith.cmpi eq, %g, %mi2 : index
-              %ge = arith.minui %g, %last : index
-              %cur = memref.load %pos[%ge] : memref<?xi64>
-              %en = arith.select %islast, %l, %cur : i64
-              %gap = arith.subi %en, %start : i64
-              %gapl = arith.select %isodd, %c0, %gap : i64
-              %tol = arith.select %isodd, %tl, %c0 : i64
-              %starti = arith.index_cast %start : i64 to index
-              %gapli = arith.index_cast %gapl : i64 to index
-              %toli = arith.index_cast %tol : i64 to index
-              %gs = trikeshed.slice %s[%starti, %gapli] : !s8 -> !s8
-              %tsl = trikeshed.slice %ts[%z, %toli] : !s8 -> !s8
-              %part = trikeshed.combine %gs, %tsl : !s8, !s8 -> !s8
-              trikeshed.yield %part : !s8
-            }
-            %od = func.call @nx_sa_desc8(%out, %nl) : (!llvm.ptr, i64) -> !d
-            %om = builtin.unrealized_conversion_cast %od : !d to !m8
-            %e = trikeshed.drain %view, %om : !s8, !m8 -> index
-            %outw = llvm.ptrtoint %out : !llvm.ptr to i64
-            scf.yield %outw, %nl : i64, i64
-          }
-          scf.yield %w#0, %w#1 : i64, i64
-        } else {
-          scf.yield %p, %l : i64, i64
-        }
-        scf.yield %res#0, %res#1 : i64, i64
-      }
+      %pl:2 = func.call @nx_sa_rewrite1(%ctx, %rws, %nrw, %p0, %l0) : (!llvm.ptr, !llvm.ptr, i64, i64, i64) -> (i64, i64)
       memref.store %pl#0, %nptr[%r] : memref<?xi64>
       memref.store %pl#1, %nlen[%r] : memref<?xi64>
     }
   }
   return
+}
+
+// nixstore::rewritePlaceholders (StructuredAttrs.cpp): the n bytes at p with the placeholders rewritten (runBuilder's
+// environment and arguments, as the structured attributes' strings are).  The result's length goes to *len; its bytes
+// are p's when nothing occurs, else the last room.
+func.func @nixstore_ts_rewrite(%ctx: !llvm.ptr, %p: !llvm.ptr, %n: i64, %rws: !llvm.ptr, %nrw: i64,
+                               %len: !llvm.ptr) -> !llvm.ptr {
+  %pw = llvm.ptrtoint %p : !llvm.ptr to i64
+  %r:2 = func.call @nx_sa_rewrite1(%ctx, %rws, %nrw, %pw, %n) : (!llvm.ptr, !llvm.ptr, i64, i64, i64) -> (i64, i64)
+  llvm.store %r#1, %len : i64, !llvm.ptr
+  %rp = llvm.inttoptr %r#0 : i64 to !llvm.ptr
+  return %rp : !llvm.ptr
 }
 
 // ---- the simple values (handleSimpleType): every string, null and boolean; a number when ceil((float) f) == (float) f,
@@ -1124,8 +1151,8 @@ func.func private @nx_sa_sh(%ctx: !llvm.ptr, %nkind: memref<?xi64>, %nptr: memre
 }
 
 // ---- the entry: 0 the two files written (through nixsa_out), 1 __json is not JSON, 2 it is not an object.
-// rec is confix.checked's record (word 15 set: the store's reading); outs nout x [name ptr, len, path ptr, len] in
-// name order; rws nrw x [placeholder ptr, len, path ptr, len] in placeholder order.
+// rec is confix.checked's record (word 15 set: the store's reading); outs the outputs' SortedMap rows (name, path),
+// rws the rewrites' (placeholder, path), both read in place (nx_sa_row).
 func.func @nixstore_ts_sattrs(%ctx: !llvm.ptr, %rec: !llvm.ptr, %outs: !llvm.ptr, %nout: i64, %rws: !llvm.ptr,
                               %nrw: i64) -> i32 {
   %c0 = arith.constant 0 : i64

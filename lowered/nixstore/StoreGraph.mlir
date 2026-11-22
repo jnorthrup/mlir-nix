@@ -7,7 +7,6 @@
 //   nixstore_ts_samecontent  sameContent: the two derivations' token streams walked in step
 //   nixstore_ts_closure      computeFSClosure: the worklist (a stack of frames) and the visited set (bisect + insert)
 //   nixstore_ts_gc           collectGarbage: dead = valid minus live (where + bisect), then the referrer-safe rounds
-//   nixstore_ts_sortwins     allValidPaths' order (sorted, byte order)
 //   nixstore_ts_infolines    queryPathInfo's lines (parts at '\n', the first ": ", the five keys)
 //
 // A window is 16 bytes {const char *p, int64 n}.  A token is 24 bytes {int64 tag, int64 a, int64 b}; tags:
@@ -170,27 +169,6 @@ func.func @nixstore_ts_union(%a: !llvm.ptr, %na: i64, %b: !llvm.ptr, %nb: i64, %
   }
   %m64 = arith.index_cast %m : index to i64
   return %m64 : i64
-}
-
-// allValidPaths' order: the windows' indices sorted by their bytes, drained into order
-func.func @nixstore_ts_sortwins(%w: !llvm.ptr, %n: i64, %order: !llvm.ptr) {
-  %ni = arith.index_cast %n : i64 to index
-  %idx = trikeshed.series %ni : !s64 {
-  ^bb0(%i: index):
-    %i64 = arith.index_cast %i : index to i64
-    trikeshed.yield %i64 : i64
-  }
-  %srt = trikeshed.sorted %idx : !s64 -> !s64 by {
-  ^bb0(%x: i64, %y: i64):
-    %xp, %xn = func.call @sg_win(%w, %x) : (!llvm.ptr, i64) -> (!llvm.ptr, i64)
-    %yp, %yn = func.call @sg_win(%w, %y) : (!llvm.ptr, i64) -> (!llvm.ptr, i64)
-    %c = func.call @sg_cmp(%xp, %xn, %yp, %yn) : (!llvm.ptr, i64, !llvm.ptr, i64) -> i32
-    trikeshed.yield %c : i32
-  }
-  %od = func.call @sg_desc(%order, %n) : (!llvm.ptr, i64) -> !d
-  %om = builtin.unrealized_conversion_cast %od : !d to !m64
-  %end = trikeshed.drain %srt, %om : !s64, !m64 -> index
-  return
 }
 
 //===----------------------------------------------------------------------===//
