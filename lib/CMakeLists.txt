@@ -200,7 +200,7 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/DrvJson.mlir DrvJson)
 mlnix_lower_trikeshed(NixStore lowered/nixstore/StructuredAttrsOps.mlir StructuredAttrsOps)
 # The local store's graph and content algorithms (LocalStore.cpp's bodies are gone; the bridges hand the sorted sets over as
 # windows and answer the store's reads and writes as callbacks): drvReferences' union (sorted + where), computeFSClosure's
-# worklist and visited set (bisect + insert), collectGarbage's dead set and referrer-safe rounds, allValidPaths' order,
+# worklist and visited set (bisect + insert), collectGarbage's dead set and referrer-safe rounds,
 # queryPathInfo's lines (parts), contentFingerprint (a fold through XXH3-64, written here) and sameContent's walk.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/StoreGraph.mlir StoreGraph)
 # The local store's builder (LocalStore.cpp; the fork, the exec, the walks and the reads stay there): runBuilder's
@@ -209,6 +209,11 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/StoreGraph.mlir StoreGraph)
 # bisected into it); registerValidPath's info file as one combine drained once.  runBuilder's placeholders are
 # StructuredAttrsOps' rewrite (nixstore_ts_rewrite, through rewritePlaceholders).
 mlnix_lower_trikeshed(NixStore lowered/nixstore/BuilderOps.mlir BuilderOps)
+# Store.h's sorted rows (SortedSet, SortedMap<V>; the template keeps the storage, the append and the pop): the key's row
+# (the halving, trikeshed.compare unsigned on the keys) and the moves of an insert or an erase (a turn of rows [a, b): one
+# combine of two slices of the rows' bytes, drained through a room and back); allValidPaths' sort (the rows in their
+# keys' order, one combineAll of row slices drained through a room and back).
+mlnix_lower_trikeshed(NixStore lowered/nixstore/SortedRows.mlir SortedRows)
 # The crit-bit trie of include/Composite/Patricia.h (its algorithms are gone from the header; the template keeps the
 # storage, the value, copy and emit): the leaf walk, the key compare (trikeshed.compare), set's plan and link, prefix's
 # byte-order walk.  NixStore owns it; NixEval (Eval.h's tries) links NixStore.

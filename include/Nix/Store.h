@@ -38,6 +38,12 @@ template <class T> T copyOf(const T &v) {
 // Sorted rows: the store's sets and maps by string
 //===----------------------------------------------------------------------===//
 
+// The rows' search and moves are lowered/nixstore/SortedRows.mlir: rowfind gives the key's row or -(where it sorts) - 1; rowrotate turns
+// rows [a, b) left by s, each row its bytes (a row starts with its key, a Text; the values are Texts, Hashes, outputs and sets, none of
+// which points into itself).
+extern "C" int64_t nixstore_ts_rowfind(const void *rows, int64_t n, int64_t stride, const char *k, int64_t kn);
+extern "C" void nixstore_ts_rowrotate(void *rows, int64_t a, int64_t b, int64_t s, int64_t stride);
+
 /// A set of strings kept as one series sorted in byte order (std::set's): no node per entry.  An insert in order is an append, which is how a
 /// derivation's inputs arrive (from a sorted context) and how its text is parsed (sorted).
 struct SortedSet {
@@ -58,27 +64,23 @@ struct SortedSet {
   const composite::Text *end() const { return rows.end(); }
   size_t size() const { return rows.size(); }
   bool empty() const { return rows.empty(); }
-  size_t lowerBound(std::string_view k) const {
-    size_t lo = 0, hi = rows.size();
-    while (lo < hi) { size_t mid = (lo + hi) / 2; if (rows[uint32_t(mid)] < k) lo = mid + 1; else hi = mid; }
-    return lo;
-  }
-  size_t count(std::string_view k) const { size_t i = lowerBound(k); return i < rows.size() && rows[uint32_t(i)] == k; }
+  int64_t row(std::string_view k) const { return nixstore_ts_rowfind(rows.data(), rows.size(), sizeof(composite::Text), k.data(), k.size()); }
+  size_t count(std::string_view k) const { return row(k) >= 0; }
   bool insert(std::string_view k) {
     if (rows.empty() || rows.back() < k) { rows.append(composite::Text(k)); return true; }
-    size_t i = lowerBound(k);
-    if (i < rows.size() && rows[uint32_t(i)] == k) return false;
-    rows.append(composite::Text(k));
-    for (size_t j = rows.size() - 1; j > i; j--) rows[uint32_t(j)].swap(rows[uint32_t(j - 1)]);
+    int64_t i = row(k);
+    if (i >= 0) return false;
+    rows.append(composite::Text(k)); // then turned to where it sorts
+    nixstore_ts_rowrotate(rows.data(), -i - 1, rows.size(), rows.size() + i, sizeof(composite::Text));
     return true;
   }
   template <class It> void insert(It b, It e) { for (; b != e; ++b) insert(std::string_view(*b)); }
   bool contains(std::string_view k) const { return count(k) != 0; }
   /// Drops k; false when it was not there.  The rows after it move down one.
   bool erase(std::string_view k) {
-    size_t i = lowerBound(k);
-    if (i >= rows.size() || rows[uint32_t(i)] != k) return false;
-    for (size_t j = i; j + 1 < rows.size(); j++) rows[uint32_t(j)].swap(rows[uint32_t(j + 1)]);
+    int64_t i = row(k);
+    if (i < 0) return false;
+    nixstore_ts_rowrotate(rows.data(), i, rows.size(), 1, sizeof(composite::Text)); // to the end, then popped
     rows.pop();
     return true;
   }
@@ -98,29 +100,21 @@ template <class V> struct SortedMap {
   SortedMap &operator=(SortedMap &&) = default;
   SortedMap(const SortedMap &o) { rows.reserve(o.rows.size()); for (const Row &r : o.rows) rows.append(Row{r.first.clone(), copyOf(r.second)}); }
   SortedMap &operator=(const SortedMap &o) { if (this != &o) { SortedMap t(o); *this = std::move(t); } return *this; }
-  static void swapRows(Row &x, Row &y) { Row t{composite::mv(x.first), composite::mv(x.second)}; x = composite::mv(y); y = composite::mv(t); }
   Row *begin() { return rows.begin(); }
   Row *end() { return rows.end(); }
   const Row *begin() const { return rows.begin(); }
   const Row *end() const { return rows.end(); }
   size_t size() const { return rows.size(); }
   bool empty() const { return rows.empty(); }
-  size_t lowerBound(std::string_view k) const {
-    size_t lo = 0, hi = rows.size();
-    while (lo < hi) { size_t mid = (lo + hi) / 2; if (rows[uint32_t(mid)].first < k) lo = mid + 1; else hi = mid; }
-    return lo;
-  }
-  Row *find(std::string_view k) { size_t i = lowerBound(k); return i < rows.size() && rows[uint32_t(i)].first == k ? begin() + i : end(); }
-  const Row *find(std::string_view k) const { size_t i = lowerBound(k); return i < rows.size() && rows[uint32_t(i)].first == k ? begin() + i : end(); }
+  int64_t row(std::string_view k) const { return nixstore_ts_rowfind(rows.data(), rows.size(), sizeof(Row), k.data(), k.size()); }
+  Row *find(std::string_view k) { int64_t i = row(k); return i >= 0 ? begin() + i : end(); }
+  const Row *find(std::string_view k) const { int64_t i = row(k); return i >= 0 ? begin() + i : end(); }
   size_t count(std::string_view k) const { return find(k) != end(); }
   /// The row for k, made (with V()) where k sorts when there is none.
   Row *place(std::string_view k) {
     if (rows.empty() || rows.back().first < k) { rows.append(Row{composite::Text(k), V()}); return end() - 1; }
-    size_t i = lowerBound(k);
-    if (i < rows.size() && rows[uint32_t(i)].first == k) return begin() + i;
-    rows.append(Row{composite::Text(k), V()});
-    for (size_t j = rows.size() - 1; j > i; j--) swapRows(rows[uint32_t(j)], rows[uint32_t(j - 1)]);
-    return begin() + i;
+    int64_t i = row(k);
+    return i >= 0 ? begin() + i : settle(i, Row{composite::Text(k), V()});
   }
   V &operator[](std::string_view k) { return place(k)->second; }
   V &at(std::string_view k) { Row *r = find(k); if (r == end()) throw std::out_of_range(composite::cat("no entry '", k, "'").c_str()); return r->second; }
@@ -128,11 +122,14 @@ template <class V> struct SortedMap {
   /// An entry, moved in: at the end when it sorts there (the hint is the end), else where it sorts; an existing key keeps its value.
   Row *emplace_hint(Row *, composite::Text k, V v) {
     if (rows.empty() || rows.back().first < k) { rows.append(Row{std::move(k), std::move(v)}); return end() - 1; }
-    size_t i = lowerBound(k);
-    if (i < rows.size() && rows[uint32_t(i)].first == k) return begin() + i;
-    rows.append(Row{std::move(k), std::move(v)});
-    for (size_t j = rows.size() - 1; j > i; j--) swapRows(rows[uint32_t(j)], rows[uint32_t(j - 1)]);
-    return begin() + i;
+    int64_t i = row(k);
+    return i >= 0 ? begin() + i : settle(i, Row{std::move(k), std::move(v)});
+  }
+  /// r, whose key row() did not find (i: -(where it sorts) - 1), appended and turned to its place.
+  Row *settle(int64_t i, Row &&r) {
+    rows.append(std::move(r));
+    nixstore_ts_rowrotate(rows.data(), -i - 1, rows.size(), rows.size() + i, sizeof(Row));
+    return begin() + (-i - 1);
   }
 };
 

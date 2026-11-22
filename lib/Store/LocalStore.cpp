@@ -31,8 +31,8 @@
 namespace nixstore {
 
 // The store's graph and content algorithms are lowered/nixstore/StoreGraph.mlir (built into NixStore by lib/CMakeLists.txt): the set
-// algebra, computeFSClosure's worklist, collectGarbage's rounds, contentFingerprint (xxh3 too) and sameContent, allValidPaths' order and
-// queryPathInfo's lines.  What stays here hands the sorted sets over as windows and answers the callbacks, which read and write the store.
+// algebra, computeFSClosure's worklist, collectGarbage's rounds, contentFingerprint (xxh3 too) and sameContent, and
+// queryPathInfo's lines; the builder's are BuilderOps.mlir, allValidPaths' order SortedRows.mlir.  What stays here hands the sorted sets over as windows and answers the callbacks, which read and write the store.
 namespace {
 struct GWin { const char *p; int64_t n; };
 template <class C> composite::MutableSeries<GWin> wins(const C &texts) {
@@ -119,7 +119,7 @@ void Store::registerValidPath(const PathInfo &info) {
   rename(tmp.c_str(), infoFile(info.path).c_str());
 }
 
-extern "C" void nixstore_ts_sortwins(const GWin *w, int64_t n, int64_t *order); // the windows' indices in byte order
+extern "C" void nixstore_ts_rowsort(void *rows, int64_t n, int64_t stride);
 composite::MutableSeries<composite::Text> Store::allValidPaths() {
   composite::MutableSeries<composite::Text> res;
   DIR *d = opendir((settings.stateDir + "/info").c_str());
@@ -131,12 +131,8 @@ composite::MutableSeries<composite::Text> Store::allValidPaths() {
     if (pathExists(toReal(p))) res.append(composite::mv(p));
   }
   closedir(d);
-  composite::MutableSeries<int64_t> order(res.size()); // the paths' order is sorted, then each path moves once, into its place
-  nixstore_ts_sortwins(wins(res).data(), res.size(), order.data());
-  composite::MutableSeries<composite::Text> sorted;
-  sorted.reserve(res.size());
-  for (int64_t i : order) sorted.append(composite::mv(res[uint32_t(i)]));
-  return sorted;
+  nixstore_ts_rowsort(res.data(), res.size(), sizeof(composite::Text)); // byte order, each path moved once (SortedRows.mlir)
+  return res;
 }
 
 SortedSet Store::queryReferrers(std::string_view path) {
