@@ -43,14 +43,9 @@
 // is an affine.apply once --expand-strided-metadata has run: run --lower-affine before --finalize-memref-to-llvm.  Casts the
 // conversion leaves between a cursor and its buffers are reconciled at the end, so a caller that built its cursor from
 // buffers ends up passing the buffers.  A dialect below TrikeShed (confix: its index and its Columns facet) adds its
-<<<<<<< HEAD
 // patterns through CursorLoweringInterface (Composite/CursorLowering.h).  groupBy and keyedJoin are rewritten first into
 // sorted, where, project, bisect and series (GroupBy.kt and KeyedJoin.kt, below).  Not lowered: pivot and the other cursor
-// combinators, joins, contains, zipnext, the lazy (unmaterialised) form of a series, and series whose
-=======
-// patterns through CursorLoweringInterface (Composite/CursorLowering.h).  Not lowered: groupBy, pivot, keyedJoin and the
-// other cursor combinators, contains, the lazy form of a series read otherwise than by at, size, slice and bisect, and series whose
->>>>>>> 4c600201f1e006cc27392224e7bb8d310cab6229
+// combinators, contains, the lazy form of a series read otherwise than by at, size, slice and bisect, and series whose
 // elements are neither builtin types nor pairs of two equal scalar halves.  trikeshed-route-twins (TwinRouting.cpp) runs
 // before this pass where a series of pairs should be laid out by how it is read, not by its width alone.
 //
