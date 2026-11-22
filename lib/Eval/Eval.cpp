@@ -2437,13 +2437,12 @@ void EvalState::prelowerLoop() {
         pl->op = nixfe::genExpr(*pl->mod, origin, pre->po, "expr", go);
         // The bodies the recorded run minted in this file, minted here in its order (the rows of nested lambdas follow from it): the
         // evaluator only indexes them at their first call.  If one fails (the file changed since), the whole file is left to the evaluator.
-        if (const auto *mints = nixprefetch::replayMints(path))
-          for (uint32_t row : *mints) {
-            if (row >= pl->pool->rows.size()) break;
-            auto lam = dyn_cast_or_null<nd::LambdaOp>(pl->pool->rows.col<nixfe::PoolCol::Op>()[row]);
-            if (!lam || !lam.getBody().front().empty()) continue;
-            nixfe::mintBody(lam, *pl->pool, row, go);
-          }
+        for (uint32_t row : nixprefetch::replayMints(path)) {
+          if (row >= pl->pool->rows.size()) break;
+          auto lam = dyn_cast_or_null<nd::LambdaOp>(pl->pool->rows.col<nixfe::PoolCol::Op>()[row]);
+          if (!lam || !lam.getBody().front().empty()) continue;
+          nixfe::mintBody(lam, *pl->pool, row, go);
+        }
         // The default pipeline is devirtualization alone, which reads only the IR and the dialect's primop table: done here, off the
         // evaluator's thread.  Another pipeline runs at adoption, where the prim folder (the evaluator's) can be called.
         if (settings.optimize && pipelineText(settings) == "nix-prims") {

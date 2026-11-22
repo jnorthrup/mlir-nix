@@ -164,6 +164,10 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/PathOps.mlir PathOps)
 # Text and call these entries).  The naming rules are trikeshed.at / slice / text / compare / combine / drain over the
 # byte series; isStorePath calls the IsInStore entry beside it.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/StoreName.mlir StoreName)
+# The prefetch list's row and order algebra (Prefetch.cpp's list reading, mints table, entry order, ring slot driver, line
+# and list texts and auto's name are gone; the bridges keep the file I/O, threads, io_uring requests and the owning
+# Texts): trikeshed.parts / where / sorted / bisect / combine / combineAll / fold / drain over the list's records.
+mlnix_lower_trikeshed(NixStore lowered/nixstore/PrefetchOps.mlir PrefetchOps)
 # The pure byte decoders nix32Decode, base64Decode (lib/Store/Hash.cpp's bodies are gone; the bridges size the Text and
 # turn the validity flag into the Maybe, parseRest's error wording stays).  trikeshed.at over the input series<i8>, a
 # constant reverse-alphabet table and guarded byte stores.
