@@ -1,15 +1,16 @@
 // The tool-scale fill-drain of tools/mlnix.cpp hollowed into the TrikeShed dialect: the NIX_PATH split
 // (parseNixPath), the help text (printHelp), the nix command's argv-list escaping and expression, the
 // eval/parse/emit-mlir/run-mlir argv splice, and cmdStore --print-env's block.  mlnix.cpp keeps only the bridges
-// that marshal windows and call these neutral C-ABI entries; the text algebra is here, in trikeshed.slice /
-// combine / combineAll / compare / at / series / drain, lowered by --trikeshed-lower-cursors and the stock buffer
-// pipeline (tools/CMakeLists.txt mlnix_lower_trikeshed into the mlnix executable).
+// that marshal windows and call these neutral C-ABI entries; the text algebra is here, in trikeshed.text / slice /
+// combine / combineAll / at / series / drain, lowered by --trikeshed-lower-cursors and the stock buffer pipeline
+// (tools/CMakeLists.txt mlnix_lower_trikeshed into the mlnix executable).
 //
-// Every text entry uses the capacity protocol: it sizes the lazy combine, returns -need-2 when cap < need (the
-// bridge resizes and calls again), else drains once into the caller's room and returns the bytes written.
-// parseNixPath writes 4-i64 records (prefix off/len, path off/len, windows into the input) and returns the count
-// or -count-2.  The argv splice drains a series of pointer bits into the caller's char* array.  Nothing here throws:
-// the bridges keep usage()/exit, the store/eval calls, getenv and the error wording.
+// Every text entry uses the capacity protocol: it sizes the lazy composition, returns -need-2 when cap < need (the
+// bridge resizes and calls again), else drains once into the caller's room and returns the bytes written.  The
+// help text is one constant drained whole.  parseNixPath writes 4-i64 records (prefix off/len, path off/len:
+// windows into the input; cap counts records) and returns the count or -count-2.  The argv splice drains a series
+// of pointer bits into the caller's char* array.  Nothing here throws: the bridges keep usage()/exit, the store and
+// eval calls, getenv and the error wording.
 //
 // Helper names are module-unique (to_*): convert-func-to-llvm exports a func.func private as a global symbol.
 !b = !trikeshed.series<i8>
@@ -22,8 +23,6 @@
 !d = !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
 
 memref.global "private" constant @to_help : memref<1379xi8> = dense<"0x6D6C6E6978202D2061204E697820696D706C656D656E746174696F6E206275696C74206F6E20616E204D4C4952206469616C6563740A0A55736167653A0A20206D6C6E697820696E7374616E7469617465205B6F7074696F6E735D205B46494C45207C202D4520455850525D2E2E2E202020286C696B65206E69782D696E7374616E7469617465290A20206D6C6E6978206275696C64202020202020205B6F7074696F6E735D205B46494C45207C202D4520455850525D2E2E2E202020286C696B65206E69782D6275696C64290A20206D6C6E6978206576616C20202020202020205B6F7074696F6E735D205B46494C45207C202D4520455850525D202020202020283D20696E7374616E7469617465202D2D6576616C202D2D737472696374290A20206D6C6E6978207061727365202020202020205B46494C45207C202D4520455850525D20202020202020202020202020202020283D20696E7374616E7469617465202D2D7061727365290A20206D6C6E697820656D69742D6D6C69722020205B2D2D6E6F2D6F70745D205B46494C45207C202D4520455850525D20202020207072696E7420746865206E6978206469616C6563742049520A20206D6C6E69782072756E2D6D6C69722020202046494C452E6D6C6972205B2D4120415454525D202020202020202020202020206576616C75617465206E6978206469616C6563742049520A20206D6C6E69782073746F7265202020202020202D2D6164647C2D2D6164642D66697865647C2D2D7265616C6973657C2D2D71756572797C2D2D64756D707C2D2D726573746F72657C2D2D67637C2D2D64656C6574657C2D2D766572696679202E2E2E0A20206D6C6E697820686173682020202020202020706174687C66696C657C2D2D746F2D6261736533327C2D2D746F2D6261736531367C2D2D746F2D737269205B2D2D7479706520414C474F5D205B2D2D7372697C2D2D6261736533325D202E2E2E0A20206D6C6E69782064657269766174696F6E202073686F77204452562E2E2E0A0A436F6D6D6F6E206F7074696F6E733A0A20202D41204154545220202D2D617267204E414D45204558505220202D2D617267737472204E414D452053545220202D49205041544820202D2D73686F772D74726163650A20202D2D73746F72652D646972204449522020206C6F676963616C2073746F7265206469726563746F7279202864656661756C74202F6E69782F73746F72652C206F7220244E49585F53544F52455F444952290A20202D2D73746F726520524F4F54202020202020706879736963616C20726F6F74206F662061206368726F6F742073746F726520286C6F63616C3F726F6F743D524F4F54292C206F722064756D6D793A2F2F0A20202D2D726561646F6E6C792D6D6F6465202020636F6D707574652073746F726520706174687320776974686F75742077726974696E670A20202D2D65787472612D6578706572696D656E74616C2D666561747572657320706970652D6F70657261746F72737C70617273652D746F6D6C2D74696D657374616D70730A0A5768656E20696E766F6B6564206173206E69782D696E7374616E74696174652C206E69782D6275696C642C206E69782D73746F7265206F72206E69782D686173682C206D6C6E69780A62656861766573206C696B652074686520636F72726573706F6E64696E67204E697820636F6D6D616E642E2020496E766F6B6564206173206E697820697420697320746865206E697820636F6D6D616E643A0A20206E6978206275696C647C6576616C7C72756E2052454623415454522C206E69782070726F66696C65206164647C6C6973747C72656D6F76652052454623415454522C206E69782064657269766174696F6E7C686173687C73746F72650A">
-memref.global "private" constant @to_hoff : memref<23xi32> = dense<[0, 54, 55, 62, 137, 206, 290, 366, 443, 519, 619, 717, 749, 750, 766, 835, 919, 1002, 1058, 1127, 1128, 1201, 1284]>
-memref.global "private" constant @to_hlen : memref<23xi32> = dense<[54, 1, 7, 75, 69, 84, 76, 77, 76, 100, 98, 32, 1, 16, 69, 84, 83, 56, 69, 1, 73, 83, 95]>
 memref.global "private" constant @to_esc : memref<512xi8> = dense<"0x00000100020003000400050006000700080009005C6E0B000C000D000E000F0010001100120013001400150016001700180019001A001B001C001D001E001F00200021005C2223005C24250026002700280029002A002B002C002D002E002F0030003100320033003400350036003700380039003A003B003C003D003E003F0040004100420043004400450046004700480049004A004B004C004D004E004F0050005100520053005400550056005700580059005A005B005C5C5D005E005F0060006100620063006400650066006700680069006A006B006C006D006E006F0070007100720073007400750076007700780079007A007B007C007D007E007F0080008100820083008400850086008700880089008A008B008C008D008E008F0090009100920093009400950096009700980099009A009B009C009D009E009F00A000A100A200A300A400A500A600A700A800A900AA00AB00AC00AD00AE00AF00B000B100B200B300B400B500B600B700B800B900BA00BB00BC00BD00BE00BF00C000C100C200C300C400C500C600C700C800C900CA00CB00CC00CD00CE00CF00D000D100D200D300D400D500D600D700D800D900DA00DB00DC00DD00DE00DF00E000E100E200E300E400E500E600E700E800E900EA00EB00EC00ED00EE00EF00F000F100F200F300F400F500F600F700F800F900FA00FB00FC00FD00FE00FF00">
 memref.global "private" constant @to_esclen : memref<256xi8> = dense<"0x01010101010101010101020101010101010101010101010101010101010101010101020101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010201010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101">
 memref.global "private" constant @to_blob : memref<76xi8> = dense<"0x6578706F7274203B203D27270A6578706F7274205F617267733B205F617267733D272028696D706F7274203C6E69782F636C692E6E69783E29207B2061726773203D205B202222205D3B207D">
@@ -129,7 +128,9 @@ func.func @mlnix_ts_nixpath(%p: !llvm.ptr, %n: i64, %recs: !llvm.ptr, %cap: i64)
   %v14 = arith.index_cast %v8#1 : index to i64
   %v16 = arith.subi %v15, %v14 : i64
   %v17 = arith.cmpi ult, %cap, %v14 : i64
-  %v18 = func.call @to_desc(%recs, %cap) : (!llvm.ptr, i64) -> !d
+  %c4 = arith.constant 4 : i64
+  %cells = arith.muli %cap, %c4 : i64
+  %v18 = func.call @to_desc(%recs, %cells) : (!llvm.ptr, i64) -> !d
   %v19 = builtin.unrealized_conversion_cast %v18 : !d to !m64
   %v20 = scf.if %v17 -> i64 {
     scf.yield %v16 : i64
@@ -175,37 +176,23 @@ func.func @mlnix_ts_nixpath(%p: !llvm.ptr, %n: i64, %recs: !llvm.ptr, %cap: i64)
 }
 
 func.func @mlnix_ts_help(%into: !llvm.ptr, %cap: i64) -> i64 {
-  %v7 = arith.constant 23 : index
-  %v17 = arith.constant -2 : i64
-  %v1 = memref.get_global @to_help : memref<1379xi8>
-  %v2 = trikeshed.text %v1 : memref<1379xi8> -> !b
-  %v3 = memref.get_global @to_hoff : memref<23xi32>
-  %v4 = trikeshed.text %v3 : memref<23xi32> -> !s32
-  %v5 = memref.get_global @to_hlen : memref<23xi32>
-  %v6 = trikeshed.text %v5 : memref<23xi32> -> !s32
-  %v8, %v9 = trikeshed.combineAll %v7 : !b, !sp {
-  ^bb0(%k: index):
-    %v10 = trikeshed.at %v4[%k] : !s32, index -> i32
-    %v11 = trikeshed.at %v6[%k] : !s32, index -> i32
-    %v12 = arith.index_cast %v10 : i32 to index
-    %v13 = arith.index_cast %v11 : i32 to index
-    %v14 = trikeshed.slice %v2[%v12, %v13] : !b -> !b
-    trikeshed.yield %v14 : !b
-  }
-  %v15 = trikeshed.size %v8 : !b
-  %v16 = arith.index_cast %v15 : index to i64
-  %v18 = arith.subi %v17, %v16 : i64
-  %v19 = arith.cmpi ult, %cap, %v16 : i64
-  %v20 = scf.if %v19 -> i64 {
-    scf.yield %v18 : i64
+  %m2 = arith.constant -2 : i64
+  %g = memref.get_global @to_help : memref<1379xi8>
+  %t = trikeshed.text %g : memref<1379xi8> -> !b
+  %sz = trikeshed.size %t : !b
+  %need = arith.index_cast %sz : index to i64
+  %neg = arith.subi %m2, %need : i64
+  %short = arith.cmpi ult, %cap, %need : i64
+  %r = scf.if %short -> i64 {
+    scf.yield %neg : i64
   } else {
-  %v21 = func.call @to_desc(%into, %cap) : (!llvm.ptr, i64) -> !d
-    %v22 = builtin.unrealized_conversion_cast %v21 : !d to !m
-    %v23 = trikeshed.drain %v8, %v22 : !b, !m -> index
-    %v24 = arith.index_cast %v23 : index to i64
-    scf.yield %v24 : i64
+    %d = func.call @to_desc(%into, %cap) : (!llvm.ptr, i64) -> !d
+    %o = builtin.unrealized_conversion_cast %d : !d to !m
+    %w = trikeshed.drain %t, %o : !b, !m -> index
+    %wi = arith.index_cast %w : index to i64
+    scf.yield %wi : i64
   }
-  return %v20 : i64
+  return %r : i64
 }
 
 func.func @mlnix_ts_nixlist(%wins: !llvm.ptr, %n: i64, %into: !llvm.ptr, %cap: i64) -> i64 {
@@ -273,12 +260,11 @@ func.func @mlnix_ts_nixlist(%wins: !llvm.ptr, %n: i64, %into: !llvm.ptr, %cap: i
       %v61 = arith.index_castui %v60 : i8 to index
       %v62 = arith.cmpi eq, %v60, %v43 : i8
       %v63 = arith.addi %u, %v41 : index
-      %v64 = arith.cmpi ult, %v63, %v56 : index
+      // the byte after a '$' (clamped: the last '$' reads itself, which is not '{')
       %v65 = arith.minsi %v63, %v57 : index
       %v66 = trikeshed.at %v55[%v65] : !b, index -> i8
       %v67 = arith.cmpi eq, %v66, %v44 : i8
-      %v68 = arith.andi %v64, %v67 : i1
-      %v69 = arith.andi %v62, %v68 : i1
+      %v69 = arith.andi %v62, %v67 : i1
       %v70 = trikeshed.at %v14[%v61] : !b, index -> i8
       %v71 = arith.index_castui %v70 : i8 to index
       %v72 = arith.select %v69, %v42, %v41 : index
