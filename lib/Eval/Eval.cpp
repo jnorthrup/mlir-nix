@@ -2758,44 +2758,18 @@ cp::Text EvalState::findFile(Value &searchPath, std::string_view name, PosPtr po
 // Error formatting
 //===----------------------------------------------------------------------===//
 
-static cp::Text chomp(cp::Text s) {
-  while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\n' || s.back() == '\r')) s.pop_back();
-  return s;
-}
+// The position line and the code lines around it are lowered/nixeval/ErrorText.mlir's (one combine and one combineAll,
+// drained once): "\n" indent "at file:line:col:", then, `with` the source, lines line-1..line+1 chomped and the caret.
+extern "C" int64_t nixev_et_pos(const char *file, uint64_t fn, uint64_t line, uint64_t col, uint64_t indent, uint64_t with,
+                                const char *text, uint64_t tn, char *into, uint64_t cap);
+extern "C" int64_t nixev_et_indent(const char *msg, uint64_t n, char *into, uint64_t cap);
 
-static void appendCodeLines(cp::Text &out, std::string_view text, unsigned line, unsigned col,
-                            unsigned indent = 7) {
-  composite::MutableSeries<std::string_view> lines; // windows on `text`, which outlives them
-  size_t start = 0;
-  while (true) {
-    size_t nl = text.find('\n', start);
-    if (nl == std::string_view::npos) {
-      lines.append(text.substr(start));
-      break;
-    }
-    lines.append(text.substr(start, nl - start));
-    start = nl + 1;
-  }
-  auto fmtLine = [&](unsigned n) {
-    char buf[16];
-    snprintf(buf, sizeof buf, "%5u", n);
-    cp::Text l;
-    l.put(indent + 1, ' ');
-    l.put(buf).put("| ").put(lines[n - 1]);
-    return chomp(cp::mv(l));
-  };
-  if (line >= 2 && line - 1 <= lines.size()) out.put('\n').put(fmtLine(line - 1));
-  if (line >= 1 && line <= lines.size()) {
-    out.put('\n').put(fmtLine(line));
-    if (col > 0) {
-      out.put('\n');
-      out.put(indent, ' ');
-      out.put("      |");
-      out.put(col, ' ');
-      out.put('^');
-    }
-  }
-  if (line + 1 <= lines.size()) out.put('\n').put(fmtLine(line + 1));
+static void putPos(cp::Text &out, std::string_view file, unsigned line, unsigned col, unsigned indent, bool with,
+                   std::string_view text) {
+  size_t at = out.size(), room = file.size() + text.size() + 5 * size_t(indent) + col + 128; // always enough
+  out.resize(at + room);
+  out.truncate(at + size_t(nixev_et_pos(file.data(), file.size(), line, col, indent, with, text.data(), text.size(),
+                                        out.begin() + at, room)));
 }
 
 static cp::Text sourceFor(EvalState *state, std::string_view file) {
@@ -2812,9 +2786,8 @@ static cp::Text sourceFor(EvalState *state, std::string_view file) {
 }
 
 static void appendPos(cp::Text &out, EvalState *state, std::string_view file, unsigned line, unsigned col) {
-  out.put("\n       at ").put(file).put(':').putUnsigned(line).put(':').putUnsigned(col).put(':');
   cp::Text text = sourceFor(state, file);
-  if (!text.empty()) appendCodeLines(out, text, line, col);
+  putPos(out, file, line, col, 7, !text.empty(), text);
 }
 
 cp::Text formatError(EvalState *state, const EvalError &e) {
@@ -2833,12 +2806,9 @@ cp::Text formatError(EvalState *state, const EvalError &e) {
     }
   }
   const cp::Text &msg = e.msg;
-  // Indent continuation lines of the message.
-  cp::Text ind;
-  for (size_t i = 0; i < msg.size(); i++) {
-    ind += msg[i];
-    if (msg[i] == '\n') ind += "       ";
-  }
+  cp::Text ind; // the message, its continuation lines indented (ErrorText.mlir)
+  ind.resize(8 * msg.size());
+  ind.truncate(size_t(nixev_et_indent(msg.data(), msg.size(), ind.begin(), ind.size())));
   cp::Text res = out.empty() ? cp::cat("error: ", ind) : cp::cat("error:", out, "\n       error: ", ind);
   if (auto f = nd::decodePos(e.pos)) appendPos(res, state, f->file, f->line, f->col);
   return res;
@@ -2847,12 +2817,9 @@ cp::Text formatError(EvalState *state, const EvalError &e) {
 cp::Text formatParseError(const nixfe::ParseError &e, const char *kind) {
   unsigned indent = strlen(kind) + 2;
   cp::Text res = cp::cat(kind, ": ", e.what());
-  if (e.pos.valid() && e.origin) {
-    res.put('\n');
-    res.put(indent, ' ');
-    res.put("at ").put(e.origin->name).put(':').putUnsigned(e.pos.line).put(':').putUnsigned(e.pos.col).put(':');
-    if (e.origin->text) appendCodeLines(res, e.origin->text->view(), e.pos.line, e.pos.col, indent);
-  }
+  if (e.pos.valid() && e.origin)
+    putPos(res, e.origin->name, e.pos.line, e.pos.col, indent, e.origin->text,
+           e.origin->text ? e.origin->text->view() : std::string_view());
   return res;
 }
 

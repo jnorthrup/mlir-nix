@@ -371,7 +371,9 @@ extern "C" int64_t nixfe_ts_strparts(void *ctx);
 extern "C" int64_t nixfe_ts_strip(const uint64_t *recs, uint64_t n, char *out, uint64_t cap, uint64_t *wins);
 extern "C" int64_t nixfe_ts_path_kind(uint64_t home, const char *lit, uint64_t n);
 extern "C" int64_t nixfe_ts_path_msg(int64_t kind, const char *lit, uint64_t n, char *into, uint64_t cap);
-extern "C" int64_t nixfe_ts_path_home(const char *home, uint64_t hn, const char *lit, uint64_t n, char *into, uint64_t cap);
+extern "C" int64_t nixfe_ts_path_text(int64_t kind, const char *home, uint64_t hn, const char *base, uint64_t bn,
+                                      const char *lit, uint64_t n, char *into, uint64_t cap);
+extern "C" int64_t nixfe_ts_partloop(void *ctx);
 
 struct Parser {
   Parser(Mode m, Origin *o, const ParseOptions &po, confix::Bands *bands,
@@ -1935,11 +1937,18 @@ struct Parser {
     return Comp{Name(), std::move(e)};
   }
 
-  /// string_parts after an opening '"'; stops before the closing '"'.  The loop is nixfe_ts_strparts
-  /// (lowered/nixfe/TextParts.mlir); the grammar actions are the nixfe_sp_* callbacks below, on a StrParts.
-  struct StrParts { Parser *p; llvm::SmallVector<Node, 4> parts; Name single; };
+  /// string_parts after an opening '"' (mode 0; stops before the closing '"'), an indented string's parts (1) or a
+  /// path's (2).  The loops are nixfe_ts_strparts / nixfe_ts_partloop (lowered/nixfe/TextParts.mlir); the grammar
+  /// actions are the nixfe_sp_* callbacks below, on a StrParts.
+  struct StrParts {
+    Parser *p;
+    int mode;
+    llvm::SmallVector<Node, 4> parts;
+    Name single;
+    composite::MutableSeries<std::pair<Pos, std::variant<Node, Token>>> ind;
+  };
   Node parseStringParts(Pos pos) {
-    StrParts c{this, {}, {}};
+    StrParts c{this, 0};
     int64_t k = nixfe_ts_strparts(&c); // 0 the empty literal, 1 c.single, 2 the interpolation of c.parts
     return k == 2 ? concat(pos, true, c.parts) : strLit(k ? c.single : Name::of(""), pos);
   }
@@ -1973,46 +1982,19 @@ struct Parser {
     }
     case T_IND_STRING_OPEN: {
       take();
-      composite::MutableSeries<std::pair<Pos, std::variant<Node, Token>>> parts;
-      while (true) {
-        if (cur().t == T_IND_STR) {
-          Token tk = take();
-          parts.emplace(tk.pos, tk);
-        } else if (cur().t == T_DOLLAR_CURLY) {
-          Pos p = take().pos;
-          Node e = parseExpr();
-          expectChar('}');
-          parts.emplace(p, std::move(e));
-        } else {
-          break;
-        }
-      }
-      if (cur().t != T_IND_STRING_CLOSE) unexpected("end of an indented string");
-      take();
-      return stripIndentation(pos, parts);
+      StrParts c{this, 1};
+      nixfe_ts_partloop(&c);
+      return stripIndentation(pos, c.ind);
     }
     case T_PATH:
     case T_HPATH: {
       Token pt = take();
       Node start = makePath(pt);
       if (cur().t == T_PATH_END) { take(); return start; }
-      llvm::SmallVector<Node, 4> parts;
-      parts.push_back(std::move(start));
-      while (true) {
-        if (cur().t == T_STR) {
-          Token s = take();
-          parts.push_back(strLit(nameOf(s), Pos{}));
-        } else if (cur().t == T_DOLLAR_CURLY) {
-          take();
-          parts.push_back(parseExpr());
-          expectChar('}');
-        } else {
-          break;
-        }
-      }
-      if (cur().t != T_PATH_END) unexpected();
-      take();
-      return concat(pos, false, parts);
+      StrParts c{this, 2};
+      c.parts.push_back(std::move(start));
+      nixfe_ts_partloop(&c);
+      return concat(pos, false, c.parts);
     }
     case T_SPATH: {
       Name s = nameOf(take());
@@ -2100,18 +2082,10 @@ struct Parser {
       diagnose(lint, kind == 3 ? "lint-short-path-literals" : "lint-absolute-path-literals", composite::mv(msg), t.pos);
     }
     static thread_local composite::Text path; // the literal's canonical text, written here and copied once (into the arena, or a node)
-    path.clear();
-    Pos pos = t.pos;
-    if (kind == 1) {
-      path.resize(opts.home.size() + lit.size());
-      path.truncate(uint32_t(nixfe_ts_path_home(opts.home.data(), opts.home.size(), lit.data(), lit.size(), path.begin(), path.size())));
-      pos = Pos{};
-    } else {
-      composite::Chars litChars = composite::chars(lit.data(), uint32_t(lit.size()));
-      if (kind == 2) canonPath(path, litChars);
-      else canonPath(path, composite::chars(origin->baseDir.data(), uint32_t(origin->baseDir.size())), litChars);
-      if (lit.size() > 1 && lit.back() == '/') path.put('/');
-    }
+    path.resize(opts.home.size() + origin->baseDir.size() + lit.size() + 2);
+    path.truncate(uint32_t(nixfe_ts_path_text(kind, opts.home.data(), opts.home.size(), origin->baseDir.data(), origin->baseDir.size(),
+                                              lit.data(), lit.size(), path.begin(), path.size())));
+    Pos pos = kind == 1 ? Pos{} : t.pos;
     if (mode == Mode::Show) return text(path.clone(), K_EXPR, pos);
     return mk(K_EXPR, pos, mode == Mode::Gen ? Value(nd::PathOp::create(b, noLoc(), composite::SeriesType::get(b.getContext(), b.getIntegerType(8)), Name::persist(llvm::StringRef(path.data(), path.size())))) : Value());
   }
@@ -2146,21 +2120,31 @@ struct Parser {
 
 /// parseStringParts' grammar actions, called back by nixfe_ts_strparts at the points the loop did them.
 static Parser::StrParts &sp(void *c) { return *static_cast<Parser::StrParts *>(c); }
-extern "C" int64_t nixfe_sp_peek(void *c) { // 0 T_STR, 1 '${', 2 '"', 3 anything else
+extern "C" int64_t nixfe_sp_peek(void *c) { // 0 the text token (T_IND_STR in an indented string), 1 '${', 2 '"', 3 other
   const Token &t = sp(c).p->cur();
-  return t.t == T_STR ? 0 : t.t == T_DOLLAR_CURLY ? 1 : Parser::isChar(t, '"') ? 2 : 3;
+  return t.t == (sp(c).mode == 1 ? T_IND_STR : T_STR) ? 0 : t.t == T_DOLLAR_CURLY ? 1 : Parser::isChar(t, '"') ? 2 : 3;
 }
 extern "C" void nixfe_sp_str(void *c, int64_t push) {
-  sp(c).single = sp(c).p->nameOf(sp(c).p->take());
+  Token t = sp(c).p->take();
+  if (sp(c).mode == 1) return void(sp(c).ind.emplace(t.pos, t));
+  sp(c).single = sp(c).p->nameOf(t);
   if (push) sp(c).parts.push_back(sp(c).p->strLit(sp(c).single, Pos{}));
 }
 extern "C" void nixfe_sp_push(void *c) { sp(c).parts.push_back(sp(c).p->strLit(sp(c).single, Pos{})); }
 extern "C" void nixfe_sp_expr(void *c) {
-  sp(c).p->take();
-  sp(c).parts.push_back(sp(c).p->parseExpr());
+  Pos at = sp(c).p->take().pos;
+  Node e = sp(c).p->parseExpr();
   sp(c).p->expectChar('}');
+  if (sp(c).mode == 1) sp(c).ind.emplace(at, std::move(e));
+  else sp(c).parts.push_back(std::move(e));
 }
-extern "C" void nixfe_sp_close(void *c) { if (!sp(c).p->atChar('"')) sp(c).p->unexpected("'\"'"); }
+extern "C" void nixfe_sp_close(void *c) {
+  Parser &p = *sp(c).p;
+  if (sp(c).mode == 0 && !p.atChar('"')) p.unexpected("'\"'");
+  if (sp(c).mode == 1 && p.cur().t != T_IND_STRING_CLOSE) p.unexpected("end of an indented string");
+  if (sp(c).mode == 2 && p.cur().t != T_PATH_END) p.unexpected();
+  if (sp(c).mode) p.take();
+}
 
 } // namespace
 
