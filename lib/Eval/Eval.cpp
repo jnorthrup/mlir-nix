@@ -221,7 +221,9 @@ void EvalState::concatLists(Value &l, Value &r, Value &out) {
     return put(l.list.elems, e);
   }
   if (n < 8) {
-    mkList(out, l.items() + r.items());
+    auto a = l.items(), b = r.items();  // before out is written: out may be l or r
+    mkList(out, n);
+    cp::drain(b, cp::drain(a, out.list.elems));
     return;
   }
   // a new buffer with room for as many cells again, on the side the smaller operand came from (where a fold adds)

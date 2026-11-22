@@ -2,6 +2,7 @@
 // keeps the store's reads and writes (queryPathInfo's file, readDerivation, isValidPath, the deletions) as callbacks and
 // marshals its sorted sets into window arrays; the algorithms are here:
 //   nixstore_ts_union        drvReferences / writeDerivation's references: two sorted sets merged (sorted + where)
+//   nixstore_ts_sortwins     NarFraming.mlir's walk: a directory's names (windows) as their indices in byte order (sorted)
 //   nixstore_ts_xxh3         XXH3-64 (seed 0, the default secret), LLVM's llvm::xxh3_64bits bit for bit
 //   nixstore_ts_fingerprint  contentFingerprint: a fold of the derivation's tokens through xxh3 and the word mix
 //   nixstore_ts_samecontent  sameContent: the two derivations' token streams walked in step
@@ -169,6 +170,35 @@ func.func @nixstore_ts_union(%a: !llvm.ptr, %na: i64, %b: !llvm.ptr, %nb: i64, %
   }
   %m64 = arith.index_cast %m : index to i64
   return %m64 : i64
+}
+
+// A directory's names in byte order (NarWriter::dump's walk): order[j], a word, is the index of the j-th of the n windows at
+// wins when the windows are put in the byte order of their text (trikeshed.sorted over the indices).  order has room for n words.
+func.func @nixstore_ts_sortwins(%wins: !llvm.ptr, %n: i64, %order: !llvm.ptr) {
+  %ni = arith.index_cast %n : i64 to index
+  %idx = trikeshed.series %ni : !s64 {
+  ^bb0(%i: index):
+    %i64 = arith.index_cast %i : index to i64
+    trikeshed.yield %i64 : i64
+  }
+  %srt = trikeshed.sorted %idx : !s64 -> !s64 by {
+  ^bb0(%x: i64, %y: i64):
+    %xp, %xn = func.call @sg_win(%wins, %x) : (!llvm.ptr, i64) -> (!llvm.ptr, i64)
+    %yp, %yn = func.call @sg_win(%wins, %y) : (!llvm.ptr, i64) -> (!llvm.ptr, i64)
+    %c = func.call @sg_cmp(%xp, %xn, %yp, %yn) : (!llvm.ptr, i64, !llvm.ptr, i64) -> i32
+    trikeshed.yield %c : i32
+  }
+  %z0 = arith.constant 0 : index
+  %s1 = arith.constant 1 : index
+  %c8 = arith.constant 8 : i64
+  scf.for %j = %z0 to %ni step %s1 {
+    %e = trikeshed.at %srt[%j] : !s64, index -> i64
+    %j64 = arith.index_cast %j : index to i64
+    %off = arith.muli %j64, %c8 : i64
+    %op = llvm.getelementptr %order[%off] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+    llvm.store %e, %op : i64, !llvm.ptr
+  }
+  return
 }
 
 //===----------------------------------------------------------------------===//

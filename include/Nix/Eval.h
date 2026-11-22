@@ -498,7 +498,7 @@ struct EvalState {
   /// `l ++ r` into out: into the room of r's or l's buffer when the other side fits there (ListExtent), else a new buffer, with
   /// room on the smaller side when the result has 8 or more cells.
   void concatLists(Value &l, Value &r, Value &out);
-  /// A list drained from a series of Value * (a Series, a vector, a combine): the one fill loop, the α of the caller inlined.
+  /// A list drained from a series of Value * (a Series, a vector): the one fill loop, the α of the caller inlined.
   template <class S> requires requires(const S &s, Value **o) { s.size(); cp::drain(s, o); }
   void mkList(Value &v, const S &s) {
     mkList(v, size_t(s.size()));

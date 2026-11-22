@@ -270,6 +270,10 @@ mlnix_lower_trikeshed(NixFrontend lowered/nixfrontend/ConfixScan.mlir ConfixScan
 # calls nixfe_lex_next (the character classes as tables, the longest-match rules / keyword / number / position called
 # back).  Same cf-loop lifting as the Confix scan beside it.
 mlnix_lower_trikeshed(NixFrontend lowered/nixfrontend/LexScan.mlir LexScan --lift-cf-to-scf --convert-ub-to-llvm)
+# confix::lexBands' band layering (Parser.cpp's token switch and Confix.h's Layers are gone; the bridge lexes the tokens and
+# calls nixfe_lb_layers, which adopts the rows): the token actions are two constant tables, and each band close drains its
+# pending slice (trikeshed.slice + drain).  NixFrontend owns it: mlnix-parse links NixFrontend alone.
+mlnix_lower_trikeshed(NixFrontend lowered/nixfe/BandLayers.mlir BandLayers)
 
 # The Nix sources the evaluator ships (lib/Corepkgs/*.nix: flakes) embedded as <nix/NAME>.
 file(GLOB COREPKGS_NIX CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/Corepkgs/*.nix)
