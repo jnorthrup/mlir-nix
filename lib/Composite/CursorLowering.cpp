@@ -41,8 +41,9 @@
 // is an affine.apply once --expand-strided-metadata has run: run --lower-affine before --finalize-memref-to-llvm.  Casts the
 // conversion leaves between a cursor and its buffers are reconciled at the end, so a caller that built its cursor from
 // buffers ends up passing the buffers.  A dialect below TrikeShed (confix: its index and its Columns facet) adds its
-// patterns through CursorLoweringInterface (Composite/CursorLowering.h).  Not lowered: groupBy, pivot, keyedJoin and the
-// other cursor combinators, joins, contains, zipnext, the lazy (unmaterialised) form of a series, and series whose
+// patterns through CursorLoweringInterface (Composite/CursorLowering.h).  groupBy and keyedJoin are rewritten first into
+// sorted, where, project, bisect and series (GroupBy.kt and KeyedJoin.kt, below).  Not lowered: pivot and the other cursor
+// combinators, joins, contains, zipnext, the lazy (unmaterialised) form of a series, and series whose
 // elements are neither builtin types nor pairs of two equal scalar halves.  trikeshed-route-twins (TwinRouting.cpp) runs
 // before this pass where a series of pairs should be laid out by how it is read, not by its width alone.
 //
@@ -957,6 +958,90 @@ void rewriteViews(func::FuncOp f, const TypeConverter &types) {
   }
 }
 
+//===-- GroupBy.kt and KeyedJoin.kt -------------------------------------------------------------------------------===//
+// Before the conversion, groupBy and keyedJoin are rewritten into the ops they decompose into, the op's order region
+// cloned wherever the decomposition compares two elements (TrikeShed.td states the laws):
+//   groupBy(xs) [ordered] by o   ids = 0 ..< size(xs); perm = sorted(ids) by o(xs[a], xs[b]), stable; the runs of equal
+//                                elements start where o(xs[perm[p - 1]], xs[perm[p]]) != 0 (where), and runs = perm[starts]
+//                                holds each run's first index, in o's order; the exemplars are runs (ordered), else runs
+//                                sorted, first appearance; codes = alpha(ids) {i -> the run of i (bisect by o), then, but
+//                                ordered, that run's first index among the exemplars (bisect)}
+//   keyedJoin(l, r) by o         series(size(l)) {i -> j(lo, hi - lo)}, lo and hi the lower and upper bound of l[i] in r: a
+//                                bisect each, by an order that is never 0 (o < 0, then o <= 0, sorts before)
+
+/// A `Op` made of `args`, its region one block taking `types` that yields what `body` makes of them.
+template <class Op, class... Args>
+Op withBody(OpBuilder &b, Location loc, TypeRange types, function_ref<Value(ValueRange)> body, Args &&...args) {
+  auto op = Op::create(b, loc, std::forward<Args>(args)...);
+  OpBuilder::InsertionGuard guard(b);
+  Block *block = b.createBlock(&op->getRegion(0), {}, types, SmallVector<Location>(types.size(), loc));
+  YieldOp::create(b, loc, ValueRange{body(block->getArguments())});
+  return op;
+}
+
+/// o(x, y): the order region cloned here, or the signed order of two integers.
+Value orderOf(OpBuilder &b, Location loc, Region &order, Value x, Value y) {
+  if (order.empty()) return threeWay(b, loc, x, y);
+  IRMapping map;
+  map.map(order.getArguments(), ValueRange{x, y});
+  for (Operation &op : order.front().without_terminator()) b.clone(op, map);
+  return map.lookupOrDefault(cast<YieldOp>(order.front().getTerminator()).getValues()[0]);
+}
+
+Value element(OpBuilder &b, Location loc, Value xs, Value i) {
+  return AtOp::create(b, loc, cast<SeriesType>(xs.getType()).getElement(), xs, i);
+}
+
+void expandGroupBy(GroupByOp op) {
+  OpBuilder b(op);
+  Location loc = op.getLoc();
+  Value xs = op.getSeries();
+  Type idx = b.getIndexType(), codes = op.getCodes().getType(), code = cast<SeriesType>(codes).getElement();
+  auto by = [&](Value i, Value j) { return orderOf(b, loc, op.getOrder(), element(b, loc, xs, i), element(b, loc, xs, j)); };
+  Value ids = withBody<SeriesOp>(b, loc, idx, [&](ValueRange k) -> Value { return arith::IndexCastOp::create(b, loc, code, k[0]); },
+                                 codes, SizeOp::create(b, loc, idx, xs));
+  Value perm = withBody<SortedOp>(b, loc, {code, code}, [&](ValueRange a) { return by(a[0], a[1]); }, codes, ids);
+  Value starts = withBody<WhereOp>(b, loc, code, [&](ValueRange p) -> Value {
+    Value zero = cInt(b, loc, code, 0);
+    Value prev = arith::MaxSIOp::create(b, loc, arith::SubIOp::create(b, loc, p[0], cInt(b, loc, code, 1)), zero);
+    Value differs = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::ne, by(element(b, loc, perm, prev), element(b, loc, perm, p[0])),
+                                          cInt(b, loc, b.getI32Type(), 0));
+    return arith::OrIOp::create(b, loc, arith::CmpIOp::create(b, loc, arith::CmpIPredicate::eq, p[0], zero), differs);
+  }, codes, ids);
+  Value runs = ProjectOp::create(b, loc, codes, perm, starts);
+  Value exemplars = op.getOrdered() ? runs : SortedOp::create(b, loc, codes, runs).getResult();
+  Value coded = withBody<AlphaOp>(b, loc, code, [&](ValueRange i) -> Value {
+    Value k = withBody<BisectOp>(b, loc, {code, code}, [&](ValueRange a) { return by(a[0], a[1]); }, idx, runs, i[0]);
+    if (!op.getOrdered()) k = BisectOp::create(b, loc, idx, exemplars, element(b, loc, runs, k));
+    return arith::IndexCastOp::create(b, loc, code, k);
+  }, codes, ids);
+  op.getCodes().replaceAllUsesWith(coded);
+  op.getExemplars().replaceAllUsesWith(exemplars);
+  op.erase();
+}
+
+void expandKeyedJoin(KeyedJoinOp op) {
+  OpBuilder b(op);
+  Location loc = op.getLoc();
+  Value l = op.getLeft(), r = op.getRight();
+  Type idx = b.getIndexType(), pair = cast<SeriesType>(op.getMatches().getType()).getElement(), half = pairHalf(pair);
+  Type le = cast<SeriesType>(l.getType()).getElement(), re = cast<SeriesType>(r.getType()).getElement(), i32 = b.getI32Type();
+  Value matches = withBody<SeriesOp>(b, loc, idx, [&](ValueRange i) -> Value {
+    Value key = element(b, loc, l, i[0]);
+    auto bound = [&](arith::CmpIPredicate before) -> Value {
+      Value at = withBody<BisectOp>(b, loc, {re, le}, [&](ValueRange a) -> Value {
+        Value c = arith::CmpIOp::create(b, loc, before, orderOf(b, loc, op.getOrder(), a[0], a[1]), cInt(b, loc, i32, 0));
+        return arith::SelectOp::create(b, loc, c, cInt(b, loc, i32, -1), cInt(b, loc, i32, 1));
+      }, idx, r, key);
+      return arith::IndexCastOp::create(b, loc, half, arith::SubIOp::create(b, loc, cIndex(b, loc, -1), at));
+    };
+    Value lo = bound(arith::CmpIPredicate::slt), hi = bound(arith::CmpIPredicate::sle);
+    return JOp::create(b, loc, pair, lo, arith::SubIOp::create(b, loc, hi, lo));
+  }, op.getMatches().getType(), SizeOp::create(b, loc, idx, l));
+  op.getMatches().replaceAllUsesWith(matches);
+  op.erase();
+}
+
 struct DrainLowering : Lowering<DrainOp> {
   using Lowering::Lowering;
   LogicalResult matchAndRewrite(DrainOp op, OpAdaptor a, ConversionPatternRewriter &rw) const override {
@@ -1003,6 +1088,10 @@ struct LowerCursors : PassWrapper<LowerCursors, OperationPass<ModuleOp>> {
     target.addDynamicallyLegalOp<func::ReturnOp, func::CallOp>([&](Operation *op) { return types.isLegal(op); });
 
     // combine and combineAll first, by Combine.kt's laws: what is left of them are the drains of their parts
+    // groupBy and keyedJoin first, into the ops they decompose into (GroupBy.kt and KeyedJoin.kt, above)
+    SmallVector<Operation *> joins;
+    getOperation().walk([&](Operation *op) { if (isa<GroupByOp, KeyedJoinOp>(op)) joins.push_back(op); });
+    for (Operation *op : joins) isa<GroupByOp>(op) ? expandGroupBy(cast<GroupByOp>(op)) : expandKeyedJoin(cast<KeyedJoinOp>(op));
     getOperation().walk([&](func::FuncOp f) { rewriteViews(f, types); });
 
     RewritePatternSet patterns(ctx);
