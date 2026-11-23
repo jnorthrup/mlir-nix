@@ -283,8 +283,9 @@ composite::Text Store::writeDerivation(Derivation &&drv) {
   for (GWin r : drvRefs(drv)) type.put(':').put(r.p, size_t(r.n));
   composite::Text path = makeStorePath(settings.storeDir, type, settings.readOnly ? drv.hashUnparsed(false) : hashString(HashAlgo::SHA256, text),
                                        drv.name + ".drv");
-  const Derivation &kept = keepDerivation(path, std::move(drv), false).drv; // a path names its text: the first is kept, never rewritten
-  if (!settings.readOnly) addTextToStore(kept.name + ".drv", text, drvReferences(kept));
+  // The text first: a kept derivation's path is valid (isValidPath), and addTextToStore writes no valid path.
+  if (!settings.readOnly) addTextToStore(drv.name + ".drv", text, drvReferences(drv));
+  keepDerivation(path, std::move(drv), false); // a path names its text: the first is kept, never rewritten
   return path;
 }
 

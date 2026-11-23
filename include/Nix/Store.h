@@ -351,7 +351,6 @@ struct Store {
   ~Store(); // waits for the hasher's jobs, which read the derivation cache
   const composite::Text &storeDir() const { return settings.storeDir; }
   const StoreSettings &config() const { return settings; }
-  bool readOnly() const { return settings.readOnly; }
   /// Writes while a fetcher stores its download: Nix's fetchers write even under --readonly-mode, only dummy:// refuses.
   struct FetchWrites {
     Store &s;
