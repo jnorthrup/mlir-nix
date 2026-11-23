@@ -114,14 +114,23 @@ set(MLNIX_TRIKESHED_PIPELINE
   --bufferization-lower-deallocations --convert-scf-to-cf --expand-strided-metadata --lower-affine
   --finalize-memref-to-llvm --convert-scf-to-cf --convert-arith-to-llvm --convert-index-to-llvm
   --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts)
+# A cross build cannot run the mlnix-opt it makes: MLNIX_HOST_OPT names one built for the build machine from the same
+# source (utils/mlnixos-darwin: Linux building for macOS); empty, the default, is this build's own.  The choice is made
+# inside the function, because tools/CMakeLists.txt calls it from another directory scope.
+set(MLNIX_HOST_OPT "" CACHE FILEPATH "mlnix-opt that runs on the build machine (cross builds); empty = this build's")
 function(mlnix_lower_trikeshed target mlir stem)
+  if(MLNIX_HOST_OPT)
+    set(lower_opt ${MLNIX_HOST_OPT})
+  else()
+    set(lower_opt $<TARGET_FILE:mlnix-opt>)
+  endif()
   set(src ${PROJECT_SOURCE_DIR}/${mlir})
   set(cur ${MLNIX_LOWERED_DIR}/${stem}.cursors.mlir)
   set(low ${MLNIX_LOWERED_DIR}/${stem}.lowered.mlir)
   set(ll ${MLNIX_LOWERED_DIR}/${stem}.ll)
   set(o ${MLNIX_LOWERED_DIR}/${stem}.o)
   add_custom_command(OUTPUT ${cur}
-    COMMAND $<TARGET_FILE:mlnix-opt> ${src} --trikeshed-lower-cursors -o ${cur}
+    COMMAND ${lower_opt} ${src} --trikeshed-lower-cursors -o ${cur}
     DEPENDS ${src} mlnix-opt COMMENT "trikeshed-lower-cursors ${mlir}")
   add_custom_command(OUTPUT ${low}
     COMMAND ${MLNIX_MLIR_OPT} ${cur} ${ARGN} ${MLNIX_TRIKESHED_PIPELINE} -o ${low}

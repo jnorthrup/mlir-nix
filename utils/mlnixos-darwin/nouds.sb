@@ -1,0 +1,5 @@
+(version 1)
+; Like the chroot for name resolution: everything allowed (Mach services too), except the mDNSResponder socket,
+; which a chrooted process cannot reach (it resolves /var/run/mDNSResponder inside the chroot).
+(allow default)
+(deny network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))

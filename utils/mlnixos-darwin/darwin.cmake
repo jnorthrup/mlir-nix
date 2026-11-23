@@ -1,0 +1,50 @@
+# CMake toolchain: Linux (Debian's LLVM 22) cross compiling for arm64 macOS, against the SDK sdk.sh unpacks.
+# clang-22 with -fuse-ld=lld links through ld64.lld, which ad-hoc signs arm64 Mach-O outputs; no Apple tool runs.
+#   cmake -DCMAKE_TOOLCHAIN_FILE=darwin.cmake ...      (DARWIN_SDK and DARWIN_MIN may override the defaults)
+set(CMAKE_SYSTEM_NAME Darwin)
+set(CMAKE_SYSTEM_PROCESSOR arm64)
+# The Darwin kernel version of the minimum macOS (22 = macOS 13).  CMake's Darwin platform module enables -rpath only
+# when it knows the version is past Darwin 8, so without this every @rpath library fails to configure.
+set(CMAKE_SYSTEM_VERSION 22.0.0)
+# CMake's Darwin-Initialize asks the HOST's `sw_vers -productVersion` for the macOS version; Linux has none, so the
+# version is empty and Darwin.cmake leaves the rpath flag unset ("Attempting to use @rpath without
+# CMAKE_SHARED_LIBRARY_RUNTIME_C_FLAG being set"; CMakeGenericSystem clears any value set here first).  A sw_vers shim
+# on PATH answers with the minimum macOS instead.
+set(_darwin_shim $ENV{HOME}/darwin-cross/shim)
+file(MAKE_DIRECTORY ${_darwin_shim})
+file(WRITE ${_darwin_shim}/sw_vers "#!/bin/sh\necho 13.0\n")
+file(CHMOD ${_darwin_shim}/sw_vers PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+if(NOT "$ENV{PATH}" MATCHES "darwin-cross/shim")
+  set(ENV{PATH} "${_darwin_shim}:$ENV{PATH}")
+endif()
+if(NOT DEFINED DARWIN_MIN)
+  set(DARWIN_MIN 13.0)
+endif()
+if(NOT DEFINED DARWIN_SDK)
+  set(DARWIN_SDK $ENV{HOME}/darwin-cross/sdk/MacOSX15.2.sdk)
+endif()
+set(L /usr/lib/llvm-22/bin)
+set(CMAKE_OSX_SYSROOT ${DARWIN_SDK} CACHE PATH "")
+set(CMAKE_OSX_ARCHITECTURES arm64 CACHE STRING "")
+set(CMAKE_OSX_DEPLOYMENT_TARGET ${DARWIN_MIN} CACHE STRING "")
+set(CMAKE_C_COMPILER ${L}/clang)
+set(CMAKE_CXX_COMPILER ${L}/clang++)
+set(CMAKE_ASM_COMPILER ${L}/clang)
+set(CMAKE_C_COMPILER_TARGET arm64-apple-macos${DARWIN_MIN})
+set(CMAKE_CXX_COMPILER_TARGET arm64-apple-macos${DARWIN_MIN})
+set(CMAKE_ASM_COMPILER_TARGET arm64-apple-macos${DARWIN_MIN})
+set(CMAKE_LINKER_TYPE LLD)
+set(CMAKE_AR ${L}/llvm-ar CACHE FILEPATH "")
+set(CMAKE_RANLIB ${L}/llvm-ranlib CACHE FILEPATH "")
+set(CMAKE_LIBTOOL ${L}/llvm-libtool-darwin CACHE FILEPATH "")
+set(CMAKE_INSTALL_NAME_TOOL ${L}/llvm-install-name-tool CACHE FILEPATH "")
+set(CMAKE_LIPO ${L}/llvm-lipo CACHE FILEPATH "")
+set(CMAKE_NM ${L}/llvm-nm CACHE FILEPATH "")
+set(CMAKE_OBJDUMP ${L}/llvm-objdump CACHE FILEPATH "")
+set(CMAKE_STRIP ${L}/llvm-strip CACHE FILEPATH "")
+# Libraries and headers only from the SDK (never the Linux host's /usr), programs only from the host.
+set(CMAKE_FIND_ROOT_PATH ${DARWIN_SDK})
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE BOTH)
