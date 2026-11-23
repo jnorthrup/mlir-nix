@@ -331,17 +331,15 @@ struct StoreSettings {
   composite::Text stateDir;                  // metadata
   bool readOnly = false;                 // compute paths only: dummy://, --readonly-mode, an evaluation that only evaluates
   bool dummy = false;                    // dummy://: nothing is ever written, not even by a fetcher
-  int maxJobs = 1;
   unsigned cores = 0;
   bool keepFailed = false;
-  bool verbose = false;
   composite::Text system;
   StoreSettings() = default;
   StoreSettings(StoreSettings &&) = default;
   StoreSettings &operator=(StoreSettings &&) = default;
   StoreSettings(const StoreSettings &o)
-      : storeDir(o.storeDir.clone()), realRoot(o.realRoot.clone()), stateDir(o.stateDir.clone()), readOnly(o.readOnly), dummy(o.dummy), maxJobs(o.maxJobs), cores(o.cores),
-        keepFailed(o.keepFailed), verbose(o.verbose), system(o.system.clone()) {}
+      : storeDir(o.storeDir.clone()), realRoot(o.realRoot.clone()), stateDir(o.stateDir.clone()), readOnly(o.readOnly), dummy(o.dummy), cores(o.cores),
+        keepFailed(o.keepFailed), system(o.system.clone()) {}
   StoreSettings &operator=(const StoreSettings &o) {
     if (this != &o) { StoreSettings t(o); *this = static_cast<StoreSettings &&>(t); }
     return *this;

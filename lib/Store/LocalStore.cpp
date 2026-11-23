@@ -692,6 +692,10 @@ void Store::runBuilder(std::string_view drvPath, const Derivation &drv,
   env["PWD"] = top.clone();
   env["NIX_LOG_FD"] = "2";
   env["TERM"] = "xterm-256color";
+  // In a chroot on a Mac with SIP on, dyld has no shared cache in the shared region (the kernel maps only SIP-protected
+  // cache files, and a chroot's is a copy), so each process maps the copy itself, which DYLD_SHARED_REGION=private asks
+  // for (utils/mlnixos-darwin/mlnixos-chroot.c).  A builder without it could not load libSystem.
+  if (const char *dsr = getenv("DYLD_SHARED_REGION")) env["DYLD_SHARED_REGION"] = dsr;
   bool fixed = drv.isFixed();
   if (fixed) {
     auto it = drv.env.find("impureEnvVars");
