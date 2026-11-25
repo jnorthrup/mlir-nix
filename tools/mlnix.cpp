@@ -78,6 +78,38 @@ template <class F> composite::Text drained(F f) {
   return t;
 }
 
+// The names the driver knows: flags of each command, the --option names and values, the experimental words, the
+// argv[0] and command names.  lowered/tools/ToolFlags.mlir holds the table (scripts/gen_tool_flags.py writes both).  Each name's
+// code is one of these; a name the table does not have is OPT_NONE.  Two spellings of one thing share a code.
+enum Opt : int64_t {
+  OPT_NONE = -1,
+  OPT_INCLUDE = 1, OPT_ARG = 2, OPT_ARGSTR = 3, OPT_ATTR = 4, OPT_EXPR = 5, OPT_SHOW_TRACE = 6, OPT_TRACE_VERBOSE = 7,
+  OPT_ABORT_ON_WARN = 8, OPT_PURE_EVAL = 9, OPT_IMPURE = 10, OPT_RESTRICT_EVAL = 11, OPT_EXPFEAT = 12, OPT_OPTION = 13,
+  OPT_LINT_ABS = 14, OPT_LINT_SHORT = 15, OPT_LINT_URL = 16, OPT_SYSTEM = 17, OPT_STORE_DIR = 18, OPT_STORE = 19,
+  OPT_READONLY = 20, OPT_READWRITE = 21, OPT_KEEP_FAILED = 22, OPT_JOBS = 23, OPT_CORES = 24, OPT_NO_OPT = 25,
+  OPT_NOOP = 26, OPT_EVAL = 27, OPT_PARSE = 28, OPT_EMIT_MLIR = 29, OPT_STRICT = 30, OPT_JSON = 31, OPT_XML = 32,
+  OPT_RAW = 33, OPT_NO_LOCATION = 34, OPT_FIND_FILE = 35, OPT_DRY_RUN = 36, OPT_ADD_ROOT = 37, OPT_INDIRECT = 38,
+  OPT_OUT_LINK = 39, OPT_NO_OUT_LINK = 40, OPT_STDIN = 41, OPT_OP_ADD = 42, OPT_OP_ADD_FIXED = 43, OPT_OP_REALISE = 44,
+  OPT_OP_QUERY = 45, OPT_OP_DUMP = 46, OPT_OP_GC = 47, OPT_OP_DELETE = 48, OPT_OP_VERIFY = 49, OPT_OP_PRINT_ENV = 50,
+  OPT_OP_RESTORE = 51, OPT_OP_OTHER = 52, OPT_Q_REFS = 53, OPT_Q_REQS = 54, OPT_Q_REFERRERS = 55, OPT_Q_DERIVER = 56,
+  OPT_Q_OUTPUTS = 57, OPT_Q_HASH = 58, OPT_Q_SIZE = 59, OPT_INCLUDE_OUTPUTS = 60, OPT_PRINT_INVALID = 61,
+  OPT_RECURSIVE = 62, OPT_TYPE = 63, OPT_FLAT = 64, OPT_BASE32 = 65, OPT_BASE16 = 66, OPT_BASE64 = 67, OPT_SRI = 68,
+  OPT_TRUNCATE = 69, OPT_TO_BASE32 = 70, OPT_TO_NIX32 = 71, OPT_TO_BASE16 = 72, OPT_TO_BASE64 = 73, OPT_TO_SRI = 74,
+  OPT_MODE_PATH = 75, OPT_MODE_FILE = 76, OPT_HELP = 77, OPT_VERSION = 78, OPT_INSTANTIATE = 79, OPT_BUILD = 80,
+  OPT_EVAL_CMD = 81, OPT_PARSE_CMD = 82, OPT_EMIT_CMD = 83, OPT_RUN_CMD = 84, OPT_PRIMOPS = 85, OPT_STORE_CMD = 86,
+  OPT_HASH_CMD = 87, OPT_DERIVATION = 88, OPT_SHOW = 89, OPT_PROG_NIX = 90, OPT_PROG_INSTANTIATE = 91,
+  OPT_PROG_BUILD = 92, OPT_PROG_STORE = 93, OPT_PROG_HASH = 94, OPT_VAL_MAX_CALL_DEPTH = 95, OPT_VAL_EXPFEAT = 96,
+  OPT_VAL_SYSTEM = 97, OPT_VAL_PURE_EVAL = 98, OPT_TRUE = 99, OPT_WARN = 100, OPT_FATAL = 101, OPT_IGNORE = 102,
+  OPT_WORD_PIPE = 103, OPT_WORD_TOML = 104, OPT_DUMMY = 105, OPT_AUTO = 106, OPT_LOCAL = 107, OPT_DAEMON = 108,
+};
+extern "C" int64_t mlnix_tf_lookup(const char *p, int64_t n);
+extern "C" int64_t mlnix_tf_lines(const int64_t *recs, int64_t n, int64_t mode, char *into, int64_t cap);
+extern "C" int64_t mlnix_tf_primops(const int64_t *recs, int64_t n, char *into, int64_t cap);
+extern "C" int64_t mlnix_tf_count(int64_t n, char *into, int64_t cap);
+/// The code of a name, or OPT_NONE (the bisect over the table is lowered/tools/ToolFlags.mlir).
+Opt optCode(const char *p, size_t n) { return Opt(mlnix_tf_lookup(p, int64_t(n))); }
+Opt optCode(std::string_view s) { return optCode(s.data(), s.size()); }
+
 extern "C" int64_t mlnix_ts_nixpath(const char *p, int64_t n, int64_t *recs, int64_t cap);
 /// NIX_PATH's elements as records (prefix off/len, path off/len) into s.
 composite::MutableSeries<SearchPathElem> parseNixPath(std::string_view s) {
@@ -111,79 +143,66 @@ bool parseCommon(Options &o, std::string_view arg, int &i, int argc, char **argv
     if (i + 1 >= argc) usage(composite::cat("flag '", arg, "' requires an argument"));
     return argv[++i];
   };
-  if (arg == "-I" || arg == "--include") {
-    std::string_view v = next();
-    o.includes.append(composite::Text(v));
-  } else if (arg.rfind("-I", 0) == 0 && arg.size() > 2) {
-    o.includes.append(composite::Text(arg.substr(2)));
-  } else if (arg == "--arg") {
-    composite::Text n(next()), v(next());
-    o.argExprs.append({composite::mv(n), composite::mv(v)});
-  } else if (arg == "--argstr") {
-    composite::Text n(next()), v(next());
-    o.argStrs.append({composite::mv(n), composite::mv(v)});
-  } else if (arg == "-A" || arg == "--attr") {
-    o.attrPaths.append(composite::Text(next()));
-  } else if (arg == "-E" || arg == "--expr") {
-    o.fromArgs = true;
-  } else if (arg == "--show-trace") {
-    o.eval.showTrace = true;
-  } else if (arg == "--trace-verbose") {
-    o.eval.traceVerbose = true;
-  } else if (arg == "--abort-on-warn") {
-    o.eval.abortOnWarn = true;
-  } else if (arg == "--pure-eval") {
-    o.eval.pureEval = true;
-  } else if (arg == "--impure") {
-    o.eval.pureEval = false;
-  } else if (arg == "--restrict-eval") {
-    o.eval.restrictEval = true;
-  } else if (arg == "--extra-experimental-features" || arg == "--experimental-features") {
+  switch (Opt c = optCode(arg)) {
+  case OPT_INCLUDE: o.includes.append(composite::Text(next())); break;
+  case OPT_ARG: { composite::Text n(next()), v(next()); o.argExprs.append({composite::mv(n), composite::mv(v)}); break; }
+  case OPT_ARGSTR: { composite::Text n(next()), v(next()); o.argStrs.append({composite::mv(n), composite::mv(v)}); break; }
+  case OPT_ATTR: o.attrPaths.append(composite::Text(next())); break;
+  case OPT_EXPR: o.fromArgs = true; break;
+  case OPT_SHOW_TRACE: o.eval.showTrace = true; break;
+  case OPT_TRACE_VERBOSE: o.eval.traceVerbose = true; break;
+  case OPT_ABORT_ON_WARN: o.eval.abortOnWarn = true; break;
+  case OPT_PURE_EVAL: o.eval.pureEval = true; break;
+  case OPT_IMPURE: o.eval.pureEval = false; break;
+  case OPT_RESTRICT_EVAL: o.eval.restrictEval = true; break;
+  case OPT_EXPFEAT: {
     std::string_view f = next();
     composite::eachWord(f.data(), uint32_t(f.size()), [&](const char *p, uint32_t n) {
-      std::string_view w(p, n);
-      if (w == "pipe-operators") o.eval.pipeOperators = true;
-      if (w == "parse-toml-timestamps") nixev::tomlTimestamps = true;
+      Opt w = optCode(p, n);
+      if (w == OPT_WORD_PIPE) o.eval.pipeOperators = true;
+      if (w == OPT_WORD_TOML) nixev::tomlTimestamps = true;
     });
-  } else if (arg == "--option") {
+    break;
+  }
+  case OPT_OPTION: {
     std::string_view n = next(), v = next();
-    if (n == "max-call-depth") o.eval.maxCallDepth = toUnsigned(v);
-    else if ((n == "extra-experimental-features" || n == "experimental-features") && v.find("pipe-operators") != std::string_view::npos)
-      o.eval.pipeOperators = true;
-    else if (n == "system") o.eval.currentSystem = composite::Text(v);
-    else if (n == "pure-eval") o.eval.pureEval = v == "true";
-  } else if (arg == "--lint-absolute-path-literals" || arg == "--lint-short-path-literals" || arg == "--lint-url-literals") {
+    Opt nc = optCode(n);
+    if (nc == OPT_VAL_MAX_CALL_DEPTH) o.eval.maxCallDepth = toUnsigned(v);
+    else if (nc == OPT_VAL_EXPFEAT && v.find("pipe-operators") != std::string_view::npos) o.eval.pipeOperators = true;
+    else if (nc == OPT_VAL_SYSTEM) o.eval.currentSystem = composite::Text(v);
+    else if (nc == OPT_VAL_PURE_EVAL) o.eval.pureEval = optCode(v) == OPT_TRUE;
+    break;
+  }
+  case OPT_LINT_ABS: case OPT_LINT_SHORT: case OPT_LINT_URL: {
     std::string_view v = next();
-    nixfe::Lint l = v == "warn" ? nixfe::Lint::Warn : v == "fatal" ? nixfe::Lint::Fatal : nixfe::Lint::Ignore;
-    if (v != "warn" && v != "fatal" && v != "ignore")
+    Opt lv = optCode(v);
+    nixfe::Lint l = lv == OPT_WARN ? nixfe::Lint::Warn : lv == OPT_FATAL ? nixfe::Lint::Fatal : nixfe::Lint::Ignore;
+    if (lv != OPT_WARN && lv != OPT_FATAL && lv != OPT_IGNORE)
       usage(composite::cat("option '", arg.substr(2), "' has invalid value '", v, "' (expected 'ignore', 'warn', or 'fatal')"));
-    if (arg == "--lint-absolute-path-literals") o.eval.lintAbsolutePaths = l;
-    else if (arg == "--lint-short-path-literals") o.eval.lintShortPaths = l;
+    if (c == OPT_LINT_ABS) o.eval.lintAbsolutePaths = l;
+    else if (c == OPT_LINT_SHORT) o.eval.lintShortPaths = l;
     else o.eval.lintUrls = l;
-  } else if (arg == "--system") {
-    o.eval.currentSystem = composite::Text(next());
-  } else if (arg == "--store-dir") {
-    o.store.storeDir = absPath(next());
-    o.storeDirSet = true;
-  } else if (arg == "--store") {
+    break;
+  }
+  case OPT_SYSTEM: o.eval.currentSystem = composite::Text(next()); break;
+  case OPT_STORE_DIR: o.store.storeDir = absPath(next()); o.storeDirSet = true; break;
+  case OPT_STORE: {
     std::string_view s = next();
-    if (s == "dummy://") o.readOnly = o.store.dummy = true;
+    Opt sc = optCode(s);
+    if (sc == OPT_DUMMY) o.readOnly = o.store.dummy = true;
     else if (s.rfind("local?root=", 0) == 0) { o.store.realRoot = absPath(s.substr(11)); o.storeRootSet = true; }
-    else if (s != "auto" && s != "local" && s != "daemon") { o.store.realRoot = absPath(s); o.storeRootSet = true; }
-  } else if (arg == "--readonly-mode") {
-    o.readOnly = true;
-  } else if (arg == "--read-write-mode") {
-    o.readWrite = true;
-  } else if (arg == "-K" || arg == "--keep-failed") {
-    o.store.keepFailed = true;
-  } else if (arg == "-j" || arg == "--max-jobs" || arg == "--cores") {
-    std::string_view v = next();
-    if (arg == "--cores") o.store.cores = toUnsigned(v);
-  } else if (arg == "--no-opt") {
-    o.noOpt = true;
-  } else if (arg == "-v" || arg == "--verbose" || arg == "-Q" || arg == "--no-build-output" || arg == "--quiet" ||
-             arg == "--no-substitute" || arg == "--fallback" || arg == "-L" || arg == "--print-build-logs") {
-  } else {
+    else if (sc != OPT_AUTO && sc != OPT_LOCAL && sc != OPT_DAEMON) { o.store.realRoot = absPath(s); o.storeRootSet = true; }
+    break;
+  }
+  case OPT_READONLY: o.readOnly = true; break;
+  case OPT_READWRITE: o.readWrite = true; break;
+  case OPT_KEEP_FAILED: o.store.keepFailed = true; break;
+  case OPT_JOBS: next(); break;
+  case OPT_CORES: o.store.cores = toUnsigned(next()); break;
+  case OPT_NO_OPT: o.noOpt = true; break;
+  case OPT_NOOP: break;
+  default:
+    if (arg.rfind("-I", 0) == 0 && arg.size() > 2) { o.includes.append(composite::Text(arg.substr(2))); break; }
     return false;
   }
   return true;
@@ -211,7 +230,7 @@ void finishOptions(Options &o) {
     if (const char *sd = getenv("NIX_STORE_DIR")) o.store.storeDir = sd;
     else if (const char *sd2 = getenv("NIX_STORE")) o.store.storeDir = sd2;
   }
-  if (const char *r = getenv("NIX_REMOTE"); r && std::string_view(r) == "dummy://") o.readOnly = o.store.dummy = true;
+  if (const char *r = getenv("NIX_REMOTE"); r && optCode(std::string_view(r)) == OPT_DUMMY) o.readOnly = o.store.dummy = true;
   if (!o.storeRootSet) {
     if (const char *r = getenv("MLNIX_STORE_ROOT")) o.store.realRoot = r;
     else {
@@ -534,23 +553,26 @@ int cmdInstantiate(int argc, char **argv, int start, bool build) {
   for (int i = start; i < argc; i++) {
     std::string_view a = argv[i];
     if (parseCommon(o, a, i, argc, argv)) continue;
-    if (a == "--eval" || a == "--eval-only") o.evalOnly = true;
-    else if (a == "--parse" || a == "--parse-only") { o.parseOnly = true; o.evalOnly = true; }
-    else if (a == "--emit-mlir") { o.emitMLIR = true; o.evalOnly = true; }
-    else if (a == "--strict") o.strict = true;
-    else if (a == "--json") o.json = true;
-    else if (a == "--xml") o.xml = true;
-    else if (a == "--raw") o.raw = true;
-    else if (a == "--no-location") o.location = false;
-    else if (a == "--find-file") o.findFile = true;
-    else if (a == "--dry-run") o.dryRun = true;
-    else if (a == "--add-root") { if (++i >= argc) usage("--add-root requires an argument"); o.addRoot = argv[i]; }
-    else if (a == "--indirect") {}
-    else if (a == "-o" || a == "--out-link") { if (++i >= argc) usage("--out-link requires an argument"); o.outLink = argv[i]; }
-    else if (a == "--no-out-link") o.noOutLink = true;
-    else if (a == "-") o.readStdin = true;
-    else if (a.size() > 1 && a[0] == '-' && !o.fromArgs) usage(composite::cat("unrecognised flag '", a, "'"));
-    else o.files.append(composite::Text(a));
+    switch (optCode(a)) {
+    case OPT_EVAL: o.evalOnly = true; break;
+    case OPT_PARSE: o.parseOnly = true; o.evalOnly = true; break;
+    case OPT_EMIT_MLIR: o.emitMLIR = true; o.evalOnly = true; break;
+    case OPT_STRICT: o.strict = true; break;
+    case OPT_JSON: o.json = true; break;
+    case OPT_XML: o.xml = true; break;
+    case OPT_RAW: o.raw = true; break;
+    case OPT_NO_LOCATION: o.location = false; break;
+    case OPT_FIND_FILE: o.findFile = true; break;
+    case OPT_DRY_RUN: o.dryRun = true; break;
+    case OPT_ADD_ROOT: if (++i >= argc) usage("--add-root requires an argument"); o.addRoot = argv[i]; break;
+    case OPT_INDIRECT: break;
+    case OPT_OUT_LINK: if (++i >= argc) usage("--out-link requires an argument"); o.outLink = argv[i]; break;
+    case OPT_NO_OUT_LINK: o.noOutLink = true; break;
+    case OPT_STDIN: o.readStdin = true; break;
+    default:
+      if (a.size() > 1 && a[0] == '-' && !o.fromArgs) usage(composite::cat("unrecognised flag '", a, "'"));
+      o.files.append(composite::Text(a));
+    }
   }
   if (o.parseOnly && o.files.empty() && !o.fromArgs) o.readStdin = true;
   return runEvalCommand(o, build);
@@ -559,28 +581,30 @@ int cmdInstantiate(int argc, char **argv, int start, bool build) {
 extern "C" int64_t mlnix_ts_printenv(const int64_t *envs, int64_t nenv, const int64_t *args, int64_t nargs, char *into, int64_t cap);
 int cmdStore(int argc, char **argv, int start) {
   Options o;
-  std::string_view op;
+  Opt op = OPT_NONE;
   composite::MutableSeries<composite::Text> args;
   bool queryRefs = false, queryReqs = false, queryReferrers = false, queryDeriver = false, queryOutputs = false,
        queryHash = false, querySize = false, includeOutputs = false, printInvalid = false;
   for (int i = start; i < argc; i++) {
     std::string_view a = argv[i];
     if (parseCommon(o, a, i, argc, argv)) continue;
-    if (a == "--add" || a == "--add-fixed" || a == "--realise" || a == "-r" || a == "--query" || a == "-q" ||
-        a == "--dump" || a == "--gc" || a == "--delete" || a == "--verify-path" || a == "--print-env" ||
-        a == "--restore" || a == "--read-log" || a == "--dump-db" || a == "--verify")
-      op = a == "-r" ? "--realise" : a == "-q" ? "--query" : a;
-    else if (a == "--references") queryRefs = true;
-    else if (a == "--requisites" || a == "-R") queryReqs = true;
-    else if (a == "--referrers") queryReferrers = true;
-    else if (a == "--deriver" || a == "-d") queryDeriver = true;
-    else if (a == "--outputs") queryOutputs = true;
-    else if (a == "--hash") queryHash = true;
-    else if (a == "--size") querySize = true;
-    else if (a == "--include-outputs") includeOutputs = true;
-    else if (a == "--print-dead" || a == "--print-live") printInvalid = true;
-    else if (a == "--recursive") {}
-    else args.append(composite::Text(a));
+    switch (Opt c = optCode(a)) {
+    case OPT_OP_ADD: case OPT_OP_ADD_FIXED: case OPT_OP_REALISE: case OPT_OP_QUERY: case OPT_OP_DUMP: case OPT_OP_GC:
+    case OPT_OP_DELETE: case OPT_OP_VERIFY: case OPT_OP_PRINT_ENV: case OPT_OP_RESTORE: case OPT_OP_OTHER:
+      op = c; // -r and -q are the operations --realise and --query: the same codes
+      break;
+    case OPT_Q_REFS: queryRefs = true; break;
+    case OPT_Q_REQS: queryReqs = true; break;
+    case OPT_Q_REFERRERS: queryReferrers = true; break;
+    case OPT_Q_DERIVER: queryDeriver = true; break;
+    case OPT_Q_OUTPUTS: queryOutputs = true; break;
+    case OPT_Q_HASH: queryHash = true; break;
+    case OPT_Q_SIZE: querySize = true; break;
+    case OPT_INCLUDE_OUTPUTS: includeOutputs = true; break;
+    case OPT_PRINT_INVALID: printInvalid = true; break;
+    case OPT_RECURSIVE: break;
+    default: args.append(composite::Text(a));
+    }
   }
   finishOptions(o);
   nixstore::Store store(o.store);
@@ -599,15 +623,15 @@ int cmdStore(int argc, char **argv, int start) {
     return nixstore::toStorePath(store.storeDir(), ap);
   };
   try {
-    if (op == "--add") {
+    if (op == OPT_OP_ADD) {
       for (auto &a : args) lineToStdout(store.addToStore(nixstore::baseNameOf(absPath(a)), absPath(a)));
-    } else if (op == "--add-fixed") {
+    } else if (op == OPT_OP_ADD_FIXED) {
       if (args.empty()) usage("--add-fixed requires an algorithm");
       auto algo = nixstore::parseHashAlgo(args[0]);
       if (!algo) usage(composite::cat("unknown hash algorithm '", args[0], "'"));
       for (size_t i = 1; i < args.size(); i++)
         lineToStdout(store.addToStore(nixstore::baseNameOf(absPath(args[i])), absPath(args[i]), nixstore::FileIngestionMethod::Flat, *algo));
-    } else if (op == "--realise") {
+    } else if (op == OPT_OP_REALISE) {
       for (auto &a : args) {
         composite::Text p = toStore(a);
         if (p.size() > 4 && p.substr(p.size() - 4) == ".drv") {
@@ -617,7 +641,7 @@ int cmdStore(int argc, char **argv, int start) {
           lineToStdout(p);
         }
       }
-    } else if (op == "--query") {
+    } else if (op == OPT_OP_QUERY) {
       nixstore::SortedSet out;
       composite::MutableSeries<composite::Text> ordered;
       for (auto &a : args) {
@@ -647,30 +671,30 @@ int cmdStore(int argc, char **argv, int start) {
           ordered.append(composite::mv(p));
         }
       }
-      for (auto &p : out) lineToStdout(p);
-      for (auto &p : ordered) lineToStdout(p);
-    } else if (op == "--dump") {
+      // the set's rows, then the ordered list: one line each, written once (mlnix_tf_lines)
+      composite::MutableSeries<int64_t> recs;
+      for (auto &p : out) recs.append(int64_t(intptr_t(p.data()))), recs.append(int64_t(p.size()));
+      for (auto &p : ordered) recs.append(int64_t(intptr_t(p.data()))), recs.append(int64_t(p.size()));
+      nixsys::toStdout(drained([&](char *b, int64_t cap) { return mlnix_tf_lines(recs.data(), int64_t(recs.size() / 2), 0, b, cap); }));
+    } else if (op == OPT_OP_DUMP) {
       for (auto &a : args)
         nixstore::dumpPath(absPath(a), [](std::string_view d) { nixsys::toStdout(d.data(), d.size()); });
-    } else if (op == "--restore") {
+    } else if (op == OPT_OP_RESTORE) {
       if (args.size() != 1) usage("--restore requires a path");
       nixstore::restorePath(absPath(args[0]), readStdin());
-    } else if (op == "--gc") {
+    } else if (op == OPT_OP_GC) {
       composite::MutableSeries<composite::Text> deleted;
       store.collectGarbage(printInvalid, deleted);
-      for (auto &d : deleted) {
-        if (printInvalid) lineToStdout(d);
-        else lineToStdout(composite::cat("deleting '", d, "'"));
-      }
-      composite::Text count;
-      count.putUnsigned(deleted.size()).put(" store paths deleted");
-      nixsys::lineToStderr(count.data(), count.size());
-    } else if (op == "--delete") {
+      composite::MutableSeries<int64_t> recs; // the deleted paths, a line each: "deleting 'P'", or P with --print-dead
+      for (auto &d : deleted) recs.append(int64_t(intptr_t(d.data()))), recs.append(int64_t(d.size()));
+      nixsys::toStdout(drained([&](char *p, int64_t cap) { return mlnix_tf_lines(recs.data(), int64_t(deleted.size()), printInvalid ? 0 : 1, p, cap); }));
+      nixsys::lineToStderr(drained([&](char *p, int64_t cap) { return mlnix_tf_count(int64_t(deleted.size()), p, cap); }));
+    } else if (op == OPT_OP_DELETE) {
       for (auto &a : args) {
         composite::Text p = toStore(a);
         if (!store.deletePath(p)) throw nixstore::Error(composite::cat("cannot delete path '", p, "' since it is still alive"));
       }
-    } else if (op == "--verify-path" || op == "--verify") {
+    } else if (op == OPT_OP_VERIFY) {
       int bad = 0;
       composite::MutableSeries<composite::Text> paths = args.empty() ? store.allValidPaths() : composite::MutableSeries<composite::Text>{};
       for (auto &a : args) paths.append(toStore(a));
@@ -685,7 +709,7 @@ int cmdStore(int argc, char **argv, int start) {
         }
       }
       return bad ? 1 : 0;
-    } else if (op == "--print-env") {
+    } else if (op == OPT_OP_PRINT_ENV) {
       for (auto &a : args) {
         const auto &d = store.readDerivation(toStore(a));
         composite::MutableSeries<int64_t> envs, xs; // windows: (key, value) per variable, then the arguments
@@ -704,7 +728,7 @@ int cmdStore(int argc, char **argv, int start) {
 }
 
 int cmdHash(int argc, char **argv, int start) {
-  std::string_view mode;
+  Opt mode = OPT_NONE;
   nixstore::HashAlgo algo = nixstore::HashAlgo::SHA256;
   nixstore::HashFormat fmt = nixstore::HashFormat::Base16;
   bool flat = false, sri = false;
@@ -712,37 +736,41 @@ int cmdHash(int argc, char **argv, int start) {
   bool algoGiven = false;
   for (int i = start; i < argc; i++) {
     std::string_view a = argv[i];
-    if (a == "--type") {
+    switch (optCode(a)) {
+    case OPT_TYPE: {
       if (++i >= argc) usage("--type requires an argument");
       auto t = nixstore::parseHashAlgo(argv[i]);
       if (!t) usage(composite::cat("unknown hash algorithm '", argv[i], "'"));
       algo = *t;
       algoGiven = true;
-    } else if (a == "--flat") flat = true;
-    else if (a == "--base32" || a == "--nix32") fmt = nixstore::HashFormat::Nix32;
-    else if (a == "--base16") fmt = nixstore::HashFormat::Base16;
-    else if (a == "--base64") fmt = nixstore::HashFormat::Base64;
-    else if (a == "--sri") sri = true;
-    else if (a == "--truncate") {}
-    else if (a == "--to-base32" || a == "--to-nix32" || a == "--to-base16" || a == "--to-base64" || a == "--to-sri")
-      mode = a;
-    else if (a == "path" || a == "file") mode = a;
-    else args.append(composite::Text(a));
+      break;
+    }
+    case OPT_FLAT: flat = true; break;
+    case OPT_BASE32: fmt = nixstore::HashFormat::Nix32; break;
+    case OPT_BASE16: fmt = nixstore::HashFormat::Base16; break;
+    case OPT_BASE64: fmt = nixstore::HashFormat::Base64; break;
+    case OPT_SRI: sri = true; break;
+    case OPT_TRUNCATE: break;
+    case OPT_TO_BASE32: case OPT_TO_NIX32: case OPT_TO_BASE16: case OPT_TO_BASE64: case OPT_TO_SRI: case OPT_MODE_PATH: case OPT_MODE_FILE:
+      mode = optCode(a); break;
+    default: args.append(composite::Text(a));
+    }
   }
+  const bool toMode = mode == OPT_TO_BASE32 || mode == OPT_TO_NIX32 || mode == OPT_TO_BASE16 || mode == OPT_TO_BASE64 || mode == OPT_TO_SRI;
   try {
     for (auto &a : args) {
-      if (mode.rfind("--to-", 0) == 0) {
+      if (toMode) {
         if (!algoGiven && a.find(':') == composite::npos && a.find('-') == composite::npos)
           throw nixstore::Error(composite::cat("hash '", a, "' does not include a type, nor is the type otherwise known from context"));
         auto h = nixstore::parseHash(a, algo);
-        nixstore::HashFormat f = mode == "--to-base16" ? nixstore::HashFormat::Base16
-                                 : mode == "--to-base64" ? nixstore::HashFormat::Base64
-                                 : mode == "--to-sri" ? nixstore::HashFormat::SRI : nixstore::HashFormat::Nix32;
+        nixstore::HashFormat f = mode == OPT_TO_BASE16 ? nixstore::HashFormat::Base16
+                                 : mode == OPT_TO_BASE64 ? nixstore::HashFormat::Base64
+                                 : mode == OPT_TO_SRI ? nixstore::HashFormat::SRI : nixstore::HashFormat::Nix32;
         lineToStdout(h.to_string(f, f == nixstore::HashFormat::SRI));
         continue;
       }
-      nixstore::Hash h = (flat || mode == "file") ? nixstore::hashFile(algo, absPath(a))
-                                                  : nixstore::hashPath(absPath(a), nullptr, algo).a;
+      nixstore::Hash h = (flat || mode == OPT_MODE_FILE) ? nixstore::hashFile(algo, absPath(a))
+                                                          : nixstore::hashPath(absPath(a), nullptr, algo).a;
       lineToStdout(sri ? h.to_string(nixstore::HashFormat::SRI, true) : h.to_string(fmt, false));
     }
   } catch (nixstore::Error &e) {
@@ -783,40 +811,41 @@ extern "C" int64_t mlnix_ts_nixlist(const int64_t *wins, int64_t n, char *into, 
 extern "C" int64_t mlnix_ts_args(char **argv, int64_t argc, int64_t cmd, char **out);
 int realMain(int argc, char **argv) {
   composite::Text prog = nixstore::baseNameOf(argv[0]);
-  if (prog == "nix") { // the nix command is Nix (lib/Corepkgs/cli.nix); here only its argument vector is made a Nix list
+  Opt progCode = optCode(prog.data(), prog.size());
+  if (progCode == OPT_PROG_NIX) { // the nix command is Nix (lib/Corepkgs/cli.nix); here only its argument vector is made a Nix list
     composite::MutableSeries<int64_t> wins;
     for (int i = 1; i < argc; i++) wins.append(int64_t(intptr_t(argv[i]))), wins.append(int64_t(strlen(argv[i])));
     composite::Text expr = drained([&](char *p, int64_t cap) { return mlnix_ts_nixlist(wins.data(), argc - 1, p, cap); });
     const char *nargs[] = {argv[0], "--eval", "--raw", "--read-write-mode", "-E", expr.c_str()};
     return cmdInstantiate(6, const_cast<char **>(nargs), 1, false);
   }
-  if (prog == "nix-instantiate") return cmdInstantiate(argc, argv, 1, false);
-  if (prog == "nix-build") return cmdInstantiate(argc, argv, 1, true);
-  if (prog == "nix-store") return cmdStore(argc, argv, 1);
-  if (prog == "nix-hash") return cmdHash(argc, argv, 1);
+  if (progCode == OPT_PROG_INSTANTIATE) return cmdInstantiate(argc, argv, 1, false);
+  if (progCode == OPT_PROG_BUILD) return cmdInstantiate(argc, argv, 1, true);
+  if (progCode == OPT_PROG_STORE) return cmdStore(argc, argv, 1);
+  if (progCode == OPT_PROG_HASH) return cmdHash(argc, argv, 1);
   if (argc < 2) {
     printHelp();
     return 1;
   }
   std::string_view cmd = argv[1];
-  if (cmd == "--help" || cmd == "-h" || cmd == "help") {
+  switch (Opt c = optCode(cmd)) {
+  case OPT_HELP:
     printHelp();
     return 0;
-  }
-  if (cmd == "--version") {
+  case OPT_VERSION: {
     static const char version[] = "mlnix (Nix-compatible) 2.35.4\n";
     nixsys::toStdout(version, sizeof version - 1);
     return 0;
   }
-  if (cmd == "instantiate") return cmdInstantiate(argc, argv, 2, false);
-  if (cmd == "build") return cmdInstantiate(argc, argv, 2, true);
-  if (cmd == "eval" || cmd == "parse" || cmd == "emit-mlir" || cmd == "run-mlir") { // argv[0], the command's flags, the rest
+  case OPT_INSTANTIATE: return cmdInstantiate(argc, argv, 2, false);
+  case OPT_BUILD: return cmdInstantiate(argc, argv, 2, true);
+  case OPT_EVAL_CMD: case OPT_PARSE_CMD: case OPT_EMIT_CMD: case OPT_RUN_CMD: { // argv[0], the command's flags, the rest
     composite::MutableSeries<char *> nargs(size_t(argc) + 1);
-    int64_t n = mlnix_ts_args(argv, argc, cmd == "eval" ? 0 : cmd == "parse" ? 1 : cmd == "emit-mlir" ? 2 : 3, nargs.data());
+    int64_t n = mlnix_ts_args(argv, argc, c == OPT_EVAL_CMD ? 0 : c == OPT_PARSE_CMD ? 1 : c == OPT_EMIT_CMD ? 2 : 3, nargs.data());
     return cmdInstantiate(int(n), nargs.data(), 1, false);
   }
-  if (cmd == "primops") {
-    // Dump the live primop registry ("<base-env key> <arity>"); the continent
+  case OPT_PRIMOPS: {
+    // Dump the live primop registry ("<base-env key> <arity>", sorted by name in mlnix_tf_primops); the continent
     // dialects (include/NixDialect/NixPrims.td) must stay in sync with it.
     Options o;
     o.readOnly = true;
@@ -824,23 +853,20 @@ int realMain(int argc, char **argv) {
     o.store.readOnly = true;
     nixstore::Store store(o.store);
     EvalState st(std::move(o.eval), &store);
-    using Entry = composite::TextTable<Value *>::Row;
-    composite::MutableSeries<const Entry *> v; // the entries where they lie, ordered by name
+    composite::MutableSeries<int64_t> recs; // (name ptr, name len, arity) per primop, in the registry's order
     for (auto &e : st.baseEnv)
-      if (e.v->type == VType::PrimOp) v.append(&e);
-    composite::sortRows(v.data(), v.size(), [](const Entry *a, const Entry *b) {
-      return composite::lessChars(composite::series(a->p, a->n), composite::series(b->p, b->n));
-    });
-    composite::Text rows;
-    for (const Entry *e : v) rows.put(e->p, e->n).put(' ').putInt(e->v->primOp->arity).put('\n');
-    nixsys::toStdout(rows.data(), rows.size());
+      if (e.v->type == VType::PrimOp)
+        recs.append(int64_t(intptr_t(e.p))), recs.append(int64_t(e.n)), recs.append(int64_t(e.v->primOp->arity));
+    nixsys::toStdout(drained([&](char *p, int64_t cap) { return mlnix_tf_primops(recs.data(), int64_t(recs.size() / 3), p, cap); }));
     return 0;
   }
-  if (cmd == "store") return cmdStore(argc, argv, 2);
-  if (cmd == "hash") return cmdHash(argc, argv, 2);
-  if (cmd == "derivation") {
-    if (argc < 3 || std::string_view(argv[2]) != "show") usage("expected 'mlnix derivation show DRV...'");
+  case OPT_STORE_CMD: return cmdStore(argc, argv, 2);
+  case OPT_HASH_CMD: return cmdHash(argc, argv, 2);
+  case OPT_DERIVATION:
+    if (argc < 3 || optCode(argv[2]) != OPT_SHOW) usage("expected 'mlnix derivation show DRV...'");
     return cmdDerivationShow(argc, argv, 3);
+  default:
+    break;
   }
   usage(composite::cat("unknown command '", cmd, "'"));
 }
