@@ -149,8 +149,6 @@ struct NixStringContext {
     while (*a && *a == *b) ++a, ++b;
     return (unsigned char)*a < (unsigned char)*b;
   }
-
-private:
   void settle() const;
   mutable composite::MutableSeries<const char *> rows;
   mutable bool normal = true; // sorted, each element once
@@ -575,8 +573,6 @@ struct EvalState {
     uint32_t n = 0, cap = kInline;
     Bindings *block = nullptr;
     composite::MutableSeries<Attr> more; // the rows, once more came than there was room for
-
-  private:
     void overflow(Attr a);
   };
 
@@ -862,8 +858,8 @@ struct EvalState {
     /// recursion) is found here, in a map the size of those blocks; emptied when the outermost body is done.
     composite::WordTable<Node *> blockNodes; // by the value's address: the values of the blocks being indexed
     unsigned depth = 0;
-    composite::MutableSeries<std::pair<void *, Node *>> captures;           // a helper's: for the evaluator's map of every value
-    composite::MutableSeries<std::pair<mlir::Region *, RegionInfo *>> regions; // a helper's: for regionInfos
+    composite::MutableSeries<composite::Join<void *, Node *>> captures;         // a helper's: for the evaluator's map of every value
+    composite::MutableSeries<composite::Join<mlir::Region *, RegionInfo *>> regions; // a helper's: for regionInfos
     Indexer(EvalState &st, bool helper) : st(st), helper(helper) {}
     void *allocate(size_t n, size_t a) { return helper ? arena.Allocate(n, llvm::Align(a)) : st.alloc.Allocate(n, a); }
     void index(mlir::Region &r);

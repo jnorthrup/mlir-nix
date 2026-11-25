@@ -12,7 +12,6 @@
 #include "Composite/Series.h"
 
 #include <string_view>
-#include <tuple>
 #include <utility>
 
 namespace std {

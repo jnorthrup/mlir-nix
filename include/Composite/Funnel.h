@@ -59,8 +59,6 @@ struct Funnel {
     return static_cast<const Row *>(mmx_funnel_get(cells, top, Levels, sizeof(Row), N, P, kHn, kP, kPn, sizeof(Bucket), mmxLess<Row>,
                                                    mmxEq<Row>, &r, Hash{}(r), probes));
   }
-
-private:
   static constexpr uint64_t kHn = __builtin_offsetof(Bucket, heap.a.n), kP = __builtin_offsetof(Bucket, pegs.bag.cells),
                             kPn = __builtin_offsetof(Bucket, pegs.bag.n);
 };
@@ -90,8 +88,6 @@ struct GrowFunnel {
       grow();
     }
   }
-
-private:
   static F make(uint32_t top) {
     uint32_t n = F::cellsFor(top);
     Bucket *q = static_cast<Bucket *>(::operator new(size_t(n) * sizeof(Bucket)));

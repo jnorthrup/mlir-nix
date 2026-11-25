@@ -18,7 +18,6 @@
 #ifndef NIX_POS_H
 #define NIX_POS_H
 
-#include <cstdint>
 #include "Composite/Mutable.h"
 #include "Composite/Table.h"
 #include "Nix/Os.h"

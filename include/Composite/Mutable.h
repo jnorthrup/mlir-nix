@@ -79,8 +79,6 @@ template <class T> struct Growable {
     while (n < m) { ::new (At{p + n}) T(v); ++n; }
   }
   void dropAll() { while (n) p[--n].~T(); }
-
-private:
   void release() { dropAll(); ::operator delete(p); p = nullptr; cap = 0; }
 };
 
@@ -143,8 +141,6 @@ template <class T, uint32_t N> struct Spill {
     while (n < m) { ::new (At{p + n}) T(v); ++n; }
   }
   void dropAll() { while (n) p[--n].~T(); }
-
-private:
   T *inl() { return reinterpret_cast<T *>(raw); }
   bool inlined() const { return p == reinterpret_cast<const T *>(raw); }
   void moveCells(T *q) {
@@ -322,8 +318,6 @@ template <class T, uint32_t K = 6> struct Chunked {
   constexpr It<Chunked, T> last() { return {this, n}; }
   constexpr It<const Chunked, const T> first() const { return {this, 0}; }
   constexpr It<const Chunked, const T> last() const { return {this, n}; }
-
-private:
   void release() {
     dropAll();
     for (uint32_t i = 0; i < chunks; i++) ::operator delete(tab[i]);

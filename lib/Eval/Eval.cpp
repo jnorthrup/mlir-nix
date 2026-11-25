@@ -22,9 +22,8 @@
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/SourceMgr.h"
 
-#include <algorithm>
-#include <cmath>
-#include <cstring>
+#include <math.h>
+#include <string.h>
 #include <exception>
 #include <pthread.h>
 #include <sys/stat.h>
@@ -657,7 +656,7 @@ static uint8_t sonDiesAtReturn(mlir::Block &blk, nd::NixDialect *core, mlir::Ope
     if (!mayDone) { may = mlir::son::forcedOnReturn(blk, core, /*may=*/true); mayDone = true; }
     uint8_t w = may.contains(v) ? 2 : kind;
     if (w > why) at = &op;
-    why = std::max(why, w);
+    why = cp::max(why, w);
   };
   for (mlir::Operation &op : blk) {
     if (isa<nd::LambdaOp>(op)) { at = &op; return 1; }
@@ -2799,9 +2798,10 @@ static cp::Text errorText(const cp::MutableSeries<ErrRec> &rs) {
 cp::Text formatError(EvalState *state, const EvalError &e) {
   // Traces are printed outermost first, then the error; each position's source is read here and kept for the call.
   size_t nt = state && state->settings.showTrace ? e.traces.size() : 0;
-  cp::MutableSeries<std::optional<nd::SrcPos>> at;
-  for (size_t i = nt; i > 0; i--) at.append(nd::decodePos(e.traces.begin()[i - 1].pos));
-  at.append(nd::decodePos(e.pos));
+  cp::MutableSeries<cp::Maybe<nd::SrcPos>> at;
+  auto where = [](const void *p) { auto f = nd::decodePos(p); return f ? cp::Maybe<nd::SrcPos>(*f) : nullptr; };
+  for (size_t i = nt; i > 0; i--) at.append(where(e.traces.begin()[i - 1].pos));
+  at.append(where(e.pos));
   cp::MutableSeries<cp::Text> srcs;
   for (auto &f : at) srcs.append(f ? sourceFor(state, f->file) : cp::Text());
   cp::MutableSeries<ErrRec> rs;

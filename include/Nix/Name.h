@@ -21,8 +21,8 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/ErrorHandling.h"
-#include <cstdint>
-#include <cstring>
+#include <stdint.h>
+#include <string.h>
 
 namespace nixfe {
 
@@ -40,7 +40,7 @@ struct Name {
     if (s.size() > UINT32_MAX) llvm::report_fatal_error("a name or literal of 4 GiB or more");
     static thread_local llvm::BumpPtrAllocator *arena = new llvm::BumpPtrAllocator();
     char *p = static_cast<char *>(arena->Allocate(s.size(), 1));
-    std::memcpy(p, s.data(), s.size());
+    memcpy(p, s.data(), s.size());
     return Name(p, static_cast<uint32_t>(s.size()));
   }
 

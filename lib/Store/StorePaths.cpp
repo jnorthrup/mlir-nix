@@ -9,11 +9,10 @@
 #include "Nix/Prefetch.h"
 #include "Nix/Store.h"
 
-#include <algorithm>
-#include <cerrno>
-#include <cmath>
-#include <cstdio>
-#include <cstring>
+#include <errno.h>
+#include <math.h>
+#include <stdio.h>
+#include <string.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -248,7 +247,7 @@ extern "C" void nixstore_nw_file(NarWriter *w, int64_t n, uint64_t left) {
   if (fd < 0) throw Error(composite::cat("opening file '", w->at(n), "': ", strerror(errno)));
   char buf[65536];
   while (left) {
-    ssize_t k = read(fd, buf, std::min<uint64_t>(sizeof buf, left));
+    ssize_t k = read(fd, buf, composite::min<uint64_t>(sizeof buf, left));
     if (k <= 0) { close(fd); throw Error(composite::cat("reading file '", w->at(n), "'")); }
     w->sink(std::string_view(buf, k));
     left -= k;

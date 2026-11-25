@@ -93,8 +93,6 @@ template <class V> struct WordTable {
     for (uint64_t i = 0; cells && i <= mask; i++)
       if (cells[i].k) f(cells[i].k, cells[i].v);
   }
-
-private:
   static uint64_t mix(uint64_t x) {
     x ^= x >> 33;
     x *= 0xff51afd7ed558ccdull;
@@ -157,8 +155,6 @@ struct Bump {
     cur += n + 1;
     return r;
   }
-
-private:
   static constexpr uint64_t kBlock = 64 * 1024;
   MutableSeries<char *> blocks;
   char *cur = nullptr, *end = nullptr;
@@ -203,8 +199,6 @@ template <class V> struct TextTable {
     if (V *old = find(p, n)) return *old;
     return rows[make(p, n, V(), copy)].v;
   }
-
-private:
   static constexpr uint32_t kNone = ~0u;
   uint32_t indexOf(const char *p, uint32_t n) const {
     if (const uint32_t *i = byHash.find(key(p, n))) {

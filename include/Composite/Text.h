@@ -159,8 +159,6 @@ struct Text {
   template <class P> requires Piece<P> bool ends_with(const P &p) const;
   bool contains(char c) const { return find(c) != npos; }
   template <class P> requires Piece<P> bool contains(const P &p) const { return find(p) != npos; }
-
-private:
   /// Capacity for m bytes and the NUL.  The first allocation is 32: a path or a name rarely grows past it.
   void room(size_t m) {
     if (m >= 0xFFFFFFFFull) TODO("a Text past 4 GiB");

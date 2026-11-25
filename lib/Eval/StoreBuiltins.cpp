@@ -4,7 +4,7 @@
 #include "Nix/Prefetch.h"
 #include "Nix/Eval.h"
 #include "Nix/Numbers.h"
-#include <cstring>
+#include <string.h>
 #include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>

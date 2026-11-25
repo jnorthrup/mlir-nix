@@ -18,7 +18,7 @@
 #include "mlir/Pass/PassManager.h"
 #include "llvm/Support/raw_ostream.h"
 
-#include <cstring>
+#include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -294,10 +294,10 @@ struct DrvInfo {
 };
 
 bool getDerivation(EvalState &st, Value &v, std::string_view attrPath, composite::MutableSeries<DrvInfo> &drvs,
-                   std::set<const void *> &done) {
+                   composite::WordTable<bool> &done) {
   st.forceValue(v);
   if (!st.isDerivation(v)) return true;
-  if (!done.insert(v.attrs).second) return false;
+  if (!done.insert(uint64_t(uintptr_t(v.attrs)), true)) return false;
   DrvInfo d;
   d.attrPath = composite::Text(attrPath);
   const Attr *dp = v.attrs->get(st.s.drvPath);
@@ -311,12 +311,12 @@ bool getDerivation(EvalState &st, Value &v, std::string_view attrPath, composite
 }
 
 void getDerivations(EvalState &st, Value &vIn, std::string_view prefix, const AutoArgs &autoArgs,
-                    composite::MutableSeries<DrvInfo> &drvs, std::set<const void *> &done) {
+                    composite::MutableSeries<DrvInfo> &drvs, composite::WordTable<bool> &done) {
   Value v;
   st.autoCallFunction(autoArgs, vIn, v);
   if (!getDerivation(st, v, prefix, drvs, done)) return;
   if (v.type == VType::Attrs) {
-    if (!done.insert(v.attrs).second) return;
+    if (!done.insert(uint64_t(uintptr_t(v.attrs)), true)) return;
     for (const Attr *a : v.attrs->lexicographicOrder(st.symbols)) {
       composite::Text p2 = prefix.empty() ? composite::Text(st.symbols[a->name]) : composite::cat(prefix, '.', st.symbols[a->name]);
       if (getDerivation(st, *a->value, p2, drvs, done)) {
@@ -431,31 +431,27 @@ int runEvalCommandIn(Options &o, bool build, EvalState &st, nixstore::Store *sto
     return st.evalExprOp(op);
   };
 
-  composite::MutableSeries<std::function<Value *()>> roots;
-  if (o.readStdin) {
-    roots.append([&]() { return handleParsed(readStdin(), cwdPath(), "«stdin»", ""); });
-  } else if (o.fromArgs) {
-    for (auto &f : o.files) roots.append([&, f = std::string_view(f)]() { return handleParsed(composite::Text(f), cwdPath(), "«string»", ""); });
-  } else {
-    if (o.files.empty()) o.files.append("./default.nix");
-    for (auto &f : o.files)
-      roots.append([&, f = std::string_view(f)]() -> Value * {
-        composite::Text p = lookupFileArg(st, f);
-        if (o.findFile) {
-          lineToStdout(p);
-          return nullptr;
-        }
-        composite::Text resolved = st.resolveExprPath(st.realisePath(p, nullptr));
-        if (resolved.size() > 5 && resolved.substr(resolved.size() - 5) == ".mlir") return st.evalMLIRFile(resolved, "");
-        composite::Text text = nixstore::readFile(resolved);
-        return handleParsed(composite::mv(text), nixstore::dirOf(resolved), resolved, resolved);
-      });
-  }
+  // The roots, read and evaluated in turn: stdin, or each --expr text, or each file.
+  if (!o.readStdin && !o.fromArgs && o.files.empty()) o.files.append("./default.nix");
+  auto rootOf = [&](uint32_t i) -> Value * {
+    if (o.readStdin) return handleParsed(readStdin(), cwdPath(), "«stdin»", "");
+    std::string_view f = o.files[i];
+    if (o.fromArgs) return handleParsed(composite::Text(f), cwdPath(), "«string»", "");
+    composite::Text p = lookupFileArg(st, f);
+    if (o.findFile) {
+      lineToStdout(p);
+      return nullptr;
+    }
+    composite::Text resolved = st.resolveExprPath(st.realisePath(p, nullptr));
+    if (resolved.size() > 5 && resolved.substr(resolved.size() - 5) == ".mlir") return st.evalMLIRFile(resolved, "");
+    composite::Text text = nixstore::readFile(resolved);
+    return handleParsed(composite::mv(text), nixstore::dirOf(resolved), resolved, resolved);
+  };
 
   int rootNr = 0;
   composite::MutableSeries<composite::Text> buildOutputs;
-  for (auto &r : roots) {
-    Value *root = r();
+  for (uint32_t i = 0, nRoots = o.readStdin ? 1 : o.files.size(); i < nRoots; i++) {
+    Value *root = rootOf(i);
     if (!root) continue;
     for (auto &ap : o.attrPaths) {
       Value &v = *findAlongAttrPath(st, ap, autoArgs, *root);
@@ -497,7 +493,7 @@ int runEvalCommandIn(Options &o, bool build, EvalState &st, nixstore::Store *sto
         }
       } else {
         composite::MutableSeries<DrvInfo> drvs;
-        std::set<const void *> done;
+        composite::WordTable<bool> done; // the sets met, by address
         getDerivations(st, v, "", autoArgs, drvs, done);
         for (auto &d : drvs) {
           if (!build) {
