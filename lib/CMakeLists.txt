@@ -437,5 +437,10 @@ target_sources(MLIRNix PRIVATE ${KURSIVE_WALK}.o)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/lowered/kursive/Ere.mlir)
 file(READ ${PROJECT_SOURCE_DIR}/lowered/kursive/Ere.mlir KURSIVE_ERE)
 file(CONFIGURE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/KursiveEre.inc CONTENT "R\"kursive(@KURSIVE_ERE@)kursive\"\n" @ONLY)
+# The lexer's default-state grammar (LexRules.h's matchDefault as combinators): the same in-process compile, by
+# KursiveDialect.cpp's lexGrammar (KursiveLexDefault.inc), walked by lexDefault (the bridge is nixfe_confix_match).
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/lowered/kursive/LexDefault.mlir)
+file(READ ${PROJECT_SOURCE_DIR}/lowered/kursive/LexDefault.mlir KURSIVE_LEX_DEFAULT)
+file(CONFIGURE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/KursiveLexDefault.inc CONTENT "R\"kursive(@KURSIVE_LEX_DEFAULT@)kursive\"\n" @ONLY)
 target_include_directories(MLIRNix PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 

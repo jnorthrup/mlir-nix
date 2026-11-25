@@ -2,7 +2,8 @@
 // machine (Parser.cpp's DEFAULT, STRING, IND_STRING, INPATH, INPATH_SLASH, with the same stack) without tokens, only the
 // transitions and the delimiters.  The character classes are the tables below (Nix/LexRules.h's isIdStart / isIdChar /
 // isPathChar / isDigit, and the stop bytes of a "..." or ''...'' string); the longest-match choice among the rules that
-// can begin a token stays in LexRules.h, shared with the lexer, called back per general token (nixfe_confix_match).
+// can begin a token is the kursive grammar lowered/kursive/LexDefault.mlir, shared with the lexer, called back per
+// general token (nixfe_confix_match).
 //
 // confix_scan_nix reads and writes the record of Confix.td's confix.bands (the caller owns it): src, n, start, rooted,
 // span, kind, stmts, ends, rows, nends, rowCap, endCap.  It returns 0 when the source balances, 1 when it does not, 2

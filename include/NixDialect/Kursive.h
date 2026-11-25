@@ -32,6 +32,9 @@ void registerKursivePasses();
 /// (op, x, y, z), sets 4 words a set; counts {steps, sets, groups, loops}.  Answers 0 None, 1 Invalid, 2 Space.
 int compileProgram(llvm::StringRef re, unsigned poolCap, unsigned capSteps, unsigned capSets, uint32_t *steps,
                    uint64_t *sets, uint32_t counts[4]);
+
+/// The lexer's default state at i (lowered/kursive/LexDefault.mlir): the longest match, length << 32 | Rule.
+uint64_t lexDefault(const char *src, size_t n, size_t i);
 } // namespace mlir::kursive
 
 #endif // NIXDIALECT_KURSIVE_H

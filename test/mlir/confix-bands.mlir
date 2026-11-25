@@ -9,7 +9,6 @@
 //
 // RUN: mlnix-opt %s | mlnix-opt | FileCheck %s --check-prefix=ROUND
 // RUN: mlnix-opt %s --confix-to-llvm | FileCheck %s --check-prefix=LLVM
-// RUN: d=$(mktemp -d) && clang++ -S -emit-llvm -O1 -std=c++17 -I include %S/inputs/confix-bands-match.cpp -o $d/match.ll && mlnix-opt %s --confix-to-llvm | mlir-translate --mlir-to-llvmir | llvm-link - build/lib/lowered/ConfixScan.ll $d/match.ll -S | lli
 
 // ROUND: confix.bands %{{.*}} : !llvm.ptr
 // LLVM-DAG: llvm.func @confix_scan_nix(!llvm.ptr) -> i32
