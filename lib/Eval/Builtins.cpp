@@ -11,11 +11,9 @@
 #include "mlir/IR/BuiltinAttributes.h"
 #include "llvm/ADT/TypeSwitch.h"
 
-#include <algorithm>
-#include <cstdio>
-#include <ctime>
+#include <stdio.h>
+#include <time.h>
 #include <dirent.h>
-#include <map>
 #include <stdexcept>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -64,7 +62,7 @@ int64_t nixev_ver_int(const char *p, int64_t n, int64_t *out) {
 struct TsBounds { int64_t from, to; };
 struct TsReplace {
   EvalState *st; Value **to; PosPtr pos; NixStringContext *ctx;
-  std::map<size_t, std::string_view> cache; // the replacement strings, forced once each, in match order
+  composite::WordTable<composite::Chars> cache; // the replacement strings by index + 1, forced once each, in match order
 };
 // The set primops' algebra is hollowed into lowered/nixeval/SetOps.mlir (trikeshed.sorted / bisect / where / alpha /
 // compare / series / drain), lowered the same way.  The bridges force the operands (Nix's error order and wording) and
@@ -91,14 +89,15 @@ char *nixev_str_room(EvalState *st, int64_t n) {
 }
 void nixev_str_toobig() { throw EvalError("string of 4 GiB or more"); }
 void nixev_replace_to(TsReplace *r, int64_t j, composite::Chars *out) {
-  auto c = r->cache.find(size_t(j));
-  if (c == r->cache.end()) {
+  const composite::Chars *c = r->cache.find(uint64_t(j) + 1);
+  if (!c) {
     NixStringContext c2;
     auto ts = r->st->forceString(*r->to[j], c2, r->pos, "while evaluating one of the replacement strings passed to builtins.replaceStrings");
-    c = r->cache.emplace(size_t(j), ts).first;
+    r->cache.insert(uint64_t(j) + 1, composite::chars(ts.data(), uint32_t(ts.size())));
+    c = r->cache.find(uint64_t(j) + 1);
     r->ctx->insert(c2.begin(), c2.end());
   }
-  *out = composite::chars(c->second.data(), uint32_t(c->second.size()));
+  *out = *c;
 }
 Value *nixev_name_cell(EvalState *st, const char *p, size_t n) { return st->newStringWindow(llvm::StringRef(p, n)); }
 // one sort comparison: a < b by the Nix function (or the lessThan fast path), the return value forced
@@ -344,7 +343,7 @@ in
 // The attribute-set / list algebra of __groupBy, __zipAttrsWith, __partition, __catAttrs, removeAttrs, __listToAttrs and
 // __mapAttrs is lowered/nixeval/GroupOps.mlir (trikeshed.sorted / where / alpha / slice / combineAll / drain), __getContext's
 // ContextOps.mlir.  The callbacks are the evaluator's part, called where the C++ loops made them.  __genericClosure stays
-// here: its std::set's comparison order (each a throwing, forcing lessThan) is the C++ library's, libc++'s or libstdc++'s.
+// here: its comparisons (each a throwing, forcing lessThan) are made in the order libc++'s std::set made them.
 extern "C" {
 void nixev_ts_group(EvalState *st, Value *f, Value *list, Value *v, PosPtr pos, int64_t zip);
 void nixev_ts_partition(EvalState *st, Value *f, Value *list, Value *v, PosPtr pos);
@@ -1011,8 +1010,7 @@ void registerBuiltins(EvalState &state) {
     const Attr *op = args[0]->attrs->get(st.s.operator_);
     if (!op) throw EvalError("attribute 'operator' missing", pos);
     composite::MutableSeries<Value *> res;
-    auto cmp = [&](Value *a, Value *b) { return st.lessThan(*a, *b, pos); };
-    std::set<Value *, decltype(cmp)> done(cmp);
+    composite::MutableSeries<Value *> done; // the keys met, sorted by lessThan
     composite::MutableSeries<Value *> queue;
     for (size_t k = 0, nk = ss->value->listSize(); k < nk; k++) queue.append(ss->value->list.elems[k]);
     size_t qi = 0;
@@ -1022,8 +1020,19 @@ void registerBuiltins(EvalState &state) {
       const Attr *key = e->attrs->get(st.s.key);
       if (!key) throw EvalError("attribute 'key' missing", pos);
       st.forceValue(*key->value, pos);
-      if (done.count(key->value)) continue;
-      done.insert(key->value);
+      // A binary search comparing as a std::set's lookup did: the key with an element first, then the element with the key.
+      uint32_t lo = 0, hi = done.size();
+      bool met = false;
+      while (lo < hi && !met) {
+        uint32_t mid = lo + (hi - lo) / 2;
+        if (st.lessThan(*key->value, *done[mid], pos)) hi = mid;
+        else if (st.lessThan(*done[mid], *key->value, pos)) lo = mid + 1;
+        else met = true;
+      }
+      if (met) continue;
+      done.append(nullptr);
+      for (uint32_t i = done.size() - 1; i > lo; i--) done[i] = done[i - 1];
+      done[lo] = key->value;
       res.append(e);
       Value r;
       st.callFunction(*op->value, *e, r, pos);

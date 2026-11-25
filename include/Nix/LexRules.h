@@ -9,9 +9,8 @@
 #ifndef NIX_LEXRULES_H
 #define NIX_LEXRULES_H
 
-#include <algorithm>
-#include <cstddef>
-#include <cstring>
+#include <stddef.h>
+#include <string.h>
 #include <string_view>
 
 namespace nixfe::lex {
@@ -84,7 +83,7 @@ struct Rules {
       if (at(j) == '.') {
         j++;
         while (!eof(j) && isDigit(src[j])) j++;
-        best = std::max(best, exp(j) - i);
+        if (size_t e = exp(j) - i; e > best) best = e;
       }
     }
     {
@@ -93,7 +92,7 @@ struct Rules {
       if (at(j) == '.' && isDigit(at(j + 1))) {
         j++;
         while (!eof(j) && isDigit(src[j])) j++;
-        best = std::max(best, exp(j) - i);
+        if (size_t e = exp(j) - i; e > best) best = e;
       }
     }
     return best;

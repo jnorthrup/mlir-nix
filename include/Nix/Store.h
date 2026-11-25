@@ -9,7 +9,7 @@
 #ifndef NIX_STORE_H
 #define NIX_STORE_H
 
-#include <cstdint>
+#include <stdint.h>
 
 #include "Composite/Funnel.h"
 #include "Composite/Mutable.h"

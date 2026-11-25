@@ -13,10 +13,10 @@
 #include "Nix/Os.h"
 #include "Nix/Prefetch.h"
 
-#include <climits>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <unistd.h>

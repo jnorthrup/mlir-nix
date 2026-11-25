@@ -20,7 +20,6 @@
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "Nix/Os.h"
-#include <cstdint>
 #include <sys/mman.h>
 #include <unistd.h>
 

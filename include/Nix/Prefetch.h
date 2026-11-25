@@ -18,7 +18,7 @@
 #include "Composite/Mutable.h"
 #include "Composite/Text.h"
 
-#include <cstdint>
+#include <stdint.h>
 #include <string_view>
 
 namespace nixprefetch {

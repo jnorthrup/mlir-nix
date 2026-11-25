@@ -87,8 +87,7 @@ inline void lineToStderr(const char *s) { lineToStderr(s, __builtin_strlen(s)); 
 
 /// A C string for a system call, from bytes that need not end in a NUL.  A Text always does, and is used as it lies; other bytes (a window, a
 /// string_view) are copied, onto the stack when they are short: `open(nixsys::CStr(path), ...)`.  Not copyable: the pointer is the CStr's own.
-class CStr {
-public:
+struct CStr {
   CStr(const char *s) : p(s) {}
   CStr(const composite::Text &t) : p(t.c_str()) {}
   template <class V> requires(composite::ByteView<V> && !composite::same<V, composite::Text>) CStr(const V &v) {
@@ -107,8 +106,6 @@ public:
   CStr &operator=(const CStr &) = delete;
   operator const char *() const { return p; }
   const char *c_str() const { return p; }
-
-private:
   const char *p = nullptr;
   char buf[512];
   composite::Text big;
@@ -218,8 +215,6 @@ struct Thread {
     if (live) pthread_detach(id);
     live = false;
   }
-
-private:
   pthread_t id{};
   bool live = false;
 };

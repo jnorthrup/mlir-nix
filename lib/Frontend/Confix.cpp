@@ -14,7 +14,7 @@
 #include "Nix/Confix.h"
 #include "Nix/LexRules.h"
 
-#include <cstddef>
+#include <stddef.h>
 
 namespace nixfe::confix {
 

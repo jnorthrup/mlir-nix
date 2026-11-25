@@ -18,8 +18,8 @@
 #include "Nix/Numbers.h"
 #include "Nix/Os.h"
 #include "Nix/Store.h"
-#include <cerrno>
-#include <cstring>
+#include <errno.h>
+#include <string.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <sys/stat.h>

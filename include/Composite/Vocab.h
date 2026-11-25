@@ -27,8 +27,6 @@ template <class R, class... A> struct Fn<R(A...)> {
                         }) {}
   constexpr R operator()(A... a) const { return call(obj, fw<A>(a)...); }
   constexpr explicit operator bool() const { return call != nullptr; }
-
-private:
   void *obj = nullptr;
   R (*call)(void *, A...) = nullptr;
 };
@@ -51,8 +49,6 @@ template <class T> struct Maybe {
   constexpr T value_or(T other) const { return has ? v : other; }
   constexpr bool operator==(const Maybe &o) const { return has == o.has && (!has || v == o.v); }
   constexpr bool operator!=(const Maybe &o) const { return !(*this == o); }
-
-private:
   bool has = false;
   T v{};
 };
@@ -88,8 +84,6 @@ template <class T> struct Own {
   constexpr explicit operator bool() const { return p != nullptr; }
   /// The object, no longer owned here.
   constexpr T *release() { return exchange(p, nullptr); }
-
-private:
   void drop() {
     static_assert(sizeof(T) > 0, "an Own's object must be complete where it is deleted"); // delete of an incomplete type runs no destructor
     delete p;
@@ -112,8 +106,6 @@ template <class T> struct Atomic {
   T fetch_add(T d, int order = __ATOMIC_SEQ_CST) { return __atomic_fetch_add(&v, d, order); }
   /// x for the old value, if the value is still `expected`; otherwise false, and `expected` is what the value is.
   bool compare_exchange(T &expected, T x) { return __atomic_compare_exchange_n(&v, &expected, x, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); }
-
-private:
   T v{};
 };
 

@@ -18,7 +18,7 @@
 #include "llvm/Support/SHA256.h"
 #endif
 
-#include <cstring>
+#include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -77,7 +77,7 @@ struct Sha256Ctx {
   Sha256Ctx() { CC_SHA256_Init(&c); }
   void update(const uint8_t *p, size_t n) {
     for (size_t off = 0; off < n; off += 1u << 30)
-      CC_SHA256_Update(&c, p + off, (CC_LONG)std::min<size_t>(1u << 30, n - off));
+      CC_SHA256_Update(&c, p + off, (CC_LONG)composite::min<size_t>(1u << 30, n - off));
   }
   void final(uint8_t *out) { CC_SHA256_Final(out, &c); }
 };

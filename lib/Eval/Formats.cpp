@@ -6,9 +6,9 @@
 
 #include "mlir/IR/BuiltinAttributes.h"
 
-#include <cmath>
+#include <math.h>
 #include <unistd.h>
-#include <climits>
+#include <limits.h>
 
 using namespace mlir;
 namespace nd = mlir::nix;

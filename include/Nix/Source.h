@@ -9,7 +9,7 @@
 #ifndef NIX_SOURCE_H
 #define NIX_SOURCE_H
 
-#include <cstdint>
+#include <stdint.h>
 #include <stdexcept>
 #include <string_view>
 

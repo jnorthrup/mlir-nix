@@ -26,14 +26,11 @@
 #include "llvm/ADT/StringMap.h"
 #include "llvm/Support/xxhash.h"
 
-#include <algorithm>
-#include <cassert>
-#include <cerrno>
-#include <cstdlib>
-#include <cstring>
-#include <map>
-#include <optional>
-#include <variant>
+#include <assert.h>
+#include <errno.h>
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
 
 namespace nixfe {
 using composite::α;
@@ -67,7 +64,8 @@ using namespace lex; // the character classes and matchers shared with the Confi
 /// The keyword with exactly this text, else T_ID.  The identifier rule matches every keyword's text, so a keyword is
 /// an identifier of the same length (the earlier rule wins the tie) and loses to a longer identifier (`iffy`).
 Tok keywordOf(std::string_view w) {
-  std::optional<Keyword> k = w.size() < 2 || w.size() > 7 ? std::nullopt : symbolizeKeyword(llvm::StringRef(w.data(), w.size()));
+  if (w.size() < 2 || w.size() > 7) return T_ID;
+  auto k = symbolizeKeyword(llvm::StringRef(w.data(), w.size())); // the generated enum API's optional, at its boundary
   return k ? Tok(uint8_t(*k)) : T_ID;
 }
 
@@ -193,7 +191,7 @@ struct Lexer : public lex::Rules {
   /// The offset of the first newline at or after `from`; the size of the input when there is none.
   size_t newlineFrom(size_t from) const {
     if (from >= src.size()) return src.size();
-    const void *q = std::memchr(src.data() + from, '\n', src.size() - from);
+    const void *q = memchr(src.data() + from, '\n', src.size() - from);
     return q ? static_cast<size_t>(static_cast<const char *>(q) - src.data()) : src.size();
   }
 
@@ -465,7 +463,7 @@ struct Parser {
   Origin *origin; // kept for the run (newOrigin)
   const ParseOptions &opts;
   Lexer lx;
-  std::optional<Lexer> hl; // the heads': statement starts, read for the names they bind
+  composite::Own<Lexer> hl; // the heads': statement starts, read for the names they bind
   confix::Bands *bands; // written as the heads need it: a band is scanned when its names are first read
   mlir::ModuleOp module;
   mlir::OpBuilder b;
@@ -473,7 +471,7 @@ struct Parser {
   mlir::Block *topBlock = nullptr;
   llvm::StringMap<Value> builtinCache;
   Scope *sc = nullptr;                    // where the parse is
-  std::optional<ParseError> undefinedErr; // the first undefined variable: upstream reports it once the source parses
+  composite::Own<ParseError> undefinedErr; // the first undefined variable: upstream reports it once the source parses
   uint32_t orphans = 0;                   // names a set was given ahead that nothing bound (a parse error must follow)
   bool minting = false;
   /// Where a lambda is lowered with its body even when bodies wait: the whole source, which its importer calls, and
@@ -668,7 +666,7 @@ struct Parser {
   void undefined(Name n, Pos p) {
     ParseError e(composite::cat("undefined variable '", n.str(), "'"), p, origin);
     if (minting) throw e;
-    if (!undefinedErr) undefinedErr = e;
+    if (!undefinedErr) undefinedErr = composite::own<ParseError>(e);
   }
 
   //===--------------------------------------------------------------------===//
@@ -900,7 +898,7 @@ struct Parser {
   bool hasBand(uint32_t r) const { return bands && r < bands->size(); }
   Lexer &heads() {
     if (!hl) {
-      hl.emplace(origin, opts);
+      hl = composite::own<Lexer>(origin, opts);
       hl->wantPos = false;
     }
     return *hl;
@@ -1031,8 +1029,8 @@ struct Parser {
         for (Name x : hd.names) bind(s, x);
         continue;
       }
-      size_t m = std::min(hd.path.size(), rel.size());
-      if (m == 0 || !std::equal(hd.path.begin(), hd.path.begin() + m, rel.begin())) continue;
+      size_t m = composite::min(hd.path.size(), rel.size());
+      if (m == 0 || llvm::ArrayRef<Name>(hd.path).take_front(m) != rel.take_front(m)) continue;
       if (hd.path.size() > rel.size()) bind(s, hd.path[rel.size()]);
       else if (hd.lit != ~0u) adds(hd.lit, 0, rel.drop_front(hd.path.size()), s);
     }
@@ -1111,7 +1109,7 @@ struct Parser {
     s.ordered = true;
   }
   static bool sameName(const Name &a, const Name &b) {
-    return a.size == b.size && (a.size == 0 || std::memcmp(a.data, b.data, a.size) == 0);
+    return a.size == b.size && (a.size == 0 || memcmp(a.data, b.data, a.size) == 0);
   }
   static uint32_t hashOf(const Name &n) {
     return static_cast<uint32_t>(llvm::xxh3_64bits(llvm::ArrayRef<uint8_t>(reinterpret_cast<const uint8_t *>(n.data), n.size)));
@@ -1157,7 +1155,7 @@ struct Parser {
   /// binding that lands in a `rec` set is parsed in its scope).  A path goes through the sets that will be one when
   /// the literals being read merge: at each component, those of si and of what it merges into; the last is the one
   /// the others merge into.
-  std::pair<Scope *, Set *> target(uint32_t si, llvm::ArrayRef<Comp> path) {
+  composite::Join<Scope *, Set *> target(uint32_t si, llvm::ArrayRef<Comp> path) {
     llvm::SmallVector<Set *, 4> level, next;
     for (Set *s = &sets[si]; s; s = s->into) level.push_back(s);
     for (const Comp &c : path) {
@@ -1166,7 +1164,7 @@ struct Parser {
         if (Def *d = c.computed() ? nullptr : findDef(*s, c.name); d && d->kind == D_PLAIN && d->val.k == K_SET)
           for (Set *t = &sets[d->val.set]; t; t = t->into) next.push_back(t);
       if (next.empty()) return {level.back()->values, nullptr};
-      std::swap(level, next);
+      level.swap(next);
     }
     return {level.back()->values, level.back()};
   }
@@ -1285,12 +1283,13 @@ struct Parser {
     Set &s = sets[si];
     order(s);
     composite::Text r, inherits;
-    std::map<uint32_t, composite::Text> from;
+    composite::MutableSeries<composite::Text> from(s.froms.size()); // by source: the names inherited from it, empty when none
     for (Def &d : s.defs)
       if (d.kind == D_INHERITED) inherits.put(' ').put(ident(d.name));
       else if (d.kind == D_FROM) from[d.from].put(' ').put(ident(d.name));
     if (!inherits.empty()) r.put("inherit").put(inherits).put("; ");
-    for (auto &[i, names] : from) r.put("inherit (").put(txt(s.froms[i])).put(')').put(names).put("; ");
+    for (uint32_t i = 0; i < from.size(); i++)
+      if (!from[i].empty()) r.put("inherit (").put(txt(s.froms[i])).put(')').put(from[i]).put("; ");
     for (Def &d : s.defs)
       if (d.kind == D_PLAIN) r.put(ident(d.name)).put(" = ").put(txt(d.val)).put("; ");
     for (Dyn &d : s.dyns) r.put("\"${").put(txt(d.name)).put("}\" = ").put(txt(d.val)).put("; ");
@@ -1910,7 +1909,7 @@ struct Parser {
         // In a binding of set `into`, a computed component is parsed where the binding's value would be: in the set
         // that the static components before it reach.
         Scope *s0 = sc;
-        if (into >= 0) sc = target(uint32_t(into), path).first;
+        if (into >= 0) sc = target(uint32_t(into), path).a;
         path.push_back(parseStringAttr());
         sc = s0;
       } else unexpected("identifier or 'or' or '${' or '\"'");
@@ -1945,7 +1944,7 @@ struct Parser {
     int mode;
     llvm::SmallVector<Node, 4> parts;
     Name single;
-    composite::MutableSeries<std::pair<Pos, std::variant<Node, Token>>> ind;
+    composite::MutableSeries<composite::Join<Token, Node>> ind; // an indented string's parts: its IND_STR token, or the '${' and the expression
   };
   Node parseStringParts(Pos pos) {
     StrParts c{this, 0};
@@ -2092,14 +2091,14 @@ struct Parser {
 
   /// The indentation is stripped by nixfe_ts_strip (TextParts.mlir) into `piece`: a record a part (its text, and kind 0
   /// a literal with indent, 1 one without, 2 an antiquotation); it writes each literal's window, empty when dropped.
-  Node stripIndentation(Pos pos, composite::MutableSeries<std::pair<Pos, std::variant<Node, Token>>> &es) {
+  Node stripIndentation(Pos pos, composite::MutableSeries<composite::Join<Token, Node>> &es) {
     if (es.empty()) return strLit(Name::of(""), Pos{});
     llvm::SmallVector<uint64_t, 24> recs;
     size_t total = 0;
-    for (auto &[p, i] : es) {
-      auto *t = std::get_if<Token>(&i);
-      std::string_view s = t ? lx.text(*t) : std::string_view();
-      recs.append({uint64_t(uintptr_t(s.data())), s.size(), t ? uint64_t(!t->hasIndent) : 2});
+    for (auto &[t, e] : es) {
+      bool lit = t.t != T_DOLLAR_CURLY;
+      std::string_view s = lit ? lx.text(t) : std::string_view();
+      recs.append({uint64_t(uintptr_t(s.data())), s.size(), lit ? uint64_t(!t.hasIndent) : 2});
       total += s.size();
     }
     llvm::SmallVector<uint64_t, 16> wins(2 * es.size());
@@ -2107,8 +2106,8 @@ struct Parser {
     piece.truncate(uint32_t(nixfe_ts_strip(recs.data(), es.size(), piece.begin(), total, wins.data())));
     llvm::SmallVector<Node, 4> es2;
     size_t k = 0;
-    for (auto &[p, i] : es) {
-      if (auto *e = std::get_if<Node>(&i)) es2.push_back(std::move(*e));
+    for (auto &[t, e] : es) {
+      if (t.t == T_DOLLAR_CURLY) es2.push_back(std::move(e));
       else if (wins[2 * k + 1]) es2.push_back(strLit(Name::persist(llvm::StringRef(piece.data() + wins[2 * k], wins[2 * k + 1])), Pos{}));
       k++;
     }
@@ -2126,16 +2125,16 @@ extern "C" int64_t nixfe_sp_peek(void *c) { // 0 the text token (T_IND_STR in an
 }
 extern "C" void nixfe_sp_str(void *c, int64_t push) {
   Token t = sp(c).p->take();
-  if (sp(c).mode == 1) return void(sp(c).ind.emplace(t.pos, t));
+  if (sp(c).mode == 1) return void(sp(c).ind.append(composite::Join<Token, Node>{t, Node{}}));
   sp(c).single = sp(c).p->nameOf(t);
   if (push) sp(c).parts.push_back(sp(c).p->strLit(sp(c).single, Pos{}));
 }
 extern "C" void nixfe_sp_push(void *c) { sp(c).parts.push_back(sp(c).p->strLit(sp(c).single, Pos{})); }
 extern "C" void nixfe_sp_expr(void *c) {
-  Pos at = sp(c).p->take().pos;
+  Token open = sp(c).p->take();
   Node e = sp(c).p->parseExpr();
   sp(c).p->expectChar('}');
-  if (sp(c).mode == 1) sp(c).ind.emplace(at, std::move(e));
+  if (sp(c).mode == 1) sp(c).ind.append(composite::Join<Token, Node>{open, std::move(e)});
   else sp(c).parts.push_back(std::move(e));
 }
 extern "C" void nixfe_sp_close(void *c) {

@@ -71,8 +71,6 @@ template <class V> struct Patricia {
     for (uint32_t i = 0, m = mlnix_patricia_prefix(nodes.data(), rows.data(), sizeof(Row), root, k, n, cells.data(), found); i < m; i++)
       emit(rows[found[i]]);
   }
-
-private:
   struct Node {
     uint32_t child[2]; // a node's index, or a row's index with kLeaf set
     uint32_t byte;
