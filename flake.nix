@@ -5,56 +5,21 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
   };
 
+  # The package is default.nix's derivation, so `nix build` and `nix-build` make the same mlnix.
   outputs = { self, nixpkgs }: {
     formatter = builtins.mapAttrs (system: pkgs: pkgs.nixfmt-tree) nixpkgs.legacyPackages;
 
     packages = builtins.mapAttrs (system: pkgs: {
-      default = pkgs.stdenv.mkDerivation {
-        pname = "mlir-nix";
-        version = "0.1.0";
-
-        src = self;
-
-        nativeBuildInputs = [
-          pkgs.cmake
-          pkgs.ninja
-          pkgs.llvmPackages.tblgen # provides mlir-tblgen on PATH
-        ];
-
-        buildInputs = [
-          pkgs.llvmPackages.llvm
-          pkgs.llvmPackages.mlir
-        ];
-
-        cmakeFlags = [
-          "-DMLIR_DIR=${pkgs.llvmPackages.mlir.dev}/lib/cmake/mlir"
-          "-DCMAKE_BUILD_TYPE=Release"
-        ];
-
-        installPhase = ''
-          runHook preInstall
-          mkdir -p $out/bin
-          cp bin/mlnix bin/mlnix-opt $out/bin/
-          runHook postInstall
-        '';
-      };
+      default = import ./default.nix { inherit pkgs; };
     }) nixpkgs.legacyPackages;
 
+    # The package's inputs and its compiler (LLVM 23's clang: the build compiles the lowered LLVM IR with it), plus python3 for
+    # scripts/.
     devShells = builtins.mapAttrs (system: pkgs: {
-      default = pkgs.mkShell {
-        nativeBuildInputs = [
-          pkgs.cmake
-          pkgs.ninja
-          pkgs.llvmPackages.tblgen # provides mlir-tblgen on PATH
-          pkgs.python3
-        ];
-
-        buildInputs = [
-          pkgs.llvmPackages.llvm
-          pkgs.llvmPackages.mlir
-        ];
-
-        MLIR_DIR = "${pkgs.llvmPackages.mlir.dev}/lib/cmake/mlir";
+      default = (pkgs.mkShell.override { stdenv = pkgs.llvmPackages_23.stdenv; }) {
+        inputsFrom = [ self.packages.${system}.default ];
+        packages = [ pkgs.python3 ];
+        MLIR_DIR = "${pkgs.llvmPackages_23.mlir.dev}/lib/cmake/mlir";
       };
     }) nixpkgs.legacyPackages;
   };
