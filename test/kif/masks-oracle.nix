@@ -7,8 +7,8 @@
 # descendants, each once.
 { sumo, files }:
 let
-  inherit (builtins) all attrNames attrValues concatMap elemAt filter foldl' genList genericClosure head isList isString
-    length listToAttrs tail;
+  inherit (builtins) all attrNames attrValues concatLists concatMap elemAt filter foldl' genList genericClosure head isList isString
+    length listToAttrs tail zipAttrsWith;
   kif = import (sumo + "/kif.nix");
   forms = concatMap (f: kif.parse (builtins.readFile f)) files;
   o = import (sumo + "/sumo.nix") { inherit forms; };
@@ -20,15 +20,16 @@ let
     operator = e: map (k: { key = k; start = false; }) (step e.key);
   }));
   types = x: unique (concatMap (k: [ k ] ++ (o.ancestors.${k} or [ ])) o.classOf.${x});
-  children = foldl' (m: c: foldl' (m: p: m // { ${p} = (m.${p} or [ ]) ++ [ c ]; }) m o.parents.${c}) { } (attrNames o.parents);
-  below = d: closed [ d ] (c: children.${c} or [ ]);
+  children = zipAttrsWith (_: concatLists) (concatMap (c: map (p: { ${p} = [ c ]; }) (o.parents.${c} or [ ])) (attrNames o.parents));
+  belowMemo = listToAttrs (map (d: { name = d; value = closed [ d ] (c: children.${c} or [ ]); }) (attrNames o.classes));
+  below = d: belowMemo.${d} or (closed [ d ] (c: children.${c} or [ ]));
   pairs = concatMap (f: if length f == 3 && isString (elemAt f 1) && isString (elemAt f 2) then [ [ (elemAt f 1) (elemAt f 2) ] [ (elemAt f 2) (elemAt f 1) ] ] else [ ]) (top "disjoint")
     ++ concatMap (f:
       let parts = tail (tail f); n = length parts; in
       if length f >= 4 && all isString (tail f) then
         concatMap (i: concatMap (j: if i == j then [ ] else [ [ (elemAt parts i) (elemAt parts j) ] ]) (genList (j: j) n)) (genList (i: i) n)
       else [ ]) (top "partition" ++ top "disjointDecomposition");
-  declared = foldl' (m: p: m // { ${head p} = (m.${head p} or [ ]) ++ [ (elemAt p 1) ]; }) { } pairs;
+  declared = zipAttrsWith (_: concatLists) (map (p: { ${head p} = [ (elemAt p 1) ]; }) pairs);
   mask = c: unique (concatMap (a: concatMap (d: [ d ] ++ below d) (declared.${a} or [ ])) ([ c ] ++ (o.ancestors.${c} or [ ])));
   things = attrNames o.classOf;
   classes = attrNames o.classes;
