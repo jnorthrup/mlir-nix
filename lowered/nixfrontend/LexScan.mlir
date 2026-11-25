@@ -2,8 +2,8 @@
 // MLIR: the DEFAULT, STRING, IND_STRING, INPATH, INPATH_SLASH start conditions with the same state stack, producing
 // one Token per call.  The character classes are the 256-byte tables below (Nix/LexRules.h's isIdStart / isIdChar /
 // isPathChar / isDigit, the blanks, and the single-character tokens).  The longest-match choice among the rules that
-// can begin a default token stays in LexRules.h, shared with the Confix scan, called back per general token
-// (nixfe_confix_match).  Keyword symbolization, integer/float reading and position accounting stay C++ callbacks
+// can begin a default token is the kursive grammar lowered/kursive/LexDefault.mlir, shared with the Confix scan, called
+// back per general token (nixfe_confix_match).  Keyword symbolization, integer/float reading and position accounting stay C++ callbacks
 // (nixfe_lex_keyword / nixfe_lex_int / nixfe_lex_float / nixfe_lex_pos); the Token struct, the derived-text pool, the
 // state stack storage, reposition and the parser integration stay in the Parser.cpp bridge.
 //

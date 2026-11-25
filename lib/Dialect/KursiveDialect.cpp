@@ -228,6 +228,22 @@ const Grammar *ereGrammars() {
   return g;
 }
 
+/// The lexer's default-state grammar (lowered/kursive/LexDefault.mlir), compiled once per process like the ERE grammar.
+const Grammar &lexGrammar() {
+  static const char *text =
+#include "KursiveLexDefault.inc"
+      ;
+  static Grammar g;
+  static bool done = [] {
+    OwningOpRef<ModuleOp> m = parseSourceString<ModuleOp>(text, &patternContext());
+    if (!m || failed(toProgram(*m, 1 << 16))) llvm::report_fatal_error("kursive: the lexer's default grammar does not compile");
+    g = readGrammar(*m, "lex_default");
+    return true;
+  }();
+  (void)done;
+  return g;
+}
+
 /// A pattern read token by token: each token is the longest match of the grammar at the cursor, and these are its
 /// actions.  They count the tree nodes and the sets the old compiler made, so that the reader runs out of room (Space)
 /// exactly where it did and rejects (Invalid) what it rejected, the first error winning.
@@ -499,6 +515,28 @@ int mlir::kursive::compileProgram(StringRef re, unsigned poolCap, unsigned capSt
   for (size_t i = 0; i < g.steps.size(); i++) steps[i] = g.steps[i];
   for (size_t i = 0; i < g.sets.size(); i++) sets[i] = g.sets[i];
   return g.err;
+}
+
+uint64_t mlir::kursive::lexDefault(const char *src, size_t n, size_t i) {
+  // The default state's longest match at i (LexRules.h's matchDefault, now lowered/kursive/LexDefault.mlir): the
+  // length in the high 32 bits, the Rule (group - 1) in the low.  At the end of the text the fallback answers 1 char.
+  if (i >= n) return (uint64_t(1) << 32) | 99;
+  const Grammar &g = lexGrammar();
+  SmallVector<uint32_t, 256> marks(2 * (g.counts[2] + 1)), best(2 * (g.counts[2] + 1));
+  SmallVector<uint32_t, 256> loops(2 * g.counts[3] + 2);
+  SmallVector<uint32_t, 768> stack(3 * 256);
+  for (;;) {
+    uint64_t budget = ~uint64_t(0);
+    int32_t r = mlnix_kursive_walk(g.steps.data(), g.sets.data(), g.counts[2], g.counts[3], src, uint32_t(n), uint32_t(i),
+                                   0, 1, marks.data(), best.data(), loops.data(), stack.data(), uint32_t(stack.size() / 3),
+                                   &budget);
+    if (r == 2) { stack.resize(2 * stack.size()); continue; } // out of checkpoints: walk again with twice the room
+    if (r == 0) break;                                        // unreachable: the fallback group matches every byte
+    for (uint32_t k = 1; k <= g.counts[2]; k++)
+      if (best[2 * k] != ~0u) return (uint64_t(best[1] - i) << 32) | (k - 1);
+    break;
+  }
+  return (uint64_t(1) << 32) | 99;
 }
 
 void mlir::kursive::registerKursivePasses() {
