@@ -1010,9 +1010,11 @@ void registerBuiltins(EvalState &state) {
     const Attr *op = args[0]->attrs->get(st.s.operator_);
     if (!op) throw EvalError("attribute 'operator' missing", pos);
     composite::MutableSeries<Value *> res;
-    // Nix's own genericClosure keeps its keys in a std::set of the same comparison, and a comparison here is a lessThan that may
-    // throw or force: which pair throws first is that set's walk, libc++'s or libstdc++'s.  Kept as it is, so that mlnix reports
-    // what Nix reports on the same platform (6259893 measured a copy of libc++'s order failing that on Linux).
+    // Nix's own genericClosure keeps its keys in a std::set of the same comparison and adds each key with one insert, and a
+    // comparison here is a lessThan that may throw or force: which pair throws first is that set's insert, libc++'s or
+    // libstdc++'s.  The same container and the same call give the message Nix gives on the same C++ library (a count before the
+    // insert, as here until 2026-11-24, compared the other way first under libstdc++: "an integer with a string" on Linux, where
+    // Nix 2.35.4 says "a string with an integer").
     auto cmp = [&](Value *a, Value *b) { return st.lessThan(*a, *b, pos); };
     std::set<Value *, decltype(cmp)> done(cmp);
     composite::MutableSeries<Value *> queue;
@@ -1024,8 +1026,7 @@ void registerBuiltins(EvalState &state) {
       const Attr *key = e->attrs->get(st.s.key);
       if (!key) throw EvalError("attribute 'key' missing", pos);
       st.forceValue(*key->value, pos);
-      if (done.count(key->value)) continue;
-      done.insert(key->value);
+      if (!done.insert(key->value).second) continue; // one insert, as Nix's prim_genericClosure: a count first compares in another order
       res.append(e);
       Value r;
       st.callFunction(*op->value, *e, r, pos);
