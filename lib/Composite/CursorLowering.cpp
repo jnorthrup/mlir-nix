@@ -537,39 +537,47 @@ struct SortedLowering : Lowering<SortedOp> {
   }
 };
 
-/// bisect(xs, key) [by {x, key -> c}]: a binary search over [lo, hi); the index of an equal element, or -(lo) - 1 where
-/// the search ended (the insertion point).
+/// bisect's search over [0, n): `probe(mid)` is the three-way order (-1, 0 or 1, an i32) of the element at mid against
+/// the key, made at the builder's insertion point inside the search's body.  The result is the index of an equal
+/// element, or -(insertion point) - 1 where the search ended.  BisectLowering reads the element from its buffer;
+/// bisectInPlace makes it where it is read.
+FailureOr<Value> bisectSearch(OpBuilder &b, Location loc, Value n, function_ref<FailureOr<Value>(Value)> probe) {
+  Type idx = b.getIndexType(), i1 = b.getI1Type();
+  Value zero = cIndex(b, loc, 0), one = cIndex(b, loc, 1), z32 = cInt(b, loc, b.getI32Type(), 0);
+  SmallVector<Type> state{idx, idx, idx, i1}; // lo, hi, where it was found, found
+  SmallVector<Location> locs(4, loc);
+  auto search = scf::WhileOp::create(b, loc, TypeRange(state), ValueRange{zero, n, zero, cInt(b, loc, i1, 0)});
+  Block *before = b.createBlock(&search.getBefore(), {}, TypeRange(state), locs);
+  Value open = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::ult, before->getArgument(0), before->getArgument(1));
+  Value notFound = arith::XOrIOp::create(b, loc, before->getArgument(3), cInt(b, loc, i1, 1));
+  scf::ConditionOp::create(b, loc, arith::AndIOp::create(b, loc, open, notFound), before->getArguments());
+  Block *after = b.createBlock(&search.getAfter(), {}, TypeRange(state), locs);
+  Value lo = after->getArgument(0), hi = after->getArgument(1);
+  Value mid = arith::ShRUIOp::create(b, loc, arith::AddIOp::create(b, loc, lo, hi), one);
+  FailureOr<Value> c = probe(mid);
+  if (failed(c)) return failure();
+  Value below = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::slt, *c, z32);
+  Value above = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::sgt, *c, z32);
+  Value equal = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::eq, *c, z32);
+  Value lo2 = arith::SelectOp::create(b, loc, below, arith::AddIOp::create(b, loc, mid, one), lo);
+  Value hi2 = arith::SelectOp::create(b, loc, above, mid, hi);
+  scf::YieldOp::create(b, loc, ValueRange{lo2, hi2, mid, equal});
+  b.setInsertionPointAfter(search);
+  Value missing = arith::SubIOp::create(b, loc, arith::SubIOp::create(b, loc, zero, search.getResult(0)), one);
+  return arith::SelectOp::create(b, loc, search.getResult(3), search.getResult(2), missing).getResult();
+}
+
+/// bisect(xs, key) [by {x, key -> c}]: bisectSearch over a buffer, the order region inlined at each probe.
 struct BisectLowering : Lowering<BisectOp> {
   using Lowering::Lowering;
   LogicalResult matchAndRewrite(BisectOp op, OpAdaptor a, ConversionPatternRewriter &rw) const override {
     Location loc = op.getLoc();
-    Type idx = rw.getIndexType(), i1 = rw.getI1Type();
-    Value xs = a.getSeries(), key = a.getKey(), n = length(rw, loc, xs);
-    Value zero = cIndex(rw, loc, 0), one = cIndex(rw, loc, 1);
-    SmallVector<Type> state{idx, idx, idx, i1}; // lo, hi, where it was found, found
-    SmallVector<Location> locs(4, loc);
-    auto search = scf::WhileOp::create(rw, loc, TypeRange(state), ValueRange{zero, n, zero, cInt(rw, loc, i1, 0)});
-    Block *before = rw.createBlock(&search.getBefore(), search.getBefore().end(), TypeRange(state), locs);
-    {
-      Value open = arith::CmpIOp::create(rw, loc, arith::CmpIPredicate::ult, before->getArgument(0), before->getArgument(1));
-      Value notFound = arith::XOrIOp::create(rw, loc, before->getArgument(3), cInt(rw, loc, i1, 1));
-      scf::ConditionOp::create(rw, loc, arith::AndIOp::create(rw, loc, open, notFound), before->getArguments());
-    }
-    Block *after = rw.createBlock(&search.getAfter(), search.getAfter().end(), TypeRange(state), locs);
-    Value lo = after->getArgument(0), hi = after->getArgument(1);
-    Value mid = arith::ShRUIOp::create(rw, loc, arith::AddIOp::create(rw, loc, lo, hi), one);
-    FailureOr<Value> c = order(rw, types(), loc, op.getOrder(), load(rw, loc, xs, mid), key);
-    if (failed(c)) return rw.notifyMatchFailure(op, "bisect's order yields one i32 (or the elements and the key are integers of one type)");
-    Value z32 = cInt(rw, loc, rw.getI32Type(), 0);
-    Value below = arith::CmpIOp::create(rw, loc, arith::CmpIPredicate::slt, *c, z32);
-    Value above = arith::CmpIOp::create(rw, loc, arith::CmpIPredicate::sgt, *c, z32);
-    Value equal = arith::CmpIOp::create(rw, loc, arith::CmpIPredicate::eq, *c, z32);
-    Value lo2 = arith::SelectOp::create(rw, loc, below, arith::AddIOp::create(rw, loc, mid, one), lo);
-    Value hi2 = arith::SelectOp::create(rw, loc, above, mid, hi);
-    scf::YieldOp::create(rw, loc, ValueRange{lo2, hi2, mid, equal});
-    rw.setInsertionPointAfter(search);
-    Value missing = arith::SubIOp::create(rw, loc, arith::SubIOp::create(rw, loc, zero, search.getResult(0)), one);
-    rw.replaceOp(op, arith::SelectOp::create(rw, loc, search.getResult(3), search.getResult(2), missing).getResult());
+    Value xs = a.getSeries(), key = a.getKey();
+    FailureOr<Value> found = bisectSearch(rw, loc, length(rw, loc, xs), [&](Value mid) {
+      return order(rw, types(), loc, op.getOrder(), load(rw, loc, xs, mid), key);
+    });
+    if (failed(found)) return rw.notifyMatchFailure(op, "bisect's order yields one i32 (or the elements and the key are integers of one type)");
+    rw.replaceOp(op, *found);
     return success();
   }
 };
@@ -1289,31 +1297,15 @@ bool readInPlace(SeriesOp s) {
   return llvm::all_of(s->getUses(), [](OpOperand &u) { return u.getOperandNumber() == 0 && isa<AtOp, SizeOp, SliceOp, BisectOp>(u.getOwner()); });
 }
 
-/// bisect(series(n) {k -> x}, key): BisectLowering's search with x made at each midpoint (and the order cloned there).
+/// bisect(series(n) {k -> x}, key): bisectSearch with x made at each midpoint (and the order cloned there).
 Value bisectInPlace(OpBuilder &b, BisectOp op, SeriesOp s) {
   Location loc = op.getLoc();
-  Type idx = b.getIndexType(), i1 = b.getI1Type();
-  Value zero = cIndex(b, loc, 0), one = cIndex(b, loc, 1), z32 = cInt(b, loc, b.getI32Type(), 0);
-  SmallVector<Type> state{idx, idx, idx, i1}; // lo, hi, where it was found, found
-  SmallVector<Location> locs(4, loc);
-  auto search = scf::WhileOp::create(b, loc, TypeRange(state), ValueRange{zero, s.getSize(), zero, cInt(b, loc, i1, 0)});
-  Block *before = b.createBlock(&search.getBefore(), {}, TypeRange(state), locs);
-  Value open = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::ult, before->getArgument(0), before->getArgument(1));
-  Value notFound = arith::XOrIOp::create(b, loc, before->getArgument(3), cInt(b, loc, i1, 1));
-  scf::ConditionOp::create(b, loc, arith::AndIOp::create(b, loc, open, notFound), before->getArguments());
-  Block *after = b.createBlock(&search.getAfter(), {}, TypeRange(state), locs);
-  Value lo = after->getArgument(0), hi = after->getArgument(1);
-  Value mid = arith::ShRUIOp::create(b, loc, arith::AddIOp::create(b, loc, lo, hi), one);
-  Value x = cloneWith(b, s.getAt(), ValueRange{mid});
-  Value c = op.getOrder().empty() ? threeWay(b, loc, x, op.getKey()) : cloneWith(b, op.getOrder(), ValueRange{x, op.getKey()});
-  Value below = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::slt, c, z32);
-  Value above = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::sgt, c, z32);
-  Value equal = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::eq, c, z32);
-  Value lo2 = arith::SelectOp::create(b, loc, below, arith::AddIOp::create(b, loc, mid, one), lo);
-  scf::YieldOp::create(b, loc, ValueRange{lo2, arith::SelectOp::create(b, loc, above, mid, hi), mid, equal});
-  b.setInsertionPointAfter(search);
-  Value missing = arith::SubIOp::create(b, loc, arith::SubIOp::create(b, loc, zero, search.getResult(0)), one);
-  return arith::SelectOp::create(b, loc, search.getResult(3), search.getResult(2), missing);
+  FailureOr<Value> found = bisectSearch(b, loc, s.getSize(), [&](Value mid) -> FailureOr<Value> {
+    Value x = cloneWith(b, s.getAt(), ValueRange{mid});
+    return orderOf(b, loc, op.getOrder(), x, op.getKey());
+  });
+  assert(succeeded(found) && "an in-place probe cannot fail");
+  return *found;
 }
 
 void fuseSeriesReads(func::FuncOp f) {
