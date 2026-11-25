@@ -19,6 +19,7 @@ set(MLNIX_TRIKESHED_PIPELINE
   --finalize-memref-to-llvm --convert-scf-to-cf --convert-arith-to-llvm --convert-index-to-llvm
   --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts)
 mlnix_lower_trikeshed(mlnix lowered/tools/ToolOpts.mlir ToolOpts)
+mlnix_lower_trikeshed(mlnix lowered/tools/ToolFlags.mlir ToolFlags)
 
 # KIF files into a kif.theory, and the chase (lib/Dialect/KifImport.cpp, KifChase.cpp).
 add_executable(mlnix-kif mlnix-kif.cpp)
