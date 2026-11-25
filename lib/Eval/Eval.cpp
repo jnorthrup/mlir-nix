@@ -2799,9 +2799,8 @@ cp::Text formatError(EvalState *state, const EvalError &e) {
   // Traces are printed outermost first, then the error; each position's source is read here and kept for the call.
   size_t nt = state && state->settings.showTrace ? e.traces.size() : 0;
   cp::MutableSeries<cp::Maybe<nd::SrcPos>> at;
-  auto where = [](const void *p) { auto f = nd::decodePos(p); return f ? cp::Maybe<nd::SrcPos>(*f) : nullptr; };
-  for (size_t i = nt; i > 0; i--) at.append(where(e.traces.begin()[i - 1].pos));
-  at.append(where(e.pos));
+  for (size_t i = nt; i > 0; i--) at.append(nd::decodePos(e.traces.begin()[i - 1].pos));
+  at.append(nd::decodePos(e.pos));
   cp::MutableSeries<cp::Text> srcs;
   for (auto &f : at) srcs.append(f ? sourceFor(state, f->file) : cp::Text());
   cp::MutableSeries<ErrRec> rs;

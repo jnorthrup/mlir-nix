@@ -87,6 +87,7 @@ class NixModes : public OpTrait::TraitBase<ConcreteType, NixModes> {};
 #include "NixDialect/NixOps.h.inc"
 
 #include "Nix/Pos.h"
+#include "Composite/Vocab.h"
 
 #include <optional>
 #include <string_view>
@@ -111,8 +112,8 @@ struct SrcPos {
   std::string_view file;   // a window on text that outlives it: the file table's (never freed) or the context's
   unsigned line = 0, col = 0;
 };
-/// File, line and column of a PosPtr; nullopt when it holds none.
-std::optional<SrcPos> decodePos(const void *pos);
+/// File, line and column of a PosPtr; nothing when it holds none.
+composite::Maybe<SrcPos> decodePos(const void *pos);
 /// The packed word of an op that has the `pos` property (0 for any other op), and its setter.
 uint64_t getPos(Operation *op);
 void setPos(Operation *op, uint64_t word);

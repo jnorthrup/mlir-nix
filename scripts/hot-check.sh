@@ -1,5 +1,5 @@
 #!/bin/bash
-# The algebra is pure.  Every header of include/Composite (the dialect glue TrikeShed.h excepted) includes no standard header, names nothing
+# The algebra is pure.  Every header of include/Composite (the dialect glue TrikeShed.h and CursorLowering.h excepted) includes no standard header, names nothing
 # from std:: in code, and compiles alone with no standard include path at all; the hot set (Hot.h: Core.h, Pack.h, Series.h) is also held to
 # a line budget, because what every file pays for stays small.
 #   bash scripts/hot-check.sh        CXX=<compiler>   BUDGET=<lines> (default 600)
@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 CXX=${CXX:-clang++}
 HOT="include/Composite/Core.h include/Composite/Pack.h include/Composite/Series.h"
-ALL=$(ls include/Composite/*.h | grep -v 'TrikeShed\.h$')
+ALL=$(ls include/Composite/*.h | grep -v -E '(TrikeShed|CursorLowering)\.h$') # the dialect glue: both include MLIR
 for f in $ALL; do
   if grep -n '^[[:space:]]*#[[:space:]]*include[[:space:]]*<' "$f"; then echo "FAIL: $f includes a standard header"; exit 1; fi
   if sed 's://.*$::' "$f" | grep -nE '(^|[^A-Za-z_])std::' | sed "s|^|$f:|"; then echo "FAIL: $f names std:: in code"; exit 1; fi

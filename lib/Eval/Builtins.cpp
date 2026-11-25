@@ -343,7 +343,7 @@ in
 // The attribute-set / list algebra of __groupBy, __zipAttrsWith, __partition, __catAttrs, removeAttrs, __listToAttrs and
 // __mapAttrs is lowered/nixeval/GroupOps.mlir (trikeshed.sorted / where / alpha / slice / combineAll / drain), __getContext's
 // ContextOps.mlir.  The callbacks are the evaluator's part, called where the C++ loops made them.  __genericClosure stays
-// here: its comparisons (each a throwing, forcing lessThan) are made in the order libc++'s std::set made them.
+// here: its std::set's comparison order (each a throwing, forcing lessThan) is the C++ library's, libc++'s or libstdc++'s.
 extern "C" {
 void nixev_ts_group(EvalState *st, Value *f, Value *list, Value *v, PosPtr pos, int64_t zip);
 void nixev_ts_partition(EvalState *st, Value *f, Value *list, Value *v, PosPtr pos);
@@ -1010,7 +1010,11 @@ void registerBuiltins(EvalState &state) {
     const Attr *op = args[0]->attrs->get(st.s.operator_);
     if (!op) throw EvalError("attribute 'operator' missing", pos);
     composite::MutableSeries<Value *> res;
-    composite::MutableSeries<Value *> done; // the keys met, sorted by lessThan
+    // Nix's own genericClosure keeps its keys in a std::set of the same comparison, and a comparison here is a lessThan that may
+    // throw or force: which pair throws first is that set's walk, libc++'s or libstdc++'s.  Kept as it is, so that mlnix reports
+    // what Nix reports on the same platform (6259893 measured a copy of libc++'s order failing that on Linux).
+    auto cmp = [&](Value *a, Value *b) { return st.lessThan(*a, *b, pos); };
+    std::set<Value *, decltype(cmp)> done(cmp);
     composite::MutableSeries<Value *> queue;
     for (size_t k = 0, nk = ss->value->listSize(); k < nk; k++) queue.append(ss->value->list.elems[k]);
     size_t qi = 0;
@@ -1020,19 +1024,8 @@ void registerBuiltins(EvalState &state) {
       const Attr *key = e->attrs->get(st.s.key);
       if (!key) throw EvalError("attribute 'key' missing", pos);
       st.forceValue(*key->value, pos);
-      // A binary search comparing as a std::set's lookup did: the key with an element first, then the element with the key.
-      uint32_t lo = 0, hi = done.size();
-      bool met = false;
-      while (lo < hi && !met) {
-        uint32_t mid = lo + (hi - lo) / 2;
-        if (st.lessThan(*key->value, *done[mid], pos)) hi = mid;
-        else if (st.lessThan(*done[mid], *key->value, pos)) lo = mid + 1;
-        else met = true;
-      }
-      if (met) continue;
-      done.append(nullptr);
-      for (uint32_t i = done.size() - 1; i > lo; i--) done[i] = done[i - 1];
-      done[lo] = key->value;
+      if (done.count(key->value)) continue;
+      done.insert(key->value);
       res.append(e);
       Value r;
       st.callFunction(*op->value, *e, r, pos);
