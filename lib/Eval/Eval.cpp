@@ -36,9 +36,10 @@ namespace nd = mlir::nix;
 namespace nixev {
 
 //===----------------------------------------------------------------------===//
-// Bindings
+// Bindings, and the lazy union behind `//` (see the struct's doc comment)
 //===----------------------------------------------------------------------===//
 
+<<<<<<< HEAD
 const Attr *Bindings::get(Symbol s) const { return cp::findRow(attrs, size_, s); }
 
 /// The union of two flat sorted sets, `y` winning on equal names, as a new flat set of exactly its size.
@@ -53,8 +54,84 @@ static Bindings *mergeBindings(Arena &alloc, const Bindings *x, const Bindings *
   Bindings::merged++;
   Bindings::mergedCells += r->size_;
   return r;
+||||||| 11b03dd
+const Attr *Bindings::get(Symbol s) const {
+  size_t lo = 0, hi = size_;
+  while (lo < hi) {
+    size_t mid = (lo + hi) / 2;
+    if (attrs[mid].name < s) lo = mid + 1;
+    else hi = mid;
+  }
+  if (lo < size_ && attrs[lo].name == s) return &attrs[lo];
+  return nullptr;
+=======
+namespace {
+/// Trailing data of a union Bindings, living where `attrs[]` would (see
+/// unionTailOf). Only the functions in this file ever need to know this.
+struct UnionTail {
+  EvalState *owner = nullptr;
+  mutable Bindings *flatCache = nullptr;
+  Bindings *leaves[0];
+};
+
+UnionTail *unionTailOf(const Bindings *b) {
+  return reinterpret_cast<UnionTail *>(const_cast<Attr *>(const_cast<Bindings *>(b)->attrs));
 }
 
+/// Below this many entries, `//`'s eager two-pointer merge is already just
+/// a handful of copies and not worth deferring; above it, the lhs is
+/// expensive enough to keep as a union leaf instead of recopying it on
+/// every `//`. There is deliberately no size cap on the rhs: deferring it
+/// as one leaf is O(1) no matter how big it is -- the entries only ever
+/// get copied once, whenever (if ever) the union is actually flattened,
+/// which is no more work than an eager merge would have done anyway.
+/// A real nixpkgs/NixOS eval measured via MLNIX_UPDATE_DEBUG=1 confirmed
+/// this matters: 63% of all eager-merge copying (5.6M of 8.9M entries, on
+/// a NixOS+Plasma `toplevel` eval) came from just 243 calls building one
+/// accumulator past 1,000 (up to 28,484) entries via a many-dozens-strong
+/// (not single-digit) rhs each step -- a cap on rhs size would reject
+/// exactly those calls, matching asnix's own corpus assumption
+/// ("overlay/override rhs attrsets are typically single-digit-to-low-
+/// double-digit") not holding for this one.
+constexpr int32_t kUnionLhsMin = 16;
+constexpr int32_t kUnionMaxLeaves = 64;
+
+Bindings *makeUnion(EvalState &st, Bindings *lhs, Bindings *rhsFlat) {
+  size_t lhsLeaves = lhs->isUnion() ? lhs->leafCount() : 1;
+  size_t n = lhsLeaves + 1;
+  void *mem = st.alloc.Allocate(sizeof(Bindings) + sizeof(UnionTail) + n * sizeof(Bindings *), alignof(Bindings));
+  auto *b = new (mem) Bindings();
+  b->size_ = -int32_t(n);
+  auto *ut = new (unionTailOf(b)) UnionTail();
+  ut->owner = &st;
+  if (lhs->isUnion())
+    memcpy(ut->leaves, unionTailOf(lhs)->leaves, lhsLeaves * sizeof(Bindings *));
+  else
+    ut->leaves[0] = lhs;
+  ut->leaves[lhsLeaves] = rhsFlat;
+  return b;
+}
+} // namespace
+
+const Attr *Bindings::get(Symbol s) const {
+  if (isUnion()) {
+    const UnionTail *ut = unionTailOf(this);
+    for (size_t idx = leafCount(); idx-- > 0;)
+      if (const Attr *a = ut->leaves[idx]->get(s)) return a;
+    return nullptr;
+  }
+  size_t lo = 0, hi = size_t(size_);
+  while (lo < hi) {
+    size_t mid = (lo + hi) / 2;
+    if (attrs[mid].name < s) lo = mid + 1;
+    else hi = mid;
+  }
+  if (lo < size_t(size_) && attrs[lo].name == s) return &attrs[lo];
+  return nullptr;
+>>>>>>> 7e8a58de096581fe4a1b239d6a064025fd7390a4
+}
+
+<<<<<<< HEAD
 composite::Frozen<const Attr *> Bindings::lexicographicOrder(const SymbolTable &st) const {
   // Each name's first eight bytes are read once, into the rows sorted (on the stack up to 64 of them): a comparison reads the rows, not the
   // symbol table's prefix words, which a sort read n log n times at random (the table is larger than Kali's L2); the bytes only on a tie.
@@ -89,6 +166,36 @@ Bindings *EvalState::updateAttrs(Bindings *a, Bindings *b) {
   if (a->size_ == 0) return b;
   if (statsEnabled) { nUpdMerged++; nUpdTop += a->size_ + b->size_; }
   return mergeBindings(alloc, a, b);
+||||||| 11b03dd
+std::vector<const Attr *> Bindings::lexicographicOrder(const SymbolTable &st) const {
+  std::vector<const Attr *> v;
+  v.reserve(size_);
+  for (auto &a : *this) v.push_back(&a);
+  std::sort(v.begin(), v.end(), [&](const Attr *a, const Attr *b) { return st[a->name] < st[b->name]; });
+  return v;
+=======
+Bindings *Bindings::ensureFlat() const {
+  if (!isUnion()) return const_cast<Bindings *>(this);
+  UnionTail *ut = unionTailOf(this);
+  if (ut->flatCache) return ut->flatCache;
+  EvalState::BindingsBuilder bb(*ut->owner);
+  // Highest-priority (most recently `//`'d on top) leaf first: finish()'s
+  // "first wins" dedup then keeps whichever leaf should actually win.
+  for (size_t idx = leafCount(); idx-- > 0;) {
+    Bindings *leaf = ut->leaves[idx]->ensureFlat();
+    for (const Attr &a : *leaf) bb.insert(a.name, a.value, a.pos);
+  }
+  ut->flatCache = bb.finish();
+  return ut->flatCache;
+}
+
+std::vector<const Attr *> Bindings::lexicographicOrder(const SymbolTable &st) const {
+  std::vector<const Attr *> v;
+  v.reserve(size());
+  for (auto &a : *this) v.push_back(&a);
+  std::sort(v.begin(), v.end(), [&](const Attr *a, const Attr *b) { return st[a->name] < st[b->name]; });
+  return v;
+>>>>>>> 7e8a58de096581fe4a1b239d6a064025fd7390a4
 }
 
 Bindings *EvalState::allocBindings(size_t n) {
@@ -99,12 +206,57 @@ Bindings *EvalState::allocBindings(size_t n) {
   return b;
 }
 
+<<<<<<< HEAD
 static size_t sortRowsFirstWins(Attr *rows, size_t n);
 void EvalState::BindingsBuilder::overflow(Attr a) {
   if (cap) { // the first row past the room: the rows so far move to the series, and every later row goes there
     more.reserve(size_t(n) * 2 + 1);
     more.appendAll(rows, n);
     cap = 0;
+||||||| 11b03dd
+Bindings *EvalState::BindingsBuilder::finish() {
+  std::stable_sort(attrs.begin(), attrs.end(), [](const Attr &a, const Attr &b) { return a.name < b.name; });
+  Bindings *b = st.allocBindings(attrs.size());
+  size_t n = 0;
+  for (size_t i = 0; i < attrs.size(); i++) {
+    if (n && b->attrs[n - 1].name == attrs[i].name) continue; // first wins
+    b->attrs[n++] = attrs[i];
+=======
+Bindings *EvalState::updateAttrs(Bindings *lhs, Bindings *rhs) {
+  if (lhs->empty()) return rhs;
+  if (rhs->empty()) return lhs;
+  Bindings *rhsFlat = rhs->ensureFlat();
+  size_t lLeaves = lhs->isUnion() ? lhs->leafCount() : 1;
+  // Short-circuits before `lhs->size()` so an already-union lhs (the common
+  // case inside a `foldl' (acc: x: acc // {...})`) never gets flattened
+  // just to decide whether to keep growing the union.
+  bool lhsEligible = lhs->isUnion() || lhs->size() >= size_t(kUnionLhsMin);
+  if (lLeaves < size_t(kUnionMaxLeaves) && lhsEligible)
+    return makeUnion(*this, lhs, rhsFlat);
+
+  Bindings *lhsFlat = lhs->ensureFlat();
+  Bindings *b = allocBindings(lhsFlat->size() + rhsFlat->size());
+  size_t i = 0, j = 0, n = 0;
+  while (i < lhsFlat->size() && j < rhsFlat->size()) {
+    const Attr &x = lhsFlat->attrs[i], &y = rhsFlat->attrs[j];
+    if (x.name == y.name) { b->attrs[n++] = y; i++; j++; }
+    else if (x.name < y.name) { b->attrs[n++] = x; i++; }
+    else { b->attrs[n++] = y; j++; }
+  }
+  while (i < lhsFlat->size()) b->attrs[n++] = lhsFlat->attrs[i++];
+  while (j < rhsFlat->size()) b->attrs[n++] = rhsFlat->attrs[j++];
+  b->size_ = int32_t(n);
+  return b;
+}
+
+Bindings *EvalState::BindingsBuilder::finish() {
+  std::stable_sort(attrs.begin(), attrs.end(), [](const Attr &a, const Attr &b) { return a.name < b.name; });
+  Bindings *b = st.allocBindings(attrs.size());
+  size_t n = 0;
+  for (size_t i = 0; i < attrs.size(); i++) {
+    if (n && b->attrs[n - 1].name == attrs[i].name) continue; // first wins
+    b->attrs[n++] = attrs[i];
+>>>>>>> 7e8a58de096581fe4a1b239d6a064025fd7390a4
   }
   more.append(a);
   n++;
@@ -868,6 +1020,7 @@ Frame *EvalState::newFrameSlow(RegionInfo *ri, Frame *up) {
   return f;
 }
 
+<<<<<<< HEAD
 static Node::How howOf(Operation *op) {
   if (isa<nd::IntOp, nd::FloatOp, nd::StringOp, nd::PathOp, nd::BoolOp, nd::NullOp>(op)) return Node::Const;
   if (isa<nd::BuiltinOp>(op)) return Node::Builtin;
@@ -889,7 +1042,60 @@ Value *EvalState::makeFixed(Node *s) {
     Value *bv = baseEnvValue(b.getName().str());
     if (!bv) throw EvalError(cp::cat("undefined variable '", b.getName().str(), "'"), nd::posOfOp(op));
     return s->fixed = bv;
+||||||| 11b03dd
+Value *EvalState::lookup(Frame *f, mlir::Value v) {
+  auto it = slotMap.find(v.getAsOpaquePointer());
+  if (it == slotMap.end()) throw EvalError("internal error: unindexed SSA value");
+  RegionInfo *ri = it->second.first;
+  unsigned idx = it->second.second;
+  while (f && f->info != ri) f = f->up;
+  if (!f) throw EvalError("internal error: SSA value used outside its scope");
+  Value *&slot = f->slots[idx];
+  if (slot) return slot;
+  Operation *op = v.getDefiningOp();
+  if (!op) throw EvalError("internal error: unbound block argument");
+  if (isa<nd::IntOp, nd::FloatOp, nd::StringOp, nd::PathOp, nd::BoolOp, nd::NullOp>(op)) {
+    auto c = constCache.find(op);
+    if (c != constCache.end()) return slot = c->second;
+    Value *cv = allocValue();
+    if (auto i = dyn_cast<nd::IntOp>(op)) mkInt(*cv, i.getValue());
+    else if (auto fl = dyn_cast<nd::FloatOp>(op)) mkFloat(*cv, fl.getValue().convertToDouble());
+    else if (auto s = dyn_cast<nd::StringOp>(op)) mkString(*cv, s.getValue());
+    else if (auto bl = dyn_cast<nd::BoolOp>(op)) mkBool(*cv, bl.getValue());
+    else if (isa<nd::NullOp>(op)) mkNull(*cv);
+    else mkPath(*cv, cast<nd::PathOp>(op).getValue());
+    constCache[op] = cv;
+    return slot = cv;
+=======
+Value *EvalState::lookup(Frame *f, mlir::Value v, bool forceNow, PosPtr pos) {
+  auto it = slotMap.find(v.getAsOpaquePointer());
+  if (it == slotMap.end()) throw EvalError("internal error: unindexed SSA value");
+  RegionInfo *ri = it->second.first;
+  unsigned idx = it->second.second;
+  while (f && f->info != ri) f = f->up;
+  if (!f) throw EvalError("internal error: SSA value used outside its scope");
+  Value *&slot = f->slots[idx];
+  if (slot) {
+    if (forceNow) forceValue(*slot, pos);
+    return slot;
   }
+  Operation *op = v.getDefiningOp();
+  if (!op) throw EvalError("internal error: unbound block argument");
+  if (isa<nd::IntOp, nd::FloatOp, nd::StringOp, nd::PathOp, nd::BoolOp, nd::NullOp>(op)) {
+    auto c = constCache.find(op);
+    if (c != constCache.end()) return slot = c->second;
+    Value *cv = allocValue();
+    if (auto i = dyn_cast<nd::IntOp>(op)) mkInt(*cv, i.getValue());
+    else if (auto fl = dyn_cast<nd::FloatOp>(op)) mkFloat(*cv, fl.getValue().convertToDouble());
+    else if (auto s = dyn_cast<nd::StringOp>(op)) mkString(*cv, s.getValue());
+    else if (auto bl = dyn_cast<nd::BoolOp>(op)) mkBool(*cv, bl.getValue());
+    else if (isa<nd::NullOp>(op)) mkNull(*cv);
+    else mkPath(*cv, cast<nd::PathOp>(op).getValue());
+    constCache[op] = cv;
+    return slot = cv;
+>>>>>>> 7e8a58de096581fe4a1b239d6a064025fd7390a4
+  }
+<<<<<<< HEAD
   Value *cv = allocValue();
   if (auto i = dyn_cast<nd::IntOp>(op)) mkInt(*cv, i.getValue());
   else if (auto fl = dyn_cast<nd::FloatOp>(op)) mkFloat(*cv, fl.getValue().convertToDouble());
@@ -916,7 +1122,32 @@ Value *EvalState::evalNow(Frame *f, Node *s, Value *nv) {
     nv->thunk.node = s;
     nv->thunk.env = f;
     throw;
+||||||| 11b03dd
+  if (auto b = dyn_cast<nd::BuiltinOp>(op)) {
+    Value *bv = baseEnvValue(b.getName());
+    if (!bv) throw EvalError("undefined variable '" + b.getName().str() + "'", op->getLoc().getAsOpaquePointer());
+    return slot = bv;
   }
+  Value *nv = allocValue();
+  if (isa<nd::LambdaOp>(op)) {
+    nv->type = VType::Lambda;
+  } else {
+    nv->type = VType::Thunk;
+=======
+  if (auto b = dyn_cast<nd::BuiltinOp>(op)) {
+    Value *bv = baseEnvValue(b.getName());
+    if (!bv) throw EvalError("undefined variable '" + b.getName().str() + "'", op->getLoc().getAsOpaquePointer());
+    return slot = bv;
+  }
+  if (isa<nd::LambdaOp>(op)) {
+    Value *nv = allocValue();
+    nv->type = VType::Lambda;
+    nv->thunk.op = op;
+    nv->thunk.env = f;
+    return slot = nv;
+>>>>>>> 7e8a58de096581fe4a1b239d6a064025fd7390a4
+  }
+<<<<<<< HEAD
   if (statsEnabled) ++nEager;
   return nv;
 }
@@ -944,6 +1175,33 @@ Value *EvalState::makeCell(Frame *f, Node *s, bool forced) {
   nv->thunk.env = f;
   if (statsEnabled) [[unlikely]] statCell(f, nv);
   return slot = nv;
+||||||| 11b03dd
+  nv->thunk.op = op;
+  nv->thunk.env = f;
+  return slot = nv;
+=======
+  Value *nv = allocValue();
+  if (!forceNow) {
+    nv->type = VType::Thunk;
+    nv->thunk.op = op;
+    nv->thunk.env = f;
+    return slot = nv;
+  }
+  // The caller is about to force this value anyway (a strict operand): skip
+  // the Thunk round-trip and evaluate directly, still under a Blackhole so
+  // cyclic references are caught exactly as a forced Thunk would catch them.
+  slot = nv;
+  nv->type = VType::Blackhole;
+  try {
+    evalOp(op, f, *nv);
+  } catch (...) {
+    nv->type = VType::Thunk;
+    nv->thunk.op = op;
+    nv->thunk.env = f;
+    throw;
+  }
+  return nv;
+>>>>>>> 7e8a58de096581fe4a1b239d6a064025fd7390a4
 }
 
 /// Evaluates the defining op of an in-place value straight into `dest`.  Lambdas are
@@ -1625,11 +1883,26 @@ void EvalState::evalAttrsDynamic(Node *node, Frame *env, Value &out) {
   // The names defined so far, by symbol (+1: the key 0 is no key): a dynamic name's position, a static name's null (the set's own is shown).
   cp::WordTable<PosPtr> seen;
   for (size_t i = 0; i < names.size(); i++)
+<<<<<<< HEAD
     seen.insert(uint64_t(symbolOf(names[i])) + 1, nullptr);
   for (size_t j = 0; j < nDynNames; j++) {
     Value *nv = lookupForced(env, dynNames[j]); // forced next: a cell made here is made evaluated
     PosPtr p = dynNames[j]->pos();
     forceValue(*nv, p);
+||||||| 11b03dd
+    seen[symbolOf(cast<StringAttr>(names[i]))] = nullptr;
+  auto dynValues = op.getDynValues();
+  for (size_t j = 0; j < dynNames.size(); j++) {
+    Value *nv = lookup(env, dynNames[j]);
+    PosPtr p = dynNames[j].getLoc().getAsOpaquePointer();
+    forceValue(*nv, p);
+=======
+    seen[symbolOf(cast<StringAttr>(names[i]))] = nullptr;
+  auto dynValues = op.getDynValues();
+  for (size_t j = 0; j < dynNames.size(); j++) {
+    PosPtr p = dynNames[j].getLoc().getAsOpaquePointer();
+    Value *nv = lookup(env, dynNames[j], true, p);
+>>>>>>> 7e8a58de096581fe4a1b239d6a064025fd7390a4
     if (nv->type == VType::Null) continue;
     auto name = forceStringNoCtx(*nv, p, "while evaluating the name of a dynamic attribute");
     Symbol sym = symbolOfString(name);
@@ -1641,6 +1914,7 @@ void EvalState::evalAttrsDynamic(Node *node, Frame *env, Value &out) {
   mkAttrs(out, bb.finish());
 }
 
+<<<<<<< HEAD
 // evalConcatStrings' composition is hollowed into lowered/nixeval/ConcatOps.mlir (trikeshed.combineAll / drain and the
 // scf.for accumulation), lowered by --trikeshed-lower-cursors into NixEval.  The per-part forcing (lookupForced /
 // forceValue), coercion (coerceToWindow), context merging (own.add) and the error wording (throwCannotAdd /
@@ -1663,6 +1937,92 @@ void nixev_cc_part(ConcatCtx *c, int64_t k, int64_t ft, int64_t isFirst, ConcatR
     if (v->type == VType::Int) { rec->kind = 1; rec->payload = v->integer; }
     else if (v->type == VType::Float) { rec->kind = 2; __builtin_memcpy(&rec->payload, &v->fpoint, 8); }
     else throwCannotAdd(EvalState::showType(*v), ftt == VType::Int ? "an integer" : "a float", ppos);
+||||||| 11b03dd
+void EvalState::evalConcatStrings(nd::ConcatStringsOp op, Frame *env, Value &out) {
+  auto parts = op.getParts();
+  bool forceString = op.getForceString();
+  NixStringContext context;
+  std::string str;
+  int64_t n = 0;
+  double nf = 0;
+  bool first = !forceString;
+  VType firstType = VType::String;
+  for (mlir::Value pv : parts) {
+    PosPtr ppos = pv.getLoc().getAsOpaquePointer();
+    Value *v = lookup(env, pv);
+    forceValue(*v, ppos);
+    if (first) firstType = v->type;
+    if (firstType == VType::Int) {
+      if (v->type == VType::Int) {
+        if (__builtin_add_overflow(n, v->integer, &n))
+          throw EvalError("integer overflow in adding " + std::to_string(n) + " + " + std::to_string(v->integer), ppos);
+      } else if (v->type == VType::Float) {
+        firstType = VType::Float;
+        nf = (double)n;
+        nf += v->fpoint;
+      } else {
+        throw EvalError(std::string("cannot add ") + showType(*v) + " to an integer", ppos);
+      }
+    } else if (firstType == VType::Float) {
+      if (v->type == VType::Int) nf += (double)v->integer;
+      else if (v->type == VType::Float) nf += v->fpoint;
+      else throw EvalError(std::string("cannot add ") + showType(*v) + " to a float", ppos);
+    } else {
+      str += coerceToString(*v, context, false, firstType == VType::String, ppos,
+                            "while evaluating a path segment", !first);
+    }
+    first = false;
+  }
+  PosPtr pos = op->getLoc().getAsOpaquePointer();
+  if (firstType == VType::Int) mkInt(out, n);
+  else if (firstType == VType::Float) mkFloat(out, nf);
+  else if (firstType == VType::Path) {
+    if (!context.empty())
+      throw EvalError("a string that refers to a store path cannot be appended to a path", pos);
+    mkPath(out, nixfe::canonPath(str));
+=======
+void EvalState::evalConcatStrings(nd::ConcatStringsOp op, Frame *env, Value &out) {
+  auto parts = op.getParts();
+  bool forceString = op.getForceString();
+  NixStringContext context;
+  std::string str;
+  int64_t n = 0;
+  double nf = 0;
+  bool first = !forceString;
+  VType firstType = VType::String;
+  for (mlir::Value pv : parts) {
+    PosPtr ppos = pv.getLoc().getAsOpaquePointer();
+    Value *v = lookup(env, pv, true, ppos);
+    if (first) firstType = v->type;
+    if (firstType == VType::Int) {
+      if (v->type == VType::Int) {
+        if (__builtin_add_overflow(n, v->integer, &n))
+          throw EvalError("integer overflow in adding " + std::to_string(n) + " + " + std::to_string(v->integer), ppos);
+      } else if (v->type == VType::Float) {
+        firstType = VType::Float;
+        nf = (double)n;
+        nf += v->fpoint;
+      } else {
+        throw EvalError(std::string("cannot add ") + showType(*v) + " to an integer", ppos);
+      }
+    } else if (firstType == VType::Float) {
+      if (v->type == VType::Int) nf += (double)v->integer;
+      else if (v->type == VType::Float) nf += v->fpoint;
+      else throw EvalError(std::string("cannot add ") + showType(*v) + " to a float", ppos);
+    } else {
+      str += coerceToString(*v, context, false, firstType == VType::String, ppos,
+                            "while evaluating a path segment", !first);
+    }
+    first = false;
+  }
+  PosPtr pos = op->getLoc().getAsOpaquePointer();
+  if (firstType == VType::Int) mkInt(out, n);
+  else if (firstType == VType::Float) mkFloat(out, nf);
+  else if (firstType == VType::Path) {
+    if (!context.empty())
+      throw EvalError("a string that refers to a store path cannot be appended to a path", pos);
+    mkPath(out, nixfe::canonPath(str));
+>>>>>>> 7e8a58de096581fe4a1b239d6a064025fd7390a4
   } else {
     const StringContext *pc = nullptr;
     composite::Chars w = c->st->coerceToWindow(*v, *c->context, false, ftt == VType::String, ppos, "while evaluating a path segment", *c->scratch, !isFirst, &pc);
@@ -1734,14 +2094,28 @@ void EvalState::statEval(Node *n, Frame *env) {
   }
 }
 
+<<<<<<< HEAD
 // The evaluation of each kind of node, one function a kind (Node::eval).  An operand is read through its record (n->operands); the op's
 // attributes (names, paths, literals) from the op (n->def).
 namespace {
 inline void copyFrom(EvalState &st, Value *v, Value &out, PosPtr pos) {
   st.forceValue(*v, pos);
   out = *v;
+||||||| 11b03dd
+Symbol EvalState::pathSymbol(mlir::Attribute comp, mlir::OperandRange dyn, unsigned &nextDyn, Frame *env,
+                             PosPtr pos) {
+  if (auto lit = mlir::dyn_cast<mlir::StringAttr>(comp)) return symbolOf(lit);
+  return symbols.create(forceStringNoCtx(*lookup(env, dyn[nextDyn++]), pos, "while evaluating an attribute name"));
+=======
+Symbol EvalState::pathSymbol(mlir::Attribute comp, mlir::OperandRange dyn, unsigned &nextDyn, Frame *env,
+                             PosPtr pos) {
+  if (auto lit = mlir::dyn_cast<mlir::StringAttr>(comp)) return symbolOf(lit);
+  return symbols.create(
+      forceStringNoCtx(*lookup(env, dyn[nextDyn++], true, pos), pos, "while evaluating an attribute name"));
+>>>>>>> 7e8a58de096581fe4a1b239d6a064025fd7390a4
 }
 
+<<<<<<< HEAD
 void evalApply(EvalState &st, Node *n, Frame *env, Value &out) {
   Node **x = n->operands;
   Value *f = st.lookupImpl(env, x[0], true); // callFunction forces the callee before anything else it does
@@ -1751,6 +2125,317 @@ void evalApply(EvalState &st, Node *n, Frame *env, Value &out) {
   Value **args = na <= 6 ? buf : st.allocList(na);
   cp::drain(cells, args);
   st.callFunction(*f, na, args, out, n->pos());
+||||||| 11b03dd
+void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
+  PosPtr pos = op->getLoc().getAsOpaquePointer();
+  auto copyFrom = [&](Value *v) {
+    forceValue(*v, pos);
+    out = *v;
+  };
+  llvm::TypeSwitch<Operation *>(op)
+      .Case<nd::ListOp>([&](nd::ListOp l) {
+        auto elems = l.getElements();
+        mkList(out, elems.size());
+        for (size_t i = 0; i < elems.size(); i++) out.list.elems[i] = lookup(env, elems[i]);
+      })
+      .Case<nd::AttrsOp>([&](nd::AttrsOp a) { evalAttrs(a, env, out); })
+      .Case<nd::SelectOp>([&](nd::SelectOp sel) {
+        Value *cur = lookup(env, sel.getBase());
+        mlir::Value def = sel.getDefaultValue();
+        mlir::OperandRange dyn = sel.getDynKeys();
+        unsigned nextDyn = 0;
+        for (mlir::Attribute comp : sel.getPath()) {
+          Symbol sym = pathSymbol(comp, dyn, nextDyn, env, pos);
+          forceValue(*cur, pos);
+          if (def) {
+            if (cur->type != VType::Attrs) return copyFrom(lookup(env, def));
+          } else if (cur->type != VType::Attrs) {
+            throwTypeError("a set", *cur, pos, "while selecting an attribute");
+          }
+          const Attr *a = cur->attrs->get(sym);
+          if (!a) {
+            if (def) return copyFrom(lookup(env, def));
+            throw EvalError("attribute '" + std::string(symbols[sym].str()) + "' missing", pos);
+          }
+          cur = a->value;
+        }
+        copyFrom(cur);
+      })
+      .Case<nd::HasAttrOp>([&](nd::HasAttrOp h) {
+        Value *cur = lookup(env, h.getBase());
+        mlir::OperandRange dyn = h.getDynKeys();
+        unsigned nextDyn = 0;
+        for (mlir::Attribute comp : h.getPath()) {
+          forceValue(*cur, pos);
+          Symbol sym = pathSymbol(comp, dyn, nextDyn, env, pos);
+          if (cur->type != VType::Attrs) return mkBool(out, false);
+          const Attr *a = cur->attrs->get(sym);
+          if (!a) return mkBool(out, false);
+          cur = a->value;
+        }
+        mkBool(out, true);
+      })
+      .Case<nd::ApplyOp>([&](nd::ApplyOp ap) {
+        Value *f = lookup(env, ap.getCallee());
+        auto as = ap.getArgs();
+        llvm::SmallVector<Value *, 4> args;
+        for (mlir::Value a : as) args.push_back(lookup(env, a));
+        callFunction(*f, args.size(), args.data(), out, pos);
+      })
+      .Case<nd::IfOp>([&](nd::IfOp i) {
+        bool c = forceBool(*lookup(env, i.getCond()), pos, "while evaluating a branch condition");
+        copyFrom(lookup(env, c ? i.getThenValue() : i.getElseValue()));
+      })
+      .Case<nd::AssertOp>([&](nd::AssertOp a) {
+        bool c = forceBool(*lookup(env, a.getCond()), pos, "in the condition of the assert statement");
+        if (!c) {
+          std::string txt = a.getText() ? a.getText()->str() : "?";
+          throw AssertionError("assertion '" + txt + "' failed", pos);
+        }
+        copyFrom(lookup(env, a.getBody()));
+      })
+      .Case<nd::NotOp>([&](nd::NotOp n) {
+        mkBool(out, !forceBool(*lookup(env, n.getOperand()), pos, "in the argument of the not operator"));
+      })
+      .Case<nd::AndOp>([&](nd::AndOp a) {
+        if (!forceBool(*lookup(env, a.getLhs()), pos, "in the left operand of the AND (&&) operator"))
+          return mkBool(out, false);
+        mkBool(out, forceBool(*lookup(env, a.getRhs()), pos, "in the right operand of the AND (&&) operator"));
+      })
+      .Case<nd::OrOp>([&](nd::OrOp o) {
+        if (forceBool(*lookup(env, o.getLhs()), pos, "in the left operand of the OR (||) operator"))
+          return mkBool(out, true);
+        mkBool(out, forceBool(*lookup(env, o.getRhs()), pos, "in the right operand of the OR (||) operator"));
+      })
+      .Case<nd::ImplOp>([&](nd::ImplOp o) {
+        if (!forceBool(*lookup(env, o.getLhs()), pos, "in the left operand of the IMPL (->) operator"))
+          return mkBool(out, true);
+        mkBool(out, forceBool(*lookup(env, o.getRhs()), pos, "in the right operand of the IMPL (->) operator"));
+      })
+      .Case<nd::EqOp>([&](nd::EqOp e) {
+        Value a = *lookup(env, e.getLhs()), b;
+        Value *pa = lookup(env, e.getLhs()), *pb = lookup(env, e.getRhs());
+        forceValue(*pa, pos);
+        forceValue(*pb, pos);
+        a = *pa;
+        b = *pb;
+        mkBool(out, eqValues(a, b, pos));
+      })
+      .Case<nd::NeqOp>([&](nd::NeqOp e) {
+        Value *pa = lookup(env, e.getLhs()), *pb = lookup(env, e.getRhs());
+        forceValue(*pa, pos);
+        forceValue(*pb, pos);
+        Value a = *pa, b = *pb;
+        mkBool(out, !eqValues(a, b, pos));
+      })
+      .Case<nd::UpdateOp>([&](nd::UpdateOp u) {
+        Value *l = lookup(env, u.getLhs()), *r = lookup(env, u.getRhs());
+        forceAttrs(*l, pos, "in the left operand of the update (//) operator");
+        forceAttrs(*r, pos, "in the right operand of the update (//) operator");
+        if (l->attrs->empty()) { out = *r; return; }
+        if (r->attrs->empty()) { out = *l; return; }
+        Bindings *b = allocBindings(l->attrs->size() + r->attrs->size());
+        size_t i = 0, j = 0, n = 0;
+        while (i < l->attrs->size() && j < r->attrs->size()) {
+          const Attr &x = l->attrs->attrs[i], &y = r->attrs->attrs[j];
+          if (x.name == y.name) { b->attrs[n++] = y; i++; j++; }
+          else if (x.name < y.name) { b->attrs[n++] = x; i++; }
+          else { b->attrs[n++] = y; j++; }
+        }
+        while (i < l->attrs->size()) b->attrs[n++] = l->attrs->attrs[i++];
+        while (j < r->attrs->size()) b->attrs[n++] = r->attrs->attrs[j++];
+        b->size_ = n;
+        mkAttrs(out, b);
+      })
+      .Case<nd::ConcatListsOp>([&](nd::ConcatListsOp c) {
+        Value *l = lookup(env, c.getLhs()), *r = lookup(env, c.getRhs());
+        forceList(*l, pos, "in the left operand of the list concatenation operator");
+        forceList(*r, pos, "in the right operand of the list concatenation operator");
+        if (l->list.size == 0) { out = *r; return; }
+        if (r->list.size == 0) { out = *l; return; }
+        size_t n1 = l->list.size, n2 = r->list.size;
+        Value **e1 = l->list.elems, **e2 = r->list.elems;
+        mkList(out, n1 + n2);
+        memcpy(out.list.elems, e1, n1 * sizeof(Value *));
+        memcpy(out.list.elems + n1, e2, n2 * sizeof(Value *));
+      })
+      .Case<nd::ConcatStringsOp>([&](nd::ConcatStringsOp c) { evalConcatStrings(c, env, out); })
+      .Case<nd::WithVarOp>([&](nd::WithVarOp w) {
+        Symbol sym = symbolOf(w.getNameAttr());
+        for (mlir::Value sc : w.getScopes()) {
+          Value *sv = lookup(env, sc);
+          forceAttrs(*sv, sc.getLoc().getAsOpaquePointer(), "while evaluating the first subexpression of a with expression");
+          if (const Attr *a = sv->attrs->get(sym)) return copyFrom(a->value);
+        }
+        throw EvalError("undefined variable '" + w.getName().str() + "'", pos);
+      })
+      .Case<nd::FormalOp>([&](nd::FormalOp f) {
+        Value *arg = lookup(env, f.getArg());
+        forceAttrs(*arg, pos);
+        if (const Attr *a = arg->attrs->get(symbolOf(f.getNameAttr()))) return copyFrom(a->value);
+        if (!f.getDefaultValue()) throw EvalError("missing formal argument '" + f.getName().str() + "'", pos);
+        copyFrom(lookup(env, f.getDefaultValue()));
+      })
+      .Case<nd::IntOp>([&](nd::IntOp i) { mkInt(out, i.getValue()); })
+      .Case<nd::BoolOp>([&](nd::BoolOp b) { mkBool(out, b.getValue()); })
+      .Case<nd::NullOp>([&](nd::NullOp) { mkNull(out); })
+      .Case<nd::FloatOp>([&](nd::FloatOp fl) { mkFloat(out, fl.getValue().convertToDouble()); })
+      .Case<nd::StringOp>([&](nd::StringOp s) { mkString(out, s.getValue()); })
+      .Case<nd::PathOp>([&](nd::PathOp p) { mkPath(out, p.getValue()); })
+      .Case<nd::BuiltinOp>([&](nd::BuiltinOp b) { copyFrom(baseEnvValue(b.getName())); })
+      .Default([&](Operation *o) {
+        // Everything else (all primop ops of the continent dialects) runs
+        // through the externally attached NixEvalOpInterface model.
+        if (auto e = dyn_cast<nd::NixEvalOpInterface>(o)) return e.eval(*this, env, out);
+        throw EvalError("internal error: cannot evaluate operation '" + o->getName().getStringRef().str() + "'", pos);
+      });
+=======
+void EvalState::evalOp(Operation *op, Frame *env, Value &out) {
+  PosPtr pos = op->getLoc().getAsOpaquePointer();
+  auto copyFrom = [&](Value *v) {
+    forceValue(*v, pos);
+    out = *v;
+  };
+  llvm::TypeSwitch<Operation *>(op)
+      .Case<nd::ListOp>([&](nd::ListOp l) {
+        auto elems = l.getElements();
+        mkList(out, elems.size());
+        for (size_t i = 0; i < elems.size(); i++) out.list.elems[i] = lookup(env, elems[i]);
+      })
+      .Case<nd::AttrsOp>([&](nd::AttrsOp a) { evalAttrs(a, env, out); })
+      .Case<nd::SelectOp>([&](nd::SelectOp sel) {
+        Value *cur = lookup(env, sel.getBase(), true, pos);
+        mlir::Value def = sel.getDefaultValue();
+        mlir::OperandRange dyn = sel.getDynKeys();
+        unsigned nextDyn = 0;
+        for (mlir::Attribute comp : sel.getPath()) {
+          Symbol sym = pathSymbol(comp, dyn, nextDyn, env, pos);
+          forceValue(*cur, pos);
+          if (def) {
+            if (cur->type != VType::Attrs) return copyFrom(lookup(env, def, true, pos));
+          } else if (cur->type != VType::Attrs) {
+            throwTypeError("a set", *cur, pos, "while selecting an attribute");
+          }
+          const Attr *a = cur->attrs->get(sym);
+          if (!a) {
+            if (def) return copyFrom(lookup(env, def, true, pos));
+            throw EvalError("attribute '" + std::string(symbols[sym].str()) + "' missing", pos);
+          }
+          cur = a->value;
+        }
+        copyFrom(cur);
+      })
+      .Case<nd::HasAttrOp>([&](nd::HasAttrOp h) {
+        Value *cur = lookup(env, h.getBase(), true, pos);
+        mlir::OperandRange dyn = h.getDynKeys();
+        unsigned nextDyn = 0;
+        for (mlir::Attribute comp : h.getPath()) {
+          forceValue(*cur, pos);
+          Symbol sym = pathSymbol(comp, dyn, nextDyn, env, pos);
+          if (cur->type != VType::Attrs) return mkBool(out, false);
+          const Attr *a = cur->attrs->get(sym);
+          if (!a) return mkBool(out, false);
+          cur = a->value;
+        }
+        mkBool(out, true);
+      })
+      .Case<nd::ApplyOp>([&](nd::ApplyOp ap) {
+        Value *f = lookup(env, ap.getCallee(), true, pos);
+        auto as = ap.getArgs();
+        llvm::SmallVector<Value *, 4> args;
+        for (mlir::Value a : as) args.push_back(lookup(env, a));
+        callFunction(*f, args.size(), args.data(), out, pos);
+      })
+      .Case<nd::IfOp>([&](nd::IfOp i) {
+        bool c = forceBool(*lookup(env, i.getCond(), true, pos), pos, "while evaluating a branch condition");
+        copyFrom(lookup(env, c ? i.getThenValue() : i.getElseValue(), true, pos));
+      })
+      .Case<nd::AssertOp>([&](nd::AssertOp a) {
+        bool c = forceBool(*lookup(env, a.getCond(), true, pos), pos, "in the condition of the assert statement");
+        if (!c) {
+          std::string txt = a.getText() ? a.getText()->str() : "?";
+          throw AssertionError("assertion '" + txt + "' failed", pos);
+        }
+        copyFrom(lookup(env, a.getBody(), true, pos));
+      })
+      .Case<nd::NotOp>([&](nd::NotOp n) {
+        mkBool(out, !forceBool(*lookup(env, n.getOperand(), true, pos), pos, "in the argument of the not operator"));
+      })
+      .Case<nd::AndOp>([&](nd::AndOp a) {
+        if (!forceBool(*lookup(env, a.getLhs(), true, pos), pos, "in the left operand of the AND (&&) operator"))
+          return mkBool(out, false);
+        mkBool(out, forceBool(*lookup(env, a.getRhs(), true, pos), pos, "in the right operand of the AND (&&) operator"));
+      })
+      .Case<nd::OrOp>([&](nd::OrOp o) {
+        if (forceBool(*lookup(env, o.getLhs(), true, pos), pos, "in the left operand of the OR (||) operator"))
+          return mkBool(out, true);
+        mkBool(out, forceBool(*lookup(env, o.getRhs(), true, pos), pos, "in the right operand of the OR (||) operator"));
+      })
+      .Case<nd::ImplOp>([&](nd::ImplOp o) {
+        if (!forceBool(*lookup(env, o.getLhs(), true, pos), pos, "in the left operand of the IMPL (->) operator"))
+          return mkBool(out, true);
+        mkBool(out, forceBool(*lookup(env, o.getRhs(), true, pos), pos, "in the right operand of the IMPL (->) operator"));
+      })
+      .Case<nd::EqOp>([&](nd::EqOp e) {
+        Value *pa = lookup(env, e.getLhs(), true, pos), *pb = lookup(env, e.getRhs(), true, pos);
+        Value a = *pa, b = *pb;
+        mkBool(out, eqValues(a, b, pos));
+      })
+      .Case<nd::NeqOp>([&](nd::NeqOp e) {
+        Value *pa = lookup(env, e.getLhs(), true, pos), *pb = lookup(env, e.getRhs(), true, pos);
+        Value a = *pa, b = *pb;
+        mkBool(out, !eqValues(a, b, pos));
+      })
+      .Case<nd::UpdateOp>([&](nd::UpdateOp u) {
+        Value *l = lookup(env, u.getLhs(), true, pos), *r = lookup(env, u.getRhs(), true, pos);
+        forceAttrs(*l, pos, "in the left operand of the update (//) operator");
+        forceAttrs(*r, pos, "in the right operand of the update (//) operator");
+        mkAttrs(out, updateAttrs(l->attrs, r->attrs));
+      })
+      .Case<nd::ConcatListsOp>([&](nd::ConcatListsOp c) {
+        Value *l = lookup(env, c.getLhs(), true, pos), *r = lookup(env, c.getRhs(), true, pos);
+        forceList(*l, pos, "in the left operand of the list concatenation operator");
+        forceList(*r, pos, "in the right operand of the list concatenation operator");
+        if (l->list.size == 0) { out = *r; return; }
+        if (r->list.size == 0) { out = *l; return; }
+        size_t n1 = l->list.size, n2 = r->list.size;
+        Value **e1 = l->list.elems, **e2 = r->list.elems;
+        mkList(out, n1 + n2);
+        memcpy(out.list.elems, e1, n1 * sizeof(Value *));
+        memcpy(out.list.elems + n1, e2, n2 * sizeof(Value *));
+      })
+      .Case<nd::ConcatStringsOp>([&](nd::ConcatStringsOp c) { evalConcatStrings(c, env, out); })
+      .Case<nd::WithVarOp>([&](nd::WithVarOp w) {
+        Symbol sym = symbolOf(w.getNameAttr());
+        for (mlir::Value sc : w.getScopes()) {
+          PosPtr scPos = sc.getLoc().getAsOpaquePointer();
+          Value *sv = lookup(env, sc, true, scPos);
+          forceAttrs(*sv, scPos, "while evaluating the first subexpression of a with expression");
+          if (const Attr *a = sv->attrs->get(sym)) return copyFrom(a->value);
+        }
+        throw EvalError("undefined variable '" + w.getName().str() + "'", pos);
+      })
+      .Case<nd::FormalOp>([&](nd::FormalOp f) {
+        Value *arg = lookup(env, f.getArg(), true, pos);
+        forceAttrs(*arg, pos);
+        if (const Attr *a = arg->attrs->get(symbolOf(f.getNameAttr()))) return copyFrom(a->value);
+        if (!f.getDefaultValue()) throw EvalError("missing formal argument '" + f.getName().str() + "'", pos);
+        copyFrom(lookup(env, f.getDefaultValue(), true, pos));
+      })
+      .Case<nd::IntOp>([&](nd::IntOp i) { mkInt(out, i.getValue()); })
+      .Case<nd::BoolOp>([&](nd::BoolOp b) { mkBool(out, b.getValue()); })
+      .Case<nd::NullOp>([&](nd::NullOp) { mkNull(out); })
+      .Case<nd::FloatOp>([&](nd::FloatOp fl) { mkFloat(out, fl.getValue().convertToDouble()); })
+      .Case<nd::StringOp>([&](nd::StringOp s) { mkString(out, s.getValue()); })
+      .Case<nd::PathOp>([&](nd::PathOp p) { mkPath(out, p.getValue()); })
+      .Case<nd::BuiltinOp>([&](nd::BuiltinOp b) { copyFrom(baseEnvValue(b.getName())); })
+      .Default([&](Operation *o) {
+        // Everything else (all primop ops of the continent dialects) runs
+        // through the externally attached NixEvalOpInterface model.
+        if (auto e = dyn_cast<nd::NixEvalOpInterface>(o)) return e.eval(*this, env, out);
+        throw EvalError("internal error: cannot evaluate operation '" + o->getName().getStringRef().str() + "'", pos);
+      });
+>>>>>>> 7e8a58de096581fe4a1b239d6a064025fd7390a4
 }
 
 void evalSelect(EvalState &st, Node *n, Frame *env, Value &out) {
@@ -2092,7 +2777,104 @@ cp::Text EvalState::coerceToPath(Value &v, NixStringContext &ctx, PosPtr pos, st
 // Comparison
 //===----------------------------------------------------------------------===//
 
+<<<<<<< HEAD
 bool EvalState::eqValues(Value &v1, Value &v2, PosPtr pos) { return nixev_ts_eq(this, &v1, &v2, pos) != 0; }
+||||||| 11b03dd
+bool EvalState::eqValues(Value &v1, Value &v2, PosPtr pos) {
+  forceValue(v1, pos);
+  forceValue(v2, pos);
+  if (v1.type == VType::Int && v2.type == VType::Float) return (double)v1.integer == v2.fpoint;
+  if (v1.type == VType::Float && v2.type == VType::Int) return v1.fpoint == (double)v2.integer;
+  auto norm = [](VType t) { return t == VType::PrimOp || t == VType::PrimOpApp ? VType::Lambda : t; };
+  if (norm(v1.type) != norm(v2.type)) return false;
+  switch (v1.type) {
+  case VType::Int: return v1.integer == v2.integer;
+  case VType::Float: return v1.fpoint == v2.fpoint;
+  case VType::Bool: return v1.boolean == v2.boolean;
+  case VType::Null: return true;
+  case VType::String: return v1.sv() == v2.sv();
+  case VType::Path: return v1.pathView() == v2.pathView();
+  case VType::List:
+    if (v1.list.size != v2.list.size) return false;
+    for (size_t i = 0; i < v1.list.size; i++) {
+      Value *a = v1.list.elems[i], *b = v2.list.elems[i];
+      if (a == b) continue; // value identity optimisation
+      if (!eqValues(*a, *b, pos)) return false;
+    }
+    return true;
+  case VType::Attrs: {
+    if (v1.attrs == v2.attrs) return true;
+    if (isDerivation(v1) && isDerivation(v2)) {
+      const Attr *i = v1.attrs->get(s.outPath), *j = v2.attrs->get(s.outPath);
+      if (i && j) {
+        if (i->value == j->value) return true;
+        return eqValues(*i->value, *j->value, pos);
+      }
+    }
+    if (v1.attrs->size() != v2.attrs->size()) return false;
+    for (size_t k = 0; k < v1.attrs->size(); k++) {
+      const Attr &a = v1.attrs->attrs[k], &b = v2.attrs->attrs[k];
+      if (a.name != b.name) return false;
+      if (a.value == b.value) continue;
+      if (!eqValues(*a.value, *b.value, pos)) return false;
+    }
+    return true;
+  }
+  case VType::Lambda: case VType::PrimOp: case VType::PrimOpApp:
+    return false;
+  default:
+    throw EvalError(std::string("cannot compare ") + showType(v1) + " with " + showType(v2), pos);
+  }
+}
+=======
+bool EvalState::eqValues(Value &v1, Value &v2, PosPtr pos) {
+  forceValue(v1, pos);
+  forceValue(v2, pos);
+  if (v1.type == VType::Int && v2.type == VType::Float) return (double)v1.integer == v2.fpoint;
+  if (v1.type == VType::Float && v2.type == VType::Int) return v1.fpoint == (double)v2.integer;
+  auto norm = [](VType t) { return t == VType::PrimOp || t == VType::PrimOpApp ? VType::Lambda : t; };
+  if (norm(v1.type) != norm(v2.type)) return false;
+  switch (v1.type) {
+  case VType::Int: return v1.integer == v2.integer;
+  case VType::Float: return v1.fpoint == v2.fpoint;
+  case VType::Bool: return v1.boolean == v2.boolean;
+  case VType::Null: return true;
+  case VType::String: return v1.sv() == v2.sv();
+  case VType::Path: return v1.pathView() == v2.pathView();
+  case VType::List:
+    if (v1.list.size != v2.list.size) return false;
+    for (size_t i = 0; i < v1.list.size; i++) {
+      Value *a = v1.list.elems[i], *b = v2.list.elems[i];
+      if (a == b) continue; // value identity optimisation
+      if (!eqValues(*a, *b, pos)) return false;
+    }
+    return true;
+  case VType::Attrs: {
+    if (v1.attrs == v2.attrs) return true;
+    if (isDerivation(v1) && isDerivation(v2)) {
+      const Attr *i = v1.attrs->get(s.outPath), *j = v2.attrs->get(s.outPath);
+      if (i && j) {
+        if (i->value == j->value) return true;
+        return eqValues(*i->value, *j->value, pos);
+      }
+    }
+    Bindings *b1 = v1.attrs->ensureFlat(), *b2 = v2.attrs->ensureFlat();
+    if (b1->size() != b2->size()) return false;
+    for (size_t k = 0; k < b1->size(); k++) {
+      const Attr &a = b1->attrs[k], &b = b2->attrs[k];
+      if (a.name != b.name) return false;
+      if (a.value == b.value) continue;
+      if (!eqValues(*a.value, *b.value, pos)) return false;
+    }
+    return true;
+  }
+  case VType::Lambda: case VType::PrimOp: case VType::PrimOpApp:
+    return false;
+  default:
+    throw EvalError(std::string("cannot compare ") + showType(v1) + " with " + showType(v2), pos);
+  }
+}
+>>>>>>> 7e8a58de096581fe4a1b239d6a064025fd7390a4
 
 bool EvalState::lessThan(Value &v1, Value &v2, PosPtr pos) { return nixev_ts_lt(this, &v1, &v2, pos) != 0; }
 

@@ -37,16 +37,40 @@ struct EvalState;
 namespace mlir::nix {
 // Effect resources for primops (see NixPrims.irdl.mlir, `nix.fx`).
 struct NixTraceResource : public SideEffects::Resource::Base<NixTraceResource> {
+<<<<<<< HEAD
   StringRef getName() NIX_RESOURCE_NAME_CONST final { return "NixTrace"; }
+||||||| 11b03dd
+  StringRef getName() const final { return "NixTrace"; }
+=======
+  StringRef getName() final { return "NixTrace"; }
+>>>>>>> 7e8a58de096581fe4a1b239d6a064025fd7390a4
 };
 struct NixFSResource : public SideEffects::Resource::Base<NixFSResource> {
+<<<<<<< HEAD
   StringRef getName() NIX_RESOURCE_NAME_CONST final { return "NixFS"; }
+||||||| 11b03dd
+  StringRef getName() const final { return "NixFS"; }
+=======
+  StringRef getName() final { return "NixFS"; }
+>>>>>>> 7e8a58de096581fe4a1b239d6a064025fd7390a4
 };
 struct NixEnvResource : public SideEffects::Resource::Base<NixEnvResource> {
+<<<<<<< HEAD
   StringRef getName() NIX_RESOURCE_NAME_CONST final { return "NixEnv"; }
+||||||| 11b03dd
+  StringRef getName() const final { return "NixEnv"; }
+=======
+  StringRef getName() final { return "NixEnv"; }
+>>>>>>> 7e8a58de096581fe4a1b239d6a064025fd7390a4
 };
 struct NixStoreResource : public SideEffects::Resource::Base<NixStoreResource> {
+<<<<<<< HEAD
   StringRef getName() NIX_RESOURCE_NAME_CONST final { return "NixStore"; }
+||||||| 11b03dd
+  StringRef getName() const final { return "NixStore"; }
+=======
+  StringRef getName() final { return "NixStore"; }
+>>>>>>> 7e8a58de096581fe4a1b239d6a064025fd7390a4
 };
 
 } // namespace mlir::nix
