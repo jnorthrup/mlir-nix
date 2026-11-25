@@ -10,9 +10,9 @@
 // are one module, for mlnix-opt (TABLES); or read with this file as a --query, laid out and lowered in mlnix-kif and
 // written as bytecode, never printed (the run).  The numbers are sumo.nix's, from its own evaluation (test/kif/taxonomy-oracle.nix):
 //   mlnix eval --strict --json --arg sumo <sumo-nix> --arg files '[ ./test/kif/taxonomy-a.kif ./test/kif/taxonomy-b.kif ]' test/kif/taxonomy-oracle.nix
-//   [[30,13,12,49,3,3,9],[5,2,5,2,6,6,9,4,1,5,1,3]]
-// forms, classes, withParent, ancestorLinks, things, relations, Human's ancestors; then each class with a parent, by name
-// (?C Animal Canine CognitiveAgent Dog Hominid Human Mammal Organism Primate SentientAgent Vertebrate): its ancestors.
+//   [[30,13,12,49,3,3,9],[5,0,2,5,2,6,6,9,4,1,5,1,3]]
+// forms, classes, withParent, ancestorLinks, things, relations, Human's ancestors; then each class, by name
+// (?C Agent Animal Canine CognitiveAgent Dog Hominid Human Mammal Organism Primate SentientAgent Vertebrate): its ancestors.
 // scripts/sumo-trikeshed.sh runs this query, compiled, on sumo.full's 78 files against the same oracle (PRELOAD-DIALECTS
 // step 6).
 
@@ -26,7 +26,7 @@
 // TABLES-DAG: sumo.relation
 
 // CHECK: [30,  13,  12,  49,  3,  3,  9]
-// CHECK: [5,  2,  5,  2,  6,  6,  9,  4,  1,  5,  1,  3]
+// CHECK: [5,  0,  2,  5,  2,  6,  6,  9,  4,  1,  5,  1,  3]
 // CHECK: 0
 
 !s8 = !trikeshed.series<i8>
@@ -203,8 +203,9 @@ func.func @main() -> i32 {
   %u = memref.cast %out : memref<7xi32> to memref<*xi32>
   func.call @printMemrefI32(%u) : (memref<*xi32>) -> ()
 
-  // each class with a parent, in the order of its name (sumo.nix's attrNames ancestors): its number of ancestors
-  %byName = trikeshed.sorted %children : !s32 -> !s32 by {
+  // each class, in the order of its name (sumo.nix's attrNames ancestors, a root class included, with none): its number of
+  // ancestors
+  %byName = trikeshed.sorted %allClasses : !s32 -> !s32 by {
   ^bb0(%a: i32, %b: i32):
     %c = func.call @name_order(%names, %text, %a, %b) : (!sp, !s8, i32, i32) -> i32
     trikeshed.yield %c : i32
@@ -215,7 +216,7 @@ func.func @main() -> i32 {
     %n = trikeshed.second %fc : !tp -> i32
     trikeshed.yield %n : i32
   }
-  %pc = memref.alloc(%withParent) : memref<?xi32>
+  %pc = memref.alloc(%classes) : memref<?xi32>
   %pcEnd = trikeshed.drain %perClass, %pc : !s32, memref<?xi32> -> index
   %pcu = memref.cast %pc : memref<?xi32> to memref<*xi32>
   func.call @printMemrefI32(%pcu) : (memref<*xi32>) -> ()

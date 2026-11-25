@@ -28,6 +28,7 @@
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/StringMap.h"
 
 namespace mlir::kif {
 
@@ -90,6 +91,7 @@ struct Tables {
   SmallVector<int32_t> kid;
   composite::Text names;
   SmallVector<int32_t> factTerm, factFile, ruleAntecedent, ruleConsequent, ruleFile;
+  llvm::StringMap<int32_t> atomRow; // an atom's row (its first, where a name repeats): kif.atom_row
 };
 
 int64_t pack(uint64_t a, uint64_t b) { return int64_t(a << 32 | (b & 0xffffffffu)); }
@@ -104,6 +106,7 @@ FailureOr<Tables> tablesOf(TheoryOp theory) {
   auto rowOf = [&](Value v) -> int32_t { return row.lookup(v); };
   for (Operation &op : body) {
     if (auto a = dyn_cast<AtomOp>(op)) {
+      t.atomRow.try_emplace(a.getName(), int32_t(t.tag.size()));
       t.tag.push_back(0);
       t.name.push_back(pack(t.names.size(), a.getName().size()));
       t.names += a.getName();
@@ -150,7 +153,12 @@ struct KifToTrikeShedPass : PassWrapper<KifToTrikeShedPass, OperationPass<Module
   void runOnOperation() override {
     ModuleOp module = getOperation();
     SymbolTable symbols(module);
-    llvm::DenseMap<Operation *, Tables> tables;
+    llvm::DenseMap<Operation *, Tables> tables; // each theory's tables, read once: the layout and kif.atom_row use them
+    auto tablesFor = [&](TheoryOp theory) -> Tables * {
+      if (auto it = tables.find(theory); it != tables.end()) return &it->second;
+      FailureOr<Tables> t = tablesOf(theory);
+      return failed(t) ? nullptr : &tables.try_emplace(theory, std::move(*t)).first->second;
+    };
     OpBuilder top(module.getBodyRegion());
 
     auto global = [&](TheoryOp theory, StringRef what, Type element, ArrayRef<char> raw, int64_t n) -> memref::GlobalOp {
@@ -175,8 +183,8 @@ struct KifToTrikeShedPass : PassWrapper<KifToTrikeShedPass, OperationPass<Module
     auto layOut = [&](TheoryOp theory) -> FailureOr<SmallVector<memref::GlobalOp>> {
       auto it = laid.find(theory);
       if (it != laid.end()) return it->second;
-      FailureOr<Tables> t = tablesOf(theory);
-      if (failed(t)) return failure();
+      Tables *t = tablesFor(theory);
+      if (!t) return failure();
       auto i8 = IntegerType::get(&getContext(), 8), i32 = IntegerType::get(&getContext(), 32),
            i64 = IntegerType::get(&getContext(), 64);
       auto bytes = [](auto &v) { return ArrayRef<char>(reinterpret_cast<const char *>(v.data()), v.size() * sizeof(v[0])); };
@@ -195,8 +203,7 @@ struct KifToTrikeShedPass : PassWrapper<KifToTrikeShedPass, OperationPass<Module
       return g;
     };
 
-    // kif.atom_row: a constant, from the theory's atoms (its tables are not laid out for it)
-    llvm::DenseMap<Operation *, llvm::StringMap<int32_t>> atomRows;
+    // kif.atom_row: a constant, the atom's row in the theory's tables (-1 when the theory has no such atom)
     SmallVector<AtomRowOp> rowUses;
     module.walk([&](AtomRowOp op) { rowUses.push_back(op); });
     for (AtomRowOp op : rowUses) {
@@ -205,19 +212,11 @@ struct KifToTrikeShedPass : PassWrapper<KifToTrikeShedPass, OperationPass<Module
         op.emitOpError("names no kif.theory: ") << op.getTheoryAttr();
         return signalPassFailure();
       }
-      auto it = atomRows.find(theory);
-      if (it == atomRows.end()) {
-        llvm::StringMap<int32_t> rows;
-        int32_t row = 0;
-        for (Operation &t : theory.getBody().front()) {
-          if (auto a = dyn_cast<AtomOp>(t)) rows.try_emplace(a.getName(), row);
-          if (isa<AtomOp, VarOp, ListOp>(t)) row++;
-        }
-        it = atomRows.try_emplace(theory, std::move(rows)).first;
-      }
+      Tables *t = tablesFor(theory);
+      if (!t) return signalPassFailure();
+      auto found = t->atomRow.find(op.getName());
+      int32_t row = found == t->atomRow.end() ? -1 : found->second;
       OpBuilder b(op);
-      auto found = it->second.find(op.getName());
-      int32_t row = found == it->second.end() ? -1 : found->second;
       op.replaceAllUsesWith(arith::ConstantOp::create(b, op.getLoc(), b.getI32IntegerAttr(row)).getResult());
       op.erase();
     }
