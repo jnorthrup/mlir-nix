@@ -15,10 +15,11 @@ llvm.stdenv.mkDerivation {
 
   # The checkout's tracked files, as the flake sees them (a flake's ./. is already that tree, copied again under the name "source"
   # so that the path is the same): build directories, .cache and side branches are not input, and nix-build and nix build make the
-  # same store path.
+  # same store path.  A copy of the checkout that is already in the store (a path: flake, mlnix's flake fetch) holds no git tree that
+  # lib.fileset could read (it throws "a store path within a working tree of a Git repository"): its .git is left out instead.
   src =
-    if builtins.pathExists ./.git then lib.fileset.toSource { root = ./.; fileset = lib.fileset.gitTracked ./.; }
-    else builtins.path { path = ./.; name = "source"; };
+    if !(lib.isStorePath ./.) && builtins.pathExists ./.git then lib.fileset.toSource { root = ./.; fileset = lib.fileset.gitTracked ./.; }
+    else builtins.path { path = ./.; name = "source"; filter = path: type: baseNameOf path != ".git"; };
 
   # mlir-tblgen runs during the build; mlir-opt, mlir-translate and the stdenv's clang lower and compile the .mlir modules (lowered/,
   # lib/CMakeLists.txt's mlnix_lower_*); opt and llc make the Confix scanner's object.
