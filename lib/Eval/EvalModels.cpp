@@ -19,7 +19,6 @@ namespace {
 
 struct PrimEvalModel : public nd::NixEvalOpInterface::FallbackModel<PrimEvalModel> {
   void eval(Operation *op, EvalState &st, Frame *env, Value &out) const {
-<<<<<<< HEAD
     const PrimOp *prim = st.primFor(op);
     constexpr unsigned kMaxArity = 8;
     Value *args[kMaxArity];
@@ -28,39 +27,6 @@ struct PrimEvalModel : public nd::NixEvalOpInterface::FallbackModel<PrimEvalMode
     for (unsigned i = 0; i < n; i++) args[i] = st.lookup(env, op->getOperand(i));
     st.callPrimOp(*prim, args, out, nd::posOfOp(op));
     if (getenv("MLNIX_CHECK_KINDS")) [[unlikely]] st.checkResultKind(op, out); // the slow path: no cached flag needed
-||||||| 11b03dd
-    // One cached lookup per op class and evaluator (statics are zero-initialised,
-    // so there is no guard on the fast path).
-    static EvalState *cachedFor;
-    static const PrimOp *prim;
-    if (cachedFor != &st) {
-      prim = st.primOpByKey(OpT::primKey);
-      cachedFor = &st;
-    }
-    Value *args[OpT::primArity > 0 ? OpT::primArity : 1];
-    for (unsigned i = 0; i < OpT::primArity; i++) args[i] = st.lookup(env, op->getOperand(i));
-    st.callPrimOp(*prim, args, out, op->getLoc().getAsOpaquePointer());
-=======
-    // One cached lookup per op class and evaluator (statics are zero-initialised,
-    // so there is no guard on the fast path).
-    static EvalState *cachedFor;
-    static const PrimOp *prim;
-    if (cachedFor != &st) {
-      prim = st.primOpByKey(OpT::primKey);
-      cachedFor = &st;
-    }
-    // Operands are left lazy here even though most primops force every one
-    // of them immediately: a few (seq, deepSeq, tryEval) deliberately don't,
-    // or need to control *when* an operand is forced (tryEval wraps forcing
-    // in its own try/catch). Eagerly forcing in this shared template would
-    // force those operands before the primop's own logic gets a say. Purity
-    // (no memory effects) is not the same property as "forces every operand
-    // unconditionally", so it can't be used to tell the two groups apart
-    // here; doing this safely needs a per-op marker, not an effect check.
-    Value *args[OpT::primArity > 0 ? OpT::primArity : 1];
-    for (unsigned i = 0; i < OpT::primArity; i++) args[i] = st.lookup(env, op->getOperand(i));
-    st.callPrimOp(*prim, args, out, op->getLoc().getAsOpaquePointer());
->>>>>>> 7e8a58de096581fe4a1b239d6a064025fd7390a4
   }
 };
 

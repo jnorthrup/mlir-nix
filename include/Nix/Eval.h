@@ -97,20 +97,10 @@ struct Attr {
 };
 static_assert(sizeof(Attr) == 16, "four attribute cells per 64-byte cache line");
 
-/// An attrset's representation. `size_ >= 0`: an ordinary flat, sorted
-/// array of `size_` Attrs in `attrs[]` (the only case before unions existed,
-/// and still the only case for anything not built by `EvalState::updateAttrs`).
-/// `size_ < 0`: a lazy `//` union. `-size_` is a *leaf count*, not an
-/// attribute count; the leaves (flat or union Bindings, lowest-priority
-/// first) live where `attrs[]` would, reinterpreted -- see unionTailOf() in
-/// Eval.cpp, the only place that needs to know the union layout. Everything
-/// else goes through get()/size()/begin()/end()/ensureFlat(), which stay
-/// correct (and, for get(), cheap) without knowing a union is involved.
 struct Bindings {
-  int32_t size_ = 0;
+  uint32_t size_ = 0;
   PosPtr pos = nullptr;
   Attr attrs[0];
-<<<<<<< HEAD
 
   static inline uint64_t merged = 0, mergedCells = 0; // MLNIX_STATS: flat sets made by mergeBindings, and their cells
 
@@ -120,25 +110,6 @@ struct Bindings {
   const Attr *end() const { return attrs + size_; }
   size_t size() const { return size_; }
   bool empty() const { return size_ == 0; }
-||||||| 11b03dd
-  size_t size() const { return size_; }
-  bool empty() const { return size_ == 0; }
-  Attr *begin() { return attrs; }
-  Attr *end() { return attrs + size_; }
-  const Attr *begin() const { return attrs; }
-  const Attr *end() const { return attrs + size_; }
-=======
-  bool isUnion() const { return size_ < 0; }
-  size_t leafCount() const { return size_t(-size_); }
-  size_t size() const { return isUnion() ? ensureFlat()->size() : size_t(size_); }
-  bool empty() const { return !isUnion() && size_ == 0; }
-  Attr *begin() { return isUnion() ? ensureFlat()->attrs : attrs; }
-  Attr *end() { return begin() + size(); }
-  const Attr *begin() const { return isUnion() ? ensureFlat()->attrs : attrs; }
-  const Attr *end() const { return begin() + size(); }
-  /// Looks up `s` without flattening a union: probes leaves highest-priority
-  /// (most recently `//`'d on top) first.
->>>>>>> 7e8a58de096581fe4a1b239d6a064025fd7390a4
   const Attr *get(Symbol s) const;
   /// get(), with a guess of the row: the row the asker found the name at last time, in a set of the same layout (62% of the selects of
   /// a NixOS evaluation hit the layout their site saw last).  A right guess is one row read instead of a search; a wrong one costs a
@@ -150,18 +121,7 @@ struct Bindings {
     return r;
   }
   /// Attributes sorted by name (string order).
-<<<<<<< HEAD
   composite::Frozen<const Attr *> lexicographicOrder(const SymbolTable &st) const;
-||||||| 11b03dd
-  std::vector<const Attr *> lexicographicOrder(const SymbolTable &st) const;
-=======
-  std::vector<const Attr *> lexicographicOrder(const SymbolTable &st) const;
-  /// A flat Bindings equivalent to this one: itself if already flat, else
-  /// the cached or freshly merged flattening of a union (memoized on the
-  /// union; same cost paid at most once no matter how many times this is
-  /// called on it).
-  Bindings *ensureFlat() const;
->>>>>>> 7e8a58de096581fe4a1b239d6a064025fd7390a4
 };
 
 /// String context: the set of encoded elements
@@ -500,15 +460,8 @@ struct EvalState {
     return new (alloc.Allocate<Value>()) Value();
   }
   Bindings *allocBindings(size_t n);
-<<<<<<< HEAD
   /// `a // b` (see Bindings::Layer).
   Bindings *updateAttrs(Bindings *a, Bindings *b);
-||||||| 11b03dd
-=======
-  /// `lhs // rhs`. May build a lazy union instead of copying `lhs` -- see
-  /// the Bindings union comment and the threshold constants in Eval.cpp.
-  Bindings *updateAttrs(Bindings *lhs, Bindings *rhs);
->>>>>>> 7e8a58de096581fe4a1b239d6a064025fd7390a4
   Value **allocList(size_t n);
   const char *copyString(std::string_view s);
   const StringContext *makeContext(const NixStringContext &c);
@@ -803,7 +756,6 @@ struct EvalState {
   StrSymEntry strSymCache[kStrSymCache];
   /// Symbol of one select/has_attr path component: literal (a name) or the
   /// next computed key (operand), forced to a string.
-<<<<<<< HEAD
   Symbol pathSymbol(const nixfe::Name &comp, Node *const *dyn, unsigned &nextDyn, Frame *env, PosPtr pos);
   Value *lookup(Frame *f, Node *v) { return lookupImpl(f, v, false); }
   /// The same for a consumer that forces the cell next: one it makes is evaluated now, not a thunk (a cell already there is as it is).
@@ -823,21 +775,6 @@ struct EvalState {
   void statEval(Node *n, Frame *env);
   /// MLNIX_STATS: evalOp with the census.
   void evalOpCounted(Node *n, Frame *env, Value &out);
-||||||| 11b03dd
-  Symbol pathSymbol(mlir::Attribute comp, mlir::OperandRange dyn, unsigned &nextDyn, Frame *env, PosPtr pos);
-  Value *lookup(Frame *f, mlir::Value v);
-  void evalOp(mlir::Operation *op, Frame *env, Value &out);
-=======
-  Symbol pathSymbol(mlir::Attribute comp, mlir::OperandRange dyn, unsigned &nextDyn, Frame *env, PosPtr pos);
-  /// Resolve `v` in `f`'s slot chain, materializing it on first reference.
-  /// If `forceNow` is set, the caller is about to force the result anyway
-  /// (e.g. it feeds a strict operand): skip wrapping a fresh reference in a
-  /// Thunk only to immediately re-enter through forceValue, and evaluate it
-  /// in place instead (still under a Blackhole guard, so cycles are caught
-  /// exactly as they are when forcing a Thunk).
-  Value *lookup(Frame *f, mlir::Value v, bool forceNow = false, PosPtr pos = nullptr);
-  void evalOp(mlir::Operation *op, Frame *env, Value &out);
->>>>>>> 7e8a58de096581fe4a1b239d6a064025fd7390a4
   RegionInfo *regionInfo(mlir::Region *r);
   /// A frame of `ri`'s body: its slots empty.  The ordinary case (no census) is a bump of the arena, here; the census's out of line.
   Frame *newFrame(RegionInfo *ri, Frame *up) {
