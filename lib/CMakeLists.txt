@@ -188,6 +188,9 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/Decoders.mlir Decoders)
 # one combine drained at its parent's end; the reader compares each string with the token expected (compare) and checks
 # a name with compare and a fold.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/NarFraming.mlir NarFraming)
+# The hash-name parser (parseHash with parseRest's prefixes, type checks, length dispatch and digests) and compressHash
+# (the XOR fold): lowered/nixstore/HashParse.mlir.  Its nix32 and base64 digests call Decoders.mlir's entries by symbol.
+mlnix_lower_trikeshed(NixStore lowered/nixstore/HashParse.mlir HashParse)
 # nixstore::jsonFloat (StorePaths.cpp's body is gone; the bridge keeps the snprintf callback and sizes the Text): the
 # shortest round-tripping "%.*e" digits (strtod called here) cut by where/alpha/fold, nlohmann's format_buffer cases as
 # the extents of one combine of slices (sign, literals, zeros, digits, the exponent's digits) drained once.

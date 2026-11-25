@@ -179,8 +179,6 @@ extern "C" {
 size_t mlnix_base16_encode(const uint8_t *d, size_t n, char *out);
 size_t mlnix_nix32_encode(const uint8_t *d, size_t n, char *out);
 size_t mlnix_base64_encode(const char *d, size_t n, char *out);
-int mlnix_nix32_decode(const char *s, size_t n, size_t size, uint8_t *out); // 1 valid (bytes written), 0 invalid
-int mlnix_base64_decode(const char *s, size_t n, uint8_t *out, size_t *outlen); // 1 valid, 0 invalid
 }
 
 void appendBase16(composite::Text &out, const uint8_t *d, size_t n) {
@@ -197,28 +195,12 @@ void appendNix32(composite::Text &out, const uint8_t *d, size_t n) {
   mlnix_nix32_encode(d, n, out.begin() + at);
 }
 
-composite::Maybe<composite::Text> nix32Decode(std::string_view s, size_t size) {
-  composite::Text out;
-  out.resize(size); // zero-filled: the entry ORs the digit contributions in, as the old loop did
-  if (!mlnix_nix32_decode(s.data(), s.size(), size, (uint8_t *)out.begin())) return nullptr;
-  return out;
-}
-
 composite::Text base64Encode(std::string_view s) {
   composite::Text res;
   size_t n = s.size();
   if (!n) return res;
   res.resize(((n + 2) / 3) * 4);
   mlnix_base64_encode(s.data(), n, res.begin());
-  return res;
-}
-
-composite::Maybe<composite::Text> base64Decode(std::string_view s) {
-  composite::Text res;
-  res.resize(s.size()); // capacity: <= 6 bits per input char, so never more than s.size() bytes
-  size_t len = 0;
-  if (!mlnix_base64_decode(s.data(), s.size(), (uint8_t *)res.begin(), &len)) return nullptr;
-  res.truncate(len);
   return res;
 }
 
@@ -245,67 +227,29 @@ bool Hash::operator<(const Hash &o) const {
   return memcmp(bytes, o.bytes, size()) < 0;
 }
 
-static Hash parseRest(std::string_view rest, HashAlgo algo, bool isSRI, std::string_view orig) {
-  Hash h;
-  h.algo = algo;
-  size_t sz = h.size();
-  auto bad = [&]() -> Error {
-    return Error(composite::cat("hash '", orig, "' has wrong length for hash algorithm '", algoName(algo), "'"));
-  };
-  if (!isSRI && rest.size() == sz * 2) {
-    for (size_t i = 0; i < sz; i++) {
-      auto hexv = [&](char c) -> int {
-        if (c >= '0' && c <= '9') return c - '0';
-        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-        throw Error(composite::cat("invalid base-16 hash '", orig, "'"));
-      };
-      h.bytes[i] = uint8_t(hexv(rest[2 * i]) << 4 | hexv(rest[2 * i + 1]));
-    }
-    return h;
-  }
-  if (!isSRI && rest.size() == (sz * 8 - 1) / 5 + 1) {
-    auto d = nix32Decode(rest, sz);
-    if (!d) throw Error(composite::cat("invalid nix32 hash '", orig, "'"));
-    memcpy(h.bytes, d->data(), sz);
-    return h;
-  }
-  if (isSRI || rest.size() == ((4 * sz / 3) + 3) / 4 * 4) {
-    auto d = base64Decode(rest);
-    if (!d || d->size() != sz) {
-      if (isSRI) throw Error(composite::cat("invalid SRI hash '", orig, "'"));
-      throw bad();
-    }
-    memcpy(h.bytes, d->data(), sz);
-    return h;
-  }
-  throw bad();
-}
-
+// parseRest and parseHash are lowered/nixstore/HashParse.mlir (the prefixes, the type checks, the length dispatch and the
+// digest).  The bridge sizes the scratch for the base64 decoder and throws the error wording: the code and the algorithm
+// come back from the entry (info[0] = algorithm, info[1] = the colon's index for an unknown algorithm name).
+extern "C" int64_t nixstore_ts_parsehash(const char *p, int64_t n, int64_t known, uint8_t *out, uint8_t *scratch,
+                                         int64_t *info);
 Hash parseHash(std::string_view s, composite::Maybe<HashAlgo> algo) {
+  Hash h;
+  composite::Text scratch;
+  scratch.resize(s.size());
+  int64_t info[3] = {0, 0, 0};
+  int64_t known = !algo ? -1 : int64_t(*algo);
+  int64_t code = nixstore_ts_parsehash(s.data(), int64_t(s.size()), known, h.bytes, (uint8_t *)scratch.begin(), info);
   std::string_view orig = s;
-  auto colon = s.find(':');
-  bool isSRI = false;
-  composite::Maybe<HashAlgo> parsed;
-  if (colon != std::string_view::npos) {
-    parsed = parseHashAlgo(s.substr(0, colon));
-    if (!parsed) throw Error(composite::cat("unknown hash algorithm '", s.substr(0, colon), "', expect 'blake3', 'md5', 'sha1', 'sha256', or 'sha512'"));
-    s = s.substr(colon + 1);
-  } else {
-    auto dash = s.find('-');
-    if (dash != std::string_view::npos) {
-      parsed = parseHashAlgo(s.substr(0, dash));
-      if (parsed) {
-        s = s.substr(dash + 1);
-        isSRI = true;
-      }
-    }
+  switch (code) {
+  case 0: h.algo = HashAlgo(info[0]); return h;
+  case 1: throw Error(composite::cat("unknown hash algorithm '", s.substr(0, size_t(info[1])), "', expect 'blake3', 'md5', 'sha1', 'sha256', or 'sha512'"));
+  case 2: throw Error(composite::cat("hash '", orig, "' should have type '", algoName(*algo), "'"));
+  case 3: throw Error(composite::cat("hash '", orig, "' does not include a type, nor is the type otherwise known from context"));
+  case 4: throw Error(composite::cat("hash '", orig, "' has wrong length for hash algorithm '", algoName(HashAlgo(info[0])), "'"));
+  case 5: throw Error(composite::cat("invalid base-16 hash '", orig, "'"));
+  case 6: throw Error(composite::cat("invalid nix32 hash '", orig, "'"));
+  default: throw Error(composite::cat("invalid SRI hash '", orig, "'"));
   }
-  if (parsed && algo && *parsed != *algo)
-    throw Error(composite::cat("hash '", orig, "' should have type '", algoName(*algo), "'"));
-  if (!parsed && !algo)
-    throw Error(composite::cat("hash '", orig, "' does not include a type, nor is the type otherwise known from context"));
-  return parseRest(s, parsed ? *parsed : *algo, isSRI, orig);
 }
 
 Hash parseHashAllowEmpty(std::string_view s, composite::Maybe<HashAlgo> algo, composite::Text *warning) {
@@ -319,11 +263,12 @@ Hash parseHashAllowEmpty(std::string_view s, composite::Maybe<HashAlgo> algo, co
   return parseHash(s, algo);
 }
 
+// compressHash is lowered/nixstore/HashParse.mlir's nixstore_ts_compress (the XOR fold; r.bytes is zeroed there).
+extern "C" void nixstore_ts_compress(const uint8_t *in, int64_t n, int64_t newSize, uint8_t *out);
 Hash compressHash(const Hash &h, size_t newSize) {
   Hash r;
   r.algo = h.algo;
-  memset(r.bytes, 0, sizeof r.bytes);
-  for (size_t i = 0; i < h.size(); i++) r.bytes[i % newSize] ^= h.bytes[i];
+  nixstore_ts_compress(h.bytes, int64_t(h.size()), int64_t(newSize), r.bytes);
   return r;
 }
 
