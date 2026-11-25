@@ -1997,23 +1997,14 @@ composite::Chars EvalState::coerceToWindow(Value &v, NixStringContext &ctx, bool
 // coerceToString's, eqValues' and lessThan's algorithms are hollowed into lowered/nixeval/CoerceOps.mlir and
 // CmpOps.mlir (trikeshed.at / compare over the cells and bytes, scf.while / scf.for walks, func.call recursion),
 // lowered by --trikeshed-lower-cursors and linked into NixEval.  The methods below are thin bridges; the callbacks
-// keep what only C++ can do: forcing (the inline forceValue check and the stats census), the error wording (the
-// throws), the attribute lookups, copyPathToStore, the number text (cp::str / fixedFloat), the Text writes and the
-// list element's recursive coercion under its try/catch addTrace.  errorCtx crosses as raw bytes, never a
-// std::string_view (its ABI differs per platform).
+// keep what only C++ can do: forcing (the inline forceValue check and the stats census), the attribute lookups,
+// copyPathToStore, the number text (cp::str / fixedFloat), the Text writes and the list element's recursive coercion
+// under its try/catch addTrace.  A comparison's error is an Either's Left (CmpOps.mlir): the bridge throws it, below.
+// errorCtx crosses as raw bytes, never a std::string_view (its ABI differs per platform).
 extern "C" {
-int64_t nixev_ts_eq(EvalState *st, Value *v1, Value *v2, PosPtr pos);
-int64_t nixev_ts_lt(EvalState *st, Value *v1, Value *v2, PosPtr pos);
 void nixev_ts_coerce(EvalState *st, Value *v, NixStringContext *ctx, int64_t coerceMore, int64_t copyToStore,
                      PosPtr pos, int64_t canonicalizePath, const char *errorCtx, int64_t errorCtxLen, cp::Text *out);
 void nixev_cmp_force(EvalState *st, Value *v, PosPtr pos) { st->forceValue(*v, pos); }
-[[noreturn]] void nixev_cmp_eq_throw(EvalState *st, Value *v1, Value *v2, PosPtr pos) {
-  throw EvalError(cp::cat("cannot compare ", EvalState::showType(*v1), " with ", EvalState::showType(*v2)), pos);
-}
-[[noreturn]] void nixev_cmp_lt_inc(EvalState *st, Value *v1, Value *v2, PosPtr pos) {
-  throw EvalError(cp::cat("cannot compare ", EvalState::showType(*v1), " with ", EvalState::showType(*v2),
-                          "; values of that type are incomparable"), pos);
-}
 // the outPath attribute (which 0) or the __toString attribute (which 1) of a set
 const Attr *nixev_attr_get(EvalState *st, Value *v, int64_t which) {
   return v->attrs->get(which == 0 ? st->s.outPath : st->s.toString);
@@ -2091,9 +2082,39 @@ cp::Text EvalState::coerceToPath(Value &v, NixStringContext &ctx, PosPtr pos, st
 // Comparison
 //===----------------------------------------------------------------------===//
 
-bool EvalState::eqValues(Value &v1, Value &v2, PosPtr pos) { return nixev_ts_eq(this, &v1, &v2, pos) != 0; }
+// A comparison's Left (CmpOps.mlir's Either): the code (0 "cannot compare X with Y", 1 "...; values of that type are
+// incomparable") and the two values the message names.  The C entries return kCmpLeft and write it to `err`.
+struct CmpError {
+  int64_t code;
+  Value *a;
+  Value *b;
+};
+constexpr int64_t kCmpLeft = -2;
+extern "C" {
+int64_t nixev_ts_eq(EvalState *st, Value *v1, Value *v2, PosPtr pos, CmpError *err);
+int64_t nixev_ts_lt(EvalState *st, Value *v1, Value *v2, PosPtr pos, CmpError *err);
+}
+// the one throw of a comparison's Left: Nix's wording, with the two values' types
+[[noreturn]] void throwCmpError(const CmpError &e, PosPtr pos) {
+  if (e.code == 0)
+    throw EvalError(cp::cat("cannot compare ", EvalState::showType(*e.a), " with ", EvalState::showType(*e.b)), pos);
+  throw EvalError(cp::cat("cannot compare ", EvalState::showType(*e.a), " with ", EvalState::showType(*e.b),
+                          "; values of that type are incomparable"), pos);
+}
 
-bool EvalState::lessThan(Value &v1, Value &v2, PosPtr pos) { return nixev_ts_lt(this, &v1, &v2, pos) != 0; }
+bool EvalState::eqValues(Value &v1, Value &v2, PosPtr pos) {
+  CmpError err{};
+  int64_t r = nixev_ts_eq(this, &v1, &v2, pos, &err);
+  if (r == kCmpLeft) throwCmpError(err, pos);
+  return r != 0;
+}
+
+bool EvalState::lessThan(Value &v1, Value &v2, PosPtr pos) {
+  CmpError err{};
+  int64_t r = nixev_ts_lt(this, &v1, &v2, pos, &err);
+  if (r == kCmpLeft) throwCmpError(err, pos);
+  return r != 0;
+}
 
 //===----------------------------------------------------------------------===//
 // Printing
