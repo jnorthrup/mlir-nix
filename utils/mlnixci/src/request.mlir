@@ -412,7 +412,9 @@ func.func @rq_body(%rows: !ix, %kids: !s32, %t: !text, %want: i64) -> (i64, !s64
     %in = arith.addi %o, %one32 : i32
     %s64 = arith.extui %in : i32 to i64
     %e64 = arith.extui %c : i32 to i64
-    %len = arith.subi %e64, %s64 : i64
+    %len0 = arith.subi %e64, %s64 : i64
+    %lneg = arith.cmpi slt, %len0, %z64 : i64
+    %len = arith.select %lneg, %z64, %len0 : i64
     %lo = arith.andi %len, %mask : i64
     %hi = arith.shli %s64, %v32 : i64
     %tw = arith.ori %hi, %lo : i64
@@ -448,7 +450,9 @@ func.func @rq_body(%rows: !ix, %kids: !s32, %t: !text, %want: i64) -> (i64, !s64
     %s64 = arith.extui %o : i32 to i64
     %c64 = arith.extui %c : i32 to i64
     %e64 = arith.addi %c64, %v1 : i64
-    %len = arith.subi %e64, %s64 : i64
+    %len0 = arith.subi %e64, %s64 : i64
+    %lneg = arith.cmpi slt, %len0, %z64 : i64
+    %len = arith.select %lneg, %z64, %len0 : i64
     %lo = arith.andi %len, %mask : i64
     %hi = arith.shli %s64, %v32 : i64
     %tw = arith.ori %hi, %lo : i64
@@ -549,7 +553,9 @@ func.func @rq_query(%rows: !ix, %kids: !s32, %body: memref<?xi8>, %out: memref<?
     %in = arith.addi %o, %one32 : i32
     %s64 = arith.extui %in : i32 to i64
     %e64 = arith.extui %c : i32 to i64
-    %len = arith.subi %e64, %s64 : i64
+    %len0 = arith.subi %e64, %s64 : i64
+    %lneg = arith.cmpi slt, %len0, %z64 : i64
+    %len = arith.select %lneg, %z64, %len0 : i64
     %lo = arith.andi %len, %mask : i64
     %hi = arith.shli %s64, %v32 : i64
     %tw = arith.ori %hi, %lo : i64
