@@ -1047,6 +1047,93 @@ void expandKeyedJoin(KeyedJoinOp op) {
   op.erase();
 }
 
+/// Either<L, R> (Either.kt) lies as its tag (an i1, 1 for a Left), then L's values, then R's.  The side not taken is
+/// undefined (Kotlin's leftOrNull and rightOrNull are null there), so a fold tests the tag before it reads a side.
+/// eitherLeft and eitherRight are that side's values; eitherFold is an scf.if on the tag, each region inlined into its
+/// branch with the side's values as its argument.
+template <class Op, bool Left> struct EitherSideLowering : Lowering<Op> {
+  using Lowering<Op>::Lowering;
+  LogicalResult matchAndRewrite(Op op, typename OpConversionPattern<Op>::OneToNOpAdaptor a,
+                                ConversionPatternRewriter &rw) const override {
+    auto e = cast<EitherType>(op.getEither().getType());
+    unsigned nl = converted(this->types(), e.getLeft()).size(), nr = converted(this->types(), e.getRight()).size();
+    if (!nl || !nr) return rw.notifyMatchFailure(op, "a side of the Either that does not lower to values");
+    ValueRange sides = a.getEither().drop_front(1);
+    replaceWith(rw, op, Left ? sides.take_front(nl) : sides.drop_front(nl).take_front(nr));
+    return success();
+  }
+};
+
+struct EitherFoldLowering : Lowering<EitherFoldOp> {
+  using Lowering::Lowering;
+  LogicalResult matchAndRewrite(EitherFoldOp op, OneToNOpAdaptor a, ConversionPatternRewriter &rw) const override {
+    Location loc = op.getLoc();
+    auto e = cast<EitherType>(op.getEither().getType());
+    SmallVector<Type, 2> l = converted(types(), e.getLeft()), r = converted(types(), e.getRight());
+    SmallVector<Type, 2> res = converted(types(), op.getResult().getType());
+    if (l.empty() || r.empty() || res.empty()) return rw.notifyMatchFailure(op, "a side that does not lower to values");
+    ValueRange slots = a.getEither();
+    auto fold = scf::IfOp::create(rw, loc, res, slots.front(), /*withElseRegion=*/true);
+    auto side = [&](Region &region, ValueRange args, Block *block) -> LogicalResult {
+      rw.setInsertionPointToEnd(block);
+      auto body = inlineBody(rw, types(), region, args);
+      if (failed(body) || body->size() != res.size()) return failure();
+      scf::YieldOp::create(rw, loc, *body);
+      return success();
+    };
+    if (failed(side(op.getIfLeft(), slots.drop_front(1).take_front(l.size()), fold.thenBlock())) ||
+        failed(side(op.getIfRight(), slots.drop_front(1 + l.size()).take_front(r.size()), fold.elseBlock())))
+      return rw.notifyMatchFailure(op, "a fold's region that does not yield the result's values");
+    replaceWith(rw, op, fold.getResults());
+    return success();
+  }
+};
+
+/// The casts an Either is built and taken apart by (the tag and the sides, as the values the Either lies as): a cast
+/// from the values to an Either, or from an Either to them, is the identity on the values.  Kept illegal while an
+/// Either is in it, so the patterns below replace it with its values.
+struct EitherCastLowering : OpConversionPattern<UnrealizedConversionCastOp> {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(UnrealizedConversionCastOp op, OneToNOpAdaptor a,
+                                ConversionPatternRewriter &rw) const override {
+    SmallVector<Value> flat;
+    for (ValueRange group : a.getInputs()) flat.append(group.begin(), group.end());
+    if (op.getNumResults() == 1 && isa<EitherType>(op.getResult(0).getType())) {
+      if (flat.size() != op.getNumOperands()) return rw.notifyMatchFailure(op, "an Either built from values not yet lowered");
+      rw.replaceOpWithMultiple(op, {flat});
+      return success();
+    }
+    if (op.getNumOperands() == 1 && isa<EitherType>(op.getOperand(0).getType())) {
+      if (flat.size() != op.getNumResults()) return rw.notifyMatchFailure(op, "an Either taken apart before it is lowered");
+      SmallVector<SmallVector<Value>> each;
+      for (Value v : flat) each.push_back({v});
+      rw.replaceOpWithMultiple(op, each);
+      return success();
+    }
+    return rw.notifyMatchFailure(op, "not an Either cast");
+  }
+};
+
+/// Either's type (a Left's tag, then each side's values), its three ops' patterns, and its casts: the target keeps a cast
+/// touching an Either illegal, so the cast patterns run on it.
+void populateEitherLowering(CursorTypes &types, RewritePatternSet &patterns, ConversionTarget &target) {
+  types.addConversion([&types](EitherType t, SmallVectorImpl<Type> &out) -> std::optional<LogicalResult> {
+    SmallVector<Type> l, r;
+    if (failed(types.convertType(t.getLeft(), l)) || failed(types.convertType(t.getRight(), r))) return std::nullopt;
+    out.push_back(IntegerType::get(t.getContext(), 1));
+    out.append(l);
+    out.append(r);
+    return success();
+  });
+  auto touchesEither = [](UnrealizedConversionCastOp c) {
+    return llvm::any_of(c->getOperandTypes(), [](Type t) { return isa<EitherType>(t); }) ||
+           llvm::any_of(c->getResultTypes(), [](Type t) { return isa<EitherType>(t); });
+  };
+  target.addDynamicallyLegalOp<UnrealizedConversionCastOp>([touchesEither](UnrealizedConversionCastOp c) { return !touchesEither(c); });
+  patterns.add<EitherSideLowering<EitherLeftOp, true>, EitherSideLowering<EitherRightOp, false>, EitherFoldLowering,
+               EitherCastLowering>(types, patterns.getContext());
+}
+
 struct DrainLowering : Lowering<DrainOp> {
   using Lowering::Lowering;
   LogicalResult matchAndRewrite(DrainOp op, OpAdaptor a, ConversionPatternRewriter &rw) const override {
@@ -1296,6 +1383,7 @@ struct LowerCursors : PassWrapper<LowerCursors, OperationPass<ModuleOp>> {
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, types);
     populateReturnOpTypeConversionPattern(patterns, types);
     populateCallOpTypeConversionPattern(patterns, types);
+    populateEitherLowering(types, patterns, target);
     // scf.if/for/while and arith.select that carry a pair or a series: their types lowered with them
     scf::populateSCFStructuralTypeConversionsAndLegality(types, patterns, target);
     target.addDynamicallyLegalOp<arith::SelectOp>([&](arith::SelectOp op) { return types.isLegal(op.getOperation()); });
