@@ -1,56 +1,31 @@
 #!/usr/bin/env python3
-"""ci-corpus-unterminated.py STACK.dylib [N]: corpus_load must never crash on a text cut inside a string.
+"""ci-corpus-unterminated.py STACK.dylib [N]: corpus_load never crashes on a text cut inside a string.
 
-The Confix scan closes a quote that is the text's last byte at that byte (close == open), so the string's inside is
-negative; corpus_load refuses such a text ("the evaluation ends inside a string"), where the columns read it and bus
-errored (the 2026-11-22 minimal crasher: 57 bytes).  Each text runs in its own child process, so a crash is an exit
-code, not a dead test.  The cases: the 57-byte crasher, every cut of a small corpus, and N random cuts (default 200).
+The Confix scan closes a quote that is the text's last byte at that byte (close == open), so that string's inside is
+negative.  corpus_load refuses such a text ("the evaluation ends inside a string"); before the fix the columns read it
+and bus-errored (the 2026-11-22 minimal crasher, 57 bytes).  Python here never loads the stack: it writes case files and
+spawns ci-corpus-snap (test/ci-corpus-snap.c, built with clang beside this test), one process per case, so a crash is a
+nonzero exit status and no interpreter dies.  Cases: the 57-byte crasher, every cut of a small corpus, N random cuts.
 """
-import ctypes
 import os
 import random
+import shutil
+import struct
 import subprocess
 import sys
 import tempfile
 
+HERE = os.path.dirname(os.path.abspath(__file__))
 MIN = bytes([123, 34, 34, 123, 34, 34, 34, 34, 123, 34, 34, 123, 34, 34, 123, 34, 34, 34, 34, 125, 125, 34, 34, 91,
              93, 125, 125, 34, 111, 112, 116, 105, 111, 110, 115, 34, 91, 123, 34, 34, 34, 34, 34, 34, 102, 97, 108,
              115, 101, 34, 115, 116, 97, 116, 101, 34, 34])
-UNTERMINATED = b'the evaluation ends inside a string'
-REFUSALS = {b'the evaluation is not a JSON object', b'the evaluation has no options', UNTERMINATED}
+UNTERMINATED = 'the evaluation ends inside a string'
+REFUSALS = {'the evaluation is not a JSON object', 'the evaluation has no options', UNTERMINATED}
 
 SMALL = (b'{"options":[{"path":["networking","dhcp"],"state":"set","kind":"boolean","value":true,'
          b'"description":"a \\"quoted\\" text \\u2019"},{"path":["services","x"],"state":"default",'
          b'"kind":"string","value":"a/modules/b","declarations":["modules/x/y.nix"]}],'
          b'"etc":{"a.txt":{"text":"hello"}}}\n')
-
-
-def child(lib, path):
-    """load the bytes of path with lib's corpus_load; print 'ok' or the refusal's wording"""
-    l = ctypes.CDLL(lib, mode=ctypes.RTLD_LOCAL)
-    l.corpus_load.restype = ctypes.c_void_p
-    l.corpus_load.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_double]
-    l.corpus_why.restype = ctypes.c_void_p
-    l.corpus_why_n.restype = ctypes.c_int64
-    libc = ctypes.CDLL(None)
-    libc.malloc.restype = ctypes.c_void_p
-    libc.malloc.argtypes = [ctypes.c_size_t]
-    data = open(path, 'rb').read()
-    p = libc.malloc(len(data) + 8)
-    ctypes.memmove(p, data, len(data))
-    c = l.corpus_load(p, len(data), 0.0)
-    if c:
-        print('ok')
-    else:
-        print('refused ' + ctypes.string_at(l.corpus_why(), l.corpus_why_n()).decode())
-
-
-def run(lib, data, scratch):
-    path = os.path.join(scratch, 'case.json')
-    with open(path, 'wb') as f:
-        f.write(data)
-    r = subprocess.run([sys.executable, os.path.abspath(__file__), '--child', lib, path], capture_output=True)
-    return r.returncode, r.stdout.decode().strip()
 
 
 def cases(n):
@@ -69,35 +44,54 @@ def cases(n):
         yield 'random %d' % k, data
 
 
+def case_file(path, text, mut=None, ms=0.0):
+    with open(path, 'wb') as f:
+        f.write(struct.pack('<QQQ', len(text), (1 << 64) - 1 if mut is None else len(mut),
+                            struct.unpack('<Q', struct.pack('<d', ms))[0]))
+        f.write(text)
+        if mut is not None:
+            f.write(mut)
+
+
+def build_harness(scratch):
+    exe = os.path.join(scratch, 'ci-corpus-snap')
+    src = os.path.join(HERE, 'ci-corpus-snap.c')
+    # the system clang finds dlfcn.h (on macOS Homebrew's does not); else whichever clang is on PATH
+    cc = next((c for c in ('/usr/bin/clang', 'clang', 'clang-22') if shutil.which(c)), 'clang')
+    r = subprocess.run([cc, '-O1', src, '-o', exe], capture_output=True, text=True)
+    if r.returncode != 0:
+        sys.exit('cannot build ci-corpus-snap: ' + r.stderr)
+    return exe
+
+
 def main():
-    if sys.argv[1] == '--child':
-        child(sys.argv[2], sys.argv[3])
-        return 0
-    lib = sys.argv[1]
+    lib = os.path.abspath(sys.argv[1])
     n = int(sys.argv[2]) if len(sys.argv) > 2 else 200
-    fails = 0
-    total = 0
-    refused = 0
+    fails = total = refused = 0
     with tempfile.TemporaryDirectory() as scratch:
+        exe = build_harness(scratch)
         for name, data in cases(n):
             total += 1
-            rc, out = run(lib, data, scratch)
-            if rc != 0:
+            path = os.path.join(scratch, 'case.bin')
+            case_file(path, data)
+            r = subprocess.run([exe, lib, path], capture_output=True, text=True)
+            if r.returncode != 0:
                 fails += 1
-                print('CRASH rc=%d %s %r' % (rc, name, data[:80]))
+                print('CRASH rc=%d %s %r' % (r.returncode, name, data[:80]))
                 continue
-            if out.startswith('refused '):
+            first = r.stdout.split('\n', 1)[0]
+            if first.startswith('base refused '):
                 refused += 1
-                msg = out[len('refused '):].encode()
+                msg = first[len('base refused '):]
                 if msg not in REFUSALS:
                     fails += 1
                     print('UNKNOWN REFUSAL %s %r' % (name, msg))
-            elif out != 'ok':
+                if name == 'min' and msg != UNTERMINATED:
+                    fails += 1
+                    print('MIN NOT REFUSED AS UNTERMINATED: %r' % msg)
+            elif not first.startswith('base len='):
                 fails += 1
-                print('BAD OUTPUT %s %r' % (name, out))
-            if name == 'min' and out != 'refused ' + UNTERMINATED.decode():
-                fails += 1
-                print('MIN NOT REFUSED AS UNTERMINATED: %r' % out)
+                print('BAD OUTPUT %s %r' % (name, first[:80]))
     print('ci-corpus-unterminated: %d cases, %d refused, %d failures' % (total, refused, fails))
     return 1 if fails else 0
 
