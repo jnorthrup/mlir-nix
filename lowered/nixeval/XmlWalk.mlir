@@ -22,7 +22,8 @@
 // when strict; null when absent), nixev_xw_seen (the derivations met: TextSet insert, 1 when new), nixev_xw_sym (a
 // symbol's bytes), nixev_xw_apos (positionOf), nixev_xw_pos (decodePos: {file ptr, len, line, column}, 0 when none),
 // nixev_xw_float (printFloat's text), nixev_xw_lambda (a lambda's {pos, has formals, arg name ptr, len or -1, ellipsis,
-// formal count, formals' {ptr, len} windows}), nixev_xw_cells (n i64 of bridge-owned scratch: a set's sorted order lives
+// formal count), nixev_xw_names (the bridge's n formal windows, 16 bytes each), nixev_xw_formal (formal j's {ptr, len}
+// into its window), nixev_xw_cells (n i64 of bridge-owned scratch: a set's sorted order lives
 // through its children's walk, and an exception unwinding through here leaks nothing).
 //
 // Value: type u8 @0 (Int 5, Float 6, Bool 7, Null 8, String 9, Path 10, Attrs 11, List 12, Lambda 13), aux u32 @4
@@ -53,6 +54,8 @@ func.func private @nixev_xw_apos(!llvm.ptr, !llvm.ptr) -> !llvm.ptr
 func.func private @nixev_xw_pos(!llvm.ptr, !llvm.ptr, !llvm.ptr) -> i32
 func.func private @nixev_xw_float(!llvm.ptr, !llvm.ptr, !llvm.ptr) -> !llvm.ptr
 func.func private @nixev_xw_lambda(!llvm.ptr, !llvm.ptr, !llvm.ptr)
+func.func private @nixev_xw_names(!llvm.ptr, i64) -> !llvm.ptr
+func.func private @nixev_xw_formal(!llvm.ptr, i64, !llvm.ptr)
 
 // the descriptor of n cells at p (a struct, not a memref: returning it allocates nothing and clones nothing)
 func.func private @xw_desc(%p: !llvm.ptr, %n: i64) -> !d {
@@ -326,7 +329,6 @@ func.func private @xw_value(%x: !llvm.ptr, %v: !llvm.ptr, %strict: i1, %loc: i1,
   %c24 = arith.constant 24 : i64
   %c32 = arith.constant 32 : i64
   %c40 = arith.constant 40 : i64
-  %c48 = arith.constant 48 : i64
   %kOpen = arith.constant 0 : i64
   %kClose = arith.constant 1 : i64
   %kEmpty = arith.constant 2 : i64
@@ -466,7 +468,7 @@ func.func private @xw_value(%x: !llvm.ptr, %v: !llvm.ptr, %strict: i1, %loc: i1,
     scf.yield
   }
   case 13 {
-    // {pos, has formals, arg name ptr, its length or -1, ellipsis, formal count, the formals' windows}
+    // {pos, has formals, arg name ptr, its length or -1, ellipsis, formal count}
     %rec = llvm.alloca %c7 x i64 : (i64) -> !llvm.ptr
     func.call @nixev_xw_lambda(%x, %v, %rec) : (!llvm.ptr, !llvm.ptr, !llvm.ptr) -> ()
     %lpos = llvm.load %rec : !llvm.ptr -> !llvm.ptr
@@ -480,8 +482,6 @@ func.func private @xw_value(%x: !llvm.ptr, %v: !llvm.ptr, %strict: i1, %loc: i1,
     %el = llvm.load %elp : !llvm.ptr -> i64
     %nfp = llvm.getelementptr %rec[%c40] : (!llvm.ptr, i64) -> !llvm.ptr, i8
     %nf = llvm.load %nfp : !llvm.ptr -> i64
-    %wsp = llvm.getelementptr %rec[%c48] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-    %wins = llvm.load %wsp : !llvm.ptr -> !llvm.ptr
     %r = func.call @xw_row(%x, %kOpen, %depth, %wFunction) : (!llvm.ptr, i64, i64, index) -> !llvm.ptr
     scf.if %loc {
       func.call @xw_pos(%x, %r, %lpos) : (!llvm.ptr, !llvm.ptr, !llvm.ptr) -> ()
@@ -496,6 +496,14 @@ func.func private @xw_value(%x: !llvm.ptr, %v: !llvm.ptr, %strict: i1, %loc: i1,
       func.call @xw_slot(%pa, %sEllipsis, %op, %ell_l) : (!llvm.ptr, i64, i64, i64) -> ()
       // the formals by their bytes, an <attr name=.../> each
       %nfi = arith.index_cast %nf : i64 to index
+      // the formals' windows: the bridge's buffer, one nixev_xw_formal per formal (a StringRef each)
+      %wins = func.call @nixev_xw_names(%x, %nf) : (!llvm.ptr, i64) -> !llvm.ptr
+      scf.for %g = %zi to %nfi step %one {
+        %g64 = arith.index_cast %g : index to i64
+        %go = arith.muli %g64, %c16 : i64
+        %gp = llvm.getelementptr %wins[%go] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+        func.call @nixev_xw_formal(%v, %g64, %gp) : (!llvm.ptr, i64, !llvm.ptr) -> ()
+      }
       %idx = trikeshed.series %nfi : !s64 {
       ^bb0(%q: index):
         %q64 = arith.index_cast %q : index to i64

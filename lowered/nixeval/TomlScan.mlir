@@ -5,7 +5,7 @@
 // exponent, underscores; the text is read by libc strtod in the C locale, as before), booleans, dates and times (the
 // detection and the normal form: 'T', fractions padded to 3 / 6 / 9 digits, 'Z'), arrays and inline tables nested on an
 // explicit stack (no recursion).  The table semantics (dotted-key tables, header navigation, array-of-tables, duplicate
-// keys and redefinitions) stay in the C++ bridge, fed by this scan's events IN ORDER through nixev_toml_ev, so an error
+// keys and redefinitions) are TomlTables.mlir's, fed by this scan's events IN ORDER through nixev_toml_ev, so an error
 // the bridge finds is still reported before a lexical error later in the text.  The scan stops at its first error and
 // returns its code; nixev_ts_toml_msg composes every message ("while parsing TOML: ... (line N)") as one trikeshed
 // combine drained once, for the scan's codes and the bridge's three (29 cannot redefine, 30 duplicate, 31 table defined).

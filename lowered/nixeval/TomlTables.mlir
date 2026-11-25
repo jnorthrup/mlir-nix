@@ -1,43 +1,45 @@
 // builtins.fromTOML's tables, hollowed out of lib/Eval/Formats.cpp (TomlParser's setKey / header / deliver / toValue and
-// the scan's event handler nixev_toml_ev are gone): TomlScan.mlir's events, in order, build the document's tables here --
-// a key's parts gathered, a value delivered to the open array or to the open table's dotted key (the tables on the way
-// made or entered, a key defined twice refused), a [header] or [[header]] navigating from the root (into the last table
-// of an array of tables), an array's elements drained into its list, an inline table's node made into a set when it
-// closes -- and nixev_ts_toml_value makes the root's set, the recursion func.call.  The errors are found at the event
-// that finds them, so one here still comes before a lexical error later in the text.  Lowered by lib/CMakeLists.txt's
-// mlnix_lower_trikeshed into NixEval.
+// the scan's event handler are gone): TomlScan.mlir's events, in order, build the document's tables here -- a key's
+// parts gathered, a value delivered to the open array or to the open table's dotted key (the tables on the way made or
+// entered, a key defined twice refused), a [header] or [[header]] navigating from the root (into the last table of an
+// array of tables), an array's elements drained into its list, an inline table's node made into a set when it closes.
+// nixev_ts_toml_value makes the root's set, the recursion func.call.  The errors are found at the event that finds
+// them, so one here still comes before a lexical error later in the text.
 //
-// The record (i64 words, the bridge's): 0 the bridge (TomlParser*, for the callbacks), 1 the frames (3 i64 a frame:
-// node or 0 for an array, the elems and keys counts when it opened; frame 0 is the current [table]), 2 their count,
-// 3 the elems (Value* bits), 4 their count, 5 the key parts (2 i64: ptr, len), 6 their count, 7 the latest event's
-// line, 8 the root node.  The bridge's room for each is the input's length + 2 (a frame, an element and a key part each
-// take a byte of the input at least).
+// The record (i64 words, the bridge's, Formats.cpp's parse): 0 the bridge (TomlParser*, for the callbacks), 1 the frames
+// (3 i64 a frame: node or 0 for an array, the elems and keys counts when it opened; frame 0 is the current [table]),
+// 2 their count, 3 the elems (Value* bits), 4 their count, 5 the key parts (2 i64: ptr, len), 6 their count, 7 the
+// latest event's line, 8 the root node.  The bridge's room for each is the input's length + 2 (a frame, an element and
+// a key part each take a byte of the input at least).
 // A node (the bridge's TomlNode) starts with three words: kind @0 (0 table, 1 array of tables, 2 leaf), defined @8
 // (named by a [header]), the leaf's Value* @16.  A table's rows (composite::TextTable's Row, 24 bytes): key ptr @0,
 // u32 len @8, node @16.
 //
-// The callbacks (Formats.cpp) keep the tables' storage and the evaluator: nixev_tt_child (the child slot of a table
-// for a key, 0 when none yet: holds until the table's next new key), nixev_tt_make (a new table node), nixev_tt_push /
-// nixev_tt_back / nixev_tt_kids (an array's nodes), nixev_tt_rows (a table's rows), nixev_tt_fail (the message, thrown:
-// 29 cannot redefine, 30 duplicate key, 31 table defined twice), nixev_tt_value (a string, int, float, bool or
-// timestamp's Value), nixev_tt_list (a list Value of n cells), nixev_tt_sym (a key's Symbol, made in the order the
-// old toValue made them), nixev_tt_scratch (2n i64 that outlive the children's recursion), nixev_tt_attrs (the set).
+// The callbacks (Formats.cpp) keep the nodes' storage and the evaluator: nixev_tt_child (the child slot of a table for
+// a key: holds until the table's next new key), nixev_tt_make, nixev_tt_push / nixev_tt_back / nixev_tt_nkids /
+// nixev_tt_kids (an array's nodes), nixev_tt_nrows / nixev_tt_rows (a table's rows), nixev_tt_fail (the message,
+// thrown: 29 cannot redefine, 30 duplicate key, 31 table defined twice), nixev_tt_value (a string, int, float, bool or
+// timestamp's Value), nixev_tt_list / nixev_tt_cells (a list Value of n cells and its cells), nixev_tt_sym (a key's
+// Symbol, made in the order the old toValue made them), nixev_tt_scratch (2n i64 that outlive the children's
+// recursion), nixev_tt_attrs (the set).  nixev_ts_toml_cells (FmtCompOps.mlir) drains an array's elements.
 !s64 = !trikeshed.series<i64>
-!m64 = memref<?xi64, strided<[1], offset: ?>>
-!d = !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
 
 func.func private @nixev_tt_child(!llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> !llvm.ptr
 func.func private @nixev_tt_make(!llvm.ptr) -> !llvm.ptr
 func.func private @nixev_tt_push(!llvm.ptr, !llvm.ptr)
 func.func private @nixev_tt_back(!llvm.ptr) -> !llvm.ptr
-func.func private @nixev_tt_kids(!llvm.ptr, !llvm.ptr) -> !llvm.ptr
-func.func private @nixev_tt_rows(!llvm.ptr, !llvm.ptr) -> !llvm.ptr
+func.func private @nixev_tt_nkids(!llvm.ptr) -> i64
+func.func private @nixev_tt_kids(!llvm.ptr) -> !llvm.ptr
+func.func private @nixev_tt_nrows(!llvm.ptr) -> i64
+func.func private @nixev_tt_rows(!llvm.ptr) -> !llvm.ptr
 func.func private @nixev_tt_fail(i64, i64, !llvm.ptr, i64)
 func.func private @nixev_tt_value(!llvm.ptr, i64, !llvm.ptr, i64) -> !llvm.ptr
 func.func private @nixev_tt_list(!llvm.ptr, i64) -> !llvm.ptr
+func.func private @nixev_tt_cells(!llvm.ptr) -> !llvm.ptr
 func.func private @nixev_tt_sym(!llvm.ptr, !llvm.ptr, i64) -> i64
 func.func private @nixev_tt_scratch(!llvm.ptr, i64) -> !llvm.ptr
 func.func private @nixev_tt_attrs(!llvm.ptr, !llvm.ptr, i64) -> !llvm.ptr
+func.func private @nixev_ts_toml_cells(!llvm.ptr, i64, !llvm.ptr)
 
 // word k of a record / cell array
 func.func private @tt_rd(%s: !llvm.ptr, %k: i64) -> i64 {
@@ -59,17 +61,6 @@ func.func private @tt_wp(%s: !llvm.ptr, %k: i64, %v: !llvm.ptr) {
   %q = llvm.getelementptr %s[%k] : (!llvm.ptr, i64) -> !llvm.ptr, i64
   llvm.store %v, %q : !llvm.ptr, !llvm.ptr
   return
-}
-func.func private @tt_desc64(%p: !llvm.ptr, %n: i64) -> !d {
-  %c0 = arith.constant 0 : i64
-  %c1 = arith.constant 1 : i64
-  %u = llvm.mlir.undef : !d
-  %a = llvm.insertvalue %p, %u[0] : !d
-  %b = llvm.insertvalue %p, %a[1] : !d
-  %c = llvm.insertvalue %c0, %b[2] : !d
-  %e = llvm.insertvalue %n, %c[3, 0] : !d
-  %f = llvm.insertvalue %c1, %e[4, 0] : !d
-  return %f : !d
 }
 
 // the child slot of table t for key part i
@@ -184,6 +175,7 @@ func.func private @tt_header(%tt: !llvm.ptr, %aot: i64) {
   %nk = func.call @tt_rd(%tt, %c6) : (!llvm.ptr, i64) -> i64
   %last = arith.subi %nk, %c1 : i64
   %li = arith.index_cast %last : i64 to index
+  %P0 = func.call @tt_rp(%tt, %c0) : (!llvm.ptr, i64) -> !llvm.ptr
   %root = func.call @tt_rp(%tt, %c8) : (!llvm.ptr, i64) -> !llvm.ptr
   %t = scf.for %i = %zi to %li step %one iter_args(%cur = %root) -> (!llvm.ptr) {
     %i64 = arith.index_cast %i : index to i64
@@ -207,12 +199,11 @@ func.func private @tt_header(%tt: !llvm.ptr, %aot: i64) {
   %old = llvm.load %slot : !llvm.ptr -> !llvm.ptr
   %ob = llvm.ptrtoint %old : !llvm.ptr to i64
   %fresh = arith.cmpi eq, %ob, %c0 : i64
-  %P = func.call @tt_rp(%tt, %c0) : (!llvm.ptr, i64) -> !llvm.ptr
   %frames = func.call @tt_rp(%tt, %c1) : (!llvm.ptr, i64) -> !llvm.ptr
   %isAot = arith.cmpi ne, %aot, %c0 : i64
   scf.if %isAot {
     %arr = scf.if %fresh -> (!llvm.ptr) {
-      %m = func.call @nixev_tt_make(%P) : (!llvm.ptr) -> !llvm.ptr
+      %m = func.call @nixev_tt_make(%P0) : (!llvm.ptr) -> !llvm.ptr
       llvm.store %c1, %m : i64, !llvm.ptr
       llvm.store %m, %slot : !llvm.ptr, !llvm.ptr
       scf.yield %m : !llvm.ptr
@@ -224,7 +215,7 @@ func.func private @tt_header(%tt: !llvm.ptr, %aot: i64) {
     scf.if %notArr {
       func.call @tt_fail(%tt, %e29, %last) : (!llvm.ptr, i64, i64) -> ()
     }
-    %nt = func.call @nixev_tt_make(%P) : (!llvm.ptr) -> !llvm.ptr
+    %nt = func.call @nixev_tt_make(%P0) : (!llvm.ptr) -> !llvm.ptr
     func.call @nixev_tt_push(%arr, %nt) : (!llvm.ptr, !llvm.ptr) -> ()
     func.call @tt_wp(%frames, %c0, %nt) : (!llvm.ptr, i64, !llvm.ptr) -> ()
   } else {
@@ -313,7 +304,7 @@ func.func private @tt_deliver(%tt: !llvm.ptr, %v: !llvm.ptr) {
 }
 
 // toValue: a leaf's value; an array of tables' list of its tables' sets; a table's set, each row's value made and then
-// its key's symbol (the order the old builder made them in)
+// its key's symbol (the order the old builder made them in), the (sym, value) pairs handed to the set at the end
 func.func private @tt_value(%tt: !llvm.ptr, %n: !llvm.ptr) -> !llvm.ptr {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
@@ -333,12 +324,10 @@ func.func private @tt_value(%tt: !llvm.ptr, %n: !llvm.ptr) -> !llvm.ptr {
     scf.yield %leaf : !llvm.ptr
   }
   case 1 {
-    %cnt = llvm.alloca %c1 x i64 : (i64) -> !llvm.ptr
-    %kids = func.call @nixev_tt_kids(%n, %cnt) : (!llvm.ptr, !llvm.ptr) -> !llvm.ptr
-    %k = llvm.load %cnt : !llvm.ptr -> i64
+    %k = func.call @nixev_tt_nkids(%n) : (!llvm.ptr) -> i64
+    %kids = func.call @nixev_tt_kids(%n) : (!llvm.ptr) -> !llvm.ptr
     %v = func.call @nixev_tt_list(%P, %k) : (!llvm.ptr, i64) -> !llvm.ptr
-    %cp = llvm.getelementptr %v[%c8] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-    %cells = llvm.load %cp : !llvm.ptr -> !llvm.ptr
+    %cells = func.call @nixev_tt_cells(%v) : (!llvm.ptr) -> !llvm.ptr
     %ki2 = arith.index_cast %k : i64 to index
     scf.for %i = %zi to %ki2 step %one {
       %i64 = arith.index_cast %i : index to i64
@@ -349,9 +338,8 @@ func.func private @tt_value(%tt: !llvm.ptr, %n: !llvm.ptr) -> !llvm.ptr {
     scf.yield %v : !llvm.ptr
   }
   default {
-    %cnt = llvm.alloca %c1 x i64 : (i64) -> !llvm.ptr
-    %rows = func.call @nixev_tt_rows(%n, %cnt) : (!llvm.ptr, !llvm.ptr) -> !llvm.ptr
-    %k = llvm.load %cnt : !llvm.ptr -> i64
+    %k = func.call @nixev_tt_nrows(%n) : (!llvm.ptr) -> i64
+    %rows = func.call @nixev_tt_rows(%n) : (!llvm.ptr) -> !llvm.ptr
     %k2 = arith.muli %k, %c2 : i64
     %cells = func.call @nixev_tt_scratch(%P, %k2) : (!llvm.ptr, i64) -> !llvm.ptr
     %ki2 = arith.index_cast %k : i64 to index
@@ -411,6 +399,10 @@ func.func @nixev_toml_ev(%tt: !llvm.ptr, %kind: i64, %p: !llvm.ptr, %a: i64, %li
     func.call @tt_wr(%tt, %c6, %nk1) : (!llvm.ptr, i64, i64) -> ()
     scf.yield %null : !llvm.ptr
   }
+  case 1 {
+    %sv = func.call @nixev_tt_value(%P, %c1, %p, %a) : (!llvm.ptr, i64, !llvm.ptr, i64) -> !llvm.ptr
+    scf.yield %sv : !llvm.ptr
+  }
   case 6 {
     func.call @tt_push_frame(%tt, %null) : (!llvm.ptr, !llvm.ptr) -> ()
     scf.yield %null : !llvm.ptr
@@ -423,13 +415,8 @@ func.func @nixev_toml_ev(%tt: !llvm.ptr, %kind: i64, %p: !llvm.ptr, %a: i64, %li
     %lv = func.call @nixev_tt_list(%P, %n) : (!llvm.ptr, i64) -> !llvm.ptr
     %elems = func.call @tt_rp(%tt, %c3) : (!llvm.ptr, i64) -> !llvm.ptr
     %ep = llvm.getelementptr %elems[%from] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-    %sd = func.call @tt_desc64(%ep, %n) : (!llvm.ptr, i64) -> !d
-    %sm = builtin.unrealized_conversion_cast %sd : !d to !m64
-    %ss = builtin.unrealized_conversion_cast %sm : !m64 to !s64
-    %cells = func.call @tt_rp(%lv, %c1) : (!llvm.ptr, i64) -> !llvm.ptr
-    %id = func.call @tt_desc64(%cells, %n) : (!llvm.ptr, i64) -> !d
-    %im = builtin.unrealized_conversion_cast %id : !d to !m64
-    %end = trikeshed.drain %ss, %im : !s64, !m64 -> index
+    %cells = func.call @nixev_tt_cells(%lv) : (!llvm.ptr) -> !llvm.ptr
+    func.call @nixev_ts_toml_cells(%ep, %n, %cells) : (!llvm.ptr, i64, !llvm.ptr) -> ()
     func.call @tt_wr(%tt, %c4, %from) : (!llvm.ptr, i64, i64) -> ()
     %nf = func.call @tt_rd(%tt, %c2) : (!llvm.ptr, i64) -> i64
     %nf1 = arith.subi %nf, %c1 : i64
@@ -456,7 +443,7 @@ func.func @nixev_toml_ev(%tt: !llvm.ptr, %kind: i64, %p: !llvm.ptr, %a: i64, %li
     scf.yield %null : !llvm.ptr
   }
   default {
-    // 1 string, 2 int, 3 float bits, 4 bool, 5 date: the evaluator's value
+    // 2 int, 3 float bits, 4 bool, 5 date: the evaluator's value
     %sv = func.call @nixev_tt_value(%P, %kind, %p, %a) : (!llvm.ptr, i64, !llvm.ptr, i64) -> !llvm.ptr
     scf.yield %sv : !llvm.ptr
   }
