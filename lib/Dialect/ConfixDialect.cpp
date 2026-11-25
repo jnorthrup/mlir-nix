@@ -11,6 +11,7 @@
 
 #include "Composite/CursorLowering.h"
 #include "Composite/TrikeShed.h"
+#include "Composite/Series.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -294,7 +295,7 @@ struct UnescapeLowering : OpConversionPattern<UnescapeOp> {
         u = arith::OrIOp::create(rw, loc, arith::ShLIOp::create(rw, loc, u, c32v(4)), d);
         ok = arith::AndIOp::create(rw, loc, ok, arith::OrIOp::create(rw, loc, dec, arith::OrIOp::create(rw, loc, lower, upper)));
       }
-      return std::make_pair(u, ok);
+      return composite::Join{u, ok};
     };
     auto byteAt = [&](Value v, Value at) { store(rw, loc, arith::TruncIOp::create(rw, loc, i8, v), out, at); };
 
@@ -321,7 +322,7 @@ struct UnescapeLowering : OpConversionPattern<UnescapeOp> {
     {
       Value y = load(rw, loc, text, i1v);
       // \" \\ \/ \b \f \n \r \t: the byte each names
-      const std::pair<char, char> simple[] = {{'"', '"'}, {'\\', '\\'}, {'/', '/'}, {'b', '\b'}, {'f', '\f'}, {'n', '\n'}, {'r', '\r'}, {'t', '\t'}};
+      const composite::Join<char, char> simple[] = {{'"', '"'}, {'\\', '\\'}, {'/', '/'}, {'b', '\b'}, {'f', '\f'}, {'n', '\n'}, {'r', '\r'}, {'t', '\t'}};
       Value isSimple = cInt(rw, loc, i1, 0), named = y;
       for (auto [letter, byte] : simple) {
         Value is = eq8(y, letter);

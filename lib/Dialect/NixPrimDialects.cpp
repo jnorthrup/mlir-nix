@@ -158,15 +158,15 @@ struct NameAccess : public OperationName {
   }
 };
 
-std::optional<NixDialect::PrimFx> parseFx(StringRef s) {
-  return llvm::StringSwitch<std::optional<NixDialect::PrimFx>>(s)
+composite::Maybe<NixDialect::PrimFx> parseFx(StringRef s) {
+  return llvm::StringSwitch<composite::Maybe<NixDialect::PrimFx>>(s)
       .Case("pure", NixDialect::PrimFx::Pure)
       .Case("user", NixDialect::PrimFx::User)
       .Case("fs", NixDialect::PrimFx::FS)
       .Case("env", NixDialect::PrimFx::Env)
       .Case("store", NixDialect::PrimFx::Store)
       .Case("import", NixDialect::PrimFx::Import)
-      .Default(std::nullopt);
+      .Default(nullptr);
 }
 
 } // namespace
@@ -213,7 +213,7 @@ LogicalResult mlir::nix::loadPrimDialects(MLIRContext *ctx, NixDialect &core) {
       auto fxAttr = opOp->getAttrOfType<StringAttr>("nix.fx");
       if (!key || !fxAttr)
         return opOp.emitError("needs nix.key and nix.fx");
-      std::optional<NixDialect::PrimFx> fx = parseFx(fxAttr.getValue());
+      composite::Maybe<NixDialect::PrimFx> fx = parseFx(fxAttr.getValue());
       if (!fx)
         return opOp.emitError("unknown nix.fx '") << fxAttr.getValue() << "'";
 
