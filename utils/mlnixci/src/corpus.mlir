@@ -27,12 +27,14 @@ func.func private @cx_tag(!llvm.ptr, i64) -> i64
 func.func private @cx_nkids(!llvm.ptr, i64) -> i64
 func.func private @cx_member(!llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64) -> i64
 func.func private @cx_d(!llvm.ptr, i32) -> !llvm.ptr
+func.func private @cx_unterminated(!llvm.ptr, !llvm.ptr) -> i64
 
 llvm.mlir.global internal constant @k_options("options") : !llvm.array<7 x i8>
 llvm.mlir.global internal constant @k_etc("etc") : !llvm.array<3 x i8>
 llvm.mlir.global internal constant @k_suffix("?(none)") : !llvm.array<7 x i8>
 llvm.mlir.global internal constant @k_notobject("the evaluation is not a JSON object") : !llvm.array<35 x i8>
 llvm.mlir.global internal constant @k_nooptions("the evaluation has no options") : !llvm.array<29 x i8>
+llvm.mlir.global internal constant @k_unterminated("the evaluation ends inside a string") : !llvm.array<35 x i8>
 
 llvm.mlir.global internal @why_p() : !llvm.ptr {
   %0 = llvm.mlir.zero : !llvm.ptr
@@ -144,8 +146,24 @@ func.func @corpus_load(%json: !llvm.ptr, %len: i64, %ms: f64) -> !llvm.ptr {
   }
   %isArr = arith.cmpi eq, %optsTag, %c6 : i64
   %result = scf.if %isArr -> (!llvm.ptr) {
-    %c = func.call @corpus_rows(%t, %len, %f, %opts, %ms) : (!llvm.ptr, i64, !llvm.ptr, i64, f64) -> !llvm.ptr
-    scf.yield %c : !llvm.ptr
+    // a text that ends in an open quote has a string whose inside would be negative: refused, not read
+    %ut = func.call @cx_unterminated(%t, %f) : (!llvm.ptr, !llvm.ptr) -> i64
+    %uto = arith.cmpi sgt, %ut, %c0 : i64
+    %rr = scf.if %uto -> (!llvm.ptr) {
+      %whyp = llvm.mlir.addressof @why_p : !llvm.ptr
+      %whyn = llvm.mlir.addressof @why_n : !llvm.ptr
+      %mu = llvm.mlir.addressof @k_unterminated : !llvm.ptr
+      %lu = arith.constant 35 : i64
+      llvm.store %mu, %whyp : !llvm.ptr, !llvm.ptr
+      llvm.store %lu, %whyn : i64, !llvm.ptr
+      func.call @cx_free(%f) : (!llvm.ptr) -> ()
+      llvm.call @free(%t) : (!llvm.ptr) -> ()
+      scf.yield %null : !llvm.ptr
+    } else {
+      %c = func.call @corpus_rows(%t, %len, %f, %opts, %ms) : (!llvm.ptr, i64, !llvm.ptr, i64, f64) -> !llvm.ptr
+      scf.yield %c : !llvm.ptr
+    }
+    scf.yield %rr : !llvm.ptr
   } else {
     %whyp = llvm.mlir.addressof @why_p : !llvm.ptr
     %whyn = llvm.mlir.addressof @why_n : !llvm.ptr
