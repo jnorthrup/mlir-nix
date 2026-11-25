@@ -26,7 +26,6 @@ func.func private @tw_e(i64) -> i64
 func.func private @tw_n(i64) -> i64
 func.func private @off(!llvm.ptr, i64) -> !llvm.ptr
 func.func private @is(!llvm.ptr, i64, !llvm.ptr, i64) -> i1
-func.func private @search(!llvm.ptr, i64, i64, !llvm.ptr, i64) -> i64
 func.func private @ob_start(i64)
 func.func private @ob_room(i64) -> !llvm.ptr
 func.func private @ob_used(i64)
@@ -38,8 +37,6 @@ func.func private @cx_open(!llvm.ptr, i64) -> i64
 func.func private @cx_close(!llvm.ptr, i64) -> i64
 func.func private @cx_nkids(!llvm.ptr, i64) -> i64
 func.func private @cx_kid(!llvm.ptr, i64, i64) -> i64
-func.func private @cx_member_at(!llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64) -> i64
-func.func private @cx_find_at(!llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64) -> i64
 func.func private @cx_d(!llvm.ptr, i32) -> !llvm.ptr
 func.func private @cx_text(!llvm.ptr) -> !llvm.ptr
 func.func private @view(!llvm.ptr, !llvm.ptr, i64)
