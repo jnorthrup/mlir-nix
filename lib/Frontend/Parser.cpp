@@ -2148,13 +2148,14 @@ extern "C" void nixfe_sp_close(void *c) {
 } // namespace
 
 // nixfe::canonPath's segment walk is hollowed out to MLIR: lowered/nixfe/CanonPath.mlir (trikeshed.at / slice / text /
-// drain over the byte series), built into NixFrontend by lib/CMakeLists.txt.  The bridge sizes the Text (a segment writes
-// at most its bytes + one '/', and a lone '/' when nothing is written) and adopts the drained size.
+// drain over the byte series), built into NixFrontend by lib/CMakeLists.txt.  The bridge sizes the Text and adopts the drained
+// size: a segment writes at most its bytes + one '/', so the output is at most a's and b's bytes plus a leading '/' (when a
+// is relative) and the '/' between them; the parser's base is absolute, but canonPath(a, b) is not only the parser's.
 extern "C" size_t nixfe_ts_canonpath(const char *a, size_t an, const char *b, size_t bn, char *out, size_t from);
 
 void canonPath(composite::Text &out, composite::Chars a, composite::Chars b) {
   size_t from = out.size();
-  out.resize(from + a.size() + b.size() + 1);
+  out.resize(from + a.size() + b.size() + 2);
   out.truncate(nixfe_ts_canonpath(a.data(), a.size(), b.data(), b.size(), out.begin(), from));
 }
 

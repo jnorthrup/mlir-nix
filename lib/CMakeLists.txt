@@ -177,8 +177,8 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/StoreName.mlir StoreName)
 # and list texts and auto's name are gone; the bridges keep the file I/O, threads, io_uring requests and the owning
 # Texts): trikeshed.parts / where / sorted / bisect / combine / combineAll / fold / drain over the list's records.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/PrefetchOps.mlir PrefetchOps)
-# The pure byte decoders nix32Decode, base64Decode (lib/Store/Hash.cpp's bodies are gone; the bridges size the Text and
-# turn the validity flag into the Maybe, parseRest's error wording stays).  trikeshed.at over the input series<i8>, a
+# The pure byte decoders nix32Decode, base64Decode (lib/Store/Hash.cpp's bodies are gone; HashParse.mlir calls them, with
+# the room the bridges size and the validity flag they turn into the Maybe).  trikeshed.at over the input series<i8>, a
 # constant reverse-alphabet table and guarded byte stores.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/Decoders.mlir Decoders)
 # The NAR: NarWriter's framing, its walk and restorePath's reader (StorePaths.cpp keeps lstat, the listing, the file's
