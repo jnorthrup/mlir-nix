@@ -56,15 +56,15 @@
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/JSON.h"
-#include "llvm/Support/StringSaver.h"
 #include "llvm/Support/raw_ostream.h"
 
-#include <cassert>
-#include <string>
-#include <tuple>
+#include "Composite/Text.h"
 
 namespace mlir::kif {
 namespace {
+using composite::j;
+using composite::Text;
+using join::TwInt;
 
 constexpr uint32_t kNone = ~0u;
 
@@ -135,8 +135,8 @@ struct Terms {
     if (groundMemo.size() <= id) groundMemo.resize(terms.size(), -1);
     return groundMemo[id] = g;
   }
-  void show(uint32_t id, std::string &s) const {
-    if (!isList(id)) { s += terms[id].text.str(); return; }
+  void show(uint32_t id, Text &s) const {
+    if (!isList(id)) { s += terms[id].text; return; }
     s += '(';
     for (auto [i, e] : llvm::enumerate(elems(id))) {
       if (i) s += ' ';
@@ -144,18 +144,18 @@ struct Terms {
     }
     s += ')';
   }
-  std::string show(uint32_t id) const {
-    std::string s;
+  Text show(uint32_t id) const {
+    Text s;
     show(id, s);
     return s;
   }
 };
 
-using Bind = SmallVector<std::pair<uint32_t, uint32_t>, 8>; // variable -> term
+using Bind = SmallVector<TwInt, 8>; // variable |j| term
 
 uint32_t lookup(const Bind &b, uint32_t var) {
-  for (auto &[k, x] : b)
-    if (k == var) return x;
+  for (TwInt kx : b)
+    if (kx.first() == var) return kx.second();
   return kNone;
 }
 
@@ -166,7 +166,7 @@ bool unify(Terms &T, Bind &b, uint32_t p, uint32_t f) {
     if (T.isVar(p)) {
       uint32_t x = lookup(b, p);
       if (x != kNone) return x == f;
-      b.push_back({p, f});
+      b.push_back(p |j| f);
       return true;
     }
     return p == f;
@@ -194,7 +194,7 @@ struct Form {
   uint32_t p = kNone, a = kNone, b = kNone; // Pattern, Instance: p; Equal: a, b
 };
 struct Rule {
-  std::string id;              // datalog.nix's name: the consequent's relation, '#', the rule's place
+  Text id;                     // datalog.nix's name: the consequent's relation, '#', the rule's place
   uint32_t consequent = kNone;
   SmallVector<uint32_t, 8> vars; // in the order they first occur: the antecedent, then the consequent
   SmallVector<Form, 4> forms;
@@ -219,11 +219,9 @@ struct Proof {
 /// index), children before parents; the declaration last.
 struct Writer {
   raw_ostream &os;
-  llvm::BumpPtrAllocator mem;
-  llvm::UniqueStringSaver saver{mem};
-  llvm::DenseMap<std::pair<uint32_t, StringRef>, uint32_t> names;
-  llvm::DenseMap<std::pair<uint32_t, uint64_t>, uint32_t> numNames;
-  llvm::DenseMap<std::tuple<uint8_t, uint32_t, uint32_t, uint32_t, uint32_t>, uint32_t> exprs;
+  llvm::StringMap<uint32_t> texts;                    // a name's text -> its number
+  llvm::DenseMap<uint64_t, uint32_t> names, numNames; // (prefix |j| text or number) -> the name
+  llvm::DenseMap<uint64_t, uint32_t> exprs[6], pairs; // an expression by kind and (field |j| field); a pair of fields -> its number
   uint32_t nNames = 1, nExprs = 0; // name 0 is the anonymous one
   enum Kind : uint8_t { Sort, BVar, App, Pi, Lam, Let };
 
@@ -234,8 +232,8 @@ struct Writer {
     os << R"({"il":1,"succ":0})" << '\n'; // level 1; level 0 is zero
   }
   void string(StringRef s) {
-    std::string fixed;
-    if (!llvm::json::isUTF8(s)) s = fixed = llvm::json::fixUTF8(s);
+    Text fixed;
+    if (!llvm::json::isUTF8(s)) s = fixed = Text(llvm::json::fixUTF8(s));
     os << '"';
     for (unsigned char c : s) {
       if (c == '"' || c == '\\') os << '\\' << char(c);
@@ -245,41 +243,42 @@ struct Writer {
     os << '"';
   }
   uint32_t name(StringRef s, uint32_t pre = 0) {
-    s = saver.save(s);
-    auto [it, fresh] = names.try_emplace({pre, s}, nNames);
+    uint32_t text = texts.try_emplace(s, uint32_t(texts.size())).first->second;
+    auto [it, fresh] = names.try_emplace((pre |j| text).raw, nNames);
     if (!fresh) return it->second;
     os << R"({"in":)" << nNames << R"(,"str":{"pre":)" << pre << R"(,"str":)";
     string(s);
     os << "}}\n";
     return nNames++;
   }
-  uint32_t numName(StringRef family, uint64_t i) {
+  uint32_t numName(StringRef family, uint32_t i) {
     uint32_t pre = name(family);
-    auto [it, fresh] = numNames.try_emplace({pre, i}, nNames);
+    auto [it, fresh] = numNames.try_emplace((pre |j| i).raw, nNames);
     if (!fresh) return it->second;
     os << R"({"in":)" << nNames << R"(,"num":{"i":)" << i << R"(,"pre":)" << pre << "}}\n";
     return nNames++;
   }
+  uint32_t pair(uint32_t x, uint32_t y) { return pairs.try_emplace((x |j| y).raw, uint32_t(pairs.size())).first->second; }
   /// The index of an expression, written the first time it is made.
   template <typename F>
-  uint32_t expr(Kind k, uint32_t a, uint32_t b, uint32_t c, uint32_t d, F write) {
-    auto [it, fresh] = exprs.try_emplace({k, a, b, c, d}, nExprs);
+  uint32_t expr(Kind k, uint64_t key, F write) {
+    auto [it, fresh] = exprs[k].try_emplace(key, nExprs);
     if (!fresh) return it->second;
     write(nExprs);
     return nExprs++;
   }
   uint32_t sort(uint32_t level) {
-    return expr(Sort, level, 0, 0, 0, [&](uint32_t i) { os << R"({"ie":)" << i << R"(,"sort":)" << level << "}\n"; });
+    return expr(Sort, level, [&](uint32_t i) { os << R"({"ie":)" << i << R"(,"sort":)" << level << "}\n"; });
   }
   uint32_t bvar(uint32_t n) {
-    return expr(BVar, n, 0, 0, 0, [&](uint32_t i) { os << R"({"bvar":)" << n << R"(,"ie":)" << i << "}\n"; });
+    return expr(BVar, n, [&](uint32_t i) { os << R"({"bvar":)" << n << R"(,"ie":)" << i << "}\n"; });
   }
   uint32_t app(uint32_t f, uint32_t a) {
-    return expr(App, f, a, 0, 0,
+    return expr(App, (f |j| a).raw,
                 [&](uint32_t i) { os << R"({"app":{"arg":)" << a << R"(,"fn":)" << f << R"(},"ie":)" << i << "}\n"; });
   }
   uint32_t binder(Kind k, uint32_t n, uint32_t type, uint32_t body) {
-    return expr(k, n, type, body, 0, [&](uint32_t i) {
+    return expr(k, (n |j| pair(type, body)).raw, [&](uint32_t i) {
       os << (k == Pi ? R"({"forallE":)" : R"({"lam":)") << R"({"binderInfo":"default","body":)" << body << R"(,"name":)" << n
          << R"(,"type":)" << type << R"(},"ie":)" << i << "}\n";
     });
@@ -287,7 +286,7 @@ struct Writer {
   uint32_t pi(uint32_t n, uint32_t type, uint32_t body) { return binder(Pi, n, type, body); }
   uint32_t lam(uint32_t n, uint32_t type, uint32_t body) { return binder(Lam, n, type, body); }
   uint32_t let(uint32_t n, uint32_t type, uint32_t value, uint32_t body) {
-    return expr(Let, n, type, value, body, [&](uint32_t i) {
+    return expr(Let, (pair(n, type) |j| pair(value, body)).raw, [&](uint32_t i) {
       os << R"({"ie":)" << i << R"(,"letE":{"body":)" << body << R"(,"name":)" << n << R"(,"nondep":false,"type":)" << type
          << R"(,"value":)" << value << "}}\n";
     });
@@ -303,7 +302,7 @@ struct Certificate {
   TheoryOp theory;
   // the ontology: (child, parent) edges by class name, as kif-chase reads them (readOntology)
   bool hasOntology = false;
-  SmallVector<std::pair<StringRef, StringRef>, 0> edges;
+  SmallVector<composite::Join<StringRef, StringRef>, 0> edges;
   llvm::StringMap<SmallVector<uint32_t, 2>> up; // a class -> its edges to its parents
   uint32_t aAnd = kNone, aExists = kNone, aNot = kNone, aEqual = kNone, aInstance = kNone;
 
@@ -356,16 +355,15 @@ struct Certificate {
       auto it = up.find(x);
       if (it == up.end()) continue;
       for (uint32_t e : it->second)
-        if (via.try_emplace(edges[e].second, e).second) queue.push_back(edges[e].second);
+        if (via.try_emplace(edges[e].b, e).second) queue.push_back(edges[e].b);
     }
     auto it = via.find(a);
     if (a == c || it == via.end()) return false;
-    for (StringRef x = a; x != c;) {
+    for (StringRef x = a; x != c;) { // from a down to c: each edge goes in before the one put last
       uint32_t e = via[x];
-      out.push_back(e);
-      x = edges[e].first;
+      out.insert(out.begin(), e);
+      x = edges[e].a;
     }
-    std::reverse(out.begin(), out.end());
     return true;
   }
 
@@ -408,7 +406,7 @@ struct Certificate {
       }
     }
     // the atoms the rules test by name, looked up once every term of the rules is interned (as kif-chase does)
-    SmallVector<std::pair<uint32_t, uint32_t>, 0> ruleTerms;
+    SmallVector<TwInt, 0> ruleTerms;
     for (RuleOp r : ruleOps) ruleTerms.push_back({T.of(r.getAntecedent()), T.of(r.getConsequent())});
     aAnd = T.lookupAtom("and"), aExists = T.lookupAtom("exists"), aNot = T.lookupAtom("not");
     aEqual = T.lookupAtom("equal"), aInstance = T.lookupAtom("instance");
@@ -420,10 +418,10 @@ struct Certificate {
     llvm::StringMap<unsigned> byId;
     for (auto [i, r] : llvm::enumerate(ruleTerms)) {
       Rule rule;
-      uint32_t antecedent = r.first;
-      rule.consequent = r.second;
+      uint32_t antecedent = r.first();
+      rule.consequent = r.second();
       uint32_t h = T.head(rule.consequent);
-      rule.id = (h == kNone ? std::string() : T.show(h)) + "#" + std::to_string(i + 1);
+      rule.id = composite::cat(h == kNone ? Text() : T.show(h), '#', i + 1);
       vars(antecedent, rule.vars);
       vars(rule.consequent, rule.vars);
       flatten(rule, antecedent);
@@ -439,8 +437,8 @@ struct Certificate {
       Rule &r = rules[p.rule];
       if (r.negation)
         return d.emitOpError("is derived by rule ")
-               << r.id << ", whose (not ..) premise is negation as failure: the closed world of a stratum, not a proof "
-               << "from the facts, so no Lean certificate is given for " << T.show(p.fact);
+               << r.id.c_str() << ", whose (not ..) premise is negation as failure: the closed world of a stratum, not a proof "
+               << "from the facts, so no Lean certificate is given for " << T.show(p.fact).c_str();
       SmallVector<uint32_t, 4> from;
       for (Value v : d.getFrom()) from.push_back(T.of(v));
       if (failed(replay(d, r, from, p))) return failure();
@@ -456,14 +454,14 @@ struct Certificate {
   void localize() {
     SmallVector<uint32_t, 0> order;
     SmallVector<uint8_t, 0> seen(proofs.size(), 0);
-    SmallVector<std::pair<uint32_t, unsigned>, 32> stack; // (a proof, the next of its premises to visit)
+    SmallVector<composite::Join<uint32_t, unsigned>, 32> stack; // (a proof, the next of its premises to visit)
     for (uint32_t root = uint32_t(proofs.size()); root-- > 0;) {
       if (seen[root]) continue;
       seen[root] = 1;
       stack.push_back({root, 0});
       while (!stack.empty()) {
-        uint32_t i = stack.back().first;
-        unsigned &next = stack.back().second;
+        uint32_t i = stack.back().a;
+        unsigned &next = stack.back().b;
         uint32_t child = kNone;
         while (next < proofs[i].premises.size() && child == kNone) {
           uint32_t f = proofs[i].premises[next++].fact;
@@ -492,15 +490,15 @@ struct Certificate {
     size_t next = 0;
     auto proved = [&](uint32_t f) { return assertedAt.count(f) || derivedAt.count(f); };
     auto take = [&](uint32_t &f) -> LogicalResult {
-      if (next >= from.size()) return d.emitOpError("has fewer premises than rule ") << r.id << " matches";
+      if (next >= from.size()) return d.emitOpError("has fewer premises than rule ") << r.id.c_str() << " matches";
       f = from[next++];
-      if (!proved(f)) return d.emitOpError("rests on ") << T.show(f) << ", which is neither asserted nor derived before it";
+      if (!proved(f)) return d.emitOpError("rests on ") << T.show(f).c_str() << ", which is neither asserted nor derived before it";
       return success();
     };
     for (const Form &form : r.forms) {
       if (form.kind == Form::Equal) {
         uint32_t x = subst(T, b, form.a), y = subst(T, b, form.b);
-        if (x != y) return d.emitOpError("rule ") << r.id << ": (equal " << T.show(x) << " " << T.show(y) << ") does not hold";
+        if (x != y) return d.emitOpError("rule ") << r.id.c_str() << ": (equal " << T.show(x).c_str() << " " << T.show(y).c_str() << ") does not hold";
         p.premises.push_back({Premise::Same, kNone, x});
         usesSame = true;
         continue;
@@ -511,7 +509,7 @@ struct Certificate {
           uint32_t f;
           if (failed(take(f))) return failure();
           if (!T.isList(f) || T.size(f) != 3 || T.head(f) != aInstance || !unify(T, b, T.at(form.p, 1), T.at(f, 1)))
-            return d.emitOpError("rule ") << r.id << ": " << T.show(f) << " does not match " << T.show(form.p);
+            return d.emitOpError("rule ") << r.id.c_str() << ": " << T.show(f).c_str() << " does not match " << T.show(form.p).c_str();
           uint32_t fc = T.at(f, 2);
           if (fc == c) {
             p.premises.push_back({Premise::Fact, f});
@@ -519,7 +517,7 @@ struct Certificate {
           }
           Premise up{Premise::Up, f, T.at(f, 1), fc, c};
           if (!T.isString(fc) || !T.isString(c) || !path(T.terms[fc].text, T.terms[c].text, up.path))
-            return d.emitOpError("rule ") << r.id << ": " << T.show(fc) << " is not a subclass of " << T.show(c);
+            return d.emitOpError("rule ") << r.id.c_str() << ": " << T.show(fc).c_str() << " is not a subclass of " << T.show(c).c_str();
           for (uint32_t e : up.path)
             if (edgeAt.try_emplace(e, uint32_t(usedEdges.size())).second) usedEdges.push_back(e);
           p.premises.push_back(std::move(up));
@@ -530,12 +528,12 @@ struct Certificate {
       uint32_t f;
       if (failed(take(f))) return failure();
       if (!unify(T, b, form.p, f))
-        return d.emitOpError("rule ") << r.id << ": " << T.show(f) << " does not match " << T.show(form.p);
+        return d.emitOpError("rule ") << r.id.c_str() << ": " << T.show(f).c_str() << " does not match " << T.show(form.p).c_str();
       p.premises.push_back({Premise::Fact, f});
     }
-    if (next != from.size()) return d.emitOpError("has more premises than rule ") << r.id << " matches";
+    if (next != from.size()) return d.emitOpError("has more premises than rule ") << r.id.c_str() << " matches";
     if (subst(T, b, r.consequent) != p.fact)
-      return d.emitOpError("rule ") << r.id << " gives " << T.show(subst(T, b, r.consequent)) << ", not " << T.show(p.fact);
+      return d.emitOpError("rule ") << r.id.c_str() << " gives " << T.show(subst(T, b, r.consequent)).c_str() << ", not " << T.show(p.fact).c_str();
     for (uint32_t v : r.vars) p.inst.push_back(lookup(b, v));
     return success();
   }
@@ -611,7 +609,7 @@ struct Certificate {
     }
     if (hasUp) {
       atomsOf(aInstance, false);
-      for (uint32_t e : edgeOrder) atomsOf(T.atom(edges[e].first), false), atomsOf(T.atom(edges[e].second), false);
+      for (uint32_t e : edgeOrder) atomsOf(T.atom(edges[e].a), false), atomsOf(T.atom(edges[e].b), false);
     }
     uint32_t q = 4;
     for (uint32_t a : atomOrder) qAtom[a] = q++;
@@ -629,14 +627,14 @@ struct Certificate {
   }
 
   Writer *w = nullptr;
-  llvm::DenseMap<std::pair<uint32_t, uint32_t>, uint32_t> groundAt; // (term, depth) -> expression, in this theorem
+  llvm::DenseMap<uint64_t, uint32_t> groundAt; // (term |j| depth) -> expression, in this theorem
 
   uint32_t ref(uint32_t depth, uint32_t q) { return w->bvar(depth - 1 - q); }
   /// A term at `depth`; a rule's variable is the binder at its place in `vars` (`varQ`: the place of the first).
   uint32_t term(uint32_t t, uint32_t depth, ArrayRef<uint32_t> vars = {}, uint32_t varQ = 0) {
     bool closed = vars.empty();
     if (closed)
-      if (auto it = groundAt.find({t, depth}); it != groundAt.end()) return it->second;
+      if (auto it = groundAt.find((t |j| depth).raw); it != groundAt.end()) return it->second;
     uint32_t e;
     if (T.isList(t)) {
       e = ref(depth, qNil);
@@ -648,7 +646,7 @@ struct Certificate {
     } else {
       e = ref(depth, qAtom.lookup(t));
     }
-    if (closed) groundAt[{t, depth}] = e;
+    if (closed) groundAt[(t |j| depth).raw] = e;
     return e;
   }
   uint32_t holds(uint32_t t, uint32_t depth, ArrayRef<uint32_t> vars = {}, uint32_t varQ = 0) {
@@ -721,10 +719,10 @@ struct Certificate {
     uint32_t e0 = path.front();
     uint32_t edge = ref(depth, qEdge.lookup(e0));
     if (path.size() == 1) return edge;
-    uint32_t top = T.atom(edges[path.back()].second);
+    uint32_t top = T.atom(edges[path.back()].b);
     uint32_t e = ref(depth, qSubTrans);
-    e = w->app(e, term(T.atom(edges[e0].first), depth));
-    e = w->app(e, term(T.atom(edges[e0].second), depth));
+    e = w->app(e, term(T.atom(edges[e0].a), depth));
+    e = w->app(e, term(T.atom(edges[e0].b), depth));
     e = w->app(e, term(top, depth));
     e = w->app(e, edge);
     return w->app(e, subProof(path.drop_front(), depth));
@@ -770,7 +768,7 @@ struct Certificate {
     for (uint32_t e : edgeOrder) {
       uint32_t q = qEdge[e];
       names[q] = w->numName("o", edgeAt.lookup(e));
-      types[q] = w->app(w->app(ref(q, qSub), term(T.atom(edges[e].first), q)), term(T.atom(edges[e].second), q));
+      types[q] = w->app(w->app(ref(q, qSub), term(T.atom(edges[e].a), q)), term(T.atom(edges[e].b), q));
     }
     for (uint32_t f : factOrder) {
       uint32_t q = qFact[f];
@@ -801,7 +799,7 @@ struct Certificate {
       body = w->let(w->numName("d", lo + j), holds(p.fact, depth), proofValue(p, depth), body);
     }
     for (uint32_t q = nBinders; q-- > 0;) body = w->lam(names[q], types[q], body);
-    w->theorem(piece < 0 ? w->name("closure") : w->numName("closure", uint64_t(piece)), type, body);
+    w->theorem(piece < 0 ? w->name("closure") : w->numName("closure", uint32_t(piece)), type, body);
   }
 
   void write(raw_ostream &os, uint32_t pieceLets) {
@@ -814,7 +812,7 @@ struct Certificate {
       theorem(-1);
     } else {
       for (uint32_t k = 0; k == 0 || uint64_t(k) * pieceLets < n; k++) {
-        lo = k * pieceLets, hi = std::min<uint64_t>(n, uint64_t(lo) + pieceLets);
+        lo = k * pieceLets, hi = uint32_t(composite::min<uint64_t>(n, uint64_t(lo) + pieceLets));
         place(false);
         theorem(k);
       }

@@ -22,6 +22,7 @@
 #include "NixDialect/Sumo.h"
 
 #include "Composite/TrikeShed.h"
+#include "Composite/Vocab.h"
 
 #include "mlir/Bytecode/BytecodeWriter.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -150,38 +151,35 @@ int main(int argc, char **argv) {
     if (failed(parsePassPipeline(p, pm)) || failed(pm.run(*module))) return 1;
     if (stats) llvm::errs() << llvm::format("%.*s: %.2f s, peak RSS %.0f MB\n", int(p.size()), p.data(), seconds() - t4, peakMB());
   }
-  if (dump)
-    module->walk([&](kif::TheoryOp t) { if (t.getSymName() == "kb") kif::dumpClosure(t, llvm::outs()); });
-  if (!lean.empty()) {
-    double t2 = seconds();
-    std::error_code ec;
-    llvm::ToolOutputFile f(lean, ec, llvm::sys::fs::OF_None);
-    if (ec) { llvm::errs() << "mlnix-kif: " << lean << ": " << ec.message() << "\n"; return 1; }
-    kif::TheoryOp kbTheory;
-    module->walk([&](kif::TheoryOp t) { if (t.getSymName() == "kb") kbTheory = t; });
-    if (!kbTheory || failed(kif::exportLean(kbTheory, f.os(), piece))) return 1;
+  kif::TheoryOp kbTheory;
+  module->walk([&](kif::TheoryOp t) { if (t.getSymName() == "kb") kbTheory = t; });
+  if (dump && kbTheory) kif::dumpClosure(kbTheory, llvm::outs());
+  // a file written whole or not at all: kept only when `body` succeeds
+  auto write = [&](llvm::StringRef path, llvm::StringRef shown, composite::Fn<bool(llvm::raw_ostream &)> body) {
+    std::error_code ec; // raw_fd_ostream's constructor reports through one
+    llvm::ToolOutputFile f(path, ec, llvm::sys::fs::OF_None);
+    if (ec) { llvm::errs() << "mlnix-kif: " << shown << ": " << ec.message() << "\n"; return false; }
+    if (!body(f.os())) return false;
     f.keep();
+    return true;
+  };
+  double t2 = seconds();
+  if (!lean.empty()) {
+    auto proofs = [&](llvm::raw_ostream &os) { return kbTheory && succeeded(kif::exportLean(kbTheory, os, piece)); };
+    if (!write(lean, lean, proofs)) return 1;
     if (stats) llvm::errs() << llvm::format("lean: %.2f s, peak RSS %.0f MB\n", seconds() - t2, peakMB());
   }
+  double t3 = seconds();
   if (!tptp.empty()) {
-    double t3 = seconds();
-    std::error_code ec;
-    llvm::ToolOutputFile f(tptp, ec, llvm::sys::fs::OF_None);
-    if (ec) { llvm::errs() << "mlnix-kif: " << tptp << ": " << ec.message() << "\n"; return 1; }
-    kif::TheoryOp kbTheory;
-    module->walk([&](kif::TheoryOp t) { if (t.getSymName() == "kb") kbTheory = t; });
-    if (!kbTheory || failed(kif::exportTptp(kbTheory, f.os()))) return 1;
-    f.keep();
+    auto problem = [&](llvm::raw_ostream &os) { return kbTheory && succeeded(kif::exportTptp(kbTheory, os)); };
+    if (!write(tptp, tptp, problem)) return 1;
     if (stats) llvm::errs() << llvm::format("tptp: %.2f s, peak RSS %.0f MB\n", seconds() - t3, peakMB());
   }
-  if (!out.empty() || (!dump && !stats && lean.empty() && tptp.empty())) {
-    std::error_code ec;
-    llvm::ToolOutputFile f(out.empty() ? "-" : out, ec, llvm::sys::fs::OF_None);
-    if (ec) { llvm::errs() << "mlnix-kif: " << out << ": " << ec.message() << "\n"; return 1; }
-    if (bytecode) {
-      if (failed(writeBytecodeToFile(*module, f.os()))) return 1;
-    } else module->print(f.os());
-    f.keep();
-  }
+  auto ir = [&](llvm::raw_ostream &os) {
+    if (bytecode) return succeeded(writeBytecodeToFile(*module, os));
+    module->print(os);
+    return true;
+  };
+  if ((!out.empty() || (!dump && !stats && lean.empty() && tptp.empty())) && !write(out.empty() ? "-" : out, out, ir)) return 1;
   return 0;
 }

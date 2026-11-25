@@ -18,6 +18,7 @@
 
 #include "NixDialect/Kif.h"
 
+#include "Composite/Text.h"
 #include "Composite/TrikeShed.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -27,8 +28,6 @@
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/DenseMap.h"
-
-#include <functional>
 
 namespace mlir::kif {
 
@@ -42,7 +41,7 @@ bool isPair(Type t) {
   return p && p.getElement().isSignlessInteger(32);
 }
 /// a cursor of this schema whose columns pass these checks
-bool isCursor(Type t, StringRef schema, ArrayRef<std::function<bool(Type)>> columns) {
+bool isCursor(Type t, StringRef schema, ArrayRef<bool (*)(Type)> columns) {
   auto c = dyn_cast<composite::CursorType>(t);
   if (!c || c.getSchema().getValue() != schema || c.getColumns().size() != columns.size()) return false;
   for (auto [type, ok] : llvm::zip(c.getColumns(), columns))
@@ -89,7 +88,7 @@ struct Tables {
   SmallVector<int8_t> tag;
   SmallVector<int64_t> name, kids; // (start << 32 | length), (first << 32 | count)
   SmallVector<int32_t> kid;
-  std::string names;
+  composite::Text names;
   SmallVector<int32_t> factTerm, factFile, ruleAntecedent, ruleConsequent, ruleFile;
 };
 
@@ -155,7 +154,7 @@ struct KifToTrikeShedPass : PassWrapper<KifToTrikeShedPass, OperationPass<Module
     OpBuilder top(module.getBodyRegion());
 
     auto global = [&](TheoryOp theory, StringRef what, Type element, ArrayRef<char> raw, int64_t n) -> memref::GlobalOp {
-      std::string name = ("__kif_" + theory.getSymName() + "_" + what).str();
+      composite::Text name = composite::cat("__kif_", theory.getSymName(), '_', what);
       auto type = MemRefType::get({n}, element);
       auto data = DenseElementsAttr::getFromRawBuffer(RankedTensorType::get({n}, element), raw);
       top.setInsertionPointToEnd(module.getBody());
