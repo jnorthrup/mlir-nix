@@ -186,7 +186,7 @@ func.func @nixev_ts_coerce(%st: !llvm.ptr, %v: !llvm.ptr, %ctx: !llvm.ptr, %cm: 
     scf.if %hasf {
       %r = func.call @nixev_cell(%st) : (!llvm.ptr) -> !llvm.ptr
       %args = llvm.alloca %c1 x !llvm.ptr : (i64) -> !llvm.ptr
-      llvm.store %r, %args : !llvm.ptr, !llvm.ptr
+      llvm.store %v, %args : !llvm.ptr, !llvm.ptr
       %fvp = llvm.getelementptr %f[8] : (!llvm.ptr) -> !llvm.ptr, i8
       %fv = llvm.load %fvp : !llvm.ptr -> !llvm.ptr
       %nullpos = llvm.inttoptr %c0 : i64 to !llvm.ptr

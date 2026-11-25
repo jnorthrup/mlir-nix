@@ -20,7 +20,7 @@ func.func private @_ZN5nixev9EvalState12callFunctionERNS_5ValueEmPPS1_S2_PKv(!ll
 func.func private @_ZN5nixev9EvalState9forceCellERNS_5ValueEPKv(!llvm.ptr, !llvm.ptr, !llvm.ptr)
 
 // the descriptor of n i64 cells at p (a struct, not a memref: returning it allocates nothing and clones nothing)
-func.func private @desc(%p: !llvm.ptr, %n: i64) -> !d {
+func.func private @listops_desc(%p: !llvm.ptr, %n: i64) -> !d {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
   %u = llvm.mlir.undef : !d
@@ -33,7 +33,7 @@ func.func private @desc(%p: !llvm.ptr, %n: i64) -> !d {
 }
 
 // copy the 24 bytes of a Value from %src to %dst
-func.func private @copyval(%src: !llvm.ptr, %dst: !llvm.ptr) {
+func.func private @listops_copyval(%src: !llvm.ptr, %dst: !llvm.ptr) {
   %c8 = arith.constant 8 : i64
   %c16 = arith.constant 16 : i64
   %p0 = llvm.getelementptr %src[0] : (!llvm.ptr) -> !llvm.ptr, i8
@@ -58,7 +58,7 @@ func.func @nixev_ts_length(%list: !llvm.ptr, %v: !llvm.ptr) {
   %np = llvm.getelementptr %list[4] : (!llvm.ptr) -> !llvm.ptr, i8
   %n32 = llvm.load %np : !llvm.ptr -> i32
   %n = llvm.zext %n32 : i32 to i64
-  %d = func.call @desc(%elems, %n) : (!llvm.ptr, i64) -> !d
+  %d = func.call @listops_desc(%elems, %n) : (!llvm.ptr, i64) -> !d
   %mm = builtin.unrealized_conversion_cast %d : !d to !m
   %ss = builtin.unrealized_conversion_cast %mm : !m to !s
   %k = trikeshed.size %ss : !s
@@ -78,14 +78,14 @@ func.func @nixev_ts_elemAt(%st: !llvm.ptr, %list: !llvm.ptr, %n: i64, %v: !llvm.
   %np = llvm.getelementptr %list[4] : (!llvm.ptr) -> !llvm.ptr, i8
   %n32 = llvm.load %np : !llvm.ptr -> i32
   %sz = llvm.zext %n32 : i32 to i64
-  %d = func.call @desc(%elems, %sz) : (!llvm.ptr, i64) -> !d
+  %d = func.call @listops_desc(%elems, %sz) : (!llvm.ptr, i64) -> !d
   %mm = builtin.unrealized_conversion_cast %d : !d to !m
   %ss = builtin.unrealized_conversion_cast %mm : !m to !s
   %ni = arith.index_cast %n : i64 to index
   %e64 = trikeshed.at %ss[%ni] : !s, index -> i64
   %e = llvm.inttoptr %e64 : i64 to !llvm.ptr
   func.call @_ZN5nixev9EvalState9forceCellERNS_5ValueEPKv(%st, %e, %pos) : (!llvm.ptr, !llvm.ptr, !llvm.ptr) -> ()
-  func.call @copyval(%e, %v) : (!llvm.ptr, !llvm.ptr) -> ()
+  func.call @listops_copyval(%e, %v) : (!llvm.ptr, !llvm.ptr) -> ()
   return
 }
 
@@ -95,7 +95,7 @@ func.func @nixev_ts_genList(%st: !llvm.ptr, %f: !llvm.ptr, %n: i64, %v: !llvm.pt
   func.call @_ZN5nixev9EvalState6mkListERNS_5ValueEm(%st, %v, %n) : (!llvm.ptr, !llvm.ptr, i64) -> ()
   %ep = llvm.getelementptr %v[8] : (!llvm.ptr) -> !llvm.ptr, i8
   %elems = llvm.load %ep : !llvm.ptr -> !llvm.ptr
-  %d = func.call @desc(%elems, %n) : (!llvm.ptr, i64) -> !d
+  %d = func.call @listops_desc(%elems, %n) : (!llvm.ptr, i64) -> !d
   %into = builtin.unrealized_conversion_cast %d : !d to !m
   %ni = arith.index_cast %n : i64 to index
   %ss = trikeshed.series %ni : !s {
@@ -117,18 +117,19 @@ func.func @nixev_ts_fold(%st: !llvm.ptr, %f: !llvm.ptr, %list: !llvm.ptr, %nul: 
   %np = llvm.getelementptr %list[4] : (!llvm.ptr) -> !llvm.ptr, i8
   %n32 = llvm.load %np : !llvm.ptr -> i32
   %sz = llvm.zext %n32 : i32 to i64
-  %d = func.call @desc(%elems, %sz) : (!llvm.ptr, i64) -> !d
+  %d = func.call @listops_desc(%elems, %sz) : (!llvm.ptr, i64) -> !d
   %mm = builtin.unrealized_conversion_cast %d : !d to !m
   %ss = builtin.unrealized_conversion_cast %mm : !m to !s
   %z = llvm.ptrtoint %nul : !llvm.ptr to i64
   %two = arith.constant 2 : i64
   %one = arith.constant 1 : i64
+  // the callFunction argument pair, at the entry block: an alloca inside the fold's region is a dynamic alloca per step
+  %fa = llvm.alloca %two x !llvm.ptr : (i64) -> !llvm.ptr
   %r = trikeshed.fold %ss, %z : !s, i64 -> i64 {
   ^bb0(%acc: i64, %x: i64):
     %ap = llvm.inttoptr %acc : i64 to !llvm.ptr
     %xp = llvm.inttoptr %x : i64 to !llvm.ptr
     %next = func.call @nixev_cell(%st) : (!llvm.ptr) -> !llvm.ptr
-    %fa = llvm.alloca %two x !llvm.ptr : (i64) -> !llvm.ptr
     llvm.store %ap, %fa : !llvm.ptr, !llvm.ptr
     %fb = llvm.getelementptr %fa[%one] : (!llvm.ptr, i64) -> !llvm.ptr, !llvm.ptr
     llvm.store %xp, %fb : !llvm.ptr, !llvm.ptr
@@ -138,6 +139,6 @@ func.func @nixev_ts_fold(%st: !llvm.ptr, %f: !llvm.ptr, %list: !llvm.ptr, %nul: 
   }
   %rp = llvm.inttoptr %r : i64 to !llvm.ptr
   func.call @_ZN5nixev9EvalState9forceCellERNS_5ValueEPKv(%st, %rp, %pos) : (!llvm.ptr, !llvm.ptr, !llvm.ptr) -> ()
-  func.call @copyval(%rp, %v) : (!llvm.ptr, !llvm.ptr) -> ()
+  func.call @listops_copyval(%rp, %v) : (!llvm.ptr, !llvm.ptr) -> ()
   return
 }
