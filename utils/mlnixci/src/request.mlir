@@ -22,6 +22,11 @@
 //   rq_pick(rows, kids, text, select, name, values, pieces, sel) -> picks: whether the select names column `name` with a
 //                        non-empty array; then sel[c] is whether one of its elements (a string's inside, else as written)
 //                        has the bytes of code c's name (pieces of values)
+//   ov_set_walk / ov_cut_walk(rows, kids, overlay, body, segs, out): api.mlir's set_at and remove_at walks, through the
+//                        overlay's index (ix_find, ix_member); out = 4 i64 (see each)
+//   rq_match(hay, hayAt, q, match) -> rows: match[r] = 1 when q appears in hay's [start, start + len) of hayAt's row r
+//                        (rd_search per row, one alpha; an empty q matches every row); rq_hay_end(hayAt) -> the end of
+//                        the furthest row: hay is viewed that long
 
 !text = !trikeshed.series<i8>
 !s64 = !trikeshed.series<i64>
@@ -919,4 +924,62 @@ func.func @ov_cut_walk(%rows: !ix, %kids: !s32, %ov: !text, %body: !text, %segs:
   memref.store %from, %out[%c0] : memref<?xi64>
   memref.store %to, %out[%c1] : memref<?xi64>
   return
+}
+
+// ---- query_run's per-row text search (api.mlir), one call: each row of hayAt is a piece [start, start + len) of hay
+
+// the end of the furthest piece of hayAt (0 for none): the length hay is viewed with
+func.func @rq_hay_end(%hayAt: !trikeshed.series<!tp>) -> i64 attributes {llvm.emit_c_interface} {
+  %zero = arith.constant 0 : i64
+  %end = trikeshed.fold %hayAt, %zero : !trikeshed.series<!tp>, i64 -> i64 {
+  ^bb0(%acc: i64, %p: !tp):
+    %s = trikeshed.first %p : !tp -> i32
+    %n = trikeshed.second %p : !tp -> i32
+    %s64 = arith.extui %s : i32 to i64
+    %n64 = arith.extui %n : i32 to i64
+    %e = arith.addi %s64, %n64 : i64
+    %far = arith.cmpi sgt, %e, %acc : i64
+    %next = arith.select %far, %e, %acc : i64
+    trikeshed.yield %next : i64
+  }
+  return %end : i64
+}
+
+// rd_search (reads.mlir: the first place a text appears, -1 for none) on each piece; a piece shorter than q does not hold
+// it, and an empty q is in every piece.  match[r] = 1 for a hit, 0 otherwise (the rows are drained in order)
+func.func private @rd_search(!text, !text) -> i64
+
+func.func @rq_match(%hay: !text, %hayAt: !trikeshed.series<!tp>, %q: !text, %match: memref<?xi32>) -> index
+    attributes {llvm.emit_c_interface} {
+  %c0 = arith.constant 0 : index
+  %z64 = arith.constant 0 : i64
+  %m = trikeshed.size %q : !text
+  %hits = trikeshed.alpha %hayAt : !trikeshed.series<!tp> -> !s32 {
+  ^bb0(%p: !tp):
+    %one = arith.constant 1 : i32
+    %zero = arith.constant 0 : i32
+    %s32 = trikeshed.first %p : !tp -> i32
+    %n32 = trikeshed.second %p : !tp -> i32
+    %s = arith.index_castui %s32 : i32 to index
+    %n = arith.index_castui %n32 : i32 to index
+    %empty = arith.cmpi eq, %m, %c0 : index
+    %short = arith.cmpi ult, %n, %m : index
+    %hit = scf.if %empty -> (i32) {
+      scf.yield %one : i32
+    } else {
+      %miss = scf.if %short -> (i32) {
+        scf.yield %zero : i32
+      } else {
+        %window = trikeshed.slice %hay[%s, %n] : !text -> !text
+        %at = func.call @rd_search(%window, %q) : (!text, !text) -> i64
+        %found = arith.cmpi sge, %at, %z64 : i64
+        %yes = arith.select %found, %one, %zero : i32
+        scf.yield %yes : i32
+      }
+      scf.yield %miss : i32
+    }
+    trikeshed.yield %hit : i32
+  }
+  %n = trikeshed.drain %hits, %match : !s32, memref<?xi32> -> index
+  return %n : index
 }

@@ -536,6 +536,8 @@ func.func @search_query(%bp: !llvm.ptr, %qt: i64) -> (!llvm.ptr, i64) {
 
 llvm.func @_mlir_ciface_rq_query(!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr)
 llvm.func @_mlir_ciface_rq_pick(!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr) -> i64
+llvm.func @_mlir_ciface_rq_hay_end(!llvm.ptr) -> i64
+llvm.func @_mlir_ciface_rq_match(!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr) -> i64
 func.func @query_run(%bp: !llvm.ptr, %f: !llvm.ptr) {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
@@ -662,24 +664,21 @@ func.func @query_run(%bp: !llvm.ptr, %f: !llvm.ptr) {
   }
   // the text searched for; the match column's selection is "yes" only, when there is one
   %qlow, %qn = func.call @search_query(%bp, %qt) : (!llvm.ptr, i64) -> (!llvm.ptr, i64)
+  // every row's text searched at once: request.mlir's rq_match (one trikeshed alpha over hayAt, rd_search on each
+  // row's piece of hay, drained into match); hay is viewed as far as its furthest piece (rq_hay_end)
   %hay = func.call @getp(%cur, %c9) : (!llvm.ptr, i64) -> !llvm.ptr
   %hayAt = func.call @getp(%cur, %c10) : (!llvm.ptr, i64) -> !llvm.ptr
   %match = func.call @getp(%cur, %c16) : (!llvm.ptr, i64) -> !llvm.ptr
-  %noq = arith.cmpi eq, %qn, %c0 : i64
-  scf.for %r = %c0 to %n step %c1 : i64 {
-    %ht = func.call @ld64(%hayAt, %r) : (!llvm.ptr, i64) -> i64
-    %hs = func.call @tw_s(%ht) : (i64) -> i64
-    %he = func.call @tw_e(%ht) : (i64) -> i64
-    %hit = scf.if %noq -> (i1) {
-      scf.yield %true : i1
-    } else {
-      %pos = func.call @search(%hay, %hs, %he, %qlow, %qn) : (!llvm.ptr, i64, i64, !llvm.ptr, i64) -> i64
-      %found = arith.cmpi sge, %pos, %c0 : i64
-      scf.yield %found : i1
-    }
-    %mi = arith.extui %hit : i1 to i64
-    func.call @st32(%match, %r, %mi) : (!llvm.ptr, i64, i64) -> ()
-  }
+  %dAt = llvm.alloca %one32 x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
+  func.call @view(%dAt, %hayAt, %n) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+  %hayN = llvm.call @_mlir_ciface_rq_hay_end(%dAt) : (!llvm.ptr) -> i64
+  %dHay = llvm.alloca %one32 x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
+  func.call @view(%dHay, %hay, %hayN) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+  %dQ = llvm.alloca %one32 x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
+  func.call @view(%dQ, %qlow, %qn) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+  %dMatch = llvm.alloca %one32 x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
+  func.call @view(%dMatch, %match, %n) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+  %nm = llvm.call @_mlir_ciface_rq_match(%dHay, %dAt, %dQ, %dMatch) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr) -> i64
   llvm.call @free(%qlow) : (!llvm.ptr) -> ()
   %anyMatch = func.call @ld64(%anys, %c5) : (!llvm.ptr, i64) -> i64
   %someQ = arith.cmpi sgt, %qn, %c0 : i64
@@ -1180,10 +1179,52 @@ func.func @ov_insert(%ov: !llvm.ptr, %ovn: i64, %at: i64, %comma: i64, %bp: !llv
 
 // The overlay with the member at the path set to the value (all coordinates in the body bp): the old value's span
 // replaced, or the missing members inserted after the last member of the deepest object that exists.
-func.func @set_at(%ov: !llvm.ptr, %ovn: i64, %bp: !llvm.ptr, %bn: i64, %segs: !llvm.ptr, %ns: i64, %value: i64) -> (!llvm.ptr, i64, i1) {
+// request.mlir's walks over the overlay's index, through their C interfaces: the index's columns (cx_d 0..2), its kids
+// (cx_d 3) and its text (cx_text) are the descriptors rq_body reads; the path's segments are coordinates in the body
+// (bp, bn).  set: (kind, level, a, b) of ov_set_walk; else (from, to, _, _) of ov_cut_walk.
+llvm.func @_mlir_ciface_ov_set_walk(!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr)
+llvm.func @_mlir_ciface_ov_cut_walk(!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr)
+
+func.func @ov_walk(%set: i1, %d: !llvm.ptr, %bp: !llvm.ptr, %bn: i64, %segs: !llvm.ptr, %ns: i64) -> (i64, i64, i64, i64) {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
   %c2 = arith.constant 2 : i64
+  %c3 = arith.constant 3 : i64
+  %c4 = arith.constant 4 : i64
+  %i0 = arith.constant 0 : i32
+  %i1 = arith.constant 1 : i32
+  %i2 = arith.constant 2 : i32
+  %i3 = arith.constant 3 : i32
+  %one = arith.constant 1 : i32
+  %d0 = func.call @cx_d(%d, %i0) : (!llvm.ptr, i32) -> !llvm.ptr
+  %d1 = func.call @cx_d(%d, %i1) : (!llvm.ptr, i32) -> !llvm.ptr
+  %d2 = func.call @cx_d(%d, %i2) : (!llvm.ptr, i32) -> !llvm.ptr
+  %d3 = func.call @cx_d(%d, %i3) : (!llvm.ptr, i32) -> !llvm.ptr
+  %td = func.call @cx_text(%d) : (!llvm.ptr) -> !llvm.ptr
+  %dbody = llvm.alloca %one x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
+  func.call @view(%dbody, %bp, %bn) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+  %dsegs = llvm.alloca %one x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
+  func.call @view(%dsegs, %segs, %ns) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+  %out = llvm.alloca %one x !llvm.array<4 x i64> : (i32) -> !llvm.ptr
+  %dout = llvm.alloca %one x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
+  func.call @view(%dout, %out, %c4) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+  scf.if %set {
+    llvm.call @_mlir_ciface_ov_set_walk(%d0, %d1, %d2, %d3, %td, %dbody, %dsegs, %dout)
+        : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr) -> ()
+  } else {
+    llvm.call @_mlir_ciface_ov_cut_walk(%d0, %d1, %d2, %d3, %td, %dbody, %dsegs, %dout)
+        : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr) -> ()
+  }
+  %k0 = func.call @ld64(%out, %c0) : (!llvm.ptr, i64) -> i64
+  %k1 = func.call @ld64(%out, %c1) : (!llvm.ptr, i64) -> i64
+  %k2 = func.call @ld64(%out, %c2) : (!llvm.ptr, i64) -> i64
+  %k3 = func.call @ld64(%out, %c3) : (!llvm.ptr, i64) -> i64
+  return %k0, %k1, %k2, %k3 : i64, i64, i64, i64
+}
+
+func.func @set_at(%ov: !llvm.ptr, %ovn: i64, %bp: !llvm.ptr, %bn: i64, %segs: !llvm.ptr, %ns: i64, %value: i64) -> (!llvm.ptr, i64, i1) {
+  %c0 = arith.constant 0 : i64
+  %c1 = arith.constant 1 : i64
   %c3 = arith.constant 3 : i64
   %c5 = arith.constant 5 : i64
   %m1 = arith.constant -1 : i64
@@ -1200,40 +1241,15 @@ func.func @set_at(%ov: !llvm.ptr, %ovn: i64, %bp: !llvm.ptr, %bn: i64, %segs: !l
   }
   %isObj = arith.cmpi eq, %tag0, %c5 : i64
   %res:3 = scf.if %isObj -> (!llvm.ptr, i64, i1) {
-    // walk the path: kind 0 while walking, 1 insert at obj, 2 replace v, 3 not an object
-    %w:4 = scf.while (%i = %c0, %obj = %c0, %kind = %c0, %v = %m1) : (i64, i64, i64, i64) -> (i64, i64, i64, i64) {
-      %go = arith.cmpi eq, %kind, %c0 : i64
-      scf.condition(%go) %i, %obj, %kind, %v : i64, i64, i64, i64
-    } do {
-    ^bb0(%i: i64, %obj: i64, %kind: i64, %v: i64):
-      %seg = func.call @ld64(%segs, %i) : (!llvm.ptr, i64) -> i64
-      %vv = func.call @cx_member_at(%ov, %d, %obj, %bp, %seg) : (!llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64) -> i64
-      %absent = arith.cmpi slt, %vv, %c0 : i64
-      %i1 = arith.addi %i, %c1 : i64
-      %last = arith.cmpi eq, %i1, %ns : i64
-      %vt = scf.if %absent -> (i64) {
-        scf.yield %m1 : i64
-      } else {
-        %t = func.call @cx_tag(%d, %vv) : (!llvm.ptr, i64) -> i64
-        scf.yield %t : i64
-      }
-      %notObj = arith.cmpi ne, %vt, %c5 : i64
-      %k3 = arith.select %notObj, %c3, %c0 : i64
-      %k2 = arith.select %last, %c2, %k3 : i64
-      %k1 = arith.select %absent, %c1, %k2 : i64
-      %walk = arith.cmpi eq, %k1, %c0 : i64
-      %nobj = arith.select %walk, %vv, %obj : i64
-      %ni = arith.select %walk, %i1, %i : i64
-      scf.yield %ni, %nobj, %k1, %vv : i64, i64, i64, i64
-    }
-    %level = arith.addi %w#0, %c0 : i64
-    %kind = arith.addi %w#2, %c0 : i64
-    %isNotObj = arith.cmpi eq, %kind, %c3 : i64
+    // request.mlir's ov_set_walk: kind 1 insert at a (the comma b), 2 replace [a, b), 3 not an object (level names it)
+    %k:4 = func.call @ov_walk(%true, %d, %bp, %bn, %segs, %ns)
+        : (i1, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64) -> (i64, i64, i64, i64)
+    %isNotObj = arith.cmpi eq, %k#0, %c3 : i64
     %r:3 = scf.if %isNotObj -> (!llvm.ptr, i64, i1) {
       %c400 = arith.constant 400 : i64
       %lit66 = llvm.mlir.addressof @lit61 : !llvm.ptr
       %litn66 = arith.constant 9 : i64
-      %seg = func.call @ld64(%segs, %level) : (!llvm.ptr, i64) -> i64
+      %seg = func.call @ld64(%segs, %k#1) : (!llvm.ptr, i64) -> i64
       %sp, %sn = func.call @piece_at(%bp, %seg) : (!llvm.ptr, i64) -> (!llvm.ptr, i64)
       %lit67 = llvm.mlir.addressof @lit62 : !llvm.ptr
       %litn67 = arith.constant 17 : i64
@@ -1242,34 +1258,15 @@ func.func @set_at(%ov: !llvm.ptr, %ovn: i64, %bp: !llvm.ptr, %bn: i64, %segs: !l
     } else {
       // the next overlay: text.mlir's overlay_insert (the members the path lacks, after the last member of the deepest
       // object it has) or overlay_put (the old value's span replaced)
-      %isInsert = arith.cmpi eq, %kind, %c1 : i64
+      %isInsert = arith.cmpi eq, %k#0, %c1 : i64
       %vs = func.call @tw_s(%value) : (i64) -> i64
       %vl = func.call @tw_n(%value) : (i64) -> i64
       %made:2 = scf.if %isInsert -> (!llvm.ptr, i64) {
-        %obj = arith.addi %w#1, %c0 : i64
-        %kids = func.call @cx_nkids(%d, %obj) : (!llvm.ptr, i64) -> i64
-        %empty = arith.cmpi eq, %kids, %c0 : i64
-        %at = scf.if %empty -> (i64) {
-          %o = func.call @cx_open(%d, %obj) : (!llvm.ptr, i64) -> i64
-          %a = arith.addi %o, %c1 : i64
-          scf.yield %a : i64
-        } else {
-          %lk = arith.subi %kids, %c1 : i64
-          %lastKid = func.call @cx_kid(%d, %obj, %lk) : (!llvm.ptr, i64, i64) -> i64
-          %cl = func.call @cx_close(%d, %lastKid) : (!llvm.ptr, i64) -> i64
-          %a = arith.addi %cl, %c1 : i64
-          scf.yield %a : i64
-        }
-        %comma = arith.select %empty, %c0, %c1 : i64
-        %m:2 = func.call @ov_insert(%ov, %ovn, %at, %comma, %bp, %bn, %segs, %ns, %level, %vs, %vl)
+        %m:2 = func.call @ov_insert(%ov, %ovn, %k#2, %k#3, %bp, %bn, %segs, %ns, %k#1, %vs, %vl)
             : (!llvm.ptr, i64, i64, i64, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64) -> (!llvm.ptr, i64)
         scf.yield %m#0, %m#1 : !llvm.ptr, i64
       } else {
-        %v = arith.addi %w#3, %c0 : i64
-        %o = func.call @cx_open(%d, %v) : (!llvm.ptr, i64) -> i64
-        %cl = func.call @cx_close(%d, %v) : (!llvm.ptr, i64) -> i64
-        %cl1 = arith.addi %cl, %c1 : i64
-        %m:2 = func.call @ov_put(%ov, %ovn, %o, %cl1, %bp, %bn, %vs, %vl)
+        %m:2 = func.call @ov_put(%ov, %ovn, %k#2, %k#3, %bp, %bn, %vs, %vl)
             : (!llvm.ptr, i64, i64, i64, !llvm.ptr, i64, i64, i64) -> (!llvm.ptr, i64)
         scf.yield %m#0, %m#1 : !llvm.ptr, i64
       }
@@ -1288,12 +1285,10 @@ func.func @set_at(%ov: !llvm.ptr, %ovn: i64, %bp: !llvm.ptr, %bn: i64, %segs: !l
 }
 
 // The overlay without the member at the path, and without the objects that leaves empty.  Absent is not an error.
-func.func @remove_at(%ov: !llvm.ptr, %ovn: i64, %bp: !llvm.ptr, %segs: !llvm.ptr, %ns: i64) -> (!llvm.ptr, i64, i1) {
+// request.mlir's ov_cut_walk: [from, to) is what the edit cuts (ov_put of nothing there).
+func.func @remove_at(%ov: !llvm.ptr, %ovn: i64, %bp: !llvm.ptr, %bn: i64, %segs: !llvm.ptr, %ns: i64) -> (!llvm.ptr, i64, i1) {
   %c0 = arith.constant 0 : i64
-  %c1 = arith.constant 1 : i64
-  %c2 = arith.constant 2 : i64
   %c5 = arith.constant 5 : i64
-  %c8 = arith.constant 8 : i64
   %m1 = arith.constant -1 : i64
   %true = arith.constant true
   %false = arith.constant false
@@ -1308,104 +1303,9 @@ func.func @remove_at(%ov: !llvm.ptr, %ovn: i64, %bp: !llvm.ptr, %segs: !llvm.ptr
   }
   %isObj = arith.cmpi eq, %tag0, %c5 : i64
   %res:3 = scf.if %isObj -> (!llvm.ptr, i64, i1) {
-    %ns1 = arith.addi %ns, %c1 : i64
-    %objs = llvm.call @calloc(%ns1, %c8) : (i64, i64) -> !llvm.ptr
-    %keys = llvm.call @calloc(%ns1, %c8) : (i64, i64) -> !llvm.ptr
-    %vals = llvm.call @calloc(%ns1, %c8) : (i64, i64) -> !llvm.ptr
-    %idxs = llvm.call @calloc(%ns1, %c8) : (i64, i64) -> !llvm.ptr
-    // walk: state 0 while walking, 1 absent (nothing to cut), 2 found
-    %w:2 = scf.while (%i = %c0, %state = %c0) : (i64, i64) -> (i64, i64) {
-      %go = arith.cmpi eq, %state, %c0 : i64
-      scf.condition(%go) %i, %state : i64, i64
-    } do {
-    ^bb0(%i: i64, %state: i64):
-      %o = func.call @ld64(%objs, %i) : (!llvm.ptr, i64) -> i64
-      %seg = func.call @ld64(%segs, %i) : (!llvm.ptr, i64) -> i64
-      %ix = func.call @cx_find_at(%ov, %d, %o, %bp, %seg) : (!llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64) -> i64
-      %absent = arith.cmpi slt, %ix, %c0 : i64
-      %r:2 = scf.if %absent -> (i64, i64) {
-        scf.yield %i, %c1 : i64, i64
-      } else {
-        %key = func.call @cx_kid(%d, %o, %ix) : (!llvm.ptr, i64, i64) -> i64
-        %ix1 = arith.addi %ix, %c1 : i64
-        %v = func.call @cx_kid(%d, %o, %ix1) : (!llvm.ptr, i64, i64) -> i64
-        func.call @st64(%keys, %i, %key) : (!llvm.ptr, i64, i64) -> ()
-        func.call @st64(%vals, %i, %v) : (!llvm.ptr, i64, i64) -> ()
-        func.call @st64(%idxs, %i, %ix) : (!llvm.ptr, i64, i64) -> ()
-        %i1 = arith.addi %i, %c1 : i64
-        %last = arith.cmpi eq, %i1, %ns : i64
-        %r2:2 = scf.if %last -> (i64, i64) {
-          scf.yield %i, %c2 : i64, i64
-        } else {
-          %vt = func.call @cx_tag(%d, %v) : (!llvm.ptr, i64) -> i64
-          %vObj = arith.cmpi eq, %vt, %c5 : i64
-          func.call @st64(%objs, %i1, %v) : (!llvm.ptr, i64, i64) -> ()
-          %stt = arith.select %vObj, %c0, %c1 : i64
-          scf.yield %i1, %stt : i64, i64
-        }
-        scf.yield %r2#0, %r2#1 : i64, i64
-      }
-      scf.yield %r#0, %r#1 : i64, i64
-    }
-    %found = arith.cmpi eq, %w#1, %c2 : i64
-    %span:2 = scf.if %found -> (i64, i64) {
-      // cut the deepest member whose object keeps another member (or the top level's)
-      %top = arith.subi %ns, %c1 : i64
-      %level = scf.while (%l = %top) : (i64) -> i64 {
-        %deep = arith.cmpi sgt, %l, %c0 : i64
-        %alone = scf.if %deep -> (i1) {
-          %o = func.call @ld64(%objs, %l) : (!llvm.ptr, i64) -> i64
-          %k = func.call @cx_nkids(%d, %o) : (!llvm.ptr, i64) -> i64
-          %two = arith.cmpi eq, %k, %c2 : i64
-          scf.yield %two : i1
-        } else {
-          scf.yield %false : i1
-        }
-        scf.condition(%alone) %l : i64
-      } do {
-      ^bb0(%l: i64):
-        %up = arith.subi %l, %c1 : i64
-        scf.yield %up : i64
-      }
-      %o = func.call @ld64(%objs, %level) : (!llvm.ptr, i64) -> i64
-      %key = func.call @ld64(%keys, %level) : (!llvm.ptr, i64) -> i64
-      %v = func.call @ld64(%vals, %level) : (!llvm.ptr, i64) -> i64
-      %pos = func.call @ld64(%idxs, %level) : (!llvm.ptr, i64) -> i64
-      %nk = func.call @cx_nkids(%d, %o) : (!llvm.ptr, i64) -> i64
-      %p2 = arith.addi %pos, %c2 : i64
-      %hasNext = arith.cmpi slt, %p2, %nk : i64
-      %hasPrev = arith.cmpi sgt, %pos, %c0 : i64
-      // [from, to) is cut: the member and one comma beside it
-      %cut:2 = scf.if %hasNext -> (i64, i64) {
-        %from = func.call @cx_open(%d, %key) : (!llvm.ptr, i64) -> i64
-        %nextKey = func.call @cx_kid(%d, %o, %p2) : (!llvm.ptr, i64, i64) -> i64
-        %to = func.call @cx_open(%d, %nextKey) : (!llvm.ptr, i64) -> i64
-        scf.yield %from, %to : i64, i64
-      } else {
-        %vc = func.call @cx_close(%d, %v) : (!llvm.ptr, i64) -> i64
-        %to = arith.addi %vc, %c1 : i64
-        %r3:2 = scf.if %hasPrev -> (i64, i64) {
-          %pm = arith.subi %pos, %c1 : i64
-          %prevVal = func.call @cx_kid(%d, %o, %pm) : (!llvm.ptr, i64, i64) -> i64
-          %pc = func.call @cx_close(%d, %prevVal) : (!llvm.ptr, i64) -> i64
-          %from = arith.addi %pc, %c1 : i64
-          scf.yield %from, %to : i64, i64
-        } else {
-          %from = func.call @cx_open(%d, %key) : (!llvm.ptr, i64) -> i64
-          scf.yield %from, %to : i64, i64
-        }
-        scf.yield %r3#0, %r3#1 : i64, i64
-      }
-      scf.yield %cut#0, %cut#1 : i64, i64
-    } else {
-      scf.yield %ovn, %ovn : i64, i64
-    }
-    llvm.call @free(%objs) : (!llvm.ptr) -> ()
-    llvm.call @free(%keys) : (!llvm.ptr) -> ()
-    llvm.call @free(%vals) : (!llvm.ptr) -> ()
-    llvm.call @free(%idxs) : (!llvm.ptr) -> ()
-    // the next overlay: [from, to) cut (nothing when the path is absent), text.mlir's overlay_put
-    %made:2 = func.call @ov_put(%ov, %ovn, %span#0, %span#1, %ov, %ovn, %c0, %c0)
+    %k:4 = func.call @ov_walk(%false, %d, %bp, %bn, %segs, %ns)
+        : (i1, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64) -> (i64, i64, i64, i64)
+    %made:2 = func.call @ov_put(%ov, %ovn, %k#0, %k#1, %ov, %ovn, %c0, %c0)
         : (!llvm.ptr, i64, i64, i64, !llvm.ptr, i64, i64, i64) -> (!llvm.ptr, i64)
     scf.yield %made#0, %made#1, %true : !llvm.ptr, i64, i1
   } else {
@@ -1454,7 +1354,7 @@ func.func @whatif_reset(%in: !llvm.ptr, %body: i64) {
     %ov = llvm.load %pov : !llvm.ptr -> !llvm.ptr
     %povn = llvm.mlir.addressof @g_ovn : !llvm.ptr
     %ovn = llvm.load %povn : !llvm.ptr -> i64
-    %s:3 = func.call @remove_at(%ov, %ovn, %bp, %r#1, %r#2) : (!llvm.ptr, i64, !llvm.ptr, !llvm.ptr, i64) -> (!llvm.ptr, i64, i1)
+    %s:3 = func.call @remove_at(%ov, %ovn, %bp, %bn, %r#1, %r#2) : (!llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64) -> (!llvm.ptr, i64, i1)
     scf.if %s#2 {
       // an overlay left with no member is {}
       %d2 = func.call @cx_scan(%s#0, %s#1) : (!llvm.ptr, i64) -> !llvm.ptr
