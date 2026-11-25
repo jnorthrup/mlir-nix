@@ -8,9 +8,13 @@ import java.util.IdentityHashMap
 // that prints the value (scripts/nix-native.sh).  No C++ is added for it: this is Kotlin over the export the Graal arm
 // reads, and the lowering is the one mlnixci's server is built with.
 //
-//   a list           genList's oracle, `trikeshed.series n { i -> f i }` (Series.kt's `n j { i -> ... }`)
-//   foldl'           `trikeshed.fold` (Series.kt's fold), the step applied in its region
-//   length, elemAt   `trikeshed.size`, `trikeshed.at`
+//   a list           genList's oracle, `trikeshed.series n { i -> f i }` (Series.kt's `n j { i -> ... }`); map and filter over
+//                    one likewise, filter by `trikeshed.where`
+//   a list of cells  a list literal, `++`, concatLists, attrNames, attrValues: each cell (a value, or a Pending application
+//                    of map f or mapAttrs f) computed as Nix forces it, so a list of cells needs no length-driven work
+//   foldl'           `trikeshed.fold` (Series.kt's fold), the step applied in its region; over cells, one step at a time
+//   length, elemAt   `trikeshed.size`, `trikeshed.at`; over cells, the cell's count and the cell itself
+//   a string         its text known here (a literal, or `+`/interpolation of strings: nothing is computed at run time)
 //   an int, a bool   PRELOAD's plain elements, i64 and i1 (arith), each operation checked as Nix checks it; known values
 //                    are folded here, and an `if` on a known condition is only its branch
 //   a set            PRELOAD's attrs, its names joined to its cells, known here: a select, `?`, `//`, `with` and a set
@@ -49,6 +53,14 @@ class Native(module: List<Op>) {
     }
     /// What a failure known here leaves: the failure is written before it, so no run gets past it.
     private object VNever : V()
+    /// A string, its text known here: a literal, or a concatenation or interpolation of strings (no string is computed at run time).
+    private class VStr(val s: String) : V()
+    /// A list of its cells (each a V, a Ref or a Pending, as a set's values are): a list literal, attrNames, `++`, map and a
+    /// filter over known predicates.  Its length is known; its cells are computed as Nix forces them (in order, when printed).
+    private class VKList(val cells: Array<Any>) : V()
+
+    /// A cell computed when first needed: `fn args`, one application at a time (map f's element, mapAttrs f's value).
+    private class Pending(val fn: V, val args: List<Any>)
 
     /// A value of one written-in-place body: computed where a use first needs it.
     private class Ref(val id: Int, val frame: Frame)
@@ -63,6 +75,9 @@ class Native(module: List<Op>) {
         var fallible = false
         fun get(f: Frame, id: Int): V? = memo[f]?.get(id) ?: parent?.get(f, id)
         fun put(f: Frame, id: Int, v: V) { memo.getOrPut(f) { HashMap() }[id] = v }
+        private val pending = java.util.IdentityHashMap<Pending, V>()
+        fun pendingGet(p: Pending): V? = pending[p] ?: parent?.pendingGet(p)
+        fun pendingPut(p: Pending, v: V) { pending[p] = v }
         fun line(s: String) { out.append(indent).append(s).append('\n') }
         fun child() = Scope(this, "$indent  ")
     }
@@ -109,13 +124,25 @@ class Native(module: List<Op>) {
         val v = when (val b = frame.bound[id]) {
             is V -> b
             is Ref -> value(b.frame, b.id, s)
+            is Pending -> force(b, s)
             else -> emitOp(frame.defs[id] ?: refuse("value $id has no definition"), frame, s)
         }
         s.put(frame, id, v)
         return v
     }
 
-    private fun force(c: Any, s: Scope): V = when (c) { is V -> c; is Ref -> value(c.frame, c.id, s); else -> refuse("cell $c") }
+    private fun force(c: Any, s: Scope): V = when (c) {
+        is V -> c
+        is Ref -> value(c.frame, c.id, s)
+        is Pending -> s.pendingGet(c) ?: applyAll(c, s).also { s.pendingPut(c, it) }
+        else -> refuse("cell $c")
+    }
+
+    private fun applyAll(p: Pending, s: Scope): V {
+        var f = p.fn
+        for (a in p.args) f = applyOne(f, a, s)
+        return f
+    }
 
     // A VNever where a value of some type is needed is past a failure already written: a placeholder of that type stands in.
     private fun int(v: V, what: String, s: Scope): String = when (v) {
@@ -135,6 +162,7 @@ class Native(module: List<Op>) {
     }
     private fun kind(v: V) = when (v) {
         is VInt -> "an integer"; is VBool -> "a Boolean"; is VList -> "a list"; is VFn -> "a function"; is VSet -> "a set"
+        is VStr -> "a string"; is VKList -> "a list"
         VNever -> "a failure"
     }
 
@@ -154,8 +182,25 @@ class Native(module: List<Op>) {
             }
             "nix.concat_strings" -> {
                 var acc = arg(0)
-                for (k in 1 until op.ins.size) acc = arith("add", acc, arg(k), s, "an operand of +")
+                for (k in 1 until op.ins.size) acc = concat(acc, arg(k), s)
                 acc
+            }
+            "nix.str" -> VStr(op.attrs["value"] as String)
+            "nix.interpolate" -> {
+                val sb = StringBuilder()
+                for (k in op.ins.indices) when (val v = arg(k)) {
+                    VNever -> return VNever
+                    is VStr -> sb.append(v.s)
+                    else -> refuse("an interpolated part is ${kind(v)}, not a string")
+                }
+                VStr(sb.toString())
+            }
+            "nix.list" -> VKList(Array<Any>(op.ins.size) { Ref(op.ins[it], frame) })
+            "nix.concat_lists" -> {
+                val a = arg(0); val b = arg(1)
+                if (a === VNever || b === VNever) return VNever
+                val x = cellsOf(a, "++'s left operand"); val y = cellsOf(b, "++'s right operand")
+                if (x.isEmpty()) b else if (y.isEmpty()) a else VKList(arrayOf<Any>(*x, *y))
             }
             "nix.if" -> {
                 val c = arg(0)
@@ -184,6 +229,8 @@ class Native(module: List<Op>) {
                     a is VBool && b is VBool && a.k != null && b.k != null -> bconst(s, (a.k == b.k) == eq)
                     a is VInt && b is VInt -> cmp(if (eq) "eq" else "ne", a.ssa, b.ssa, "i64", s)
                     a is VBool && b is VBool -> cmp(if (eq) "eq" else "ne", a.ssa, b.ssa, "i1", s)
+                    atomic(a) && atomic(b) && a.javaClass != b.javaClass -> bconst(s, !eq) // different types: never equal
+                    a is VStr && b is VStr -> bconst(s, (a.s == b.s) == eq)
                     else -> refuse("== of ${kind(a)} and ${kind(b)}")
                 }
             }
@@ -227,6 +274,24 @@ class Native(module: List<Op>) {
 
     private fun cmp(pred: String, a: String, b: String, ty: String, s: Scope): V {
         val r = ssa(); s.line("$r = arith.cmpi $pred, $a, $b : $ty"); return VBool(r)
+    }
+
+    /// The types `==` compares by value without a refusal: an integer, a Boolean, a string.
+    private fun atomic(v: V) = v is VInt || v is VBool || v is VStr
+
+    /// `a + b` on what `+` takes: integers (checked), or two strings (joined; a string is known here, so nothing is written).
+    private fun concat(a: V, b: V, s: Scope): V = when {
+        a === VNever || b === VNever -> VNever
+        a is VStr && b is VStr -> VStr(a.s + b.s)
+        a is VInt && b is VInt -> arith("add", a, b, s, "an operand of +")
+        else -> refuse("+ of ${kind(a)} and ${kind(b)}")
+    }
+
+    /// The cells of a list written in place (`++`, concatLists); a series is computed at run time, so it is refused.
+    private fun cellsOf(v: V, what: String): Array<Any> = when (v) {
+        is VKList -> v.cells
+        is VList -> refuse("$what is a list computed at run time (its elements are a series, not cells)")
+        else -> refuse("$what is ${kind(v)}, not a list")
     }
 
     /// `if`: each branch written in its own region, so only the taken one runs.
@@ -447,10 +512,93 @@ class Native(module: List<Op>) {
                 if (a.k != null && b.k != null) bconst(s, a.k < b.k) else cmp("slt", a.ssa, b.ssa, "i64", s)
             }
             "__genList" -> { val len = arg(1); val f = arg(0); genList(f, len, s) } // the length first, as Nix forces them
+            "map" -> {
+                val f = arg(0); val lv = arg(1)
+                if (lv === VNever) return VNever
+                val fn = f as? VFn ?: if (f === VNever) refuse("map of a failing function") else refuse("map of ${kind(f)}")
+                when (lv) {
+                    is VKList -> VKList(Array<Any>(lv.cells.size) { Pending(fn, listOf(lv.cells[it])) })
+                    is VList -> mapSeries(fn, lv, s)
+                    else -> refuse("map of ${kind(lv)}")
+                }
+            }
+            "__filter" -> {
+                val p = arg(0); val lv = arg(1)
+                if (lv === VNever) return VNever
+                val fn = p as? VFn ?: if (p === VNever) refuse("filter of a failing predicate") else refuse("filter of ${kind(p)}")
+                when (lv) {
+                    is VKList -> filterCells(fn, lv, s)
+                    is VList -> filterSeries(fn, lv, s)
+                    else -> refuse("filter of ${kind(lv)}")
+                }
+            }
+            "__concatLists" -> {
+                val lv = arg(0)
+                if (lv === VNever) return VNever
+                val outer = cellsOf(lv, "concatLists' operand")
+                val out = ArrayList<Any>()
+                for (c in outer) {
+                    val inner = force(c, s)
+                    if (inner === VNever) return VNever
+                    out.addAll(cellsOf(inner, "concatLists' element"))
+                }
+                VKList(out.toTypedArray())
+            }
+            "__attrNames" -> {
+                val v = arg(0)
+                if (v === VNever) return VNever
+                val set = v as? VSet ?: return notASet(v, s)
+                VKList(Array<Any>(set.names.size) { VStr(set.names[it]) })
+            }
+            "__attrValues" -> {
+                val v = arg(0)
+                if (v === VNever) return VNever
+                val set = v as? VSet ?: return notASet(v, s)
+                VKList(Array(set.cells.size) { set.cells[it] })
+            }
+            "__hasAttr" -> {
+                val nv = arg(0); val sv = arg(1)
+                if (nv === VNever) return VNever
+                val name = (nv as? VStr ?: refuse("hasAttr's name is ${kind(nv)}, not a string")).s
+                if (sv === VNever) return VNever
+                val set = sv as? VSet ?: return notASet(sv, s)
+                bconst(s, set.cell(name) != null)
+            }
+            "__mapAttrs" -> {
+                val f = arg(0); val sv = arg(1)
+                if (sv === VNever) return VNever
+                val set = sv as? VSet ?: return notASet(sv, s)
+                val fn = f as? VFn ?: if (f === VNever) refuse("mapAttrs of a failing function") else refuse("mapAttrs of ${kind(f)}")
+                VSet(set.names, Array<Any>(set.names.size) { Pending(fn, listOf(VStr(set.names[it]), set.cells[it])) })
+            }
+            "removeAttrs" -> {
+                val sv = arg(0); val nv = arg(1)
+                if (sv === VNever) return VNever
+                val set = sv as? VSet ?: return notASet(sv, s)
+                val names = cellsOf(nv, "removeAttrs' names")
+                val gone = HashSet<String>()
+                for (c in names) {
+                    val x = force(c, s)
+                    if (x === VNever) return VNever
+                    gone.add((x as? VStr ?: refuse("removeAttrs' name is ${kind(x)}, not a string")).s)
+                }
+                val keep = set.names.indices.filter { set.names[it] !in gone }
+                VSet(Array(keep.size) { set.names[keep[it]] }, Array(keep.size) { set.cells[keep[it]] })
+            }
+            "__isInt", "__isBool", "__isString", "__isList", "__isAttrs", "__isFunction" -> {
+                val v = arg(0)
+                if (v === VNever) return VNever
+                val t = when (v) {
+                    is VInt -> "__isInt"; is VBool -> "__isBool"; is VStr -> "__isString"; is VList, is VKList -> "__isList"
+                    is VSet -> "__isAttrs"; is VFn -> "__isFunction"; VNever -> ""
+                }
+                bconst(s, t == key)
+            }
             "__foldl'" -> { val f = arg(0); val l = arg(2); foldl(f, Ref(op.ins[1], frame), l, s) }
             "__length" -> {
                 val lv = arg(0)
                 if (lv === VNever) return VNever
+                if (lv is VKList) return known(s, lv.cells.size.toLong())
                 val l = list(lv, "length's operand")
                 (lv as VList).size?.let { return known(s, it) }
                 val i = ssa(); val r = ssa()
@@ -461,6 +609,12 @@ class Native(module: List<Op>) {
             "__elemAt" -> {
                 val lv = arg(0); val kv = arg(1)
                 if (lv === VNever || kv === VNever) return VNever
+                if (lv is VKList) {
+                    val k = (kv as? VInt ?: refuse("elemAt's index is ${kind(kv)}, not an integer")).k
+                        ?: refuse("elemAt's index is computed at run time over a list of cells")
+                    if (k < 0 || k >= lv.cells.size) return failNow("error: list index $k is out of bounds", s)
+                    return force(lv.cells[k.toInt()], s)
+                }
                 val l = list(lv, "elemAt's list"); val k = int(kv, "elemAt's index", s)
                 val i = ssa(); val n64 = ssa(); val z = const(s, 0)
                 s.line("$i = trikeshed.size $l : !trikeshed.series<i64>")
@@ -502,10 +656,70 @@ class Native(module: List<Op>) {
         return VList(r, body.fallible, len.k)
     }
 
+    /// map f xs over a series of integers: the series whose element i is f xs[i], made at once like genList's.
+    private fun mapSeries(f: VFn, l: VList, s: Scope): V {
+        val idx = ssa(); val r = ssa()
+        s.line("$idx = trikeshed.size ${l.ssa} : !trikeshed.series<i64>")
+        val body = s.child()
+        val i = ssa(); val x = ssa(); val i64 = ssa()
+        body.line("$i64 = arith.index_cast $i : index to i64")
+        body.line("$x = trikeshed.at ${l.ssa}[$i] : !trikeshed.series<i64>, index -> i64")
+        val e = int(applyOne(f, VInt(x), body), "map's element", body)
+        if (body.fallible) s.fallible = true
+        s.line("$r = trikeshed.series $idx : !trikeshed.series<i64> {")
+        s.line("^bb0($i: index):")
+        s.out.append(body.out)
+        s.line("  trikeshed.yield $e : i64")
+        s.line("}")
+        return VList(r, body.fallible, l.size)
+    }
+
+    /// filter p xs over a series of integers: `trikeshed.where`, its predicate written in the region.  A predicate that may
+    /// fail is refused: Nix forces the predicates as the list is made, and the order of their failures is not the program's.
+    private fun filterSeries(f: VFn, l: VList, s: Scope): V {
+        if (l.fallible) refuse("filter over a list whose elements may fail")
+        val body = s.child()
+        val x = ssa()
+        val b = bool(applyOne(f, VInt(x), body), "filter's predicate", body)
+        if (body.fallible) refuse("filter whose predicate may fail")
+        val r = ssa()
+        s.line("$r = trikeshed.where ${l.ssa} : !trikeshed.series<i64> -> !trikeshed.series<i64> {")
+        s.line("^bb0($x: i64):")
+        s.out.append(body.out)
+        s.line("  trikeshed.yield $b : i1")
+        s.line("}")
+        return VList(r, false, null)
+    }
+
+    /// filter p over a list of cells: each predicate result must be known here (the kept cells are chosen while writing).
+    private fun filterCells(f: VFn, l: VKList, s: Scope): V {
+        val kept = ArrayList<Any>()
+        for (c in l.cells) {
+            val b = applyOne(f, c, s)
+            if (b === VNever) return VNever
+            val k = (b as? VBool ?: refuse("filter's predicate is ${kind(b)}, not a Boolean")).k
+                ?: refuse("filter's predicate is computed at run time over a list of cells")
+            if (k) kept.add(c)
+        }
+        return VKList(kept.toTypedArray())
+    }
+
+    /// foldl' over a list of cells: the accumulator forced at each step, the cells passed as they are.
+    private fun foldCells(f: V, nul: Ref, l: VKList, s: Scope): V {
+        val fn = f as? VFn ?: refuse("foldl' of ${kind(f)}")
+        var acc = force(nul, s)
+        for (c in l.cells) {
+            if (acc === VNever) return VNever
+            acc = applyOne(applyOne(fn, acc, s), c, s)
+        }
+        return acc
+    }
+
     /// foldl' op nul list: `trikeshed.fold`.  nul is computed before the fold, which son must allow: op forces its first
     /// argument (arg_forced), or the closure op returns forces it (forced_captures).
     private fun foldl(f: V, nul: Ref, lv: V, s: Scope): V {
         if (f === VNever || lv === VNever) return VNever
+        if (lv is VKList) return foldCells(f, nul, lv, s)
         val fn = f as? VFn ?: refuse("foldl' of ${kind(f)}")
         val l = list(lv, "foldl''s list")
         if (!forcesFirst(fn.row)) refuse("foldl' whose function does not force the accumulator (son)")
@@ -665,9 +879,15 @@ class Native(module: List<Op>) {
     /// here is reached.  mlnix forces a set's values in its symbols' order, which puts the names it interned before the
     /// program (`type`, the builtins' names, ...) first: so a set two of whose values may fail is refused, since which error
     /// comes first is not the program's to say.
-    private fun deep(v: V, s: Scope, seen: IdentityHashMap<VSet, Boolean>): Boolean {
+    private fun deep(v: V, s: Scope, seen: IdentityHashMap<V, Boolean>): Boolean {
         if (v === VNever) return false
-        if (v !is VSet || seen.put(v, true) != null) return true
+        if (seen.put(v, true) != null) return true
+        if (v is VKList) { // a list's elements in index order, as forceValueDeep forces them
+            var reached = true
+            for (c in v.cells) if (!deep(force(c, s), s, seen)) reached = false
+            return reached
+        }
+        if (v !is VSet) return true
         var mayFail = 0
         var reached = true
         for (c in v.cells) {
@@ -693,6 +913,12 @@ class Native(module: List<Op>) {
             is VInt -> if (v.k != null) p.lit(v.k.toString()) else p.int(v.ssa)
             is VBool -> if (v.k != null) p.lit(v.k.toString()) else p.bool(v.ssa)
             is VFn -> p.lit("<LAMBDA>")
+            is VStr -> p.lit(quoteNix(v.s))
+            is VKList -> if (lists.add(cell)) {
+                p.lit("[ ")
+                for (c in v.cells) { show(cellOf(c), force(c, s), p, s, sets, lists); p.lit(" ") }
+                p.lit("]")
+            } else if (v.cells.isEmpty()) p.lit("[ ]") else p.lit("«repeated»")
             is VSet -> when {
                 v.names.isEmpty() -> p.lit("{ }")
                 sets.put(v, true) != null -> p.lit("«repeated»")
@@ -789,7 +1015,23 @@ class Native(module: List<Op>) {
             return b.append('"').toString()
         }
 
-        /// A constant text as an LLVM global: its UTF-8 bytes, each outside printable ASCII (and `"`, `\`) as \XX.
+        /// A string as mlnix prints it (Source.cpp's printLiteralString, lowered/nixfe/LiteralString.mlir): `"` `\` and the
+        /// newline, return and tab escaped, and a `$` before `{` as `\$`; every other byte as it is.
+        private fun quoteNix(s: String): String {
+            val b = StringBuilder("\"")
+            for (i in s.indices) {
+                val x = s[i]
+                when {
+                    x == '"' -> b.append("\\\""); x == '\\' -> b.append("\\\\"); x == '\n' -> b.append("\\n")
+                    x == '\r' -> b.append("\\r"); x == '\t' -> b.append("\\t")
+                    x == '$' && i + 1 < s.length && s[i + 1] == '{' -> b.append("\\$")
+                    else -> b.append(x)
+                }
+            }
+            return b.append('"').toString()
+        }
+
+        /// Constant text as an LLVM global: its UTF-8 bytes, each outside printable ASCII (and `"`, `\`) as \XX.
         private fun lit(name: String, text: String): String {
             val bytes = text.toByteArray()
             val esc = StringBuilder()
