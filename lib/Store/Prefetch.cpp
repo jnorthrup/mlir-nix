@@ -85,14 +85,12 @@ bool kept(composite::Text line) {
 extern "C" int64_t nixstore_pf_line(int64_t kind, const char *pre, int64_t pn, int64_t slash, const char *p, int64_t pl, int64_t row,
                                     char *into, int64_t room);
 composite::Text line(char kind, const char *path, int64_t row) {
-  char cwd[PATH_MAX], room[512];
+  char cwd[PATH_MAX];
   bool rel = path[0] != '/' && getcwd(cwd, sizeof cwd);
   int64_t pn = rel ? int64_t(strlen(cwd)) : 0, pl = int64_t(strlen(path));
-  int64_t n = nixstore_pf_line(uint8_t(kind), cwd, pn, rel, path, pl, row, room, sizeof room);
-  if (n <= int64_t(sizeof room)) return composite::Text(room, size_t(n));
   composite::Text t;
-  t.resize(size_t(n));
-  nixstore_pf_line(uint8_t(kind), cwd, pn, rel, path, pl, row, &t[0], n);
+  t.resize(size_t(nixstore_pf_line(uint8_t(kind), cwd, pn, rel, path, pl, row, nullptr, 0))); // the size; nothing is written
+  nixstore_pf_line(uint8_t(kind), cwd, pn, rel, path, pl, row, &t[0], int64_t(t.size()));
   return t;
 }
 
@@ -191,12 +189,10 @@ void warmFiles(const int64_t *files, int64_t nf) {
 }
 #endif
 
-void replay(const int64_t *dirs, int64_t nd, const int64_t *files, int64_t nf) {
+void replay(const int64_t *dirs, int64_t nd, [[maybe_unused]] const int64_t *files, [[maybe_unused]] int64_t nf) {
   nixsys::Thread dirThread = nixsys::Thread::start([=] { warmDirectories(dirs, nd, 4); });
 #ifdef MLNIX_HAVE_URING
   warmFiles(files, nf);
-#else
-  (void)files, (void)nf;
 #endif
   dirThread.join();
 }
