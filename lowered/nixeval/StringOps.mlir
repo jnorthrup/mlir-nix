@@ -24,7 +24,7 @@ func.func private @nixev_replace_to(!llvm.ptr, i64, !llvm.ptr)
 llvm.mlir.global private constant @ts_empty(dense<0> : tensor<1xi8>) : !llvm.array<1 x i8>
 
 // the descriptor of n i8 cells at p
-func.func private @ts_desc8(%p: !llvm.ptr, %n: i64) -> !d {
+func.func private @strops_desc8(%p: !llvm.ptr, %n: i64) -> !d {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
   %u = llvm.mlir.undef : !d
@@ -38,7 +38,7 @@ func.func private @ts_desc8(%p: !llvm.ptr, %n: i64) -> !d {
 
 // __stringLength: the size of the string's byte series, an Int.  The bridge has coerced the argument to a window.
 func.func @nixev_ts_stringLength(%p: !llvm.ptr, %n: i64, %v: !llvm.ptr) {
-  %d = func.call @ts_desc8(%p, %n) : (!llvm.ptr, i64) -> !d
+  %d = func.call @strops_desc8(%p, %n) : (!llvm.ptr, i64) -> !d
   %mm = builtin.unrealized_conversion_cast %d : !d to !m
   %ss = builtin.unrealized_conversion_cast %mm : !m to !s
   %k = trikeshed.size %ss : !s
@@ -54,7 +54,7 @@ func.func @nixev_ts_stringLength(%p: !llvm.ptr, %n: i64, %v: !llvm.ptr) {
 // __substring: the clamped [from, to) of the byte series.  start >= 0 (the bridge refused a negative one); a negative
 // len takes the rest.  The bridge shares the string's own bytes at from (nothing copied) or copies the coerced window.
 func.func @nixev_ts_substring(%p: !llvm.ptr, %n: i64, %start: i64, %len: i64) -> !bnds {
-  %d = func.call @ts_desc8(%p, %n) : (!llvm.ptr, i64) -> !d
+  %d = func.call @strops_desc8(%p, %n) : (!llvm.ptr, i64) -> !d
   %mm = builtin.unrealized_conversion_cast %d : !d to !m
   %ss = builtin.unrealized_conversion_cast %mm : !m to !s
   %k = trikeshed.size %ss : !s
@@ -128,7 +128,7 @@ func.func @nixev_ts_concat(%st: !llvm.ptr, %pieces: !llvm.ptr, %np: i64, %v: !ll
     llvm.store %ctx, %cp : !llvm.ptr, !llvm.ptr
   } else {
     %buf = func.call @nixev_str_room(%st, %sum#0) : (!llvm.ptr, i64) -> !llvm.ptr
-    %d = func.call @ts_desc8(%buf, %sum#0) : (!llvm.ptr, i64) -> !d
+    %d = func.call @strops_desc8(%buf, %sum#0) : (!llvm.ptr, i64) -> !d
     %into = builtin.unrealized_conversion_cast %d : !d to !m
     %all, %coords = trikeshed.combineAll %npi : !s, !trikeshed.series<!trikeshed.twinpacked<i32>> {
     ^bb0(%k: index):
@@ -139,7 +139,7 @@ func.func @nixev_ts_concat(%st: !llvm.ptr, %pieces: !llvm.ptr, %np: i64, %v: !ll
       %l = llvm.zext %l32 : i32 to i64
       %dp = llvm.getelementptr %ap[%c8] : (!llvm.ptr, i64) -> !llvm.ptr, i8
       %p = llvm.load %dp : !llvm.ptr -> !llvm.ptr
-      %pd = func.call @ts_desc8(%p, %l) : (!llvm.ptr, i64) -> !d
+      %pd = func.call @strops_desc8(%p, %l) : (!llvm.ptr, i64) -> !d
   %pm = builtin.unrealized_conversion_cast %pd : !d to !m
   %part = builtin.unrealized_conversion_cast %pm : !m to !s
       trikeshed.yield %part : !s
@@ -165,7 +165,7 @@ func.func @nixev_ts_concat(%st: !llvm.ptr, %pieces: !llvm.ptr, %np: i64, %v: !ll
 // the first j whose from[j] (a Chars at from + 16*j) equals the bytes at p, else -1: a slice of the string compared
 // unsigned (Kotlin's Char order) with the piece.  A piece longer than what is left cannot match; an empty one matches
 // anywhere (p <= size).  The first match wins, as std::string_view::compare's scan does.
-func.func private @ts_match_at(%ss: !s, %sz: index, %p: index, %from: !llvm.ptr, %m: i64) -> i64 {
+func.func private @strops_match_at(%ss: !s, %sz: index, %p: index, %from: !llvm.ptr, %m: i64) -> i64 {
   %c0 = arith.constant 0 : i64
   %c032 = arith.constant 0 : i32
   %zi = arith.constant 0 : index
@@ -189,7 +189,7 @@ func.func private @ts_match_at(%ss: !s, %sz: index, %p: index, %from: !llvm.ptr,
       %ok = arith.cmpi ule, %li, %rest : index
       %hit = scf.if %ok -> i64 {
         %sl = trikeshed.slice %ss[%p, %li] : !s -> !s
-        %fd = func.call @ts_desc8(%fp, %l) : (!llvm.ptr, i64) -> !d
+        %fd = func.call @strops_desc8(%fp, %l) : (!llvm.ptr, i64) -> !d
   %fm = builtin.unrealized_conversion_cast %fd : !d to !m
   %fs = builtin.unrealized_conversion_cast %fm : !m to !s
         %c = trikeshed.compare %sl, %fs unsigned : !s, !s
@@ -219,7 +219,10 @@ func.func @nixev_ts_replace(%st: !llvm.ptr, %r: !llvm.ptr, %p: !llvm.ptr, %sn: i
   %c1i = arith.constant 1 : index
   %c8i = arith.constant 8 : i64
   %c16 = arith.constant 16 : i64
-  %sd = func.call @ts_desc8(%p, %sn) : (!llvm.ptr, i64) -> !d
+  // one out-slot for both loops, at the entry block: an alloca inside a loop body is a dynamic alloca that grows the
+  // stack on every match
+  %out = llvm.alloca %c1 x !chars : (i64) -> !llvm.ptr
+  %sd = func.call @strops_desc8(%p, %sn) : (!llvm.ptr, i64) -> !d
   %sm = builtin.unrealized_conversion_cast %sd : !d to !m
   %ss = builtin.unrealized_conversion_cast %sm : !m to !s
   %k = trikeshed.size %ss : !s
@@ -232,10 +235,9 @@ func.func @nixev_ts_replace(%st: !llvm.ptr, %r: !llvm.ptr, %p: !llvm.ptr, %sn: i
     scf.condition(%cond) %pos, %total : index, i64
   } do {
   ^bb0(%pos: index, %total: i64):
-    %j = func.call @ts_match_at(%ss, %szi, %pos, %from, %m) : (!s, index, index, !llvm.ptr, i64) -> i64
+    %j = func.call @strops_match_at(%ss, %szi, %pos, %from, %m) : (!s, index, index, !llvm.ptr, i64) -> i64
     %hit = arith.cmpi sge, %j, %c0 : i64
     %tlfl:2 = scf.if %hit -> (i64, i64) {
-      %out = llvm.alloca %c1 x !chars : (i64) -> !llvm.ptr
       func.call @nixev_replace_to(%r, %j, %out) : (!llvm.ptr, i64, !llvm.ptr) -> ()
       %tl32 = llvm.load %out : !llvm.ptr -> i32
       %tl = llvm.zext %tl32 : i32 to i64
@@ -266,7 +268,7 @@ func.func @nixev_ts_replace(%st: !llvm.ptr, %r: !llvm.ptr, %p: !llvm.ptr, %sn: i
     func.call @nixev_str_toobig() : () -> ()
   }
   %buf = func.call @nixev_str_room(%st, %tot#1) : (!llvm.ptr, i64) -> !llvm.ptr
-  %d = func.call @ts_desc8(%buf, %tot#1) : (!llvm.ptr, i64) -> !d
+  %d = func.call @strops_desc8(%buf, %tot#1) : (!llvm.ptr, i64) -> !d
   %into = builtin.unrealized_conversion_cast %d : !d to !m
   // pass two: the pieces drained where each lands (the replacements now cached)
   %fill:2 = scf.while (%pos = %zero, %at = %c0) : (index, i64) -> (index, i64) {
@@ -274,16 +276,15 @@ func.func @nixev_ts_replace(%st: !llvm.ptr, %r: !llvm.ptr, %p: !llvm.ptr, %sn: i
     scf.condition(%cond) %pos, %at : index, i64
   } do {
   ^bb0(%pos: index, %at: i64):
-    %j = func.call @ts_match_at(%ss, %szi, %pos, %from, %m) : (!s, index, index, !llvm.ptr, i64) -> i64
+    %j = func.call @strops_match_at(%ss, %szi, %pos, %from, %m) : (!s, index, index, !llvm.ptr, i64) -> i64
     %hit = arith.cmpi sge, %j, %c0 : i64
     %step:2 = scf.if %hit -> (index, i64) {
-      %out = llvm.alloca %c1 x !chars : (i64) -> !llvm.ptr
       func.call @nixev_replace_to(%r, %j, %out) : (!llvm.ptr, i64, !llvm.ptr) -> ()
       %tl32 = llvm.load %out : !llvm.ptr -> i32
       %tl = llvm.zext %tl32 : i32 to i64
       %dp = llvm.getelementptr %out[%c8i] : (!llvm.ptr, i64) -> !llvm.ptr, i8
       %tp = llvm.load %dp : !llvm.ptr -> !llvm.ptr
-      %td = func.call @ts_desc8(%tp, %tl) : (!llvm.ptr, i64) -> !d
+      %td = func.call @strops_desc8(%tp, %tl) : (!llvm.ptr, i64) -> !d
   %tm = builtin.unrealized_conversion_cast %td : !d to !m
   %ts = builtin.unrealized_conversion_cast %tm : !m to !s
       %ati = arith.index_cast %at : i64 to index
@@ -329,6 +330,10 @@ func.func @nixev_ts_replace(%st: !llvm.ptr, %r: !llvm.ptr, %p: !llvm.ptr, %sn: i
     }
     scf.yield %step#0, %step#1 : index, i64
   }
+  // NUL-terminate, as every string constructor does (nixev_str_room's bytes are not zeroed)
+  %nul = llvm.getelementptr %buf[%tot#1] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+  %zero8 = arith.constant 0 : i8
+  llvm.store %zero8, %nul : i8, !llvm.ptr
   %tp = llvm.getelementptr %v[0] : (!llvm.ptr) -> !llvm.ptr, i8
   %nine = arith.constant 9 : i8
   llvm.store %nine, %tp : i8, !llvm.ptr
