@@ -35,6 +35,8 @@
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include "Composite/Series.h"
+
 namespace mlir::kif {
 namespace {
 
@@ -138,10 +140,10 @@ struct Terms {
 };
 
 struct Bind {
-  SmallVector<std::pair<uint32_t, uint32_t>, 8> v; // variable -> term
+  SmallVector<join::TwInt, 8> v; // variable |j| term
   uint32_t get(uint32_t var) const {
-    for (auto &[k, x] : v)
-      if (k == var) return x;
+    for (join::TwInt kx : v)
+      if (kx.first() == var) return kx.second();
     return kNone;
   }
 };
@@ -172,7 +174,7 @@ struct Chase {
   // the index of a round (datalog.nix's `index`): entries in show order, by relation, by relation and first argument
   SmallVector<uint32_t, 0> sorted;
   llvm::DenseMap<uint32_t, SmallVector<uint32_t, 4>> byHead;
-  llvm::DenseMap<std::pair<uint32_t, uint32_t>, SmallVector<uint32_t, 2>> byFirst;
+  llvm::DenseMap<uint64_t, SmallVector<uint32_t, 2>> byFirst; // (relation |j| first argument) -> entries
 
   explicit Chase(Terms &t) : T(t) {
     aAnd = T.lookupAtom("and"), aExists = T.lookupAtom("exists"), aNot = T.lookupAtom("not");
@@ -206,7 +208,7 @@ struct Chase {
     for (uint32_t e : sorted) {
       uint32_t f = entries[e].fact;
       byHead[T.head(f)].push_back(e);
-      if (T.isList(f) && T.size(f) > 1 && T.isString(T.at(f, 1))) byFirst[{T.head(f), T.at(f, 1)}].push_back(e);
+      if (T.isList(f) && T.size(f) > 1 && T.isString(T.at(f, 1))) byFirst[(T.head(f) |composite::j| T.at(f, 1)).raw].push_back(e);
     }
   }
 
@@ -227,7 +229,7 @@ struct Chase {
       if (T.isVar(p)) {
         uint32_t x = b.get(p);
         if (x != kNone) return x == f;
-        b.v.push_back({p, f});
+        b.v.push_back(p |composite::j| f);
         return true;
       }
       return p == f;
@@ -247,7 +249,7 @@ struct Chase {
     }
     if (h != kNone && T.isString(h) && !T.isVar(h)) {
       if (T.size(q) > 1 && T.isString(T.at(q, 1)) && !T.isVar(T.at(q, 1))) {
-        auto it = byFirst.find({h, T.at(q, 1)});
+        auto it = byFirst.find((h |composite::j| T.at(q, 1)).raw);
         return it == byFirst.end() ? ArrayRef<uint32_t>() : ArrayRef<uint32_t>(it->second);
       }
       auto it = byHead.find(h);
@@ -266,7 +268,7 @@ struct Chase {
         sols = std::move(next);
         if (sols.empty()) break;
       }
-      out.append(std::make_move_iterator(sols.begin()), std::make_move_iterator(sols.end()));
+      for (State &t : sols) out.push_back(std::move(t));
       return;
     }
     if (h != kNone && h == aExists) return step(s, T.at(p, 2), out);
