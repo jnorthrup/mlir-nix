@@ -76,9 +76,37 @@ func.func @ix_str(%rows: !ix, %r: i64) -> !tp attributes {llvm.emit_c_interface}
   %c = trikeshed.second %s : !tw -> i32
   %one = arith.constant 1 : i32
   %in = arith.addi %o, %one : i32
-  %n = arith.subi %c, %in : i32
+  %raw = arith.subi %c, %in : i32
+  // an unterminated string at the end of the text has close = open: its inside is empty, not negative
+  %zero = arith.constant 0 : i32
+  %neg = arith.cmpi slt, %raw, %zero : i32
+  %n = arith.select %neg, %zero, %raw : i32
   %t = trikeshed.j %in, %n : i32, i32 -> !tp
   return %t : !tp
+}
+
+// the number of unterminated strings: a string row whose close is not past its open quote (the scan closes a quote that
+// is the text's last byte at that byte).  corpus_load refuses such a text: its inside would be negative.
+func.func @ix_unterminated(%rows: !ix, %t: !text) -> i64 attributes {llvm.emit_c_interface} {
+  %k0 = trikeshed.key 0 : !ik
+  %spans = trikeshed.column %rows[%k0] : !ix, !ik -> !trikeshed.series<!tw>
+  %z64 = arith.constant 0 : i64
+  %one64 = arith.constant 1 : i64
+  %zero = arith.constant 0 : i32
+  %quote = arith.constant 34 : i8
+  %n = trikeshed.fold %spans, %z64 : !trikeshed.series<!tw>, i64 -> i64 {
+  ^bb0(%acc: i64, %sp: !tw):
+    %o = trikeshed.first %sp : !tw -> i32
+    %c = trikeshed.second %sp : !tw -> i32
+    %ch = trikeshed.at %t[%o] : !text, i32 -> i8
+    %isq = arith.cmpi eq, %ch, %quote : i8
+    %notpast = arith.cmpi sle, %c, %o : i32
+    %bad = arith.andi %notpast, %isq : i1
+    %inc = arith.select %bad, %one64, %z64 : i64
+    %next = arith.addi %acc, %inc : i64
+    trikeshed.yield %next : i64
+  }
+  return %n : i64
 }
 
 // DirectChildren: how many, and the i-th
@@ -150,7 +178,9 @@ func.func @ix_find(%rows: !ix, %kids: !s32, %t: !text, %obj: i64, %key: !text) -
         %o = trikeshed.first %sp : !tw -> i32
         %c = trikeshed.second %sp : !tw -> i32
         %in = arith.addi %o, %one : i32
-        %len = arith.subi %c, %in : i32
+        %len0 = arith.subi %c, %in : i32
+        %lneg = arith.cmpi slt, %len0, %zero : i32
+        %len = arith.select %lneg, %zero, %len0 : i32
         %ini = arith.index_cast %in : i32 to index
         %leni = arith.index_cast %len : i32 to index
         %inside = trikeshed.slice %t[%ini, %leni] : !text -> !text

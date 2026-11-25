@@ -245,3 +245,23 @@ func.func @cx_find_at(%text: !llvm.ptr, %h: !llvm.ptr, %obj: i64, %kbase: !llvm.
   %i = func.call @cx_find(%text, %h, %obj, %k, %n) : (!llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64) -> i64
   return %i : i64
 }
+
+llvm.func @_mlir_ciface_ix_unterminated(!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr) -> i64
+
+// the number of unterminated strings in the text (index.mlir's ix_unterminated: a text that ends in an open quote)
+func.func @cx_unterminated(%text: !llvm.ptr, %h: !llvm.ptr) -> i64 {
+  %one = arith.constant 1 : i32
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %c2 = arith.constant 2 : i32
+  %own = func.call @cx_text(%h) : (!llvm.ptr) -> !llvm.ptr
+  %pn = llvm.getelementptr %own[0, 3, 0] : (!llvm.ptr) -> !llvm.ptr, !d
+  %tn = llvm.load %pn : !llvm.ptr -> i64
+  %td = llvm.alloca %one x !d : (i32) -> !llvm.ptr
+  func.call @view(%td, %text, %tn) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+  %d0 = func.call @cx_d(%h, %c0) : (!llvm.ptr, i32) -> !llvm.ptr
+  %d1 = func.call @cx_d(%h, %c1) : (!llvm.ptr, i32) -> !llvm.ptr
+  %d2 = func.call @cx_d(%h, %c2) : (!llvm.ptr, i32) -> !llvm.ptr
+  %v = llvm.call @_mlir_ciface_ix_unterminated(%d0, %d1, %d2, %td) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr) -> i64
+  return %v : i64
+}
