@@ -21,6 +21,8 @@
 //===-----------------------------------------------------------------------------------------------------------------===//
 
 #include "Composite/TrikeShed.h"
+#include "Composite/Series.h"
+#include "Composite/Vocab.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -33,11 +35,11 @@ namespace composite {
 namespace {
 
 /// The two sides of a pair type (a Join, a Twin, a TwinPacked).
-std::optional<std::pair<Type, Type>> sides(Type t) {
-  if (auto j = dyn_cast<JoinType>(t)) return std::pair{j.getA(), j.getB()};
-  if (auto w = dyn_cast<TwinType>(t)) return std::pair{w.getElement(), w.getElement()};
-  if (auto p = dyn_cast<TwinPackedType>(t)) return std::pair{p.getElement(), p.getElement()};
-  return std::nullopt;
+Maybe<Join<Type, Type>> sides(Type t) {
+  if (auto j = dyn_cast<JoinType>(t)) return Join{j.getA(), j.getB()};
+  if (auto w = dyn_cast<TwinType>(t)) return Join{w.getElement(), w.getElement()};
+  if (auto p = dyn_cast<TwinPackedType>(t)) return Join{p.getElement(), p.getElement()};
+  return {};
 }
 
 /// The laws of j, applied in f until nothing folds; the pairs left unread are erased.
@@ -70,14 +72,14 @@ bool foldPairs(func::FuncOp f) {
 }
 
 /// The side every use of a pair takes (false the first, true the second), when they all take the same one.
-std::optional<bool> halfRead(Value pair, std::pair<Type, Type> side) {
-  std::optional<bool> read;
+Maybe<bool> halfRead(Value pair, Join<Type, Type> side) {
+  Maybe<bool> read;
   for (Operation *user : pair.getUsers()) {
     bool second;
-    if (auto f = dyn_cast<FirstOp>(user); f && f.getA().getType() == side.first) second = false;
-    else if (auto s = dyn_cast<SecondOp>(user); s && s.getB().getType() == side.second) second = true;
-    else return std::nullopt;
-    if (read && *read != second) return std::nullopt;
+    if (auto f = dyn_cast<FirstOp>(user); f && f.getA().getType() == side.a) second = false;
+    else if (auto s = dyn_cast<SecondOp>(user); s && s.getB().getType() == side.b) second = true;
+    else return {};
+    if (read && *read != second) return {};
     read = second;
   }
   return read;
@@ -95,7 +97,7 @@ bool splitSeries(Operation *made) {
   region.walk([&](Operation *op) { pure &= isMemoryEffectFree(op); });
   if (!pure) return false;
 
-  SmallVector<std::pair<Operation *, bool>> reads;
+  SmallVector<Join<Operation *, bool>> reads;
   SmallVector<Operation *> sizes;
   for (OpOperand &use : xs.getUses()) {
     Operation *by = use.getOwner();
@@ -115,7 +117,7 @@ bool splitSeries(Operation *made) {
 
   Location loc = made->getLoc();
   Value column[2];
-  auto half = [&](bool second) { return second ? side->second : side->first; };
+  auto half = [&](bool second) { return second ? side->b : side->a; };
   auto columnOf = [&](bool second) {
     if (column[second]) return column[second];
     Operation *c = made->clone();
@@ -149,7 +151,7 @@ bool splitSeries(Operation *made) {
       by->setOperand(0, col);
     }
   }
-  for (Operation *size : sizes) size->setOperand(0, columnOf(reads[0].second));
+  for (Operation *size : sizes) size->setOperand(0, columnOf(reads[0].b));
   made->erase();
   return true;
 }

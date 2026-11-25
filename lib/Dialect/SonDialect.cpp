@@ -11,8 +11,8 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/RegionUtils.h"
 
-#include <deque>
-#include <optional>
+#include "Composite/Mutable.h"
+#include "Composite/Vocab.h"
 
 #include "NixDialect/SonDialect.cpp.inc"
 
@@ -69,17 +69,15 @@ namespace {
 /// never returns (throw, abort) forces everything, since no path through it returns.  A block argument is the caller's.
 /// The set is an under-approximation: a cycle of forcing is cut (it never returns: infinite recursion), and a block too big
 /// for the bit sets gets the return value alone.
-class MustForce {
-public:
+struct MustForce {
   /// `may`: the values forced on some path that returns instead (the arms of an if joined, both sides of and/or/impl).
   MustForce(Block &block, nix::NixDialect *nixd, llvm::DenseMap<Operation *, bool> *argStrict = nullptr, bool may = false)
       : nixd(nixd), argStrict(argStrict), may(may) {
-    for (BlockArgument a : block.getArguments()) if (index.try_emplace(a, index.size()).second) values.push_back(a);
+    for (BlockArgument a : block.getArguments()) if (index.try_emplace(a, index.size()).second) values.append(a);
     for (Operation &o : block)
-      for (Value r : o.getResults()) if (index.try_emplace(r, index.size()).second) values.push_back(r);
+      for (Value r : o.getResults()) if (index.try_emplace(r, index.size()).second) values.append(r);
     memo.resize(index.size());
     state.assign(index.size(), 0);
-    top.assign(index.size(), false);
     if (block.empty() || !isa<nix::ReturnOp>(block.back())) return;
     Value ret = block.back().getOperand(0);
     auto it = index.find(ret);
@@ -96,15 +94,13 @@ public:
   /// No path of the body returns (every one throws).
   bool neverReturns() const { return never; }
 
-private:
   nix::NixDialect *nixd;
   llvm::DenseMap<Operation *, bool> *argStrict; // per son.body: forces its argument (memo, shared across bodies)
   bool may;
   llvm::DenseMap<Value, unsigned> index;
-  std::vector<Value> values; // by index
-  std::vector<std::optional<llvm::BitVector>> memo;
-  std::vector<uint8_t> state; // 0 not seen, 1 being computed (a cycle), 2 done
-  std::vector<bool> top;      // done and forcing it never returns
+  composite::MutableSeries<Value> values; // by index
+  composite::MutableSeries<composite::Maybe<llvm::BitVector>> memo; // done: nothing when forcing it never returns
+  composite::MutableSeries<uint8_t> state; // 0 not seen, 1 being computed (a cycle), 2 done
   llvm::BitVector forcedSet;
   bool never = false;
   size_t bits = 0;
@@ -112,12 +108,12 @@ private:
 
   /// The set forced when value i is, or null when forcing it never returns (it throws on every path).
   const llvm::BitVector *of(unsigned i, unsigned depth) {
-    if (state[i] == 2) return top[i] ? nullptr : &*memo[i];
+    if (state[i] == 2) return memo[i] ? &*memo[i] : nullptr;
     llvm::BitVector self(index.size());
     self.set(i);
     if (state[i] == 1 || depth > 4096 || bits + index.size() > kBitBudget) return keep(i, std::move(self), false, state[i] == 1);
     state[i] = 1;
-    Value v = valueAt(i);
+    Value v = values[i];
     SmallVector<Value, 4> must, alts;
     bool throws = false;
     if (Operation *op = v.getDefiningOp()) demands(op, must, alts, throws);
@@ -130,7 +126,7 @@ private:
       self |= *d;
     }
     if (!alts.empty()) {
-      std::optional<llvm::BitVector> meet; // what every arm that returns forces (`may`: some arm)
+      composite::Maybe<llvm::BitVector> meet; // what every arm that returns forces (`may`: some arm)
       for (Value a : alts) {
         auto it = index.find(a);
         if (it == index.end()) { // an arm from outside the frame: it forces nothing of it
@@ -151,18 +147,16 @@ private:
   }
   const llvm::BitVector *keep(unsigned i, llvm::BitVector set, bool throws, bool cycle = false) {
     if (cycle) { // the value is being computed below us: what is known of it so far is itself (not memoized)
-      scratch.push_back(std::move(set));
+      scratch.append(std::move(set));
       return &scratch.back();
     }
     bits += set.size();
     state[i] = 2;
-    top[i] = throws;
+    if (throws) return nullptr;
     memo[i] = std::move(set);
-    return throws ? nullptr : &*memo[i];
+    return &*memo[i];
   }
-  std::deque<llvm::BitVector> scratch;
-
-  Value valueAt(unsigned i) const { return values[i]; }
+  composite::MutableSeries<llvm::BitVector, composite::Chunked<llvm::BitVector>> scratch; // its cells never move: of() hands out their addresses
 
   void demands(Operation *op, SmallVectorImpl<Value> &must, SmallVectorImpl<Value> &alts, bool &throws) {
     auto firstKey = [](auto path, ValueRange keys, SmallVectorImpl<Value> &out) { // a computed first name: its key

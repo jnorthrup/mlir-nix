@@ -53,6 +53,7 @@
 
 #include "Composite/CursorLowering.h"
 #include "Composite/TrikeShed.h"
+#include "Composite/Series.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -1086,7 +1087,7 @@ struct SelectLowering : OpConversionPattern<arith::SelectOp> {
 //                          read it (Series.kt: the region runs each time an element is read): at(.., i) is x at k = i, a
 //                          slice the series of its count at k + offset, a bisect probes x at its midpoints.  So a search
 //                          over keys read at a row stride reads log n of them and makes no buffer.
-std::pair<Type, Type> sidesOf(Type t) {
+Join<Type, Type> sidesOf(Type t) {
   if (auto s = dyn_cast<SplitType>(t)) return {s.getA(), s.getB()};
   auto s = cast<Series2Type>(t);
   return {s.getA(), s.getB()};
@@ -1125,7 +1126,7 @@ template <class Op, bool Left, bool All = false> struct SideLowering : Lowering<
   using Lowering<Op>::Lowering;
   LogicalResult matchAndRewrite(Op op, typename OpConversionPattern<Op>::OneToNOpAdaptor a, ConversionPatternRewriter &rw) const override {
     ValueRange all = a.getSeries();
-    size_t n = converted(this->types(), sidesOf(op.getSeries().getType()).first).size();
+    size_t n = converted(this->types(), sidesOf(op.getSeries().getType()).a).size();
     if (!n || n >= all.size()) return rw.notifyMatchFailure(op, "a side whose elements do not lower");
     replaceWith(rw, op, All ? all : Left ? all.take_front(n) : all.drop_front(n));
     return success();
@@ -1170,8 +1171,8 @@ void rewriteSplits(func::FuncOp f) {
       if (auto c = dyn_cast<CursorType>(of); c && matchPattern(t.getColumn(), m_ConstantInt(&i))) {
         Value k = KeyOp::create(b, loc, ColKeyType::get(ctx, c.getSchema()), b.getI64IntegerAttr(i.getZExtValue()));
         to = ColumnOp::create(b, loc, r, t.getOf(), k);
-      } else if (isa<SplitType, Series2Type>(of) && (r == sidesOf(of).first || r == sidesOf(of).second)) {
-        to = AtOp::create(b, loc, r, side(t.getOf(), r, r == sidesOf(of).first), t.getColumn());
+      } else if (isa<SplitType, Series2Type>(of) && (r == sidesOf(of).a || r == sidesOf(of).b)) {
+        to = AtOp::create(b, loc, r, side(t.getOf(), r, r == sidesOf(of).a), t.getColumn());
       } else continue;
     }
     op->getResult(0).replaceAllUsesWith(to);
