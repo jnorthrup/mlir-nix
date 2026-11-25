@@ -5,20 +5,16 @@
 // It is the lexer's state machine (Parser.cpp: DEFAULT, STRING, IND_STRING, INPATH, INPATH_SLASH, with the same
 // stack) without tokens: only the transitions and the delimiters are kept, the character classes as tables.  This
 // file is the bridge: it sizes the Bands storage, calls confix_scan_nix and adopts the rows it wrote.  The
-// longest-match choice among the rules that can begin a token is the kursive grammar lowered/kursive/LexDefault.mlir,
-// shared with the lexer, and is called back per general token (nixfe_confix_match).
+// longest-match choice among the rules that can begin a token stays in Nix/LexRules.h, shared with the lexer, and
+// is called back per general token (nixfe_confix_match).
 //
 //===----------------------------------------------------------------------===//
 
 #include "Composite/Mutable.h"
 #include "Nix/Confix.h"
+#include "Nix/LexRules.h"
 
 #include <stddef.h>
-
-// The default state's longest match (lib/Dialect/KursiveDialect.cpp): the kursive grammar of LexRules.h's rules.
-namespace mlir::kursive {
-uint64_t lexDefault(const char *src, size_t n, size_t i);
-}
 
 namespace nixfe::confix {
 
@@ -41,11 +37,12 @@ static_assert(offsetof(ScanRec, span) == 32 && offsetof(ScanRec, rows) == 64, "t
 
 extern "C" int32_t confix_scan_nix(ScanRec *rec);
 
-/// The lexer's own choice among the rules that can begin at i: the default state's longest match, a kursive grammar
-/// (lowered/kursive/LexDefault.mlir, walked by mlir::kursive::lexDefault).  The match's length in the high 32 bits,
+/// The lexer's own choice among the rules that can begin at i (LexRules.h): the match's length in the high 32 bits,
 /// its Rule in the low.
 extern "C" uint64_t nixfe_confix_match(const char *src, uint64_t n, uint64_t i) {
-  return mlir::kursive::lexDefault(src, n, i);
+  lex::Rules r(std::string_view(src, n));
+  lex::Match m = r.matchDefault(i, i < n ? src[i] : '\0');
+  return (uint64_t(m.len) << 32) | uint32_t(m.rule);
 }
 
 /// Scan from `start` into the bands, growing the storage and scanning again when it runs out of room (the status 2,
