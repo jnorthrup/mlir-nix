@@ -191,7 +191,7 @@ struct XmlWalk {
   composite::TextSet seen;                                       // the derivations met, by drvPath
   composite::MutableSeries<int64_t> rows;                        // the fill
   composite::MutableSeries<composite::MutableSeries<int64_t>> cells; // each set's sorted order, through its children's walk
-  composite::MutableSeries<llvm::StringRef> names;               // the latest lambda's formals
+  composite::MutableSeries<int64_t> names;                       // the latest lambda's formals' windows (ptr, len)
   composite::Bump bytes;                                         // the floats' text
 };
 } // namespace
@@ -225,11 +225,19 @@ const char *nixev_xw_float(XmlWalk *x, Value *v, int64_t *n) {
 void nixev_xw_lambda(XmlWalk *x, Value *v, int64_t *rec) {
   auto lam = cast<nd::LambdaOp>(v->thunk.node->def);
   auto arg = lam.getArgName();
-  x->names.clear();
-  if (auto fs = lam.getFormals()) for (Attribute f : ArrayAttr(*fs)) x->names.append(cast<StringAttr>(f).getValue());
-  int64_t r[7] = {int64_t(nd::posOfOp(lam)), lam.getFormals() ? 1 : 0, arg ? int64_t(arg->data()) : 0, arg ? int64_t(arg->size()) : -1,
-                  lam.getEllipsis() ? 1 : 0, int64_t(x->names.size()), int64_t(x->names.data())};
-  for (int64_t k = 0; k < 7; k++) rec[k] = r[k];
+  int64_t r[6] = {int64_t(nd::posOfOp(lam)), lam.getFormals() ? 1 : 0, arg ? int64_t(arg->data()) : 0, arg ? int64_t(arg->size()) : -1,
+                  lam.getEllipsis() ? 1 : 0, lam.getFormals() ? int64_t(ArrayAttr(*lam.getFormals()).size()) : 0};
+  for (int64_t k = 0; k < 6; k++) rec[k] = r[k];
+}
+// The formals' windows: the bridge's buffer for n formals (two words each), and formal j's name written into it.
+int64_t *nixev_xw_names(XmlWalk *x, int64_t n) {
+  x->names.resize(size_t(2 * n));
+  return x->names.data();
+}
+void nixev_xw_formal(Value *v, int64_t j, int64_t *win) {
+  llvm::StringRef s = cast<StringAttr>(ArrayAttr(*cast<nd::LambdaOp>(v->thunk.node->def).getFormals()).getValue()[j]).getValue();
+  win[0] = int64_t(s.data());
+  win[1] = int64_t(s.size());
 }
 }
 static_assert(sizeof(llvm::StringRef) == 16 && sizeof(Attr) == 16 && offsetof(Bindings, attrs) == 16); // as XmlWalk.mlir reads them
@@ -257,13 +265,13 @@ void EvalState::printValueAsXML(composite::Text &out, Value &v, bool strict, boo
 //===----------------------------------------------------------------------===//
 
 // The scan of the document (whitespace, comments, keys, headers, strings and escapes, numbers, dates, the array and
-// inline-table nesting, the syntax errors) is lowered/nixeval/TomlScan.mlir, and so is every message's text.  It hands
-// its events here in order, and the tables (dotted keys, headers, array-of-tables, duplicates, redefinitions) are built
-// and checked here, so an error found here still comes before a lexical error later in the text.
+// inline-table nesting, the syntax errors) is lowered/nixeval/TomlScan.mlir, and the tables its events build (dotted
+// keys, headers, array-of-tables, duplicates and redefinitions, the arrays' lists and the sets) are
+// lowered/nixeval/TomlTables.mlir: nixev_toml_ev is its entry.  What stays here: the nodes' storage, the symbols and
+// values (the evaluator), the messages' composition (the scan's own, nixev_ts_toml_msg) and the throws.
 extern "C" int32_t nixev_ts_toml_scan(int64_t *rec);
 extern "C" int64_t nixev_ts_toml_msg(int64_t code, int64_t line, const char *w, int64_t wn, char *into, int64_t cap);
-// An open array's close: its elements (a window of the elems stack) drained into the list's cells, FmtCompOps.mlir.
-extern "C" void nixev_ts_toml_cells(const void *elems, int64_t n, void *into);
+extern "C" Value *nixev_ts_toml_value(void *tt, void *node); // TomlTables.mlir: the set made from a node
 namespace {
 [[noreturn]] void tomlFail(int64_t code, int64_t line, std::string_view w) {
   composite::Text m;
@@ -272,14 +280,14 @@ namespace {
   throw EvalError(composite::mv(m));
 }
 
+// A node of the document's tables: kind @0 (0 table, 1 array of tables, 2 leaf), defined @8, leaf @16 are read by
+// TomlTables.mlir, so they come first.  A table's rows are composite::TextTable's (key bytes, length, node: 24 bytes).
 struct TomlNode {
-  enum Kind { Table, Array, Leaf } kind = Table;
-  composite::TextTable<TomlNode *> table;     // by key, the keys' bytes in the parser's Bump; no order (the set is sorted when built)
-  composite::MutableSeries<TomlNode *> array; // the nodes are the parser's
+  int64_t kind = 0;
+  int64_t defined = 0;                        // named by a [header]
   Value *leaf = nullptr;
-  bool defined = false;       // explicitly defined via [header]
-  bool inlineTable = false;   // immutable
-  bool arrayOfTables = false;
+  composite::TextTable<TomlNode *> table;     // by key; no order (the set is sorted when built)
+  composite::MutableSeries<TomlNode *> array; // the nodes are the parser's
 };
 
 struct TomlParser {
@@ -287,126 +295,82 @@ struct TomlParser {
   bool timestamps;
   composite::MutableSeries<composite::Own<TomlNode>> nodes; // every node of the parse, owned here
   composite::Bump keyBytes;                                  // every key of every table
+  composite::MutableSeries<composite::MutableSeries<int64_t>> scratch; // the sets' (symbol, value) cells, kept while nested sets are made
   TomlNode root;
-  int64_t line = 1;                                          // the line of the scan's latest event
-  struct Frame { TomlNode *node; uint32_t elems, keys; };    // an open array (node null) or table; frames[0] the current [table]
-  composite::MutableSeries<Frame> frames;
-  composite::MutableSeries<Value *> elems;                   // the open arrays' elements
-  composite::MutableSeries<std::string_view> keys;           // the open keys' parts (windows on the input or the scan's bytes)
+  TomlParser(EvalState &st, bool timestamps) : st(st), timestamps(timestamps) {}
   TomlNode *make() { return nodes[nodes.append(composite::own<TomlNode>())].get(); }
-  /// The child of `t` named `k`, null when there is none yet: a reference to fill.  It holds until t's next new key.
-  TomlNode *&child(TomlNode &t, std::string_view k) {
-    return t.table.at(k.data(), uint32_t(k.size()), [&] { return keyBytes.copy(k.data(), uint32_t(k.size())); });
-  }
-  [[noreturn]] void fail(int64_t code, std::string_view k) { tomlFail(code, line, k); }
-
-  void setKey(TomlNode &tbl, uint32_t from, Value *v) {
-    TomlNode *cur = &tbl;
-    for (uint32_t i = from; i + 1 < keys.size(); i++) {
-      TomlNode *&n = child(*cur, keys[i]);
-      if (!n) n = make();
-      else if (n->kind != TomlNode::Table || n->inlineTable) fail(29, keys[i]);
-      cur = n;
-    }
-    TomlNode *&leaf = child(*cur, keys.back());
-    if (leaf) fail(30, keys.back());
-    leaf = make();
-    leaf->kind = TomlNode::Leaf;
-    leaf->leaf = v;
-  }
-
-  void header(bool aot) {
-    TomlNode *t = &root;
-    for (uint32_t i = 0; i + 1 < keys.size(); i++) {
-      TomlNode *&n = child(*t, keys[i]);
-      if (!n) n = make();
-      if (n->kind == TomlNode::Array) t = n->array.back();
-      else if (n->kind == TomlNode::Table && !n->inlineTable) t = n;
-      else fail(29, keys[i]);
-    }
-    TomlNode *&last = child(*t, keys.back());
-    if (aot) {
-      if (!last) { last = make(); last->kind = TomlNode::Array; last->arrayOfTables = true; }
-      if (last->kind != TomlNode::Array || !last->arrayOfTables) fail(29, keys.back());
-      TomlNode *nt = make();
-      last->array.append(nt);
-      frames[0].node = nt;
-    } else {
-      if (!last) last = make();
-      else if (last->kind != TomlNode::Table || last->defined) fail(31, keys.back());
-      last->defined = true;
-      frames[0].node = last;
-    }
-    keys.clear();
-  }
-
-  /// A complete value: an element of the open array, or the value of the open table's key.
-  void deliver(Value *v) {
-    Frame &f = frames.back();
-    if (!f.node) { elems.append(v); return; }
-    setKey(*f.node, f.keys, v);
-    while (keys.size() > f.keys) keys.pop();
-  }
-
-  Value *toValue(TomlNode &n) {
-    if (n.kind == TomlNode::Leaf) return n.leaf;
-    Value *v = st.allocValue();
-    if (n.kind == TomlNode::Array) {
-      st.mkList(*v, n.array |cp::α| [&](const auto &x) { return toValue(*x); });
-      return v;
-    }
-    EvalState::BindingsBuilder bb(st);
-    for (auto &r : n.table) bb.insert(llvm::StringRef(r.p, r.n), toValue(*r.v));
-    st.mkAttrs(*v, bb.finish());
-    return v;
-  }
-
-  void parse(std::string_view s, Value &out) {
-    frames.append({&root, 0, 0});
-    composite::MutableSeries<uint8_t> stack(s.size() + 1);
-    composite::MutableSeries<char> dec(2 * s.size() + 16);
-    int64_t rec[16] = {int64_t(s.data()), int64_t(s.size()), int64_t(this), int64_t(stack.data()), int64_t(dec.data()), 0, 1};
-    if (int32_t code = nixev_ts_toml_scan(rec)) tomlFail(code, rec[6], std::string_view((const char *)rec[9], size_t(rec[10])));
-    out = *toValue(root);
-  }
 };
 } // namespace
 
-/// The scan's events (TomlScan.mlir's header lists them): the values made here, in order.
-extern "C" void nixev_toml_ev(void *c, int64_t kind, const char *p, int64_t a, int64_t line) {
-  TomlParser &P = *static_cast<TomlParser *>(c);
-  EvalState &st = P.st;
-  P.line = line;
-  Value *v;
+// The events and callbacks of TomlTables.mlir (the tables and the Values; the record is the parse's, see there).
+extern "C" {
+void *nixev_tt_child(TomlParser *P, TomlNode *t, const char *k, int64_t n) {
+  return &t->table.at(k, uint32_t(n), [&] { return P->keyBytes.copy(k, uint32_t(n)); });
+}
+TomlNode *nixev_tt_make(TomlParser *P) { return P->make(); }
+void nixev_tt_push(TomlNode *arr, TomlNode *n) { arr->array.append(n); }
+TomlNode *nixev_tt_back(TomlNode *arr) { return arr->array.back(); }
+int64_t nixev_tt_nkids(TomlNode *n) { return int64_t(n->array.size()); }
+TomlNode **nixev_tt_kids(TomlNode *n) { return n->array.data(); }
+int64_t nixev_tt_nrows(TomlNode *n) { return int64_t(n->table.size()); }
+composite::TextTable<TomlNode *>::Row *nixev_tt_rows(TomlNode *n) { return n->table.begin(); }
+[[noreturn]] void nixev_tt_fail(int64_t code, int64_t line, const char *p, int64_t n) {
+  tomlFail(code, line, std::string_view(p, size_t(n)));
+}
+Value *nixev_tt_value(TomlParser *P, int64_t kind, const char *p, int64_t a) {
+  EvalState &st = P->st;
   switch (kind) {
-  case 0: P.keys.append(std::string_view(p, size_t(a))); return;
-  case 1: v = st.newString(std::string_view(p, size_t(a))); break;
-  case 2: st.mkInt(*(v = st.allocValue()), a); break;
-  case 3: st.mkFloat(*(v = st.allocValue()), __builtin_bit_cast(double, a)); break;
-  case 4: v = a ? &st.vTrue : &st.vFalse; break;
-  case 5: {
-    if (!P.timestamps) tomlFail(32, 0, {});
-    v = st.allocValue();
+  case 1: return st.newString(std::string_view(p, size_t(a)));
+  case 2: { Value *v = st.allocValue(); st.mkInt(*v, a); return v; }
+  case 3: { Value *v = st.allocValue(); st.mkFloat(*v, __builtin_bit_cast(double, a)); return v; }
+  case 4: return a ? &st.vTrue : &st.vFalse;
+  default: { // 5: a date or time, as the attribute set { _type = "timestamp"; value = ...; }
+    if (!P->timestamps) tomlFail(32, 0, {});
+    Value *v = st.allocValue();
     EvalState::BindingsBuilder bb(st);
     st.mkString(bb.alloc("_type"), "timestamp");
     st.mkString(bb.alloc("value"), std::string_view(p, size_t(a)));
     st.mkAttrs(*v, bb.finish());
-    break;
+    return v;
   }
-  case 6: P.frames.append({nullptr, P.elems.size(), P.keys.size()}); return;
-  case 7: {
-    uint32_t from = P.frames.back().elems, n = P.elems.size() - from;
-    st.mkList(*(v = st.allocValue()), size_t(n));
-    nixev_ts_toml_cells(P.elems.data() + from, int64_t(n), v->list.elems);
-    while (P.elems.size() > from) P.elems.pop();
-    P.frames.pop();
-    break;
   }
-  case 8: P.frames.append({P.make(), P.elems.size(), P.keys.size()}); return;
-  case 9: v = P.toValue(*P.frames.back().node); P.frames.pop(); break;
-  default: return P.header(a != 0);
-  }
-  P.deliver(v);
+}
+Value *nixev_tt_list(TomlParser *P, int64_t n) {
+  Value *v = P->st.allocValue();
+  P->st.mkList(*v, size_t(n));
+  return v;
+}
+Value **nixev_tt_cells(Value *v) { return v->list.elems; }
+int64_t nixev_tt_sym(TomlParser *P, const char *p, int64_t n) {
+  return int64_t(P->st.symbols.create(llvm::StringRef(p, size_t(n))));
+}
+int64_t *nixev_tt_scratch(TomlParser *P, int64_t n) {
+  P->scratch.append(composite::MutableSeries<int64_t>(size_t(n)));
+  return P->scratch.back().data();
+}
+Value *nixev_tt_attrs(TomlParser *P, const int64_t *cells, int64_t k) {
+  EvalState::BindingsBuilder bb(P->st);
+  for (int64_t i = 0; i < k; i++)
+    bb.insert(Symbol(cells[2 * i]), reinterpret_cast<Value *>(static_cast<intptr_t>(cells[2 * i + 1])));
+  Value *v = P->st.allocValue();
+  P->st.mkAttrs(*v, bb.finish());
+  return v;
+}
+}
+
+// builtins.fromTOML: the scan's events drive the tables (the record: see TomlTables.mlir); the root's set is made last.
+static void parseTOML(TomlParser &P, std::string_view s, Value &out) {
+  size_t cap = s.size() + 2; // a frame, an element and a key part each take a byte of the input at least
+  composite::MutableSeries<int64_t> frames(3 * cap), keys(2 * cap);
+  composite::MutableSeries<Value *> elems(cap);
+  composite::MutableSeries<uint8_t> stack(s.size() + 1);
+  composite::MutableSeries<char> dec(2 * s.size() + 16);
+  frames.data()[0] = int64_t(&P.root), frames.data()[1] = 0, frames.data()[2] = 0; // frame 0: the current [table]
+  int64_t tt[9] = {int64_t(&P), int64_t(frames.data()), 1, int64_t(elems.data()), 0, int64_t(keys.data()), 0, 1,
+                   int64_t(&P.root)};
+  int64_t rec[16] = {int64_t(s.data()), int64_t(s.size()), int64_t(tt), int64_t(stack.data()), int64_t(dec.data()), 0, 1};
+  if (int32_t code = nixev_ts_toml_scan(rec)) tomlFail(code, rec[6], std::string_view((const char *)rec[9], size_t(rec[10])));
+  out = *nixev_ts_toml_value(tt, &P.root);
 }
 
 //===----------------------------------------------------------------------===//
@@ -522,7 +486,7 @@ void registerFormatBuiltins(EvalState &state) {
     auto s = st.forceString(*args[0], pos, "while evaluating the argument passed to builtins.fromTOML");
     TomlParser P{st, tomlTimestamps};
     try {
-      P.parse(s, v);
+      parseTOML(P, s, v);
     } catch (EvalError &e) {
       if (!e.pos) e.pos = pos;
       throw;

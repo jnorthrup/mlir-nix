@@ -365,6 +365,9 @@ mlnix_lower_trikeshed(NixEval lowered/nixeval/FmtCompOps.mlir FmtCompOps)
 # its events in order and keeps the duplicate/redefinition checks).  A cf state machine over the input bytes with an
 # explicit nesting stack, lifted to scf first; the messages are one trikeshed combine drained once.
 mlnix_lower_trikeshed(NixEval lowered/nixeval/TomlScan.mlir TomlScan --lift-cf-to-scf --convert-ub-to-llvm)
+# fromTOML's tables (TomlTables.mlir: the scan's events in order build the document's sets and lists, the dotted keys,
+# headers, array-of-tables and duplicate checks; Formats.cpp's TomlNode storage, symbols, values and throws are the callbacks).
+mlnix_lower_trikeshed(NixEval lowered/nixeval/TomlTables.mlir TomlTables)
 # The higher-order list primops __concatLists / __concatMap / __filter / __any / __all / __elem (their C++ loops are
 # gone).  concatLists/concatMap are trikeshed.combineAll of the inner lists' cells, filter a trikeshed.where; any/all/elem
 # short-circuit in an scf.while.  Each Nix function application calls back into the evaluator.
