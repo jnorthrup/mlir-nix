@@ -71,12 +71,13 @@ func.func @nixev_ts_concatLists(%st: !llvm.ptr, %list: !llvm.ptr, %v: !llvm.ptr,
   %ss = builtin.unrealized_conversion_cast %mm : !m to !s
   %n = trikeshed.size %ss : !s
   %c1 = arith.constant 1 : i64
+  // the out-slots, at the entry block (an alloca inside the combineAll region is a dynamic alloca per part)
+  %oe = llvm.alloca %c1 x !llvm.ptr : (i64) -> !llvm.ptr
+  %on = llvm.alloca %c1 x i64 : (i64) -> !llvm.ptr
   %all, %co = trikeshed.combineAll %n : !s, !coords {
   ^bb0(%k: index):
     %x = trikeshed.at %ss[%k] : !s, index -> i64
     %xp = llvm.inttoptr %x : i64 to !llvm.ptr
-    %oe = llvm.alloca %c1 x !llvm.ptr : (i64) -> !llvm.ptr
-    %on = llvm.alloca %c1 x i64 : (i64) -> !llvm.ptr
     func.call @nixev_concat_part(%st, %xp, %pos, %oe, %on) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr) -> ()
     %p = llvm.load %oe : !llvm.ptr -> !llvm.ptr
     %l = llvm.load %on : !llvm.ptr -> i64
@@ -104,13 +105,14 @@ func.func @nixev_ts_concatMap(%st: !llvm.ptr, %list: !llvm.ptr, %v: !llvm.ptr, %
   %ss = builtin.unrealized_conversion_cast %mm : !m to !s
   %n = trikeshed.size %ss : !s
   %c1 = arith.constant 1 : i64
+  // the out-slots, at the entry block (see nixev_ts_concatLists)
+  %oe = llvm.alloca %c1 x !llvm.ptr : (i64) -> !llvm.ptr
+  %on = llvm.alloca %c1 x i64 : (i64) -> !llvm.ptr
   %all, %co = trikeshed.combineAll %n : !s, !coords {
   ^bb0(%k: index):
     %k64 = arith.index_cast %k : index to i64
     %x = trikeshed.at %ss[%k] : !s, index -> i64
     %xp = llvm.inttoptr %x : i64 to !llvm.ptr
-    %oe = llvm.alloca %c1 x !llvm.ptr : (i64) -> !llvm.ptr
-    %on = llvm.alloca %c1 x i64 : (i64) -> !llvm.ptr
     func.call @nixev_concatmap_part(%cm, %k64, %xp, %oe, %on) : (!llvm.ptr, i64, !llvm.ptr, !llvm.ptr, !llvm.ptr) -> ()
     %p = llvm.load %oe : !llvm.ptr -> !llvm.ptr
     %l = llvm.load %on : !llvm.ptr -> i64
