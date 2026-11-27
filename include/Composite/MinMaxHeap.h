@@ -80,7 +80,7 @@ template <class Row, class F> void mmxEmit(void *ctx, const void *row) { (*stati
 /// The caller must not push when full or read/pop when empty.
 template <class Row, unsigned N>
 struct MinMaxHeap {
-  static_assert((N & (N + 1)) == 0, "N is one less than a power of two (level-clean)");
+  static_assert((N & (N + 1)) == 0 && N <= 256, "N is one less than a power of two, at most 255 (the sift walks the index table of 256)");
   static_assert(plainData<Row>, "a row crosses into ClusterOps.mlir as its bytes");
   MutableSeries<Row, Inline<Row, N>> a;  // the rows in heap order: an inline body, no heap
 
@@ -129,6 +129,7 @@ struct Pegs {
 /// key order, one popMin a row.
 template <class Row, unsigned N, unsigned P>
 struct Cluster {
+  static_assert(N + P <= 256, "a cluster's rows index the table of 256 (its drain and its pegs' argMin)");
   MinMaxHeap<Row, N> heap;
   Pegs<Row, P> pegs;
 
