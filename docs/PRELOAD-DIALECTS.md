@@ -12,7 +12,7 @@ sumo-to-kif and trikeshed-lower-clusters (which starts in trikeshed).
 |---|---|---|---|
 | nix (NixBase.td, NixOps.td) | the language, 29 ops | one opaque `!nix.value` for every value | attrs = `Join<CSeries<Symbol>, Series<Value>>` (sorted rows), list = `Series<Value>`, string = `Join<CharSeries, context>`, `//` = `!trikeshed.layers` + `trikeshed.resolve` |
 | nix syntax (NixSyntax.td) | the parser's forms, 4 ops | spans held as attributes | a token's span is `!trikeshed.twinpacked` (TwInt), a source is a CharSeries |
-| son (Son.td) | the demand schedule: pool, body, defer | the pool is its own region kind | a row of the pool is `trikeshed.append`, its first force `trikeshed.anchor` (named in 1547e4a as not built) |
+| son (Son.td) | the demand schedule: pool, body, defer | the pool is its own region kind | a row of the pool is `trikeshed.append`, its first force `trikeshed.anchor` (named in 1547e4a as not built; the two ops lower since 27 November, over `!trikeshed.lane`, and the pool does not write them yet) |
 | confix (Confix.td) | TrikeShed's scanner over LLVM IR | lowers straight to LLVM; the index is a C struct | the index is PRELOAD's `JsElement = Join<Twin<Int>, Series<Int>>`: twin + series in, LLVM below trikeshed |
 | kif (Kif.td) | terms and theories | `kif.list` is its own list | `Series<Term>`; a theory's facts are a Cursor |
 | sumo (Sumo.td) | subclass, instance, domain, range, holds | lowers to kif, then to nix strings | each relation is a Cursor of rows (child, parent), (relation, position, class); kif-to-nix makes text the gate, not the carrier |

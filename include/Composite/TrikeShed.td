@@ -24,7 +24,8 @@
 //                      sortedWith, compareTo       sorted, compare
 //   lib/ReifiedSplitSeries2.kt   split            !trikeshed.split<A, B>       reify, splitSelect, take
 //   lib/Either.kt      Either<L,R>                !trikeshed.either<L, R>      eitherLeft, eitherRight, eitherFold
-//   lib/MutableSeries.kt, cursor/Cursor.kt       !trikeshed.cursor<schema, [columns]>  append, anchor, drain
+//   cursor/Cursor.kt                              !trikeshed.cursor<schema, [columns]>  column, facet
+//   collections/MutableSeries.kt, cas/CursorTrie.kt   !trikeshed.lane<columns>          lane, append, anchor, drain
 //
 // A Join of fixed-width scalars is ONE integer (Pack.h: Twin<i32> is an i64, Join<i32, Twin<i32>> an i96), so those
 // types are declared with their layout in the description and their C++ representation in Pack.h.  The Kotlin literals
@@ -169,6 +170,36 @@ def TS_CursorType : TS_Type<"Cursor", "cursor"> {
   }];
 }
 
+def TS_LaneType : TS_Type<"Lane", "lane"> {
+  let summary = "a MutableSeries as LaneTrie keeps one: columns of rows in pages that never move, and one published count";
+  let parameters = (ins ArrayRefParameter<"::mlir::Type">:$columns);
+  let assemblyFormat = "`<` $columns `>`";
+  let description = [{
+    collections/MutableSeries.kt's series that takes appends, in the shape cas/CursorTrie.kt's LaneTrie gives a relation's
+    rows: fixed-width rows in fixed pages, found through a directory that is replaced whole when a page opens past its
+    end, and a count published after the row it covers.  So a row never moves, an append copies nothing but, now and
+    then, the directory, and a read below the count needs nothing else.  `!trikeshed.lane<i64>` is a MutableSeries of
+    i64; `!trikeshed.lane<i32, i8>` a cursor's rows while they are filled, the columns sharing the one count (Series.h
+    `Cursor::append`).  Mutable.h's `Chunked` body is the same shape in C++.
+
+    The lane is the fill: `trikeshed.lane` makes an empty one, `trikeshed.append` adds a row and gives its index,
+    `trikeshed.drain` of a series into it adds the series' rows a page's run at a time, `trikeshed.size` and
+    `trikeshed.at` read it as it is now, `trikeshed.take` is one column of it (a lane over the same count),
+    `trikeshed.anchor` mints a cell once.  `trikeshed.drain` of it is where the fill stops: the pages copied into one
+    buffer of exactly the count, a `!trikeshed.series` that every other op reads unchanged.
+
+    Lowered (trikeshed-lower-cursors) a lane is cells of its own, never a series' or a cursor's buffers: the count, and
+    for each column the directory of its pages.  A page holds at most 16 KiB (LaneTrie's TRIE_PAGE) and at most 4096
+    rows, a power of two of them, so that a row's page and its place there are a shift and a mask: 4096 rows of one to
+    four bytes, 2048 of eight (a lane of a few bytes does not take 16 KiB for them).  The lane lives in the frame of the
+    function that makes it, its count, its first directories and the first page of each column there (so a fill of up
+    to a page allocates nothing, and a lane costs its maker's frame a page a column: it is made where a fill begins,
+    not in a function that recurses), and its other pages go back when that function returns: it is handed down to
+    the functions that fill and read it, and never returned.  size and at read what an append or an anchor changes: two of them either
+    side of one are two reads (their memory effect says so; of a series they have none).
+  }];
+}
+
 def TS_EitherType : TS_Type<"Either", "either"> {
   let summary = "Either<L, R>: one side of two, and the fold over it";
   let parameters = (ins "::mlir::Type":$left, "::mlir::Type":$right);
@@ -250,26 +281,34 @@ def TS_TextOp : TS_Op<"text", [Pure]> {
   }];
 }
 
-def TS_SizeOp : TS_Op<"size", [Pure]> {
+// A MutableSeries IS a Series (MutableSeries.kt), so what reads a series' rows reads a lane's of one column as they are now.
+// Of a series that is pure; of a lane it is a read of what an append or an anchor changes (TrikeShedDialect.cpp), so two
+// of them either side of an append stay two.
+def TS_Rows : AnyTypeOf<[TS_SeriesType, TS_LaneType], "a series or a lane">;
+defvar TS_ReadsRows = [AlwaysSpeculatable, DeclareOpInterfaceMethods<MemoryEffectsOpInterface>];
+
+def TS_SizeOp : TS_Op<"size", TS_ReadsRows> {
   let summary = "the `a` of a series";
-  let arguments = (ins TS_SeriesType:$series);
+  let arguments = (ins TS_Rows:$series);
   let results = (outs Index:$size);
   let assemblyFormat = "$series attr-dict `:` type($series)";
   let description = [{
     Laws: size(n j f) = n; size(xs α g) = size(xs); size(joins(a, b)) = size(a); size(combine(a, b)) =
-    size(a) + size(b); size(xs[r]) = r.count; size(xs[idx]) = size(idx).
+    size(a) + size(b); size(xs[r]) = r.count; size(xs[idx]) = size(idx).  A lane's is its published count: the rows
+    an append has finished.
   }];
 }
 
-def TS_AtOp : TS_Op<"at", [Pure]> {
+def TS_AtOp : TS_Op<"at", TS_ReadsRows> {
   let summary = "element k: the oracle applied to k";
-  let arguments = (ins TS_SeriesType:$series, AnyType:$index);
+  let arguments = (ins TS_Rows:$series, AnyType:$index);
   let results = (outs AnyType:$element);
   let assemblyFormat = "$series `[` $index `]` attr-dict `:` type($series) `,` type($index) `->` type($element)";
   let description = [{
     Laws: at(n j f, i) = f(i); at(xs α g, i) = g(at(xs, i)); at(joins(a, b), i) = at(a, i) j at(b, i);
     at(xs[r], i) = at(xs, r.first + i); at(select(a, b, sel), i) = at(sel[i].second ? b : a, sel[i].first).
-    No bounds check: the index belongs to whoever built the series.
+    No bounds check: the index belongs to whoever built the series.  Of a lane of one column: at(l, append(l, x)) = x,
+    and the row stays where it is whatever is appended after it.
   }];
 }
 
@@ -394,13 +433,26 @@ def TS_CombineAllOp : TS_Op<"combineAll", [Pure]> {
 
 def TS_DrainOp : TS_Op<"drain"> {
   let summary = "copy a series into cells, part by part; the end of what was written";
-  let arguments = (ins TS_SeriesType:$series, AnyType:$into);
+  let arguments = (ins TS_Rows:$series, Optional<AnyType>:$into);
   let results = (outs AnyType:$end);
-  let assemblyFormat = "$series `,` $into attr-dict `:` type($series) `,` type($into) `->` type($end)";
+  let assemblyFormat = "$series (`,` $into^)? attr-dict `:` type($series) (`,` type($into)^)? `->` type($end)";
   let description = [{
     Series.h `drain`.  Where a lazy composition stops and cells begin: the drain of a combine or a combineAll is the
     drains of their parts, each where the one before ended, and a series of the cells' type is stored element by
     element, so no view between them and the cells is ever a buffer.
+
+    A lane of one column drains the same way, its pages one after the other.  With no cells given the drain makes
+    them: one buffer of exactly size(lane) rows, and the result is the `!trikeshed.series` over it (MutableSeries.kt's
+    `snapshot()`: an append after it does not reach it).  That is the end of a fill: sorted, bisect, where, fold,
+    slice and combine read the drained series as they read any other.
+
+    The cells may be a lane's: `drain %xs, %lane` (a lane of one column of xs's element) makes xs's rows the lane's
+    next rows, in order, and gives the lane's size after them (Mutable.h `appendAll`: text written in pieces).  The
+    rows are copied a page's run at a time, a page opened where a run begins one, and the count is published once,
+    after them all.  A combine or a combineAll drains into a lane as into cells, its parts in turn, and its region
+    runs once: a lane is not sized ahead, so nothing is added up first.
+    Laws: drain(xs, l) = size(l) before it + size(xs); at(l, n + i) = at(xs, i) for the n it was before;
+    drain(combine(a, b), l) = drain(a, l) then drain(b, l).
   }];
 }
 
@@ -647,37 +699,57 @@ def TS_SplitSelectOp : TS_Op<"splitSelect", [Pure]> {
 }
 
 def TS_TakeOp : TS_Op<"take", [Pure]> {
-  let summary = "one column of a split or a cursor, by column index";
+  let summary = "one column of a split, a cursor or a lane, by column index";
   let arguments = (ins AnyType:$of, Index:$column);
   let results = (outs AnyType:$value);
   let assemblyFormat = "$of `[` $column `]` attr-dict `:` type($of) `->` type($value)";
-  let description = [{ ReifiedSplitSeries2's `valueAt` / `rightAt`: one array load, no Join. }];
+  let description = [{
+    ReifiedSplitSeries2's `valueAt` / `rightAt`: one array load, no Join.  Of a lane (by a constant index): that
+    column as a lane of one column over the same rows and the same count, to read (size, at, drain) and to anchor in.
+    A row is appended to the whole lane, never to a column of it: the count is the row's in every column.
+  }];
 }
 
 //===----------------------------------------------------------------------===//
 // MutableSeries, ↺, Either
 //===----------------------------------------------------------------------===//
 
+def TS_LaneOp : TS_Op<"lane"> {
+  let summary = "an empty lane: the MutableSeries a fill appends to";
+  let results = (outs TS_LaneType:$lane);
+  let assemblyFormat = "attr-dict `:` type($lane)";
+  let description = [{
+    MutableSeries.kt's `mutableSeriesOf()` with LaneTrie's storage (`!trikeshed.lane`): no row.  It stands in the
+    entry block of its function: the lane lives until that function returns, when the pages it took go back (Kotlin's
+    `use { }` over the appender).  Law: size(lane) = 0.
+  }];
+}
+
 def TS_AppendOp : TS_Op<"append"> {
   let summary = "accumulate one row; the result is its index, the `b` of whatever refers back to it";
-  let arguments = (ins AnyType:$cursor, Variadic<AnyType>:$cells);
+  let arguments = (ins TS_LaneType:$lane, Variadic<AnyType>:$cells);
   let results = (outs Index:$row);
-  let assemblyFormat = "$cursor `,` $cells attr-dict `:` type($cursor) `,` type($cells) `->` type($row)";
+  let assemblyFormat = "$lane `,` $cells attr-dict `:` type($lane) `,` type($cells) `->` type($row)";
   let description = [{
-    Series.h `MutableSeries::append` / `Cursor::append`.  A list that is mutated says so in its type, and a pool an
-    index refers into is never renumbered: a drained cell stays a default cell.
+    Series.h `MutableSeries::append` / `Cursor::append`, and LaneTrie's `Appender.append`: one cell a column.  A list
+    that is mutated says so in its type, and a pool an index refers into is never renumbered: a drained cell stays a
+    default cell.  The row n = size(lane) is written into page n / perPage at n % perPage of each column (a page
+    opened where the row is the first of it), then n + 1 is published, and n is the result.
+    Laws: append(l, x) = size(l) before it; size(l) after it is one more; at(l, n) = x from then on.
   }];
 }
 
 def TS_AnchorOp : TS_Op<"anchor"> {
   let summary = "↺: the first force of a cell mints it; every read after is the constant it produced";
-  let arguments = (ins TS_CursorType:$cells, Index:$index);
+  let arguments = (ins TS_LaneType:$cells, Index:$index);
   let results = (outs AnyType:$constant);
   let regions = (region SizedRegion<1>:$mint);
   let assemblyFormat = "$cells `[` $index `]` attr-dict `:` type($cells) `->` type($constant) $mint";
   let description = [{
-    Series.h `anchor(cells, i, mint)`.  The cell is addressed by index again after the mint, because a mint may append
-    to the series it anchors in and an append moves the cells.
+    Series.h `anchor(cells, i, mint)`, over a lane of one integer column: a cell that was never forced is 0.  The
+    region is the mint (its argument, when it takes one, is the index); it runs only for a cell that is 0, and what it
+    yields is stored and is the result.  The cell is addressed by index again after the mint, because a mint may
+    append to the series it anchors in.
   }];
 }
 
