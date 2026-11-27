@@ -274,6 +274,17 @@ the form timed out, so all five stand open.
    nixev_json_grow, nixsa_room, nixstore_nar_room; 11 call sites), so even retiring every one, with its bridge's sizing,
    pays back some 25-40 lines of the lowering's 174.  G1's value is the MLIR's (the audit's 57 hand-spelled appends and 16
    anchors, single-pass writers, dense rows for G3c), not a C++ cut.
+   Finished (13:00): branch gap/lanes (05e5fb8 the lowering +205, 88a07e0 fromJSON on a lane -31; pushed, merges onto
+   master cleanly).  The lowering by piece: maker 35, anchor 26, append 22, page open and directory doubling 19, type
+   conversion 14, take 12, row placement 11, fill 11, constants 9, page runs 8, directory release 7, row copy 7, drain 7,
+   the series patterns' growth 11, size/at's memory effect 6.  The runtime alternative (cluster_order's pattern),
+   assessed, not built: cold paths as calls into an MLIR kernel save about 37 lines with no slowdown (+168), every lane
+   op a call saves about 100 (+105) but costs a JSON read 11-33% without a splice-and-inline step.  Neither reaches
+   zero; so G1 merges only on the user's word, or with cuts in its wave that pay for it.  Proof on the final tree:
+   mac-gates, confix-check's 17,021,769 cases plain and sanitized, 3 x 300,000 + 3 x 400,000 old/new cases, every
+   block freed once, LLVM 22's lane tests and 210,000 old/new cases, 3,657 fromJSON probes, 73 other modules lowered to
+   the same bytes; 697 mutants, 667 killed, 11 not built, 19 survivors (18 equivalent and tabled, one an out-of-bounds
+   write no answer showed, now killed by fencing each allocation); timing 0.94-0.98x of a8d3ae3 on five JSON workloads.
 2. **The scanners (G6).**  ConfixScan, LexScan, TomlScan and the readers are the largest bypass rows (confix_scan_nix
    944 non-dialect ops, lx_default 482, the TOML scan 204 + 115 + 74).  The standing rule: a scanner already merged is
    redone only on the user's word; regex goes only to combinators.  kursive2's lexer as a kursive grammar is proven
