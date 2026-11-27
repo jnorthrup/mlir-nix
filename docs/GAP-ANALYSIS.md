@@ -179,3 +179,14 @@ Each merge, `gap-census.py --seal` on the new master and `--diff` against the pr
   for its clang steps, the 16-byte swap is register moves and the phase is 4.7% faster than the llvm port (min of 15
   interleaved runs; 12.7% fewer instructions retired).  Linux (LLVM 22, 5df9b19): mlir 52/0, lang 488/488 exact 231 on
   both schedules, prims 121, mlnixci 51 PASS, son wrong 0, the Composite checks plain and sanitized.
+- wave 1 part 3 (2026-11-27, sweval 4677d80 + swstore 4964860; C++ +0).  The nixeval bypass walks (xw_value,
+  ceq_attrs_eq, nixev_ts_replace, nixev_ts_concat_parts, nixev_ts_flake_unparse) read their records with trikeshed.at
+  over word views made once per record (xw_value 33 -> 9 llvm ops, ceq_attrs_eq 29 -> 8, concat_parts 25 -> 1); MD5's
+  and SHA-1's update read the context through one view and buffer as head / whole blocks / tail, as Sha512.mlir does;
+  nixfe_ts_strip's measuring pass is one fold a literal part (it now counts as a scalar core; its second pass is still
+  llvm).  Repository dialect ops 12.9% -> 13.2%, llvm 12.5% -> 12.0%; bypass 60 -> 54 functions, 6,173 -> 5,696 ops.
+  Proof: object harnesses with recording stubs, each catching a seeded mutant (ceq 400k, XmlWalk 502k, replace 120k,
+  concat 320k with 73k throws, flake 320k; MD5/SHA-1 2.2M with guard pages; strip 2.0M), 7,566 old/new mlnix probes,
+  mlnix-parse over 39,646 nixpkgs files identical.  Time: instructions retired on the bench workloads -0.17%
+  (nixos-toplevel) and -0.20% (nixpkgs-73), outputs identical (scripts/instr-ab.sh).  Left: narw_node and narr_node
+  (they need a callback-order harness first) and nixstore_ts_samecontent (a walk that stops at its first mismatch).
