@@ -1,7 +1,32 @@
-// The store's index (lib/Store/LocalStore.cpp): `<stateDir>/info.trie`, the info directory's entries as a trie CAS in
-// TrikeShed's shape (cas/CursorTrie.kt, HashTrie): rows keyed by the hash part, a byte of fan-out a level, an open leaf
-// filled by append and sealed, sorted, as one page of 1,024 rows (16 KiB of them), the heap store's page
-// (docs/BTRFS-COMPRESSOR.md): sorted rows emitted as deltas, kept as they are when that is not shorter.
+// The local store's index (lib/Store/LocalStore.cpp calls it): `<stateDir>/info.trie`, the entries of the info
+// directory as a trie CAS in TrikeShed's shape (cas/CursorTrie.kt: HashTrie's rows by a digest's leading bytes, LaneTrie's
+// relation) with the heap store's page (docs/BTRFS-COMPRESSOR.md).  The info files stay what they are, the store's
+// truth and what an older mlnix reads and writes; the index is derived from them, says which state of the directory it
+// speaks for, and answers only for that state.
+//
+//   the calls       nixsi_info      a path's info text when the index holds the directory as it is: no lock, no file
+//                                   opened (else the store reads the file, as it always did)
+//                   nixsi_names     every entry's name in byte order (allValidPaths), or the names whose info may refer
+//                                   to a path (queryReferrers reads those and no other)
+//                   nixsi_register  an info file written (through `.tmp`, renamed), the index told
+//                   nixsi_unlink    an info file removed, the index told
+//   two relations   the paths: a row is (the key of an entry's name, its record), struck out by a later row; the
+//                   references: a row is (the key of a reference's name, the referring record).  HashTrie's put and
+//                   get: down by the key's bytes, open leaves filled by append, a full leaf sealed under a node
+//   a key           the first 64 bits of the name's hash part (13 nix32 digits, each its place in the alphabet)
+//   a record        an entry's name, its identity (the file's number, with its time where a number is given again)
+//                   and its info text as the file has it
+//   a page          a full leaf (1,024 rows, 16 KiB) sealed: sorted, each row its step from the one before (two
+//                   varints), a restart every 16 rows and the table of the restarts; the rows as they are when that
+//                   is not shorter
+//   the token       the directory's state as one word (what fstat says of it); written after a pass over the
+//                   directory that it did not change under.  The index is read for a directory with that token only
+//   sums            a record, a leaf, a page, a node and the first words each carry the sum of what they hold and are
+//                   summed before they are believed
+// The system's words (where a directory entry's name is, how a file is opened, which file systems are trusted, this
+// boot's name) are StoreIndexDarwin.mlir.in and StoreIndexLinux.mlir.  scripts/store-index-check.sh proves the pages,
+// the index against the directory under damage and killed writers, and the system's words.
+//
 // The pages' algebra (this part of the file):
 //
 //   nixsi_page_seal   a fill (a leaf's rows, in the order they came) drained once, sorted, into its page
@@ -733,7 +758,8 @@ func.func @nixsi_page_find(%page: !llvm.ptr, %avail: i64, %key: i64, %out: !llvm
 // The index is one file, `<stateDir>/info.trie` (beside the info directory it is derived from), mapped whole and shared:
 // 32 words, then a heap that only grows.  The words: 0 the magic, 1 the heap's end, 2 the token (the info directory's
 // state the index holds, 0 when no pass has read the directory since it changed), 3 and 4 the roots (the paths, the
-// references), 5 the paths in the directory, 6 and 7 the rows put (paths, references), 8 the rows struck out.
+// references), 5 the paths in the directory, 6 and 7 the rows put (paths, references), 8 the rows struck out, 9 this
+// boot's name, 15 the sum of words 0 to 14.
 // A blob of the heap begins with a word whose low byte is its kind:
 //   1 a record   1 | flags << 8 | name bytes << 16 | text bytes << 32; the entry's identity; the sum; the name, the
 //                text (an info file as it is), zeros to a word.  flags: 1 listed (a valid path's: 34 bytes of name at
@@ -741,25 +767,47 @@ func.func @nixsi_page_find(%page: !llvm.ptr, %avail: i64, %key: i64, %out: !llvm
 //                writes one, or there is none to read)
 //   2 a leaf     2 | relation << 8 | room in rows << 32; rows | their running sum << 32; the rows as they came
 //   3 a page     a sealed leaf (above)
-//   4 a node     4 | relation << 8; its page; 256 children (a leaf or a node each, 0 while none)
+//   4 a node     4 | relation << 8 | the sum of its other words << 16; its page; 256 children (a leaf or a node each,
+//                0 while none; a child lies after its node in the heap, so every way down ends)
 // A relation is HashTrie's: a row goes down from the root by the bytes of its key, to a leaf, which it is appended to; a
 // leaf of 1,024 rows is sealed as a page under a node that takes its place, and later rows of its prefix go to the node's
 // children (past the key's eight bytes, to the one child a chain goes on by).  A leaf begins with room for 16 rows and
 // is copied fourfold when full, so a small index is small.  A key's rows are in every page on its way down (a bisect
 // each) and in the leaf the way ends at (a scan).
 // The paths: a row (key of the entry's name, its record), struck out by a row (the key, the record | 1).  The references:
-// a row (key of the reference's name, the referring record), one row under the key of all (-1) for a record not held.
+// a row (key of the reference's name, the referring record), one row under the key of all (-1) for a record not held:
+// every query of referrers gets it, and the store reads its file and fails or answers as it did before the index.
 // A record no row of the paths names any more is passed over wherever it is met.
-// What is written is linked last and the token after everything, so a writer that dies leaves an index that is sound
-// and knows it has not read the directory; a blob is checked (its place, its lengths, its sum) before it is believed,
-// and an index that is not sound is begun again from the files.
+//
+// What the index is trusted with, and why:
+//   a writer that dies    what is written is linked last and the token after everything, so the index it leaves either
+//                         reads back whole or fails a sum; a blob is checked (its place, its lengths, its sum) before
+//                         it is believed, and an index that is not sound is begun again from the files
+//   the system stopping   the file is written through the mapping and never forced to the disk, so what was written
+//                         before the system last started may be there in part: word 9 is the boot's name, and an index
+//                         of another boot is begun again (one reading of the info files a boot)
+//   two processes         whoever lists or changes takes the file's lock (flock; a list of referrers too: it may have
+//                         to mend the index).  nixsi_info takes none: it copies what it gives and sums the copy
+//   an older mlnix        takes no lock and knows no index: its changes change the directory's token.  A change this
+//                         process makes (a register, an unlink) clears the token even though the index is told of it,
+//                         because an older mlnix may have changed the directory in the same moment and a directory's
+//                         time does not count changes; the next list makes a pass (the directory read, every entry
+//                         matched with its row by name and identity, no file opened that was read before)
+//   the file system       the file is kept only where the system says the directory's file system is a local one that
+//                         tells its changes (nixsi_os_local).  Anywhere else a process answers from an index of its
+//                         own that it begins again for every query, reading the files as the old code did; where the
+//                         file system is trusted but the file cannot be made, written or locked, the process's own
+//                         index lasts as long as the process and follows the directory's token as the file would
+//   the directory's time  set one nanosecond back before a pass (a time no later change gives it); where it cannot
+//                         be set the token is held only once the directory is three seconds old
 
 // the handle of this process: 0 the image, 1 its kind (0 none, 1 the file, 2 the file read-only, 3 this process's own),
 // 2 the file, 3 the info directory, 4 the file's bytes, 5 the directory path's bytes, 6 a directory is in hand, 7 the
 // lock held (1 shared, 2 alone), 8 the entries a pass has seen, 9 the file as it was when last locked (its length and
 // time), 10 this boot (0 not asked yet, 1 not known), 11 what the directory's file system is trusted with (0 nothing:
-// no index is kept beside it; 1 an entry's number and time; 2 its number alone), 12 the last stamp held; from 16 the
-// rooms' pointers and bytes (two words a room).  The handle is the store's thread's alone, as the store is.
+// no index is kept beside it; 1 an entry's number and time; 2 its number alone), 12 the last stamp held, 13 the
+// directory was looked for; from 16 the rooms' pointers and bytes (two words a room).  The handle is the store's
+// thread's alone, as the store is.
 memref.global "private" @nxsi_h : memref<40xi64> = dense<0>
 memref.global "private" constant @nxsi_zero : memref<32xi64> = dense<0>
 // the code of a byte in a key: its place in nix32's alphabet, the low 5 bits of any other byte
@@ -3752,21 +3800,101 @@ func.func private @nxsi_emit(%offs: !llvm.ptr, %n: i64, %ctx: !llvm.ptr, %ctx2: 
 // The store's calls (lib/Store/LocalStore.cpp); f is a path's info file, `<stateDir>/info/<name>`
 //===----------------------------------------------------------------------===//
 
+// The text of the record at x, when the record reads back whole, holds its text and has the name asked for: the record's
+// name and text copied into room 4 and summed there (what is given is what was checked, whatever another process
+// writes meanwhile).  The text's bytes, at *out; -1 when the record does not answer.
+func.func private @nxsi_take(%x: i64, %np: !llvm.ptr, %nn: i64, %out: !llvm.ptr) -> i64 {
+  %c0 = arith.constant 0 : i64
+  %c1 = arith.constant 1 : i64
+  %c2 = arith.constant 2 : i64
+  %c3 = arith.constant 3 : i64
+  %c4 = arith.constant 4 : i64
+  %c7 = arith.constant 7 : i64
+  %c8 = arith.constant 8 : i64
+  %c16 = arith.constant 16 : i64
+  %c24 = arith.constant 24 : i64
+  %c32 = arith.constant 32 : i64
+  %c255 = arith.constant 255 : i64
+  %c65535 = arith.constant 65535 : i64
+  %cm8 = arith.constant -8 : i64
+  %m1 = arith.constant -1 : i64
+  %z32 = arith.constant 0 : i32
+  %z = arith.constant 0 : index
+  %t = func.call @nxsi_tag(%x) : (i64) -> i64
+  %kind = arith.andi %t, %c255 : i64
+  %fl = arith.shrui %t, %c8 : i64
+  %nh = arith.andi %fl, %c2 : i64
+  %nl0 = arith.shrui %t, %c16 : i64
+  %nl = arith.andi %nl0, %c65535 : i64
+  %tl = arith.shrui %t, %c32 : i64
+  %by0 = arith.addi %nl, %tl : i64
+  %by1 = arith.addi %by0, %c7 : i64
+  %body = arith.andi %by1, %cm8 : i64
+  %end = func.call @nxsi_w(%c8) : (i64) -> i64
+  %x24 = arith.addi %x, %c24 : i64
+  %past = arith.addi %x24, %body : i64
+  %isrec = arith.cmpi eq, %kind, %c1 : i64
+  %kept = arith.cmpi eq, %nh, %c0 : i64
+  %fits = arith.cmpi sle, %past, %end : i64
+  %named = arith.cmpi eq, %nl, %nn : i64
+  %a = arith.andi %isrec, %kept : i1
+  %b = arith.andi %a, %fits : i1
+  %may = arith.andi %b, %named : i1
+  %r = scf.if %may -> (i64) {
+    %x8 = arith.addi %x, %c8 : i64
+    %x16 = arith.addi %x, %c16 : i64
+    %id = func.call @nxsi_w(%x8) : (i64) -> i64
+    %stamp = func.call @nxsi_w(%x16) : (i64) -> i64
+    %ob = arith.addi %body, %c8 : i64
+    %op = func.call @nxsi_buf(%c4, %ob) : (i64, i64) -> !llvm.ptr
+    %sp = func.call @nxsi_p(%x24) : (i64) -> !llvm.ptr
+    %sd = func.call @nxsi_d(%sp, %body) : (!llvm.ptr, i64) -> !d
+    %sm = builtin.unrealized_conversion_cast %sd : !d to !m
+    %src = builtin.unrealized_conversion_cast %sm : !m to !s
+    %dd = func.call @nxsi_d(%op, %body) : (!llvm.ptr, i64) -> !d
+    %dm = builtin.unrealized_conversion_cast %dd : !d to !m
+    %e = trikeshed.drain %src, %dm : !s, !m -> index
+    %seed = arith.xori %t, %id : i64
+    %bw = arith.shrui %body, %c3 : i64
+    %got = func.call @nxsi_sum(%op, %bw, %seed) : (!llvm.ptr, i64, i64) -> i64
+    %whole = arith.cmpi eq, %got, %stamp : i64
+    %copy = builtin.unrealized_conversion_cast %dm : !m to !s
+    %nli = arith.index_cast %nl : i64 to index
+    %mine = trikeshed.slice %copy[%z, %nli] : !s -> !s
+    %nd = func.call @nxsi_d(%np, %nn) : (!llvm.ptr, i64) -> !d
+    %nm = builtin.unrealized_conversion_cast %nd : !d to !m
+    %name = builtin.unrealized_conversion_cast %nm : !m to !s
+    %cmp = trikeshed.compare %mine, %name unsigned : !s, !s
+    %same = arith.cmpi eq, %cmp, %z32 : i32
+    %ok = arith.andi %whole, %same : i1
+    %tp = llvm.getelementptr %op[%nl] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+    scf.if %ok {
+      llvm.store %tp, %out : !llvm.ptr, !llvm.ptr
+    }
+    %rr = arith.select %ok, %tl, %m1 : i64
+    scf.yield %rr : i64
+  } else {
+    scf.yield %m1 : i64
+  }
+  return %r : i64
+}
+
 // queryPathInfo: the info text the index holds for f's name, a copy the next call may overwrite, at *out; its bytes, or
 // -1 when the index does not answer (there is none, it has not read the directory as it is now, it holds no record of
-// the name or does not hold the record's text): the store then reads the file, as before.  Never makes or mends an index.
+// the name or does not hold the record's text): the store then reads the file, as before.  Never makes or mends an
+// index, and takes no lock: the index is read as it stands (HashTrie's readers take none either), what it gives is
+// checked after it is copied (nxsi_take), and anything a writer was in the middle of reads as no answer.
 func.func @nixsi_info(%f: !llvm.ptr, %out: !llvm.ptr) -> i64 {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
   %c2 = arith.constant 2 : i64
+  %c3 = arith.constant 3 : i64
   %c4 = arith.constant 4 : i64
   %c8 = arith.constant 8 : i64
   %c11 = arith.constant 11 : i64
-  %c16 = arith.constant 16 : i64
-  %c24 = arith.constant 24 : i64
-  %c32 = arith.constant 32 : i64
-  %c65535 = arith.constant 65535 : i64
+  %c256 = arith.constant 256 : i64
   %m1 = arith.constant -1 : i64
+  %end32 = arith.constant 2 : i32
   %start = func.call @nxsi_use(%f, %c0) : (!llvm.ptr, i64) -> i64
   %kind = func.call @nxsi_hg(%c1) : (i64) -> i64
   %pol = func.call @nxsi_hg(%c11) : (i64) -> i64
@@ -3776,13 +3904,27 @@ func.func @nixsi_info(%f: !llvm.ptr, %out: !llvm.ptr) -> i64 {
   %r = scf.if %skip -> (i64) {
     scf.yield %m1 : i64
   } else {
-    %locked = func.call @nxsi_lock(%c1) : (i64) -> i1
-    %fresh = scf.if %locked -> (i1) {
-      %fr = func.call @nxsi_fresh() : () -> i1
-      scf.yield %fr : i1
+    // the file's length, asked again when it is not known to hold the first words or the heap the first words tell of
+    %own = arith.cmpi eq, %kind, %c3 : i64
+    %size0 = func.call @nxsi_hg(%c4) : (i64) -> i64
+    %has0 = arith.cmpi sge, %size0, %c256 : i64
+    %end0 = scf.if %has0 -> (i64) {
+      %e0 = func.call @nxsi_w(%c8) : (i64) -> i64
+      scf.yield %e0 : i64
     } else {
-      scf.yield %locked : i1
+      scf.yield %c256 : i64
     }
+    %behind = arith.cmpi sgt, %end0, %size0 : i64
+    %yes = arith.constant 1 : i1
+    %isfile = arith.xori %own, %yes : i1
+    %ask = arith.andi %behind, %isfile : i1
+    scf.if %ask {
+      %fd64 = func.call @nxsi_hg(%c2) : (i64) -> i64
+      %fd = arith.trunci %fd64 : i64 to i32
+      %size = func.call @lseek(%fd, %c0, %end32) : (i32, i64, i32) -> i64
+      func.call @nxsi_hs(%c4, %size) : (i64, i64) -> ()
+    }
+    %fresh = func.call @nxsi_fresh() : () -> i1
     %rr = scf.if %fresh -> (i64) {
       %n = func.call @strlen(%f) : (!llvm.ptr) -> i64
       %np = llvm.getelementptr %f[%start] : (!llvm.ptr, i64) -> !llvm.ptr, i8
@@ -3790,33 +3932,8 @@ func.func @nixsi_info(%f: !llvm.ptr, %out: !llvm.ptr) -> i64 {
       %x = func.call @nxsi_live(%np, %nn) : (!llvm.ptr, i64) -> i64
       %held = arith.cmpi sgt, %x, %c0 : i64
       %r1 = scf.if %held -> (i64) {
-        %t = func.call @nxsi_rec(%x) : (i64) -> i64
-        %fl = arith.shrui %t, %c8 : i64
-        %nh = arith.andi %fl, %c2 : i64
-        %isrec = arith.cmpi ne, %t, %c0 : i64
-        %kept = arith.cmpi eq, %nh, %c0 : i64
-        %give = arith.andi %isrec, %kept : i1
-        %r2 = scf.if %give -> (i64) {
-          %nl0 = arith.shrui %t, %c16 : i64
-          %nl = arith.andi %nl0, %c65535 : i64
-          %tl = arith.shrui %t, %c32 : i64
-          %ob = arith.addi %tl, %c8 : i64
-          %op = func.call @nxsi_buf(%c4, %ob) : (i64, i64) -> !llvm.ptr
-          %t0 = arith.addi %x, %c24 : i64
-          %t1 = arith.addi %t0, %nl : i64
-          %sp = func.call @nxsi_p(%t1) : (i64) -> !llvm.ptr
-          %sd = func.call @nxsi_d(%sp, %tl) : (!llvm.ptr, i64) -> !d
-          %sm = builtin.unrealized_conversion_cast %sd : !d to !m
-          %src = builtin.unrealized_conversion_cast %sm : !m to !s
-          %dd = func.call @nxsi_d(%op, %tl) : (!llvm.ptr, i64) -> !d
-          %dm = builtin.unrealized_conversion_cast %dd : !d to !m
-          %e = trikeshed.drain %src, %dm : !s, !m -> index
-          llvm.store %op, %out : !llvm.ptr, !llvm.ptr
-          scf.yield %tl : i64
-        } else {
-          scf.yield %m1 : i64
-        }
-        scf.yield %r2 : i64
+        %tl = func.call @nxsi_take(%x, %np, %nn, %out) : (i64, !llvm.ptr, i64, !llvm.ptr) -> i64
+        scf.yield %tl : i64
       } else {
         scf.yield %m1 : i64
       }
@@ -3824,7 +3941,6 @@ func.func @nixsi_info(%f: !llvm.ptr, %out: !llvm.ptr) -> i64 {
     } else {
       scf.yield %m1 : i64
     }
-    func.call @nxsi_unlock() : () -> ()
     scf.yield %rr : i64
   }
   return %r : i64

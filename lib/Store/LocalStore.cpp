@@ -32,7 +32,7 @@ namespace nixstore {
 
 // The store's graph and content algorithms are lowered/nixstore/StoreGraph.mlir (built into NixStore by lib/CMakeLists.txt): the set
 // algebra, computeFSClosure's worklist, collectGarbage's rounds, contentFingerprint (xxh3 too) and sameContent, and
-// queryPathInfo's lines; the builder's are BuilderOps.mlir, allValidPaths' order SortedRows.mlir.  What stays here hands the sorted sets over as windows and answers the callbacks, which read and write the store.
+// queryPathInfo's lines; the builder's are BuilderOps.mlir, the index of the info files StoreIndex.mlir.  What stays here hands the sorted sets over as windows and answers the callbacks, which read and write the store.
 namespace {
 struct GWin { const char *p; int64_t n; };
 template <class C> composite::MutableSeries<GWin> wins(const C &texts) {
@@ -89,16 +89,14 @@ bool Store::isValidPath(std::string_view path) {
 // The store's index is lowered/nixstore/StoreIndex.mlir: `<stateDir>/info.trie`, the info directory's entries as a trie keyed by the hash
 // part (and the references as a second relation, by the reference), derived from the info files, which stay as they are and are what an
 // older mlnix reads and writes.  Its calls take a path's info file; it answers only for the directory as it is when asked.
-extern "C" {
-int64_t nixstore_ts_infolines(const char *p, int64_t n, int64_t *recs); // {key 0-4, value offset, value length}, in line order
-/// The path's info text as the index holds it (or -1: the file is read); the file written through `infoFile.tmp` (0, 1 not made, 2 not written).
-int64_t nixsi_info(const char *infoFile, const char **text), nixsi_register(const char *infoFile, const char *text, int64_t n);
-/// Every entry's name in byte order, or (referring) those whose info may refer to the path, each given to nixsi_name; the info file's unlink.
-void nixsi_names(const char *infoFile, int64_t referring, Store *st, composite::MutableSeries<composite::Text> *res), nixsi_unlink(const char *infoFile);
-void nixsi_name(Store *st, composite::MutableSeries<composite::Text> *res, const char *p, int64_t n) { // a valid path when its store object is there
-  composite::Text path = st->settings.storeDir + "/" + std::string_view(p, size_t(n));
-  if (pathExists(st->toReal(path))) res->append(composite::mv(path));
-}
+extern "C" int64_t nixstore_ts_infolines(const char *p, int64_t n, int64_t *recs); // {key 0-4, value offset, value length}, in line order
+extern "C" int64_t nixsi_info(const char *infoFile, const char **text); // the path's info text as the index holds it, or -1: the file is read
+extern "C" int64_t nixsi_register(const char *infoFile, const char *text, int64_t n); // the file written through `infoFile.tmp`: 0, 1 not made, 2 not written
+extern "C" void nixsi_unlink(const char *infoFile);
+/// Every entry's name in byte order, or (referring) those whose info may refer to the path, each given to nixsi_name.
+extern "C" void nixsi_names(const char *infoFile, int64_t referring, Store *st, composite::MutableSeries<composite::Text> *res);
+extern "C" void nixsi_name(Store *st, composite::MutableSeries<composite::Text> *res, const char *p, int64_t n) { // a valid path when its store object is there
+  if (composite::Text path = st->settings.storeDir + "/" + std::string_view(p, size_t(n)); pathExists(st->toReal(path))) res->append(composite::mv(path));
 }
 composite::Maybe<PathInfo> Store::queryPathInfo(std::string_view path) {
   composite::Text f = infoFile(path), text;
@@ -134,17 +132,15 @@ void Store::registerValidPath(const PathInfo &info) {
     throw Error(composite::cat(rc == 1 ? "creating" : "writing", " file '", f, ".tmp': ", strerror(errno)));
 }
 
-composite::MutableSeries<composite::Text> Store::allValidPaths() {
+composite::MutableSeries<composite::Text> Store::allValidPaths(std::string_view referringTo) {
   composite::MutableSeries<composite::Text> res;
-  nixsi_names(infoFile("").c_str(), 0, this, &res);
+  nixsi_names(infoFile(referringTo).c_str(), !referringTo.empty(), this, &res);
   return res;
 }
 
 SortedSet Store::queryReferrers(std::string_view path) {
   SortedSet res;
-  composite::MutableSeries<composite::Text> may; // the paths whose info may refer to it, by the index
-  nixsi_names(infoFile(path).c_str(), 1, this, &may);
-  for (auto &p : may)
+  for (auto &p : allValidPaths(path))
     if (auto info = queryPathInfo(p))
       if (info->references.count(path)) res.insert(p);
   return res;

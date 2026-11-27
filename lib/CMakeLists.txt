@@ -261,8 +261,7 @@ endif()
 mlnix_lower_trikeshed(NixStore lowered/nixstore/BuilderOps.mlir BuilderOps)
 # Store.h's sorted rows (SortedSet, SortedMap<V>; the template keeps the storage, the append and the pop): the key's row
 # (the halving, trikeshed.compare unsigned on the keys) and the moves of an insert or an erase (a turn of rows [a, b): one
-# combine of two slices of the rows' bytes, drained through a room and back); allValidPaths' sort (the rows in their
-# keys' order, one combineAll of row slices drained through a room and back).
+# combine of two slices of the rows' bytes, drained through a room and back).  (allValidPaths' order is the index's.)
 mlnix_lower_trikeshed(NixStore lowered/nixstore/SortedRows.mlir SortedRows)
 # The crit-bit trie of include/Composite/Patricia.h (its algorithms are gone from the header; the template keeps the
 # storage, the value, copy and emit): the leaf walk, the key compare (trikeshed.compare), set's plan and link, prefix's

@@ -6,9 +6,6 @@
 //   nixstore_ts_rowrotate  rows [a, b) turned left by s: the rows from a + s on, then the s before them, one combine of
 //                          two slices of the rows' bytes drained into a room, the room drained back (an insert puts the
 //                          row it appended at its place, an erase moves its row to the end before the pop)
-//   nixstore_ts_rowsort    n rows put in their keys' order (trikeshed.sorted over the row indices, stable), then one
-//                          combineAll of the rows in that order drained into a room and the room drained back: each row
-//                          moves once (allValidPaths' paths)
 // Helper names are module-unique (nx_sr_*).
 !s = !trikeshed.series<i8>
 !s64 = !trikeshed.series<i64>
@@ -117,52 +114,6 @@ func.func @nixstore_ts_rowrotate(%rows: !llvm.ptr, %a: i64, %b: i64, %s: i64, %s
       %back = trikeshed.text %room : memref<?xi8> -> !s
       %e2 = trikeshed.drain %back, %wm : !s, !m -> index
     }
-  }
-  return
-}
-
-// n rows of stride bytes sorted by their keys, in place
-func.func @nixstore_ts_rowsort(%rows: !llvm.ptr, %n: i64, %stride: i64) {
-  %c1 = arith.constant 1 : i64
-  %c8 = arith.constant 8 : i64
-  %many = arith.cmpi sgt, %n, %c1 : i64
-  scf.if %many {
-    %ni = arith.index_cast %n : i64 to index
-    %bytes = arith.muli %n, %stride : i64
-    %wd = func.call @nx_sr_desc(%rows, %bytes) : (!llvm.ptr, i64) -> !d
-    %wm = builtin.unrealized_conversion_cast %wd : !d to !m
-    %w = builtin.unrealized_conversion_cast %wm : !m to !s
-    %idx = trikeshed.series %ni : !s64 {
-    ^bb0(%i: index):
-      %i64 = arith.index_cast %i : index to i64
-      trikeshed.yield %i64 : i64
-    }
-    %srt = trikeshed.sorted %idx : !s64 -> !s64 by {
-    ^bb0(%x: i64, %y: i64):
-      %off = arith.muli %y, %stride : i64
-      %r = llvm.getelementptr %rows[%off] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-      %p = llvm.load %r : !llvm.ptr -> !llvm.ptr
-      %np = llvm.getelementptr %r[%c8] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-      %n32 = llvm.load %np : !llvm.ptr -> i32
-      %yn = arith.extui %n32 : i32 to i64
-      %yd = func.call @nx_sr_desc(%p, %yn) : (!llvm.ptr, i64) -> !d
-      %c = func.call @nx_sr_cmp(%rows, %stride, %x, %yd) : (!llvm.ptr, i64, i64, !d) -> i32
-      trikeshed.yield %c : i32
-    }
-    %si = arith.index_cast %stride : i64 to index
-    %all, %where = trikeshed.combineAll %ni : !s, !trikeshed.series<!trikeshed.twinpacked<i32>> {
-    ^bb0(%k: index):
-      %e = trikeshed.at %srt[%k] : !s64, index -> i64
-      %ei = arith.index_cast %e : i64 to index
-      %at = arith.muli %ei, %si : index
-      %row = trikeshed.slice %w[%at, %si] : !s -> !s
-      trikeshed.yield %row : !s
-    }
-    %bi = arith.index_cast %bytes : i64 to index
-    %room = memref.alloc(%bi) : memref<?xi8>
-    %e1 = trikeshed.drain %all, %room : !s, memref<?xi8> -> index
-    %back = trikeshed.text %room : memref<?xi8> -> !s
-    %e2 = trikeshed.drain %back, %wm : !s, !m -> index
   }
   return
 }
