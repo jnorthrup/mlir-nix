@@ -18,7 +18,7 @@
 // RUN: mlnix-opt %s --trikeshed-lower-cursors | mlir-opt --ownership-based-buffer-deallocation --canonicalize --buffer-deallocation-simplification --bufferization-lower-deallocations --convert-scf-to-cf --expand-strided-metadata --lower-affine --finalize-memref-to-llvm --convert-arith-to-llvm --convert-index-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts | mlir-runner -e main -entry-point-result=void -shared-libs=$(ls $(dirname $(which mlir-runner))/../lib/libmlir_runner_utils.* | head -1) -shared-libs=$(ls $(dirname $(which mlir-runner))/../lib/libmlir_c_runner_utils.* | head -1) | FileCheck %s
 
 // ROUND: trikeshed.slice %{{.*}}[%{{.*}}, %{{.*}}] : <i32> -> <i32>
-// ROUND: trikeshed.at %{{.*}}[%{{.*}}] : <i32>, index -> i32
+// ROUND: trikeshed.at %{{.*}}[%{{.*}}] : !trikeshed.series<i32>, index -> i32
 // ROUND: trikeshed.combine %{{.*}}, %{{.*}}, %{{.*}} : !trikeshed.series<i32>, !trikeshed.series<i32>, !trikeshed.series<i32> -> <i32>
 //
 // the printed sequence: each show is its count, then its rows (none when there are none)

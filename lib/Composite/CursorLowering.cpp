@@ -38,6 +38,8 @@
 //   closure(parents, above)         ClosureIndex: two walks from each node over its parents (count, then write)
 //   joins, leftOf, rightOf, reify   a Series2 and a split as their two sides' buffers; zipnext, splitSelect and take
 //                                   rewritten by their laws into views, projects and ats (ReifiedSplitSeries2, below)
+//   !trikeshed.lane<T0..Tn>         a MutableSeries in LaneTrie's shape: one count, and a column's directory of pages that
+//   lane, append, anchor            never move; size, at, take and drain of one (MutableSeries.kt in LaneTrie's shape, below)
 //
 // Buffers are allocated and never freed here: run --ownership-based-buffer-deallocation after this pass.  A slice's offset
 // is an affine.apply once --expand-strided-metadata has run: run --lower-affine before --finalize-memref-to-llvm.  Casts the
@@ -281,6 +283,7 @@ struct FacetLowering : Lowering<FacetOp> {
 struct SizeLowering : Lowering<SizeOp> {
   using Lowering::Lowering;
   LogicalResult matchAndRewrite(SizeOp op, OneToNOpAdaptor a, ConversionPatternRewriter &rw) const override {
+    if (isa<LaneType>(op.getSeries().getType())) return failure(); // LaneSizeLowering's
     rw.replaceOp(op, length(rw, op.getLoc(), a.getSeries()[0]));
     return success();
   }
@@ -289,6 +292,7 @@ struct SizeLowering : Lowering<SizeOp> {
 struct AtLowering : Lowering<AtOp> {
   using Lowering::Lowering;
   LogicalResult matchAndRewrite(AtOp op, OneToNOpAdaptor a, ConversionPatternRewriter &rw) const override {
+    if (isa<LaneType>(op.getSeries().getType())) return failure(); // LaneAtLowering's
     if (a.getIndex().size() != 1) return rw.notifyMatchFailure(op, "an index is one value");
     replaceWith(rw, op, loadAll(rw, op.getLoc(), a.getSeries(), a.getIndex()[0]));
     return success();
@@ -948,7 +952,7 @@ void rewriteViews(func::FuncOp f, const TypeConverter &types) {
   for (;;) {
     SmallVector<Operation *> reads, views;
     f.walk([&](Operation *op) {
-      if (isa<SizeOp>(op) || (isa<DrainOp>(op) && isa<MemRefType>(op->getOperand(1).getType())))
+      if (isa<SizeOp>(op) || (isa<DrainOp>(op) && op->getNumOperands() == 2 && isa<MemRefType>(op->getOperand(1).getType())))
         if (isView(op->getOperand(0))) reads.push_back(op);
     });
     for (Operation *op : reads) {
@@ -1142,11 +1146,262 @@ void populateEitherLowering(CursorTypes &types, RewritePatternSet &patterns, Con
                EitherCastLowering>(types, patterns.getContext());
 }
 
+//===-- MutableSeries.kt in LaneTrie's shape: lanes ---------------------------------------------------------------===//
+// A lane (!trikeshed.lane<T0 .. Tk>) is a MutableSeries as cas/CursorTrie.kt's LaneTrie keeps a relation's rows: column c's
+// rows lie in pages of 2^s rows (laneShift) that never move, found through a directory that is replaced whole when a page
+// opens past its end, under one count published after the row it covers.  It lowers to cells of its own:
+//   the count               memref<1xindex>
+//   column c's box          memref<1 x memref<?x memref<2^s x Tc>>>: the one cell that holds the directory in force, whose
+//                           slots are the pages
+// trikeshed.lane makes them in its function's frame (allocas, a first directory of kLaneFrame slots beside each box), so an
+// empty lane allocates nothing.  Pages, and the directories past the frame's, are allocated with
+// bufferization.manual_deallocation (the deallocation pass cannot see a page through its directory, and leaves them
+// alone) and go back before each return of the function that made the lane.  A callee is handed these cells.  A lane over
+// cells another owner made (the count 0, a directory of no slots: all zero) is filled the same way and never closed here.
+//   append(l, x ..)     row n = the count: in each column a page opened where n is the first row of it (the pages open are
+//                       the ones the count needs: a lane only grows), x stored at n; then the count is n + 1; n
+//   size(l), at(l, i)   the count; the row at page i >> s, place i & (2^s - 1), through the directory in force
+//   take(l, c)          the count and column c's box: a lane of one column over the same rows
+//   anchor(l, i) {m}    the cell if it is not 0, else what m yields, stored at i (found again: m may have appended)
+//   drain(l [, into])   the rows below the count, page by page, into `into` or into a fresh buffer of exactly the count
+
+/// A directory of up to this many slots is not the heap's: it is the frame's of the lane's maker, or its owner's.
+constexpr int64_t kLaneFrame = 4;
+
+/// log2 of the rows in a page of `element`: at most 16 KiB (LaneTrie's TRIE_PAGE) and at most 4096 rows.
+unsigned laneShift(Type element) {
+  unsigned shift = llvm::Log2_32(16384 / llvm::PowerOf2Ceil((element.getIntOrFloatBitWidth() + 7) / 8));
+  return shift < 12 ? shift : 12;
+}
+
+/// An allocation or a free the deallocation pass leaves alone.
+template <class Op> Op manual(Op op) {
+  op->setAttr("bufferization.manual_deallocation", UnitAttr::get(op->getContext()));
+  return op;
+}
+
+/// A lane's column as it lies: its box, the types of the directory and of a page, and where a row is.
+struct LaneColumn {
+  Value box;
+  MemRefType dir, page;
+  LaneColumn(Value box)
+      : box(box), dir(cast<MemRefType>(cast<MemRefType>(box.getType()).getElementType())), page(cast<MemRefType>(dir.getElementType())) {}
+  Value rows(OpBuilder &b, Location loc) const { return cIndex(b, loc, page.getDimSize(0)); }
+  Value directory(OpBuilder &b, Location loc) const { return load(b, loc, box, cIndex(b, loc, 0)); }
+  Value pageOf(OpBuilder &b, Location loc, Value dir, Value i) const {
+    return load(b, loc, dir, arith::ShRUIOp::create(b, loc, i, cIndex(b, loc, llvm::Log2_64(page.getDimSize(0)))));
+  }
+  Value placeOf(OpBuilder &b, Location loc, Value i) const {
+    return arith::AndIOp::create(b, loc, i, cIndex(b, loc, page.getDimSize(0) - 1));
+  }
+  /// Row i: its page, through the directory in force, and its place there.
+  Join<Value, Value> cell(OpBuilder &b, Location loc, Value i) const { return {pageOf(b, loc, directory(b, loc), i), placeOf(b, loc, i)}; }
+
+  /// A directory given back, unless it is the frame's.
+  void drop(OpBuilder &b, Location loc, Value dir) const {
+    Value heap = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::ugt, length(b, loc, dir), cIndex(b, loc, kLaneFrame));
+    auto given = scf::IfOp::create(b, loc, heap, /*withElseRegion=*/false);
+    OpBuilder::InsertionGuard guard(b);
+    b.setInsertionPoint(given.thenBlock()->getTerminator());
+    manual(memref::DeallocOp::create(b, loc, dir));
+  }
+
+  /// Before row n is appended: a page opened if n is the first row of one, in a directory twice as long if this one is full.
+  void open(OpBuilder &b, Location loc, Value n) const {
+    Value zero = cIndex(b, loc, 0), one = cIndex(b, loc, 1);
+    auto first = scf::IfOp::create(b, loc, arith::CmpIOp::create(b, loc, arith::CmpIPredicate::eq, placeOf(b, loc, n), zero), /*withElseRegion=*/false);
+    OpBuilder::InsertionGuard guard(b);
+    b.setInsertionPoint(first.thenBlock()->getTerminator());
+    Value old = directory(b, loc), slots = length(b, loc, old);
+    Value at = arith::ShRUIOp::create(b, loc, n, cIndex(b, loc, llvm::Log2_64(page.getDimSize(0))));
+    auto full = scf::IfOp::create(b, loc, arith::CmpIOp::create(b, loc, arith::CmpIPredicate::eq, at, slots), /*withElseRegion=*/false);
+    b.setInsertionPoint(full.thenBlock()->getTerminator());
+    Value twice = arith::MaxUIOp::create(b, loc, arith::MulIOp::create(b, loc, slots, cIndex(b, loc, 2)), cIndex(b, loc, 2 * kLaneFrame));
+    Value longer = manual(memref::AllocOp::create(b, loc, dir, ValueRange{twice}));
+    auto copy = scf::ForOp::create(b, loc, zero, slots, one);
+    b.setInsertionPoint(copy.getBody()->getTerminator());
+    store(b, loc, load(b, loc, old, copy.getInductionVar()), longer, copy.getInductionVar());
+    b.setInsertionPointAfter(copy);
+    store(b, loc, longer, box, zero);
+    drop(b, loc, old);
+    b.setInsertionPointAfter(full);
+    Value fresh = manual(memref::AllocOp::create(b, loc, page));
+    store(b, loc, fresh, directory(b, loc), at);
+  }
+
+  /// The pages of the n rows, in order: step(the page, the first row in it).
+  void pages(OpBuilder &b, Location loc, Value n, function_ref<void(Value, Value)> step) const {
+    Value dir = directory(b, loc);
+    auto each = scf::ForOp::create(b, loc, cIndex(b, loc, 0), n, rows(b, loc));
+    OpBuilder::InsertionGuard guard(b);
+    b.setInsertionPoint(each.getBody()->getTerminator());
+    step(pageOf(b, loc, dir, each.getInductionVar()), each.getInductionVar());
+  }
+};
+
+/// trikeshed.lane: the count and each column's box in the frame, its first directory beside it; before each return of
+/// the function the pages the count needed go back, and a directory that is the heap's.
+struct LaneLowering : Lowering<LaneOp> {
+  using Lowering::Lowering;
+  LogicalResult matchAndRewrite(LaneOp op, OpAdaptor, ConversionPatternRewriter &rw) const override {
+    Location loc = op.getLoc();
+    auto f = dyn_cast<func::FuncOp>(op->getParentOp());
+    auto cells = converted(types(), op.getType());
+    if (!f || !op->getBlock()->isEntryBlock() || cells.size() < 2)
+      return rw.notifyMatchFailure(op, "a lane of integer or float columns is made in its function's entry block");
+    Value zero = cIndex(rw, loc, 0);
+    SmallVector<Value> lane;
+    for (Type t : cells) lane.push_back(memref::AllocaOp::create(rw, loc, cast<MemRefType>(t)));
+    store(rw, loc, zero, lane[0], zero);
+    for (LaneColumn c : ArrayRef<Value>(lane).drop_front()) {
+      Value first = memref::AllocaOp::create(rw, loc, MemRefType::get({kLaneFrame}, c.page));
+      store(rw, loc, memref::CastOp::create(rw, loc, c.dir, first), c.box, zero);
+    }
+    for (Block &block : f.getBody()) {
+      if (block.empty() || !isa<func::ReturnOp>(block.back())) continue;
+      rw.setInsertionPoint(&block.back());
+      Value n = load(rw, loc, lane[0], zero);
+      for (LaneColumn c : ArrayRef<Value>(lane).drop_front()) {
+        c.pages(rw, loc, n, [&](Value page, Value) { manual(memref::DeallocOp::create(rw, loc, page)); });
+        c.drop(rw, loc, c.directory(rw, loc));
+      }
+    }
+    replaceWith(rw, op, lane);
+    return success();
+  }
+};
+
+struct AppendLowering : Lowering<AppendOp> {
+  using Lowering::Lowering;
+  LogicalResult matchAndRewrite(AppendOp op, OneToNOpAdaptor a, ConversionPatternRewriter &rw) const override {
+    Location loc = op.getLoc();
+    ValueRange lane = a.getLane();
+    ArrayRef<ValueRange> cells = a.getCells();
+    if (cells.size() + 1 != lane.size()) return rw.notifyMatchFailure(op, "append takes one cell a column");
+    for (auto [box, cell] : llvm::zip(lane.drop_front(), cells))
+      if (cell.size() != 1 || cell[0].getType() != LaneColumn(box).page.getElementType())
+        return rw.notifyMatchFailure(op, "append takes each column's cell, of the column's type");
+    Value zero = cIndex(rw, loc, 0), n = load(rw, loc, lane[0], zero);
+    for (auto [box, cell] : llvm::zip(lane.drop_front(), cells)) {
+      LaneColumn c(box);
+      c.open(rw, loc, n);
+      auto [page, at] = c.cell(rw, loc, n);
+      store(rw, loc, cell[0], page, at);
+    }
+    store(rw, loc, arith::AddIOp::create(rw, loc, n, cIndex(rw, loc, 1)), lane[0], zero); // published after the row it covers
+    rw.replaceOp(op, n);
+    return success();
+  }
+};
+
+/// size(l): the count.  at(l, i): row i of a lane of one column, where it lies.
+struct LaneSizeLowering : Lowering<SizeOp> {
+  using Lowering::Lowering;
+  LogicalResult matchAndRewrite(SizeOp op, OneToNOpAdaptor a, ConversionPatternRewriter &rw) const override {
+    if (!isa<LaneType>(op.getSeries().getType())) return failure();
+    rw.replaceOp(op, load(rw, op.getLoc(), a.getSeries()[0], cIndex(rw, op.getLoc(), 0)));
+    return success();
+  }
+};
+struct LaneAtLowering : Lowering<AtOp> {
+  using Lowering::Lowering;
+  LogicalResult matchAndRewrite(AtOp op, OneToNOpAdaptor a, ConversionPatternRewriter &rw) const override {
+    ValueRange lane = a.getSeries();
+    if (!isa<LaneType>(op.getSeries().getType()) || lane.size() != 2 || a.getIndex().size() != 1)
+      return rw.notifyMatchFailure(op, "at reads a lane of one column (trikeshed.take gives one)");
+    auto [page, at] = LaneColumn(lane[1]).cell(rw, op.getLoc(), toIndex(rw, op.getLoc(), a.getIndex()[0]));
+    rw.replaceOp(op, load(rw, op.getLoc(), page, at));
+    return success();
+  }
+};
+
+/// take(l, c) of a lane: the count and column c's box.
+struct LaneTakeLowering : Lowering<TakeOp> {
+  using Lowering::Lowering;
+  LogicalResult matchAndRewrite(TakeOp op, OneToNOpAdaptor a, ConversionPatternRewriter &rw) const override {
+    ValueRange lane = a.getOf();
+    APInt c;
+    if (!isa<LaneType>(op.getOf().getType()) || !matchPattern(op.getColumn(), m_ConstantInt(&c)) || c.getZExtValue() + 1 >= lane.size())
+      return rw.notifyMatchFailure(op, "a lane's column is taken by a constant index");
+    replaceWith(rw, op, ValueRange{lane[0], lane[1 + c.getZExtValue()]});
+    return success();
+  }
+};
+
+/// anchor(l, i) {mint}: the cell if it is not 0, else what the mint yields, stored where cell i lies after the mint.
+struct AnchorLowering : Lowering<AnchorOp> {
+  using Lowering::Lowering;
+  LogicalResult matchAndRewrite(AnchorOp op, OneToNOpAdaptor a, ConversionPatternRewriter &rw) const override {
+    Location loc = op.getLoc();
+    ValueRange lane = a.getCells();
+    if (lane.size() != 2 || !isa<IntegerType>(LaneColumn(lane[1]).page.getElementType()))
+      return rw.notifyMatchFailure(op, "an anchor's cells are a lane of one integer column");
+    LaneColumn c(lane[1]);
+    Value i = a.getIndex()[0];
+    auto [page, at] = c.cell(rw, loc, i);
+    Value cell = load(rw, loc, page, at);
+    Value forced = arith::CmpIOp::create(rw, loc, arith::CmpIPredicate::ne, cell, cInt(rw, loc, cell.getType(), 0));
+    auto read = scf::IfOp::create(rw, loc, TypeRange{cell.getType()}, forced, /*withElseRegion=*/true);
+    rw.setInsertionPointToStart(read.thenBlock());
+    scf::YieldOp::create(rw, loc, ValueRange{cell});
+    rw.setInsertionPointToStart(read.elseBlock());
+    auto minted = inlineBody(rw, types(), op.getMint(), ValueRange{i}.take_front(op.getMint().front().getNumArguments()));
+    if (failed(minted) || minted->size() != 1 || (*minted)[0].getType() != cell.getType())
+      return rw.notifyMatchFailure(op, "an anchor's mint yields the cell");
+    auto [pageNow, atNow] = c.cell(rw, loc, i);
+    store(rw, loc, (*minted)[0], pageNow, atNow);
+    scf::YieldOp::create(rw, loc, *minted);
+    rw.replaceOp(op, read.getResult(0));
+    return success();
+  }
+};
+
+/// drain(l [, into]) of a lane of one column: its rows below the count, a page at a time, into `into`, or into a fresh
+/// buffer of exactly the count, which is then the result.
+struct LaneDrainLowering : Lowering<DrainOp> {
+  using Lowering::Lowering;
+  LogicalResult matchAndRewrite(DrainOp op, OneToNOpAdaptor a, ConversionPatternRewriter &rw) const override {
+    Location loc = op.getLoc();
+    ValueRange lane = a.getSeries();
+    if (!isa<LaneType>(op.getSeries().getType()) || lane.size() != 2 || (op.getInto() && !isa<MemRefType>(a.getInto()[0].getType())))
+      return rw.notifyMatchFailure(op, "a lane of one column drains into a memref, or into a buffer of its own");
+    LaneColumn c(lane[1]);
+    Value n = load(rw, loc, lane[0], cIndex(rw, loc, 0));
+    Value into = op.getInto() ? a.getInto()[0] : newSeriesBuffer(rw, loc, c.page.getElementType(), n);
+    c.pages(rw, loc, n, [&](Value page, Value first) {
+      Value count = arith::MinUIOp::create(rw, loc, c.rows(rw, loc), arith::SubIOp::create(rw, loc, n, first));
+      auto row = scf::ForOp::create(rw, loc, cIndex(rw, loc, 0), count, cIndex(rw, loc, 1));
+      rw.setInsertionPoint(row.getBody()->getTerminator());
+      store(rw, loc, load(rw, loc, page, row.getInductionVar()), into, arith::AddIOp::create(rw, loc, first, row.getInductionVar()));
+    });
+    Type end = op.getEnd().getType();
+    rw.replaceOp(op, !op.getInto() ? into : end.isIndex() ? n : arith::IndexCastOp::create(rw, loc, end, n).getResult());
+    return success();
+  }
+};
+
+/// The lane's type (the count, then a box a column) and the patterns of the ops that fill, read and drain one.
+void populateLaneLowering(CursorTypes &types, RewritePatternSet &patterns) {
+  types.addConversion([&types](LaneType t, SmallVectorImpl<Type> &out) -> std::optional<LogicalResult> {
+    SmallVector<Type> cells{MemRefType::get({1}, IndexType::get(t.getContext()))};
+    for (Type column : t.getColumns()) {
+      Type element = types.convertType(column);
+      if (!element || !element.isIntOrFloat()) return failure();
+      auto page = MemRefType::get({int64_t(1) << laneShift(element)}, element);
+      cells.push_back(MemRefType::get({1}, MemRefType::get({ShapedType::kDynamic}, page)));
+    }
+    out.append(cells);
+    return success();
+  });
+  patterns.add<LaneLowering, AppendLowering, LaneSizeLowering, LaneAtLowering, LaneTakeLowering, AnchorLowering, LaneDrainLowering>(
+      types, patterns.getContext());
+}
+
 struct DrainLowering : Lowering<DrainOp> {
   using Lowering::Lowering;
   LogicalResult matchAndRewrite(DrainOp op, OpAdaptor a, ConversionPatternRewriter &rw) const override {
     Location loc = op.getLoc();
-    if (!isa<MemRefType>(a.getInto().getType())) return rw.notifyMatchFailure(op, "drain needs a memref to write into");
+    if (!a.getInto() || !isa<MemRefType>(a.getInto().getType())) return rw.notifyMatchFailure(op, "drain needs a memref to write into");
     Value xs = a.getSeries(), n = length(rw, loc, xs);
     auto loop = scf::ForOp::create(rw, loc, cIndex(rw, loc, 0), n, cIndex(rw, loc, 1));
     rw.setInsertionPoint(loop.getBody()->getTerminator());
@@ -1375,6 +1630,7 @@ struct LowerCursors : PassWrapper<LowerCursors, OperationPass<ModuleOp>> {
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, types);
     populateReturnOpTypeConversionPattern(patterns, types);
     populateCallOpTypeConversionPattern(patterns, types);
+    populateLaneLowering(types, patterns);
     populateEitherLowering(types, patterns, target);
     // scf.if/for/while and arith.select that carry a pair or a series: their types lowered with them
     scf::populateSCFStructuralTypeConversionsAndLegality(types, patterns, target);
