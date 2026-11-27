@@ -248,7 +248,8 @@ Each merge, `gap-census.py --seal` on the new master and `--diff` against the pr
 ## Decisions that are the user's (with the numbers they turn on)
 
 The gap analysis can measure these and a lane can carry them out, but each changes a standing rule or the project's
-scope, so none is taken without the user's word.
+scope, so none is taken without the user's word.  Asked on 2026-11-27 at 10:57 (one form, all five); no answer before
+the form timed out, so all five stand open.
 
 1. **G1, MutableSeries in the dialect (lane `lanes`).**  `!trikeshed.lane` with append/anchor/size/at/take/drain lowered
    in LaneTrie's shape, and fromJSON's index on a lane (nixev_json_grow and JsonRec deleted), proven (3.6M old/new
@@ -256,6 +257,11 @@ scope, so none is taken without the user's word.
    at 803609f after the lane removed duplication with the series patterns (the lowering is C++ on MLIR's API), against
    a wave that has cut 1.  It is the root of G3c and the single-pass writers (the parked
    JSON printer).  The lane is assessing a runtime written in MLIR with thin C++ rewrites (cluster_order's pattern).
+   Its C++ payoff, measured (scratch gap/g1-payoff.py): the growth protocols the lowered MLIR calls back to make room in
+   a C++ buffer are 6 callbacks of 15 code lines in all at eae7ad5 (nixstore_walk_room, nixev_str_room, nixbo_room,
+   nixev_json_grow, nixsa_room, nixstore_nar_room; 11 call sites), so even retiring every one, with its bridge's sizing,
+   pays back some 25-40 lines of the lowering's 174.  G1's value is the MLIR's (the audit's 57 hand-spelled appends and 16
+   anchors, single-pass writers, dense rows for G3c), not a C++ cut.
 2. **The scanners (G6).**  ConfixScan, LexScan, TomlScan and the readers are the largest bypass rows (confix_scan_nix
    944 non-dialect ops, lx_default 482, the TOML scan 204 + 115 + 74).  The standing rule: a scanner already merged is
    redone only on the user's word; regex goes only to combinators.  kursive2's lexer as a kursive grammar is proven
