@@ -256,6 +256,11 @@ Each merge, `gap-census.py --seal` on the new master and `--diff` against the pr
   lane's 27 synthetic stores and the lead's 3 (1,000-20,000 paths, a root every 7th path), dry and real --gc, stdout,
   stderr and the store's tree afterwards identical.  Time: a dry GC of 20,000 paths 7.1 s -> 0.6 s (53.8 -> 6.4 G
   instructions, no roots; 19.8 -> 8.0 G with roots); what is left is the read of every info file, G3b's.
+- x86_64 (2026-11-27, Kali: clang-22, LLVM 22, OpenSSL; the skill's scripts/bless-kali.sh on 07bc10b, eae7ad5's code):
+  wave 1's first gate off arm64.  mlir 52/0, lang 488/488 exact 231 on both schedules, prims 121, mlnixci 51 PASS with
+  no C++ library linked, the seven Composite checks plain and sanitized with the same funnel statistics as on arm64.
+  (The first run read PASS 0, FAIL 0 for mlnixci: build-test.sh named mlnix-os's nixpkgs lib, which Kali does not have,
+  so the server exited at start; NIXPKGS_LIB is a setting now.)
 
 ## Divergences found on the way (reported, not fixed)
 
