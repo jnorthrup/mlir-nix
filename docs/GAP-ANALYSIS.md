@@ -224,9 +224,42 @@ Each merge, `gap-census.py --seal` on the new master and `--diff` against the pr
   20.07 -> 19.72 G, nixpkgs-73 16.484 -> 16.484 G, `mlnix hash path` over .cache/nixpkgs level (26.98 / 27.00 G; a
   cold-cache first run read 32.9 G and is not counted).  Census rows of functions are keyed by name since this part, so
   an edit above a function no longer shows as a removal and an addition.
+- wave 1 part 5 (2026-11-27, gc e8f2453 + 622b023; C++ 22,817 -> 22,821: a no-throw read of a path's info, which the
+  fast pass needs to fall back to the old scan exactly; wave 1 since a8d3ae3: 22,822 -> 22,821).  nixstore_ts_gc reads
+  each dead path's references once, counts referrers among the dead with trikeshed.adjacency (its first product use),
+  and sweeps by the counts in the old visiting order; the old scan stays as the fallback for a malformed info file,
+  where the order of reads decides what is deleted.  Proof: 44,000 random dead graphs (self references, cycles, failing
+  reads, partial deletions before a throw) against the old module and a C++ model of it, four mutants caught; the
+  lane's 27 synthetic stores and the lead's 3 (1,000-20,000 paths, a root every 7th path), dry and real --gc, stdout,
+  stderr and the store's tree afterwards identical.  Time: a dry GC of 20,000 paths 7.1 s -> 0.6 s (53.8 -> 6.4 G
+  instructions, no roots; 19.8 -> 8.0 G with roots); what is left is the read of every info file, G3b's.
 
 ## Divergences found on the way (reported, not fixed)
 
 - `mlnix store --gc --print-live` prints the dead paths: tools/mlnix.cpp (cmdStore's flag scan, 0d02917 L581) reads
   `--print-live` as `--print-dead`.  Nix's `nix-store --gc --print-live` prints the live paths, the roots' closure.
   Found by the gc lane's store proof (2026-11-27).
+
+## Decisions that are the user's (with the numbers they turn on)
+
+The gap analysis can measure these and a lane can carry them out, but each changes a standing rule or the project's
+scope, so none is taken without the user's word.
+
+1. **G1, MutableSeries in the dialect (lane `lanes`).**  `!trikeshed.lane` with append/anchor/size/at/take/drain lowered
+   in LaneTrie's shape, and fromJSON's index on a lane (nixev_json_grow and JsonRec deleted), proven (3.6M old/new
+   cases, the gates on both platforms at 2ed7fa0, deep recursion to 20,000 identical).  Cost: C++ +224 (the lowering is
+   C++ on MLIR's API), against a wave that has cut 1.  It is the root of G3c and the single-pass writers (the parked
+   JSON printer).  The lane is assessing a runtime written in MLIR with thin C++ rewrites (cluster_order's pattern).
+2. **The scanners (G6).**  ConfixScan, LexScan, TomlScan and the readers are the largest bypass rows (confix_scan_nix
+   944 non-dialect ops, lx_default 482, the TOML scan 204 + 115 + 74).  The standing rule: a scanner already merged is
+   redone only on the user's word; regex goes only to combinators.  kursive2's lexer as a kursive grammar is proven
+   (152M text positions) and deletes 152 C++ lines, but costs 5-9% on both bench workloads (held back as 2fffc12).
+3. **KIF/SUMO's C++ (2,959 code lines, 13.0%).**  KifTptp, KifLean, KifChase, KifTrikeShed and SumoDialect: whether
+   they stay in mlir-nix as C++, move to MLIR, or move out (sumo-nix) is a scope decision.
+4. **The boundary primops.**  fsMkdir, fsSymlink, fsRename, fsWrite, fsUnlink, fsReadLink, procSelf, procRun, procExec
+   (StoreBuiltins.cpp registerBoundary, 103 code lines, for lib/Corepkgs/cli.nix) are global names in every
+   evaluation, --pure-eval and --restrict-eval included; in Nix they are undefined variables.  Any expression mlnix
+   evaluates can run programs and write files.  Gating them (to cli.nix's own evaluation) or removing them is the
+   user's call; it was raised on 2026-11-25.
+5. **The parser (2,102 code lines, 9.2%).**  It builds nix ops through MLIR's builder API; only a grammar in kursive
+   combinators would move it, which is G6's question at the scale of the whole language.
