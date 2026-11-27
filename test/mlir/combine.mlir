@@ -7,10 +7,11 @@
 //   combineAll of no parts is empty;
 //   confix.unescape of JSON's escapes, of \u code points (a surrogate pair, lone surrogates), of escapes JSON does not
 //   have (kept as written), and of a text escaped as Python's json.dumps escapes it, which gives that text's UTF-8
-//   again.  The bytes are printed as i32.
+//   again (the op a call of its body, lowered/confix/ConfixIndex.mlir's confix_unescape, which build/lib's
+//   TrikeShedRuntime carries).  The bytes are printed as i32.
 //
 // RUN: mlnix-opt %s | mlnix-opt | FileCheck %s --check-prefix=ROUND
-// RUN: mlnix-opt %s --trikeshed-lower-cursors | mlir-opt --ownership-based-buffer-deallocation --canonicalize --buffer-deallocation-simplification --bufferization-lower-deallocations --convert-scf-to-cf --expand-strided-metadata --lower-affine --finalize-memref-to-llvm --convert-arith-to-llvm --convert-index-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts | mlir-runner -e main -entry-point-result=i32 -shared-libs=$(ls $(dirname $(which mlir-runner))/../lib/libmlir_runner_utils.* | head -1) | FileCheck %s
+// RUN: ext=so; if [ "$(uname -s)" = Darwin ]; then ext=dylib; fi; mlnix-opt %s --trikeshed-lower-cursors | mlir-opt --ownership-based-buffer-deallocation --canonicalize --buffer-deallocation-simplification --bufferization-lower-deallocations --convert-scf-to-cf --expand-strided-metadata --lower-affine --finalize-memref-to-llvm --convert-arith-to-llvm --convert-index-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts | mlir-runner -e main -entry-point-result=i32 -shared-libs=$(ls $(dirname $(which mlir-runner))/../lib/libmlir_runner_utils.* | head -1),%S/../../build/lib/libTrikeShedRuntime.${ext} | FileCheck %s
 
 // ROUND: trikeshed.combine %{{.*}}, %{{.*}}, %{{.*}} : !trikeshed.series<i8>, !trikeshed.series<i8>, !trikeshed.series<i8> -> <i8>
 // ROUND: trikeshed.combineAll %{{.*}} : <i8>, <!trikeshed.twinpacked<i32>>

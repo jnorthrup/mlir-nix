@@ -117,3 +117,14 @@ $(BUILD)/kursive-walk.ll: $(MLIR_NIX)/lowered/nixeval/KursiveOps.mlir
 	$(LLVM_BIN)/mlir-opt $< $(LOWER_BUFFERS) | $(LLVM_BIN)/mlir-translate --mlir-to-llvmir -o $@
 
 $(BUILD)/mlnixci: $(BUILD)/request.o $(BUILD)/kursive-walk.o
+
+# confix.index (src/index.mlir), confix.columns and confix.unescape (src/columns.mlir) lower into calls of their bodies:
+# mlir-nix's lowered/confix/ConfixIndex.mlir, in the confix dialect's reads of the scan's record and TrikeShed's ops,
+# lowered as the TrikeShed modules are and then by --confix-to-llvm (its confix.scan, confix.row and confix.kid).
+$(BUILD)/confix-index.ll: $(MLIR_NIX)/lowered/confix/ConfixIndex.mlir
+	mkdir -p $(BUILD)
+	$(MLNIX_OPT) $< --trikeshed-lower-cursors --confix-to-llvm > $(BUILD)/confix-index.lowered.mlir
+	! grep -q -E '(trikeshed|confix)\.' $(BUILD)/confix-index.lowered.mlir
+	$(LLVM_BIN)/mlir-opt $(BUILD)/confix-index.lowered.mlir --inline --symbol-dce $(LOWER_BUFFERS) | $(LLVM_BIN)/mlir-translate --mlir-to-llvmir -o $@
+
+$(BUILD)/mlnixci: $(BUILD)/confix-index.o

@@ -4,19 +4,18 @@
 // confix_scan_json, confix_scan_cbor or confix_scan_yaml, `confix.bands` to a call of ConfixScan.mlir's confix_scan_nix (the Nix delimiter
 // scan, lowered at build time), and the reads of a Flat record (include/NixDialect/Confix.td) to loads from it.
 // `confix.index`, `confix.columns` and `confix.unescape` make and read TrikeShed's series and cursors; trikeshed-lower-cursors lowers
-// them, with the patterns this dialect gives it through CursorLoweringInterface (Composite/CursorLowering.h), as it lowers
+// them, with the patterns this dialect gives it through CursorLoweringInterface (Composite/CursorLowering.h), into calls of their
+// bodies, the functions of lowered/confix/ConfixIndex.mlir, as it lowers
 // `confix.checked` (builtins.fromJSON's scan) to a call of its body, JsonRead.mlir's confix_scan_checked.
 
 #include "NixDialect/Confix.h"
 
 #include "Composite/CursorLowering.h"
 #include "Composite/TrikeShed.h"
-#include "Composite/Series.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
-#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
@@ -81,322 +80,84 @@ LogicalResult ColumnsOp::verify() {
 
 namespace {
 
-// ---- confix.index and confix.columns, lowered in trikeshed-lower-cursors' conversion
+// ---- confix.index, confix.columns and confix.unescape, lowered in trikeshed-lower-cursors' conversion: each a call of
+// its body, a function of lowered/confix/ConfixIndex.mlir (the confix dialect's reads of the scan's record and
+// TrikeShed's ops), over the buffers its operands lowered to
 
-Value cIndex(OpBuilder &b, Location loc, int64_t v) { return arith::ConstantIndexOp::create(b, loc, v); }
-Value cInt(OpBuilder &b, Location loc, Type t, int64_t v) { return arith::ConstantOp::create(b, loc, t, b.getIntegerAttr(t, v)); }
-Value asIndex(OpBuilder &b, Location loc, Value v) {
-  return v.getType().isIndex() ? v : arith::IndexCastUIOp::create(b, loc, b.getIndexType(), v).getResult();
-}
-Value load(OpBuilder &b, Location loc, Value buffer, Value i) { return memref::LoadOp::create(b, loc, buffer, ValueRange{asIndex(b, loc, i)}); }
-void store(OpBuilder &b, Location loc, Value v, Value buffer, Value i) {
-  memref::StoreOp::create(b, loc, v, buffer, ValueRange{asIndex(b, loc, i)});
-}
-/// (a << 32) | b, of two i32
-Value pack(OpBuilder &b, Location loc, Value hi, Value lo) {
-  Type i64 = b.getI64Type();
-  Value h = arith::ShLIOp::create(b, loc, arith::ExtUIOp::create(b, loc, i64, hi), cInt(b, loc, i64, 32));
-  return arith::OrIOp::create(b, loc, h, arith::ExtUIOp::create(b, loc, i64, lo));
+/// A call of `name`, a function of ConfixIndex.mlir (declared when the module does not define it): its results.
+ResultRange body(ConversionPatternRewriter &rw, Operation *op, StringRef name, ArrayRef<Type> results, ArrayRef<Value> args) {
+  auto module = op->getParentOfType<ModuleOp>();
+  if (!module.lookupSymbol(name)) {
+    OpBuilder::InsertionGuard g(rw);
+    rw.setInsertionPointToStart(module.getBody());
+    func::FuncOp::create(rw, module.getLoc(), name, rw.getFunctionType(ValueRange(args).getTypes(), results)).setPrivate();
+  }
+  return func::CallOp::create(rw, op->getLoc(), name, results, args)->getResults();
 }
 
-/// The text's scan: confix.ll's scanner fills arrays sized for the text (room = n + 1 rows, which a JSON or CBOR text of n
-/// bytes cannot outgrow), given through a Flat record and a CharSeries on the stack; then the columns of the rows found are
-/// made, and the arrays are left to the deallocation pass.
+/// `data` as a constant of the module, seen as a series' buffer.
+Value constant(ConversionPatternRewriter &rw, Operation *op, DenseElementsAttr data) {
+  auto module = op->getParentOfType<ModuleOp>();
+  auto type = MemRefType::get(data.getType().getShape(), data.getElementType());
+  unsigned k = 0;
+  auto name = SymbolTable::generateSymbolName<32>("confix_names", [&](StringRef n) { return module.lookupSymbol(n) != nullptr; }, k);
+  {
+    OpBuilder::InsertionGuard g(rw);
+    rw.setInsertionPointToStart(module.getBody());
+    memref::GlobalOp::create(rw, module.getLoc(), name, rw.getStringAttr("private"), type, data, /*constant=*/true, IntegerAttr());
+  }
+  Value whole = memref::GetGlobalOp::create(rw, op->getLoc(), type, name);
+  return memref::CastOp::create(rw, op->getLoc(), composite::seriesBuffer(data.getElementType()), whole);
+}
+
+/// confix_index(text, syntax): the rows' three columns, the kid series, the fault and where it was.
 struct IndexLowering : OpConversionPattern<IndexOp> {
   using OpConversionPattern::OpConversionPattern;
   LogicalResult matchAndRewrite(IndexOp op, OpAdaptor a, ConversionPatternRewriter &rw) const override {
-    Location loc = op.getLoc();
-    MLIRContext *ctx = rw.getContext();
-    Value text = a.getText();
-    if (!isa<MemRefType>(text.getType())) return rw.notifyMatchFailure(op, "the text is not a buffer");
-    Type i8 = rw.getI8Type(), i32 = rw.getI32Type(), i64 = rw.getI64Type(), idx = rw.getIndexType();
-    Type ptr = LLVM::LLVMPointerType::get(ctx);
-    auto scanType = LLVM::LLVMFunctionType::get(i32, {ptr, ptr});
-    StringRef callee = op.getSyntax() == SyntaxKind::Json ? "confix_scan_json" : "confix_scan_cbor";
-    auto module = op->getParentOfType<ModuleOp>();
-    if (!module.lookupSymbol(callee)) {
-      OpBuilder::InsertionGuard g(rw);
-      rw.setInsertionPointToStart(module.getBody());
-      LLVM::LLVMFuncOp::create(rw, module.getLoc(), callee, scanType);
-    }
-    Value zero = cIndex(rw, loc, 0), one = cIndex(rw, loc, 1);
-    Value n = memref::DimOp::create(rw, loc, text, 0);
-    Value room = arith::AddIOp::create(rw, loc, n, one);
-    auto address = [&](Value buffer, Value offset) -> Value {
-      Value p = memref::ExtractAlignedPointerAsIndexOp::create(rw, loc, buffer);
-      if (offset) p = arith::AddIOp::create(rw, loc, p, offset);
-      Value word = arith::IndexCastUIOp::create(rw, loc, i64, p);
-      return LLVM::IntToPtrOp::create(rw, loc, ptr, ValueRange{word});
-    };
-    // the text's bytes start at its view's offset (an i8 buffer: the offset is in bytes)
-    auto meta = memref::ExtractStridedMetadataOp::create(rw, loc, text);
-    Value textAt = address(text, meta.getOffset());
-    auto scratch = [&](Type e, Value count) -> Value {
-      return memref::AllocOp::create(rw, loc, MemRefType::get({ShapedType::kDynamic}, e), ValueRange{count});
-    };
-    Value span = scratch(i32, arith::MulIOp::create(rw, loc, room, cIndex(rw, loc, 2)));
-    Value tag = scratch(i8, room), depth = scratch(i32, room), start = scratch(i32, arith::AddIOp::create(rw, loc, room, one));
-    Value kid = scratch(i32, room), work = scratch(i32, arith::MulIOp::create(rw, loc, room, cIndex(rw, loc, 3)));
-    // the Flat record and the CharSeries (Confix.td): total, fault, at, room, span, tag, depth, start, kid, work; size, data,
-    // pos, limit, mark
-    Type flatType = LLVM::LLVMStructType::getLiteral(ctx, {i32, i32, i32, i32, ptr, ptr, ptr, ptr, ptr, ptr});
-    Type charsType = LLVM::LLVMStructType::getLiteral(ctx, {i32, ptr, i32, i32, i32});
-    Value one32 = LLVM::ConstantOp::create(rw, loc, i32, rw.getI32IntegerAttr(1));
-    Value flat = LLVM::AllocaOp::create(rw, loc, ptr, flatType, one32);
-    Value chars = LLVM::AllocaOp::create(rw, loc, ptr, charsType, one32);
-    auto field = [&](Value record, Type recordType, int32_t k) -> Value {
-      return LLVM::GEPOp::create(rw, loc, ptr, recordType, record, ArrayRef<LLVM::GEPArg>{0, k});
-    };
-    auto put = [&](Value v, Value record, Type recordType, int32_t k) { LLVM::StoreOp::create(rw, loc, v, field(record, recordType, k)); };
-    put(arith::IndexCastUIOp::create(rw, loc, i32, room), flat, flatType, 3);
-    int32_t k = 4;
-    for (Value buffer : {span, tag, depth, start, kid, work}) put(address(buffer, Value()), flat, flatType, k++);
-    Value n32 = arith::IndexCastUIOp::create(rw, loc, i32, n);
-    put(n32, chars, charsType, 0);
-    put(textAt, chars, charsType, 1);
-    put(cInt(rw, loc, i32, 0), chars, charsType, 2);
-    put(n32, chars, charsType, 3);
-    put(cInt(rw, loc, i32, -1), chars, charsType, 4);
-    Value fault = LLVM::CallOp::create(rw, loc, scanType, callee, ValueRange{chars, flat}).getResult();
-    Value total = LLVM::LoadOp::create(rw, loc, i32, field(flat, flatType, 0));
-    Value at = LLVM::LoadOp::create(rw, loc, i32, field(flat, flatType, 2));
-    Value ok = arith::CmpIOp::create(rw, loc, arith::CmpIPredicate::eq, fault, cInt(rw, loc, i32, 0));
-    Value rows = arith::SelectOp::create(rw, loc, ok, asIndex(rw, loc, total), zero);
-    // the columns: span (open, close) and kids (first, count) as pairs, the tag as it is
-    Value spanCol = composite::newSeriesBuffer(rw, loc, i64, rows), tagCol = composite::newSeriesBuffer(rw, loc, i8, rows);
-    Value kidsCol = composite::newSeriesBuffer(rw, loc, i64, rows);
-    {
-      auto loop = scf::ForOp::create(rw, loc, zero, rows, one);
-      rw.setInsertionPoint(loop.getBody()->getTerminator());
-      Value r = loop.getInductionVar();
-      Value r2 = arith::MulIOp::create(rw, loc, r, cIndex(rw, loc, 2));
-      Value open = load(rw, loc, span, r2), close = load(rw, loc, span, arith::AddIOp::create(rw, loc, r2, one));
-      store(rw, loc, pack(rw, loc, open, close), spanCol, r);
-      store(rw, loc, load(rw, loc, tag, r), tagCol, r);
-      Value first = load(rw, loc, start, r), next = load(rw, loc, start, arith::AddIOp::create(rw, loc, r, one));
-      store(rw, loc, pack(rw, loc, first, arith::SubIOp::create(rw, loc, next, first)), kidsCol, r);
-      rw.setInsertionPointAfter(loop);
-    }
-    // the kid series: start[total] rows, every row but the root
-    auto counted = scf::IfOp::create(rw, loc, TypeRange{idx}, ok, /*withElseRegion=*/true);
-    rw.setInsertionPointToStart(counted.thenBlock());
-    scf::YieldOp::create(rw, loc, ValueRange{asIndex(rw, loc, load(rw, loc, start, rows))});
-    rw.setInsertionPointToStart(counted.elseBlock());
-    scf::YieldOp::create(rw, loc, ValueRange{zero});
-    rw.setInsertionPointAfter(counted);
-    Value nk = counted.getResult(0);
-    Value kids = composite::newSeriesBuffer(rw, loc, i32, nk);
-    {
-      auto loop = scf::ForOp::create(rw, loc, zero, nk, one);
-      rw.setInsertionPoint(loop.getBody()->getTerminator());
-      store(rw, loc, load(rw, loc, kid, loop.getInductionVar()), kids, loop.getInductionVar());
-      rw.setInsertionPointAfter(loop);
-    }
-    SmallVector<SmallVector<Value>> results{{spanCol, tagCol, kidsCol}, {kids}, {fault}, {at}};
+    Type i32 = rw.getI32Type(), pairs = composite::seriesBuffer(rw.getI64Type());
+    Value syntax = arith::ConstantOp::create(rw, op.getLoc(), i32, rw.getI32IntegerAttr(int32_t(op.getSyntax())));
+    auto r = body(rw, op, "confix_index", {pairs, composite::seriesBuffer(rw.getI8Type()), pairs, composite::seriesBuffer(i32), i32, i32},
+                  {a.getText(), syntax});
+    SmallVector<SmallVector<Value>> results{{r[0], r[1], r[2]}, {r[3]}, {r[4]}, {r[5]}};
     rw.replaceOpWithMultiple(op, std::move(results));
     return success();
   }
 };
 
-/// The Columns facet: for each object, each member's key against each name (its length, then its bytes, unrolled from
-/// the name), the value's row stored where they match; -1 elsewhere.
+/// The Columns facet: confix_columns makes the table, the names its data (one text, and each name's (start, length) in
+/// it); confix_column gives each column of it cells of its own, as a cursor's column has.
 struct ColumnsLowering : OpConversionPattern<ColumnsOp> {
   using OpConversionPattern::OpConversionPattern;
   LogicalResult matchAndRewrite(ColumnsOp op, OneToNOpAdaptor a, ConversionPatternRewriter &rw) const override {
     Location loc = op.getLoc();
-    if (a.getRows().size() != 3) return rw.notifyMatchFailure(op, "the rows are not three buffers");
-    Value spanCol = a.getRows()[0], tagCol = a.getRows()[1], kidsCol = a.getRows()[2];
-    Value kids = a.getKids().front(), text = a.getText().front(), objects = a.getObjects().front();
-    Type i8 = rw.getI8Type(), i32 = rw.getI32Type(), i64 = rw.getI64Type();
-    Value zero = cIndex(rw, loc, 0), one = cIndex(rw, loc, 1), two = cIndex(rw, loc, 2);
-    Value m = memref::DimOp::create(rw, loc, objects, 0);
-    SmallVector<StringRef> names;
-    for (Attribute n : op.getNames()) names.push_back(cast<StringAttr>(n).getValue());
-    SmallVector<Value> columns;
-    for (size_t c = 0; c < names.size(); c++) columns.push_back(composite::newSeriesBuffer(rw, loc, i32, m));
-    Value none = cInt(rw, loc, i32, -1), mask = cInt(rw, loc, i64, 0xffffffff), c32 = cInt(rw, loc, i64, 32);
-    auto rowsLoop = scf::ForOp::create(rw, loc, zero, m, one);
-    rw.setInsertionPoint(rowsLoop.getBody()->getTerminator());
-    Value r = rowsLoop.getInductionVar();
-    for (Value column : columns) store(rw, loc, none, column, r);
-    Value obj = load(rw, loc, objects, r);
-    Value isObject = arith::CmpIOp::create(rw, loc, arith::CmpIPredicate::eq, load(rw, loc, tagCol, obj),
-                                           cInt(rw, loc, i8, int64_t(TagKind::Object)));
-    auto inObject = scf::IfOp::create(rw, loc, isObject, /*withElseRegion=*/false);
-    rw.setInsertionPoint(inObject.thenBlock()->getTerminator());
-    Value fc = load(rw, loc, kidsCol, obj);
-    Value first = arith::IndexCastUIOp::create(rw, loc, rw.getIndexType(), arith::ShRUIOp::create(rw, loc, fc, c32));
-    Value count = arith::IndexCastUIOp::create(rw, loc, rw.getIndexType(), arith::AndIOp::create(rw, loc, fc, mask));
-    auto members = scf::ForOp::create(rw, loc, zero, arith::DivUIOp::create(rw, loc, count, two), one);
-    rw.setInsertionPoint(members.getBody()->getTerminator());
-    Value at = arith::AddIOp::create(rw, loc, first, arith::MulIOp::create(rw, loc, members.getInductionVar(), two));
-    Value key = load(rw, loc, kids, at), value = load(rw, loc, kids, arith::AddIOp::create(rw, loc, at, one));
-    Value isString = arith::CmpIOp::create(rw, loc, arith::CmpIPredicate::eq, load(rw, loc, tagCol, key),
-                                           cInt(rw, loc, i8, int64_t(TagKind::String)));
-    Value keySpan = load(rw, loc, spanCol, key);
-    Value open = arith::ShRUIOp::create(rw, loc, keySpan, c32), close = arith::AndIOp::create(rw, loc, keySpan, mask);
-    // between the quotes: [open + 1, close)
-    Value inner = arith::AddIOp::create(rw, loc, open, cInt(rw, loc, i64, 1));
-    Value len = arith::SubIOp::create(rw, loc, close, inner);
-    for (size_t c = 0; c < names.size(); c++) {
-      StringRef name = names[c];
-      Value sized = arith::AndIOp::create(rw, loc, isString,
-          arith::CmpIOp::create(rw, loc, arith::CmpIPredicate::eq, len, cInt(rw, loc, i64, int64_t(name.size()))));
-      auto ifSized = scf::IfOp::create(rw, loc, sized, /*withElseRegion=*/false);
-      rw.setInsertionPoint(ifSized.thenBlock()->getTerminator());
-      Value same = cInt(rw, loc, rw.getI1Type(), 1);
-      for (size_t j = 0; j < name.size(); j++) {
-        Value byte = load(rw, loc, text, arith::AddIOp::create(rw, loc, inner, cInt(rw, loc, i64, int64_t(j))));
-        same = arith::AndIOp::create(rw, loc, same,
-            arith::CmpIOp::create(rw, loc, arith::CmpIPredicate::eq, byte, cInt(rw, loc, i8, int64_t(int8_t(name[j])))));
-      }
-      auto ifSame = scf::IfOp::create(rw, loc, same, /*withElseRegion=*/false);
-      rw.setInsertionPoint(ifSame.thenBlock()->getTerminator());
-      store(rw, loc, value, columns[c], r);
-      rw.setInsertionPointAfter(ifSized);
+    SmallString<64> text;
+    SmallVector<int64_t> at;
+    for (Attribute n : op.getNames()) {
+      StringRef name = cast<StringAttr>(n).getValue();
+      at.push_back(int64_t(text.size()) << 32 | int64_t(name.size()));
+      text += name;
     }
-    rw.setInsertionPointAfter(rowsLoop);
-    SmallVector<SmallVector<Value>> results{SmallVector<Value>(columns.begin(), columns.end())};
+    Type column = composite::seriesBuffer(rw.getI32Type());
+    auto shaped = [&](size_t n, Type element) { return RankedTensorType::get({int64_t(n)}, element); };
+    SmallVector<Value> args(a.getRows());
+    args.append({a.getKids().front(), a.getText().front(), a.getObjects().front(),
+                 constant(rw, op, DenseElementsAttr::getFromRawBuffer(shaped(text.size(), rw.getI8Type()), ArrayRef<char>(text.data(), text.size()))),
+                 constant(rw, op, DenseElementsAttr::get(shaped(at.size(), rw.getI64Type()), ArrayRef<int64_t>(at)))});
+    Value table = body(rw, op, "confix_columns", {column}, args)[0];
+    Value width = arith::ConstantIndexOp::create(rw, loc, at.size());
+    SmallVector<SmallVector<Value>> results(1);
+    for (size_t c = 0; c < at.size(); c++)
+      results[0].push_back(body(rw, op, "confix_column", {column}, {table, width, arith::ConstantIndexOp::create(rw, loc, c)})[0]);
     rw.replaceOpWithMultiple(op, std::move(results));
     return success();
   }
 };
 
-/// A string's value: one walk over its bytes, i the byte read and w the next free cell of a buffer of size(text) (w never
-/// passes i: no escape's value is longer than the escape).  A backslash that begins one of JSON's escapes writes the
-/// value; any other byte, itself.  The value is the first w cells.
+/// confix_unescape(text): the value, the first cells of a buffer of its own.
 struct UnescapeLowering : OpConversionPattern<UnescapeOp> {
   using OpConversionPattern::OpConversionPattern;
   LogicalResult matchAndRewrite(UnescapeOp op, OpAdaptor a, ConversionPatternRewriter &rw) const override {
-    Location loc = op.getLoc();
-    Value text = a.getText();
-    if (!isa<MemRefType>(text.getType())) return rw.notifyMatchFailure(op, "the text is not a buffer");
-    Type i1 = rw.getI1Type(), i8 = rw.getI8Type(), i32 = rw.getI32Type(), idx = rw.getIndexType();
-    Value n = memref::DimOp::create(rw, loc, text, 0);
-    Value out = composite::newSeriesBuffer(rw, loc, i8, n);
-    Value zero = cIndex(rw, loc, 0), one = cIndex(rw, loc, 1), two = cIndex(rw, loc, 2), six = cIndex(rw, loc, 6);
-    auto eq8 = [&](Value x, char c) { return arith::CmpIOp::create(rw, loc, arith::CmpIPredicate::eq, x, cInt(rw, loc, i8, c)).getResult(); };
-    auto c32v = [&](int64_t v) { return cInt(rw, loc, i32, v); };
-    auto in = [&](Value x, int64_t lo, int64_t hi) {  // lo <= x < hi, unsigned
-      Value ge = arith::CmpIOp::create(rw, loc, arith::CmpIPredicate::uge, x, cInt(rw, loc, x.getType(), lo));
-      Value lt = arith::CmpIOp::create(rw, loc, arith::CmpIPredicate::ult, x, cInt(rw, loc, x.getType(), hi));
-      return arith::AndIOp::create(rw, loc, ge, lt).getResult();
-    };
-    auto add = [&](Value x, Value y) { return arith::AddIOp::create(rw, loc, x, y).getResult(); };
-    auto sel = [&](Value c, Value x, Value y) { return arith::SelectOp::create(rw, loc, c, x, y).getResult(); };
-    // four hex digits from p on: their value, and whether all four are hex digits
-    auto hex4 = [&](Value p) {
-      Value u = c32v(0), ok = cInt(rw, loc, i1, 1);
-      for (int k = 0; k < 4; k++) {
-        Value b = arith::ExtUIOp::create(rw, loc, i32, load(rw, loc, text, add(p, cIndex(rw, loc, k))));
-        Value dec = in(b, '0', '9' + 1), lower = in(b, 'a', 'f' + 1), upper = in(b, 'A', 'F' + 1);
-        Value d = sel(dec, arith::SubIOp::create(rw, loc, b, c32v('0')),
-                      sel(lower, arith::SubIOp::create(rw, loc, b, c32v('a' - 10)), arith::SubIOp::create(rw, loc, b, c32v('A' - 10))));
-        u = arith::OrIOp::create(rw, loc, arith::ShLIOp::create(rw, loc, u, c32v(4)), d);
-        ok = arith::AndIOp::create(rw, loc, ok, arith::OrIOp::create(rw, loc, dec, arith::OrIOp::create(rw, loc, lower, upper)));
-      }
-      return composite::Join{u, ok};
-    };
-    auto byteAt = [&](Value v, Value at) { store(rw, loc, arith::TruncIOp::create(rw, loc, i8, v), out, at); };
-
-    auto loop = scf::WhileOp::create(rw, loc, TypeRange{idx, idx}, ValueRange{zero, zero});
-    Block *before = rw.createBlock(&loop.getBefore(), loop.getBefore().end(), TypeRange{idx, idx}, {loc, loc});
-    rw.setInsertionPointToEnd(before);
-    Value going = arith::CmpIOp::create(rw, loc, arith::CmpIPredicate::ult, before->getArgument(0), n);
-    scf::ConditionOp::create(rw, loc, going, before->getArguments());
-    Block *after = rw.createBlock(&loop.getAfter(), loop.getAfter().end(), TypeRange{idx, idx}, {loc, loc});
-    rw.setInsertionPointToEnd(after);
-    Value i = after->getArgument(0), w = after->getArgument(1);
-    Value x = load(rw, loc, text, i);
-    Value i1v = add(i, one), w1 = add(w, one);
-    Value escape = arith::AndIOp::create(rw, loc, eq8(x, '\\'), arith::CmpIOp::create(rw, loc, arith::CmpIPredicate::ult, i1v, n));
-    // the byte as it is, the next byte read after it
-    auto asItIs = [&]() {
-      store(rw, loc, x, out, w);
-      scf::YieldOp::create(rw, loc, ValueRange{i1v, w1});
-    };
-    auto step = scf::IfOp::create(rw, loc, TypeRange{idx, idx}, escape, /*withElseRegion=*/true);
-    rw.setInsertionPointToStart(step.elseBlock());
-    asItIs();
-    rw.setInsertionPointToStart(step.thenBlock());
-    {
-      Value y = load(rw, loc, text, i1v);
-      // \" \\ \/ \b \f \n \r \t: the byte each names
-      const composite::Join<char, char> simple[] = {{'"', '"'}, {'\\', '\\'}, {'/', '/'}, {'b', '\b'}, {'f', '\f'}, {'n', '\n'}, {'r', '\r'}, {'t', '\t'}};
-      Value isSimple = cInt(rw, loc, i1, 0), named = y;
-      for (auto [letter, byte] : simple) {
-        Value is = eq8(y, letter);
-        isSimple = arith::OrIOp::create(rw, loc, isSimple, is);
-        named = sel(is, cInt(rw, loc, i8, byte), named);
-      }
-      auto bySimple = scf::IfOp::create(rw, loc, TypeRange{idx, idx}, isSimple, /*withElseRegion=*/true);
-      rw.setInsertionPointToStart(bySimple.thenBlock());
-      store(rw, loc, named, out, w);
-      scf::YieldOp::create(rw, loc, ValueRange{add(i, two), w1});
-      rw.setInsertionPointToStart(bySimple.elseBlock());
-      {
-        // \uXXXX, its four digits within the text
-        Value isU = arith::AndIOp::create(rw, loc, eq8(y, 'u'), arith::CmpIOp::create(rw, loc, arith::CmpIPredicate::ule, add(i, six), n));
-        auto byU = scf::IfOp::create(rw, loc, TypeRange{idx, idx}, isU, /*withElseRegion=*/true);
-        rw.setInsertionPointToStart(byU.elseBlock());
-        asItIs();
-        rw.setInsertionPointToStart(byU.thenBlock());
-        auto [u, ok] = hex4(add(i, two));
-        auto byHex = scf::IfOp::create(rw, loc, TypeRange{idx, idx}, ok, /*withElseRegion=*/true);
-        rw.setInsertionPointToStart(byHex.elseBlock());
-        asItIs();
-        rw.setInsertionPointToStart(byHex.thenBlock());
-        {
-          // a high surrogate followed by \u and a low one is one code point; any other surrogate is U+FFFD
-          Value high = in(u, 0xD800, 0xDC00);
-          Value room = arith::CmpIOp::create(rw, loc, arith::CmpIPredicate::ule, add(i, cIndex(rw, loc, 12)), n);
-          auto point = scf::IfOp::create(rw, loc, TypeRange{i32, idx}, arith::AndIOp::create(rw, loc, high, room), /*withElseRegion=*/true);
-          rw.setInsertionPointToStart(point.thenBlock());
-          {
-            Value bs = eq8(load(rw, loc, text, add(i, six)), '\\'), lu = eq8(load(rw, loc, text, add(i, cIndex(rw, loc, 7))), 'u');
-            auto [v, ok2] = hex4(add(i, cIndex(rw, loc, 8)));
-            Value pair = arith::AndIOp::create(rw, loc, arith::AndIOp::create(rw, loc, bs, lu), arith::AndIOp::create(rw, loc, ok2, in(v, 0xDC00, 0xE000)));
-            Value cp = add(add(c32v(0x10000), arith::ShLIOp::create(rw, loc, arith::SubIOp::create(rw, loc, u, c32v(0xD800)), c32v(10))),
-                           arith::SubIOp::create(rw, loc, v, c32v(0xDC00)));
-            scf::YieldOp::create(rw, loc, ValueRange{sel(pair, cp, c32v(0xFFFD)), sel(pair, cIndex(rw, loc, 12), six)});
-          }
-          rw.setInsertionPointToStart(point.elseBlock());
-          scf::YieldOp::create(rw, loc, ValueRange{sel(in(u, 0xD800, 0xE000), c32v(0xFFFD), u), six});
-          rw.setInsertionPointAfter(point);
-          // the code point in UTF-8: four cells written (w + 3 < i + 6 <= n), the first len of them the value
-          Value cp = point.getResult(0);
-          Value len = add(add(cIndex(rw, loc, 1), arith::IndexCastUIOp::create(rw, loc, idx, arith::ExtUIOp::create(rw, loc, i32, in(cp, 0x80, 0x7fffffff)))),
-                          add(arith::IndexCastUIOp::create(rw, loc, idx, arith::ExtUIOp::create(rw, loc, i32, in(cp, 0x800, 0x7fffffff))),
-                              arith::IndexCastUIOp::create(rw, loc, idx, arith::ExtUIOp::create(rw, loc, i32, in(cp, 0x10000, 0x7fffffff)))));
-          auto isLen = [&](int64_t l) { return arith::CmpIOp::create(rw, loc, arith::CmpIPredicate::eq, len, cIndex(rw, loc, l)).getResult(); };
-          auto shr = [&](int64_t b) { return arith::ShRUIOp::create(rw, loc, cp, c32v(b)).getResult(); };
-          auto cont = [&](Value v) { return arith::OrIOp::create(rw, loc, c32v(0x80), arith::AndIOp::create(rw, loc, v, c32v(0x3F))).getResult(); };
-          auto lead = [&](int64_t mark, int64_t b) { return arith::OrIOp::create(rw, loc, c32v(mark), shr(b)).getResult(); };
-          Value b0 = sel(isLen(1), cp, sel(isLen(2), lead(0xC0, 6), sel(isLen(3), lead(0xE0, 12), lead(0xF0, 18))));
-          Value b1 = sel(isLen(2), cont(cp), sel(isLen(3), cont(shr(6)), cont(shr(12))));
-          Value b2 = sel(isLen(3), cont(cp), cont(shr(6)));
-          Value b3 = cont(cp);
-          byteAt(b0, w);
-          byteAt(b1, add(w, one));
-          byteAt(b2, add(w, two));
-          byteAt(b3, add(w, cIndex(rw, loc, 3)));
-          scf::YieldOp::create(rw, loc, ValueRange{add(i, point.getResult(1)), add(w, len)});
-        }
-        rw.setInsertionPointAfter(byHex);
-        scf::YieldOp::create(rw, loc, byHex.getResults());
-        rw.setInsertionPointAfter(byU);
-        scf::YieldOp::create(rw, loc, byU.getResults());
-      }
-      rw.setInsertionPointAfter(bySimple);
-      scf::YieldOp::create(rw, loc, bySimple.getResults());
-    }
-    rw.setInsertionPointAfter(step);
-    scf::YieldOp::create(rw, loc, step.getResults());
-    rw.setInsertionPointAfter(loop);
-    Value value = memref::SubViewOp::create(rw, loc, out, ArrayRef<OpFoldResult>{rw.getIndexAttr(0)},
-                                           ArrayRef<OpFoldResult>{loop.getResult(1)}, ArrayRef<OpFoldResult>{rw.getIndexAttr(1)});
-    if (value.getType() != out.getType()) value = memref::CastOp::create(rw, loc, out.getType(), value);
-    rw.replaceOp(op, value);
+    rw.replaceOp(op, body(rw, op, "confix_unescape", {a.getText().getType()}, {a.getText()}));
     return success();
   }
 };
