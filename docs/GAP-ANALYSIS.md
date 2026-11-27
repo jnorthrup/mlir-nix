@@ -172,6 +172,10 @@ Wave 2, after G1: G3b with G4c (the store index as a HashTrie with sealed pages)
 G3b and G4c started early (2026-11-27, lane `sidx` from b77b980): a HashTrie's leaves are fixed 16 KiB pages and its log
 is a file, so the store index needs no growable series and does not wait on G1.  Lane `gc` (from 0db2780) takes the
 quadratic referrer scan out of nixstore_ts_gc meanwhile, with trikeshed.adjacency's counts.
+G2's lowering started too (lane `drain` from eae7ad5): a drain of plain elements as one llvm.intr.memmove (the value
+semantics; the old element loop smears only under an overlap no product drain may have), constant counts kept constant,
+then Rows' row moves as drains and ClusterOps without its loop-idiom flag, each within 2% by instructions retired.
+G5's remainder runs as lane `sha256hw` (SHA-256 with the CPU's SHA-2 instructions; a platform switches within 5%).
 
 ## Ledger
 
