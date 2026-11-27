@@ -24,6 +24,7 @@
 !m = memref<?xi8, strided<[1], offset: ?>>
 !d = !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
 !coords = !trikeshed.series<!trikeshed.twinpacked<i32>>
+!q = !trikeshed.series<i64>
 
 // the descriptor of n cells at p (a struct, not a memref: returning it allocates nothing and clones nothing)
 func.func private @tp_desc(%p: !llvm.ptr, %n: i64) -> !d {
@@ -43,7 +44,10 @@ func.func @nixfe_ts_strip(%recs: !llvm.ptr, %n: i64, %out: !llvm.ptr, %cap: i64,
   %c1_i64 = arith.constant 1 : i64
   %c2_i64 = arith.constant 2 : i64
   %c3_i64 = arith.constant 3 : i64
-  %c4_i64 = arith.constant 1000000 : i64
+  %c32_i64 = arith.constant 32 : i64
+  %cmin_i64 = arith.constant 1000000 : i64
+  %cinit_i64 = arith.constant 4294967296000001 : i64
+  %cidx_i64 = arith.constant 2147483647 : i64
   %c5_i8 = arith.constant 32 : i8
   %c6_i8 = arith.constant 10 : i8
   %c7_index = arith.constant 0 : index
@@ -53,87 +57,96 @@ func.func @nixfe_ts_strip(%recs: !llvm.ptr, %n: i64, %out: !llvm.ptr, %cap: i64,
   %n2_3 = arith.muli %n, %c2_i64 : i64
   %rc_4 = func.call @tp_desc(%recs, %n3_2) : (!llvm.ptr, i64) -> !d
   %recm_5 = builtin.unrealized_conversion_cast %rc_4 : !d to memref<?xi64>
+  %recv = trikeshed.text %recm_5 : memref<?xi64> -> !q
   %wc_6 = func.call @tp_desc(%wins, %n2_3) : (!llvm.ptr, i64) -> !d
   %winm_7 = builtin.unrealized_conversion_cast %wc_6 : !d to memref<?xi64>
-  %p1:4 = scf.for %k = %c7_index to %ni_1 step %c8_index iter_args(%aS = %c1_i64, %ci = %c0_i64, %mi = %c4_i64, %tot = %c0_i64) -> (i64, i64, i64, i64) {
-  %k_8 = arith.index_cast %k : index to i64
-  %k3_9 = arith.muli %k_8, %c3_i64 : i64
-  %k31_10 = arith.addi %k3_9, %c1_i64 : i64
-  %k32_11 = arith.addi %k3_9, %c2_i64 : i64
-  %kindi_12 = arith.index_cast %k32_11 : i64 to index
-  %kind_13 = memref.load %recm_5[%kindi_12] : memref<?xi64>
-  %leni_14 = arith.index_cast %k31_10 : i64 to index
-  %len_15 = memref.load %recm_5[%leni_14] : memref<?xi64>
-  %lit0_16 = arith.cmpi eq, %kind_13, %c0_i64 : i64
-  %p_17, %p_18, %p_19, %p_20 = scf.if %lit0_16 -> (i64, i64, i64, i64) {
-  %pbi_21 = arith.index_cast %k3_9 : i64 to index
-  %pb_22 = memref.load %recm_5[%pbi_21] : memref<?xi64>
-  %ptr_23 = llvm.inttoptr %pb_22 : i64 to !llvm.ptr
-  %txd_24 = func.call @tp_desc(%ptr_23, %len_15) : (!llvm.ptr, i64) -> !d
-  %txm_25 = builtin.unrealized_conversion_cast %txd_24 : !d to !m
-  %tx_26 = builtin.unrealized_conversion_cast %txm_25 : !m to !s
-  %lni_27 = arith.index_cast %len_15 : i64 to index
-  %in:3 = scf.for %j = %c7_index to %lni_27 step %c8_index iter_args(%a = %aS, %c = %ci, %m = %mi) -> (i64, i64, i64) {
-  %ch_28 = trikeshed.at %tx_26[%j] : !s, index -> i8
-  %sp_29 = arith.cmpi eq, %ch_28, %c5_i8 : i8
-  %nl_30 = arith.cmpi eq, %ch_28, %c6_i8 : i8
-  %anz_31 = arith.cmpi ne, %a, %c0_i64 : i64
-  %q_32, %q_33, %q_34 = scf.if %anz_31 -> (i64, i64, i64) {
-  %q_35, %q_36, %q_37 = scf.if %sp_29 -> (i64, i64, i64) {
-  %ci2_38 = arith.addi %c, %c1_i64 : i64
-  scf.yield %a, %ci2_38, %m : i64, i64, i64
+  // pass 1, the measure: the state (atStartOfLine, indent, minIndent) packed as (minIndent << 32) | (indent << 1) | a,
+  // carried across the parts with the literal total.  A literal part is a fold over its bytes (a part's indent
+  // counts from its line start, which may be in an earlier part: the packed state carries it).  An antiquotation
+  // closes an open line's indent (minIndent = min(minIndent, indent)).  Indents stay below 2^31 (a part's length).
+  %p1:2 = scf.for %k = %c7_index to %ni_1 step %c8_index iter_args(%st0 = %cinit_i64, %tot0 = %c0_i64) -> (i64, i64) {
+    %k_8 = arith.index_cast %k : index to i64
+    %k3_9 = arith.muli %k_8, %c3_i64 : i64
+    %k31_10 = arith.addi %k3_9, %c1_i64 : i64
+    %k32_11 = arith.addi %k3_9, %c2_i64 : i64
+    %kindi_12 = arith.index_cast %k32_11 : i64 to index
+    %kind_13 = trikeshed.at %recv[%kindi_12] : !q, index -> i64
+    %leni_14 = arith.index_cast %k31_10 : i64 to index
+    %len_15 = trikeshed.at %recv[%leni_14] : !q, index -> i64
+    %lit0_16 = arith.cmpi eq, %kind_13, %c0_i64 : i64
+    %st1, %tot1 = scf.if %lit0_16 -> (i64, i64) {
+      %pbi_21 = arith.index_cast %k3_9 : i64 to index
+      %pb_22 = trikeshed.at %recv[%pbi_21] : !q, index -> i64
+      %ptr_23 = llvm.inttoptr %pb_22 : i64 to !llvm.ptr
+      %txd_24 = func.call @tp_desc(%ptr_23, %len_15) : (!llvm.ptr, i64) -> !d
+      %txm_25 = builtin.unrealized_conversion_cast %txd_24 : !d to !m
+      %tx_26 = builtin.unrealized_conversion_cast %txm_25 : !m to !s
+      %stf = trikeshed.fold %tx_26, %st0 : !s, i64 -> i64 {
+      ^bb0(%s: i64, %ch: i8):
+        %a = arith.andi %s, %c1_i64 : i64
+        %cs = arith.shrui %s, %c1_i64 : i64
+        %cw = arith.andi %cs, %cidx_i64 : i64
+        %mw = arith.shrui %s, %c32_i64 : i64
+        %sp = arith.cmpi eq, %ch, %c5_i8 : i8
+        %nl = arith.cmpi eq, %ch, %c6_i8 : i8
+        %open = arith.cmpi ne, %a, %c0_i64 : i64
+        %c1x = arith.addi %cw, %c1_i64 : i64
+        %opensp = arith.andi %open, %sp : i1
+        %cb = arith.select %opensp, %c1x, %cw : i64
+        %c2 = arith.select %nl, %c0_i64, %cb : i64
+        %nsp = arith.cmpi ne, %ch, %c5_i8 : i8
+        %nnl = arith.cmpi ne, %ch, %c6_i8 : i8
+        %sn = arith.andi %nsp, %nnl : i1
+        %oth = arith.andi %open, %sn : i1
+        %mn = arith.minui %mw, %cw : i64
+        %m2 = arith.select %oth, %mn, %mw : i64
+        %a0 = arith.select %oth, %c0_i64, %a : i64
+        %a2 = arith.select %nl, %c1_i64, %a0 : i64
+        %m2s = arith.shli %m2, %c32_i64 : i64
+        %c2s = arith.shli %c2, %c1_i64 : i64
+        %pk0 = arith.ori %m2s, %c2s : i64
+        %pk = arith.ori %pk0, %a2 : i64
+        trikeshed.yield %pk : i64
+      }
+      %t2 = arith.addi %tot0, %len_15 : i64
+      scf.yield %stf, %t2 : i64, i64
     } else {
-  %q_39, %q_40, %q_41 = scf.if %nl_30 -> (i64, i64, i64) {
-  scf.yield %a, %c0_i64, %m : i64, i64, i64
-    } else {
-  %mi2_42 = arith.minui %m, %c : i64
-  scf.yield %c0_i64, %c, %mi2_42 : i64, i64, i64
+      // an antiquotation or a path-literal without indent: an open line's indent is final
+      %a_1 = arith.andi %st0, %c1_i64 : i64
+      %cs_1 = arith.shrui %st0, %c1_i64 : i64
+      %cw_1 = arith.andi %cs_1, %cidx_i64 : i64
+      %mw_1 = arith.shrui %st0, %c32_i64 : i64
+      %open_1 = arith.cmpi ne, %a_1, %c0_i64 : i64
+      %mn_1 = arith.minui %mw_1, %cw_1 : i64
+      %m_1 = arith.select %open_1, %mn_1, %mw_1 : i64
+      %mshift = arith.shli %m_1, %c32_i64 : i64
+      %cshift = arith.shli %cw_1, %c1_i64 : i64
+      %closed = arith.ori %mshift, %cshift : i64
+      %stc = arith.select %open_1, %closed, %st0 : i64
+      %k1_52 = arith.cmpi eq, %kind_13, %c1_i64 : i64
+      %t2_53 = arith.addi %tot0, %len_15 : i64
+      %tot_54 = arith.select %k1_52, %t2_53, %tot0 : i64
+      scf.yield %stc, %tot_54 : i64, i64
     }
-  scf.yield %q_39, %q_40, %q_41 : i64, i64, i64
-    }
-  scf.yield %q_35, %q_36, %q_37 : i64, i64, i64
-    } else {
-  %q_43, %q_44, %q_45 = scf.if %nl_30 -> (i64, i64, i64) {
-  scf.yield %c1_i64, %c0_i64, %m : i64, i64, i64
-    } else {
-  scf.yield %a, %c, %m : i64, i64, i64
-    }
-  scf.yield %q_43, %q_44, %q_45 : i64, i64, i64
-    }
-  scf.yield %q_32, %q_33, %q_34 : i64, i64, i64
+    scf.yield %st1, %tot1 : i64, i64
   }
-  %tot2_46 = arith.addi %tot, %len_15 : i64
-  scf.yield %in#0, %in#1, %in#2, %tot2_46 : i64, i64, i64, i64
-    } else {
-  %anz_47 = arith.cmpi ne, %aS, %c0_i64 : i64
-  %q_48, %q_49, %q_50 = scf.if %anz_47 -> (i64, i64, i64) {
-  %mi2_51 = arith.minui %mi, %ci : i64
-  scf.yield %c0_i64, %ci, %mi2_51 : i64, i64, i64
-    } else {
-  scf.yield %aS, %ci, %mi : i64, i64, i64
-    }
-  %k1_52 = arith.cmpi eq, %kind_13, %c1_i64 : i64
-  %tot2_53 = arith.addi %tot, %len_15 : i64
-  %tot_54 = arith.select %k1_52, %tot2_53, %tot : i64
-  scf.yield %q_48, %q_49, %q_50, %tot_54 : i64, i64, i64, i64
-    }
-  scf.yield %p_17, %p_18, %p_19, %p_20 : i64, i64, i64, i64
-  }
-  %tp_55 = arith.addi %p1#3, %n : i64
+  %mfin = arith.shrui %p1#0, %c32_i64 : i64
+  %tp_55 = arith.addi %p1#1, %n : i64
   %words_56 = arith.muli %tp_55, %c2_i64 : i64
   %wsi_57 = arith.index_cast %words_56 : i64 to index
   %segs_58 = memref.alloc(%wsi_57) : memref<?xi64>
+  // pass 2: the segments (a line's piece in a part, from its first kept byte to its newline) and the windows
   %p2:4 = scf.for %k2 = %c7_index to %ni_1 step %c8_index iter_args(%aS2 = %c1_i64, %dr = %c0_i64, %off = %c0_i64, %ns = %c0_i64) -> (i64, i64, i64, i64) {
   %k2_59 = arith.index_cast %k2 : index to i64
   %k3_60 = arith.muli %k2_59, %c3_i64 : i64
   %k31_61 = arith.addi %k3_60, %c1_i64 : i64
   %k32_62 = arith.addi %k3_60, %c2_i64 : i64
   %kindi_63 = arith.index_cast %k32_62 : i64 to index
-  %kind_64 = memref.load %recm_5[%kindi_63] : memref<?xi64>
+  %kind_64 = trikeshed.at %recv[%kindi_63] : !q, index -> i64
   %leni_65 = arith.index_cast %k31_61 : i64 to index
-  %len_66 = memref.load %recm_5[%leni_65] : memref<?xi64>
+  %len_66 = trikeshed.at %recv[%leni_65] : !q, index -> i64
   %pbi_67 = arith.index_cast %k3_60 : i64 to index
-  %pb_68 = memref.load %recm_5[%pbi_67] : memref<?xi64>
+  %pb_68 = trikeshed.at %recv[%pbi_67] : !q, index -> i64
   %node_69 = arith.cmpi eq, %kind_64, %c2_i64 : i64
   %k2x2_70 = arith.muli %k2_59, %c2_i64 : i64
   %k2x21_71 = arith.addi %k2x2_70, %c1_i64 : i64
@@ -171,7 +184,7 @@ func.func @nixfe_ts_strip(%recs: !llvm.ptr, %n: i64, %out: !llvm.ptr, %cap: i64,
   %anz_102 = arith.cmpi ne, %a2, %c0_i64 : i64
   %q_103, %q_104, %q_105, %q_106, %q_107, %q_108 = scf.if %anz_102 -> (i64, i64, i64, i64, i64, i64) {
   %q_109, %q_110, %q_111, %q_112, %q_113, %q_114 = scf.if %sp_85 -> (i64, i64, i64, i64, i64, i64) {
-  %keep_115 = arith.cmpi uge, %d2, %p1#2 : i64
+  %keep_115 = arith.cmpi uge, %d2, %mfin : i64
   %ks1_116 = arith.addi %ks, %c1_i64 : i64
   %ks_117 = arith.select %keep_115, %ks, %ks1_116 : i64
   %d3_118 = arith.addi %d2, %c1_i64 : i64
