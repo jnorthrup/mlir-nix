@@ -192,8 +192,8 @@ def TS_LaneType : TS_Type<"Lane", "lane"> {
     rows, a power of two of them, so that a row's page and its place there are a shift and a mask: 4096 rows of one to
     four bytes, 2048 of eight (a lane of a few bytes does not take 16 KiB for them).  The lane lives in the frame of the
     function that makes it, and its pages go back when that function returns: it is handed down to the functions that
-    fill and read it, and never returned.  size and at read what an append changes: two of them either side of an
-    append are two reads.
+    fill and read it, and never returned.  size and at read what an append or an anchor changes: two of them either
+    side of one are two reads (their memory effect says so; of a series they have none).
   }];
 }
 
@@ -279,9 +279,12 @@ def TS_TextOp : TS_Op<"text", [Pure]> {
 }
 
 // A MutableSeries IS a Series (MutableSeries.kt), so what reads a series' rows reads a lane's of one column as they are now.
+// Of a series that is pure; of a lane it is a read of what an append or an anchor changes (TrikeShedDialect.cpp), so two
+// of them either side of an append stay two.
 def TS_Rows : AnyTypeOf<[TS_SeriesType, TS_LaneType], "a series or a lane">;
+defvar TS_ReadsRows = [AlwaysSpeculatable, DeclareOpInterfaceMethods<MemoryEffectsOpInterface>];
 
-def TS_SizeOp : TS_Op<"size", [Pure]> {
+def TS_SizeOp : TS_Op<"size", TS_ReadsRows> {
   let summary = "the `a` of a series";
   let arguments = (ins TS_Rows:$series);
   let results = (outs Index:$size);
@@ -293,7 +296,7 @@ def TS_SizeOp : TS_Op<"size", [Pure]> {
   }];
 }
 
-def TS_AtOp : TS_Op<"at", [Pure]> {
+def TS_AtOp : TS_Op<"at", TS_ReadsRows> {
   let summary = "element k: the oracle applied to k";
   let arguments = (ins TS_Rows:$series, AnyType:$index);
   let results = (outs AnyType:$element);
@@ -685,11 +688,15 @@ def TS_SplitSelectOp : TS_Op<"splitSelect", [Pure]> {
 }
 
 def TS_TakeOp : TS_Op<"take", [Pure]> {
-  let summary = "one column of a split or a cursor, by column index";
+  let summary = "one column of a split, a cursor or a lane, by column index";
   let arguments = (ins AnyType:$of, Index:$column);
   let results = (outs AnyType:$value);
   let assemblyFormat = "$of `[` $column `]` attr-dict `:` type($of) `->` type($value)";
-  let description = [{ ReifiedSplitSeries2's `valueAt` / `rightAt`: one array load, no Join. }];
+  let description = [{
+    ReifiedSplitSeries2's `valueAt` / `rightAt`: one array load, no Join.  Of a lane (by a constant index): that
+    column as a lane of one column over the same rows and the same count, to read (size, at, drain) and to anchor in.
+    A row is appended to the whole lane, never to a column of it: the count is the row's in every column.
+  }];
 }
 
 //===----------------------------------------------------------------------===//

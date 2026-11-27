@@ -9,6 +9,7 @@
 // Each case prints its size and the number of laws it broke.
 //
 // RUN: mlnix-opt %s | mlnix-opt | FileCheck %s --check-prefix=ROUND
+// RUN: mlnix-opt %s --cse | FileCheck %s --check-prefix=CSE
 // RUN: mlnix-opt %s --trikeshed-lower-cursors | FileCheck %s --check-prefix=LOWERED
 // RUN: mlnix-opt %s --trikeshed-lower-cursors | mlir-opt --ownership-based-buffer-deallocation --canonicalize --buffer-deallocation-simplification --bufferization-lower-deallocations --convert-scf-to-cf --expand-strided-metadata --lower-affine --finalize-memref-to-llvm --convert-arith-to-llvm --convert-index-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts | mlir-runner -e main -entry-point-result=void -shared-libs=$(ls $(dirname $(which mlir-runner))/../lib/libmlir_runner_utils.* | head -1) | FileCheck %s
 
@@ -18,6 +19,18 @@
 // ROUND: trikeshed.drain %{{.*}} : !trikeshed.lane<i8> -> !trikeshed.series<i8>
 // ROUND: trikeshed.drain %{{.*}}, %{{.*}} : !trikeshed.lane<i8>, memref<?xi8> -> index
 // ROUND: trikeshed.take %{{.*}}[%{{.*}}] : !trikeshed.lane<i64, i64, i64> -> !trikeshed.lane<i64>
+
+// size and at of a lane read what an append changes: either side of one they stay two (of a series they are pure, one).
+// CSE-LABEL: func.func private @lane_reads(
+// CSE: trikeshed.size
+// CSE: trikeshed.at
+// CSE: trikeshed.append
+// CSE: trikeshed.size
+// CSE: trikeshed.at
+// CSE-LABEL: func.func private @lane_series_reads(
+// CSE: trikeshed.size
+// CSE-NOT: trikeshed.size
+// CSE: return
 
 // The count and a box a column, in the frame; a column's pages by its own width; the pages given back by hand.
 // LOWERED-LABEL: func.func private @lane_bytes(
@@ -49,6 +62,24 @@
 !s8 = !trikeshed.series<i8>
 !s32 = !trikeshed.series<i32>
 !s64 = !trikeshed.series<i64>
+
+// the size and the first row, before an append and after it
+func.func private @lane_reads(%x: i64) -> (index, index, i64, i64) {
+  %l = trikeshed.lane : !words
+  %z = arith.constant 0 : index
+  %r0 = trikeshed.append %l, %x : !words, i64 -> index
+  %n0 = trikeshed.size %l : !words
+  %a0 = trikeshed.at %l[%z] : !words, index -> i64
+  %r1 = trikeshed.append %l, %x : !words, i64 -> index
+  %n1 = trikeshed.size %l : !words
+  %a1 = trikeshed.at %l[%z] : !words, index -> i64
+  return %n0, %n1, %a0, %a1 : index, index, i64, i64
+}
+func.func private @lane_series_reads(%s: !s64) -> (index, index) {
+  %n0 = trikeshed.size %s : !s64
+  %n1 = trikeshed.size %s : !s64
+  return %n0, %n1 : index, index
+}
 
 // row i of the bytes: the low byte of 7 i + 3
 func.func private @lane_byte(%i: index) -> i8 {
