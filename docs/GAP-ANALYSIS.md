@@ -145,6 +145,9 @@ Wave 1b (same day, files no wave-1 lane touches): printValueAsJSON's composition
 structured attrs: the writer gap of lib/Eval/Formats.cpp), and G7's query path (utils/mlnixci/src/api.mlir: query_run's
 hand-spelled fills, folds and offsets, then facet, page and report).
 Wave 2, after G1: G3b with G4c (the store index as a HashTrie with sealed pages), G3c, G4b.  On the user's word: G6.
+G3b and G4c started early (2026-11-27, lane `sidx` from b77b980): a HashTrie's leaves are fixed 16 KiB pages and its log
+is a file, so the store index needs no growable series and does not wait on G1.  Lane `gc` (from 0db2780) takes the
+quadratic referrer scan out of nixstore_ts_gc meanwhile, with trikeshed.adjacency's counts.
 
 ## Ledger
 
