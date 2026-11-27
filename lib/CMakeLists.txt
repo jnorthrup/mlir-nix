@@ -162,25 +162,25 @@ mlnix_lower_interface(NixStore lowered/nixstore/IsInStore.mlir IsInStore)
 mlnix_lower_trikeshed(NixStore lowered/nixstore/Sha512.mlir Sha512)
 # SHA-256 (lib/Store/Hash.cpp's CommonCrypto and llvm::SHA256 contexts are gone; HashSink calls these entries).  Sha256.mlir
 # is the Sha512.mlir pattern (update's slices drained into the context, final's padding one combine drained, the digest a
-# combineAll) around rounds chosen once a process: the CPU's SHA-2 instructions, llvm-dialect functions carrying the target
-# feature (Sha256Arm64.mlir: sha256h/h2/su0/su1; Sha256X86.mlir: SHA-NI behind cpuid), or the portable rounds, scf loops that
-# clang unrolls whole at the threshold below (K folds into the code and the schedule into registers).  The probe is the
-# platform's: getauxval on Linux arm64, nothing to ask on macOS arm64, cpuid on x86_64.
+# combineAll) around the rounds of a block, chosen once a process: the CPU's SHA-2 instructions, an llvm-dialect function
+# carrying the target feature (Sha256Arm64.mlir: sha256h/h2/su0/su1; Sha256X86.mlir: SHA-NI), the state passed through it
+# as two vectors by the loop over the blocks; or the portable rounds, scf loops that clang unrolls whole at the threshold
+# below (K folds into the code and the schedule into registers).  The probe is the platform's: getauxval on Linux arm64
+# (Sha256Auxv.mlir), nothing to ask on macOS arm64 (Sha256Apple.mlir), cpuid on x86_64; elsewhere the rounds are portable.
 set(MLNIX_LOWER_CLANG_ARGS -mllvm -unroll-threshold=4000)
 mlnix_lower_trikeshed(NixStore lowered/nixstore/Sha256.mlir Sha256)
 unset(MLNIX_LOWER_CLANG_ARGS)
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
-  mlnix_lower_interface(NixStore lowered/nixstore/Sha256Arm64.mlir Sha256Arm64)
-  if(APPLE)
-    mlnix_lower_interface(NixStore lowered/nixstore/Sha256Apple.mlir Sha256Apple)
-  else()
-    mlnix_lower_interface(NixStore lowered/nixstore/Sha256Auxv.mlir Sha256Auxv)
-  endif()
+set(MLNIX_SHA256_HW NoHw)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$" AND APPLE)
+  set(MLNIX_SHA256_HW Arm64 Apple)
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  set(MLNIX_SHA256_HW Arm64 Auxv)
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
-  mlnix_lower_interface(NixStore lowered/nixstore/Sha256X86.mlir Sha256X86)
-else()
-  mlnix_lower_interface(NixStore lowered/nixstore/Sha256NoHw.mlir Sha256NoHw)
+  set(MLNIX_SHA256_HW X86)
 endif()
+foreach(part ${MLNIX_SHA256_HW})
+  mlnix_lower_interface(NixStore lowered/nixstore/Sha256${part}.mlir Sha256${part})
+endforeach()
 # MD5 and SHA-1 (lib/Store/Hash.cpp's llvm::MD5 / llvm::SHA1 contexts are gone; HashSink calls these entries on the same
 # 112-byte context shape as SHA-512's).  Each is the Sha512.mlir pattern: block words by trikeshed.fold over 4-byte slices,
 # the rounds as scf loops, the padding one combine drained into the context's buffer.

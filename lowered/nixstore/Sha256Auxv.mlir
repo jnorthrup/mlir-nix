@@ -1,4 +1,4 @@
-// Sha256.mlir's @s256_hw_probe on Linux arm64: 2 (the hardware form, Sha256Arm64.mlir) where the kernel reports the SHA-2
+// Sha256.mlir's @s256_hw_probe on Linux arm64: 2 (the hardware rounds, Sha256Arm64.mlir) where the kernel reports the SHA-2
 // instructions, getauxval(AT_HWCAP = 16) & HWCAP_SHA2 (1 << 6), else 1 (the portable rounds).  llvm dialect.
 llvm.func @getauxval(i64) -> i64
 llvm.func @s256_hw_probe() -> i64 {

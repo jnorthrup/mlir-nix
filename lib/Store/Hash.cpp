@@ -49,9 +49,9 @@ composite::Maybe<HashAlgo> parseHashAlgo(std::string_view s) {
 // The digests are hollowed out to MLIR, built into NixStore by lib/CMakeLists.txt; a context is plain state in HashSink::impl.
 // SHA-512: lowered/nixstore/Sha512.mlir (the compression, update's buffering, final's padding; h[8], buf[128], bufLen,
 // totalLen).  MD5 and SHA-1: Md5.mlir, Sha1.mlir (the same pattern: 112-byte contexts, h words @0, buf[64] @32, bufLen @96,
-// totalLen @104).  SHA-256, where the hashing of a run goes (store paths, derivations, NARs): Sha256.mlir, its rounds the
-// CPU's SHA-2 instructions (Sha256Arm64.mlir, Sha256X86.mlir) where it has them, else portable; 176 bytes, h[8] @0,
-// bufLen @32, totalLen @40, buf[128] @48.
+// totalLen @104).  SHA-256, where the hashing of a run goes (store paths, derivations, NARs): Sha256.mlir, the rounds of a
+// block the CPU's SHA-2 instructions where it has them (Sha256Arm64.mlir, Sha256X86.mlir), else portable; 176 bytes,
+// 16-aligned, h[8] @0, bufLen @32, totalLen @40, buf[128] @48.
 extern "C" {
 void mlnix_md5_init(void *ctx);
 void mlnix_md5_update(void *ctx, const uint8_t *p, size_t n);
@@ -82,6 +82,7 @@ constexpr size_t sha256CtxSize = 176;
 static_assert(md5CtxSize <= sizeof(HashSink::impl) && sha1CtxSize <= sizeof(HashSink::impl) &&
                   sha256CtxSize <= sizeof(HashSink::impl) && sha512CtxSize <= sizeof(HashSink::impl),
               "a hash context fits in its sink");
+static_assert(alignof(HashSink) >= 16 && offsetof(HashSink, impl) % 16 == 0, "Sha256.mlir reads the state as two aligned vectors");
 
 HashSink::HashSink(HashAlgo a) : algo(a) {
   switch (a) {
