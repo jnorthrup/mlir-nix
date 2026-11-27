@@ -213,8 +213,8 @@ Older generations and what changed between them: [PERFORMANCE.md at 77de09c](htt
 ## Build
 
 LLVM and MLIR with their CMake packages (22 on Linux and 23.1.1 on macOS are what it is built and tested with), CMake 3.20,
-Ninja, and clang with C++20 (`-DCMAKE_CXX_STANDARD=23` builds and passes the same tests). SHA-256 comes from CommonCrypto on macOS and from OpenSSL's libcrypto elsewhere when it is found,
-else from LLVM (`-DMLNIX_SHA256=auto|openssl|llvm`).
+Ninja, and clang with C++20 (`-DCMAKE_CXX_STANDARD=23` builds and passes the same tests). SHA-256 is the lowered module, its rounds the CPU's SHA-2 instructions where it has them (arm64, and x86_64 behind cpuid);
+on x86_64 OpenSSL's libcrypto is linked instead when it is found (`-DMLNIX_SHA256=auto|mlir|openssl`).
 
     cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_C_COMPILER=clang-22 -DCMAKE_CXX_COMPILER=clang++-22 \
