@@ -500,7 +500,11 @@ GWin *nixstore_walk_room(Walk *c, int64_t which, int64_t need) {
 const GWin *nixstore_walk_next(Walk *c, const char *p, int64_t n, int64_t which, int64_t *count) {
   std::string_view path(p, size_t(n));
   composite::MutableSeries<GWin> &w = c->got[c->got.append(composite::MutableSeries<GWin>())];
-  if (which == 1) {
+  if (which == 3) { // gc_fast's first pass: a read that fails is count -1; the GC then keeps the rounds that read on demand
+    composite::Maybe<PathInfo> info;
+    try { info = c->st->queryPathInfo(path); } catch (...) { *count = -1; return nullptr; }
+    if (info) w = wins(c->sets[c->sets.append(composite::mv(info->references))]);
+  } else if (which == 1) {
     try {
       for (auto &[name, o] : c->st->readDerivation(path).outputs)
         if (!o.path.empty() && c->st->isValidPath(o.path)) w.append({o.path.data(), int64_t(o.path.size())});
