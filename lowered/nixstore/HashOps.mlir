@@ -32,7 +32,7 @@
 !d = !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
 
 memref.global "private" constant @hs_words : memref<405xi8> =
-  dense<"0x6d643500736861310073686132353600736861353132003f00756e6b6e6f776e206861736820616c676f726974686d2027272c206578706563742027626c616b6533272c20276d6435272c202773686131272c2027736861323536272c206f72202773686135313227686173682027272073686f756c642068617665207479706520272720646f6573206e6f7420696e636c756465206120747970652c206e6f72206973207468652074797065206f7468657277697365206b6e6f776e2066726f6d20636f6e7465787427206861732077726f6e67206c656e67746820666f72206861736820616c676f726974686d2027696e76616c696420626173652d313620686173682027696e76616c6964206e6978333220686173682027696e76616c696420535249206861736820276f70656e696e672066696c65202772656164696e672066696c652027273a203a2d666f756e6420656d70747920686173682c20617373756d696e672027656d7074792068617368207265717569726573206578706c69636974206861736820616c676f726974686d">
+  dense<"0x6d643500736861310073686132353600736861353132003f00756e6b6e6f776e206861736820616c676f726974686d2027272c206578706563742027626c616b6533272c20276d6435272c202773686131272c2027736861323536272c206f72202773686135313227686173682027272073686f756c642068617665207479706520272720646f6573206e6f7420696e636c756465206120747970652c206e6f72206973207468652074797065206f7468657277697365206b6e6f776e2066726f6d20636f6e7465787427206861732077726f6e67206c656e67746820666f72206861736820616c676f726974686d2027696e76616c696420626173652d313620686173682027696e76616c6964206e6978333220686173682027696e76616c696420535249206861736820276f70656e696e672066696c652027273a2072656164696e672066696c6520273a2d666f756e6420656d70747920686173682c20617373756d696e672027656d7074792068617368207265717569726573206578706c69636974206861736820616c676f726974686d">
 // the algorithms' names, each with its NUL, in HashAlgo's order; the last is no algorithm's
 memref.global "private" constant @hs_names : memref<10xi64> = dense<[0, 4, 4, 5, 9, 7, 16, 7, 23, 2]>
 // what parseHash refuses, by HashParse.mlir's code (1 to 7): the words before the hash (or the name), after it, and
@@ -356,6 +356,20 @@ func.func @nixstore_ts_hashstring(%a: i64, %p: !llvm.ptr, %n: i64, %h: !llvm.ptr
   return
 }
 
+// What hashFile says of a file that could not be opened (e: the system's error): `opening file '<path>': <what the
+// system says>`.  The one place that wording is made.
+func.func private @hs_file_notopened(%err: !llvm.ptr, %cp: !llvm.ptr, %n: i64, %e: i32) -> i64 {
+  %c0 = arith.constant 0 : i64
+  %opening_o = arith.constant 301 : index  // "opening file '"
+  %opening_n = arith.constant 14 : index
+  %why_o = arith.constant 315 : index  // "': "
+  %why_n = arith.constant 3 : index
+  %none_o = arith.constant 0 : index  // ""
+  %none_n = arith.constant 0 : index
+  %f = func.call @hs_fail(%err, %opening_o, %opening_n, %cp, %n, %why_o, %why_n, %cp, %c0, %none_o, %none_n, %e) : (!llvm.ptr, index, index, !llvm.ptr, i64, index, index, !llvm.ptr, i64, index, index, i32) -> i64
+  return %f : i64
+}
+
 // hashFile: the file's bytes through a sink, 64 KiB at a time.  A file that cannot be opened is said with what the
 // system says; a read that fails is said without it, the file closed first, as the C++ said it.
 func.func @nixstore_ts_hashfile(%a: i64, %cp: !llvm.ptr, %n: i64, %h: !llvm.ptr, %err: !llvm.ptr) -> i64 {
@@ -367,12 +381,8 @@ func.func @nixstore_ts_hashfile(%a: i64, %cp: !llvm.ptr, %n: i64, %h: !llvm.ptr,
   %z32 = arith.constant 0 : i32
   %m1 = arith.constant -1 : i32
   %kF = arith.constant 70 : i32
-  %opening_o = arith.constant 301 : index  // "opening file '"
-  %opening_n = arith.constant 14 : index
-  %reading_o = arith.constant 315 : index  // "reading file '"
+  %reading_o = arith.constant 318 : index  // "reading file '"
   %reading_n = arith.constant 14 : index
-  %why_o = arith.constant 329 : index  // "': "
-  %why_n = arith.constant 3 : index
   %quote_o = arith.constant 48 : index  // "'"
   %quote_n = arith.constant 1 : index
   %none_o = arith.constant 0 : index  // ""
@@ -412,7 +422,7 @@ func.func @nixstore_ts_hashfile(%a: i64, %cp: !llvm.ptr, %n: i64, %h: !llvm.ptr,
     scf.yield %res : i64
   } else {
     %e = func.call @nixfs_os_errno() : () -> i32
-    %f0 = func.call @hs_fail(%err, %opening_o, %opening_n, %cp, %n, %why_o, %why_n, %cp, %c0, %none_o, %none_n, %e) : (!llvm.ptr, index, index, !llvm.ptr, i64, index, index, !llvm.ptr, i64, index, index, i32) -> i64
+    %f0 = func.call @hs_file_notopened(%err, %cp, %n, %e) : (!llvm.ptr, !llvm.ptr, i64, i32) -> i64
     scf.yield %f0 : i64
   }
   return %r : i64
