@@ -41,6 +41,14 @@ mlir::OpFoldResult JOp::fold(FoldAdaptor) {
   return a && b && a.getJoin() == b.getJoin() && a.getJoin().getType() == getType() ? mlir::OpFoldResult(a.getJoin()) : nullptr;
 }
 
+// size and at (TrikeShed.td): pure of a series; of a lane, a read of what an append or an anchor changes.
+using Effects = llvm::SmallVectorImpl<mlir::MemoryEffects::EffectInstance>;
+static void readsLane(mlir::Type rows, Effects &effects) {
+  if (llvm::isa<LaneType>(rows)) effects.emplace_back(mlir::MemoryEffects::Read::get());
+}
+void SizeOp::getEffects(Effects &effects) { readsLane(getSeries().getType(), effects); }
+void AtOp::getEffects(Effects &effects) { readsLane(getSeries().getType(), effects); }
+
 mlir::LogicalResult ClusterOrderOp::verify() {
   for (auto type : {getKeys().getType(), getOrder().getType()}) {
     auto memref = llvm::cast<mlir::MemRefType>(type);
