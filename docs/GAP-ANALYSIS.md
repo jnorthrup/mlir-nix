@@ -172,6 +172,14 @@ Wave 2, after G1: G3b with G4c (the store index as a HashTrie with sealed pages)
 G3b and G4c started early (2026-11-27, lane `sidx` from b77b980): a HashTrie's leaves are fixed 16 KiB pages and its log
 is a file, so the store index needs no growable series and does not wait on G1.  Lane `gc` (from 0db2780) takes the
 quadratic referrer scan out of nixstore_ts_gc meanwhile, with trikeshed.adjacency's counts.
+sidx's first pass (12:18, wip 9e3619b, C++ -1): `<stateDir>/info.trie`, an append-only mapped file derived from the info
+files (still the truth), paths and references keyed by the hash part's first 64 bits, 256-way nodes over leaves sealed
+as pages of sorted deltas with restarts every 16 rows and a RAW fallback (pages about 44% of their rows), records
+holding the info text; staleness by the info directory's token and its entries' count and sum (old binaries take no
+lock), flock between processes, another boot's index rebuilt.  Referrers at 20,000 paths 7.3 G -> 187 M instructions
+(size-independent on an unchanged directory); 100 deletes at 5,000 paths 192.8 G -> 23.9 G (each still reads the
+directory once).  594 + 1,742 store commands old/new identical.  Finishing: rebase onto eae7ad5, the GC interplay,
+the gates on both platforms, the 5,000/20,000-path differential.
 G2's lowering started too (lane `drain` from eae7ad5): a drain of plain elements as one llvm.intr.memmove (the value
 semantics; the old element loop smears only under an overlap no product drain may have), constant counts kept constant,
 then Rows' row moves as drains and ClusterOps without its loop-idiom flag, each within 2% by instructions retired.
