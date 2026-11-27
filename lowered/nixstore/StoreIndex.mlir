@@ -2151,14 +2151,17 @@ func.func private @nxsi_walk(%above: i64, %ref: i64, %out: !llvm.ptr, %at: i64, 
         } else {
           scf.yield %at : i64
         }
+        // the node's 256 child words: one view made here (no call writes the image during a walk), read at each child
+        %k16 = arith.addi %ref, %c16 : i64
+        %kp = func.call @nxsi_p(%k16) : (i64) -> !llvm.ptr
+        %c256l = arith.constant 256 : i64
+        %kd = func.call @nxsi_d(%kp, %c256l) : (!llvm.ptr, i64) -> !d
+        %km = builtin.unrealized_conversion_cast %kd : !d to !m64
+        %kw = builtin.unrealized_conversion_cast %km : !m64 to !s64
         %an = scf.for %i = %z to %i256 step %one iter_args(%a = %a1) -> (i64) {
           %fine = arith.cmpi sge, %a, %c0 : i64
           %a2 = scf.if %fine -> (i64) {
-            %i64x = arith.index_cast %i : index to i64
-            %i8 = arith.muli %i64x, %c8 : i64
-            %k0 = arith.addi %ref, %c16 : i64
-            %ks = arith.addi %k0, %i8 : i64
-            %child = func.call @nxsi_w(%ks) : (i64) -> i64
+            %child = trikeshed.at %kw[%i] : !s64, index -> i64
             %w = func.call @nxsi_walk(%ref, %child, %out, %a, %cap) : (i64, i64, !llvm.ptr, i64, i64) -> i64
             scf.yield %w : i64
           } else {
