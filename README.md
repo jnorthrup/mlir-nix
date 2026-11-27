@@ -94,8 +94,11 @@ MLIR ops stay the program: nodes are made from them and read their attributes.
   No pass creates a trikeshed op yet (the LLVM arm's emitter is Kotlin over son-export). Since 27 November
   `trikeshed.append` and `trikeshed.anchor` lower, over a lane (`!trikeshed.lane`: a MutableSeries in the shape of
   TrikeShed's LaneTrie, rows in pages that never move under one published count, drained into an ordinary series),
-  and one reader is written with them: the index of `builtins.fromJSON` and of the structured attributes is a lane
-  that `confix.checked` fills (lowered/nixeval/JsonRead.mlir), where it was arrays C++ grew when the scan asked.
+  and one reader and one writer are written with them: the index of `builtins.fromJSON` and of the structured
+  attributes is a lane that `confix.checked` fills (lowered/nixeval/JsonRead.mlir), where it was arrays C++ grew when
+  the scan asked; and the text of `builtins.toJSON` is a lane that the walk of the value fills in one pass
+  (lowered/nixeval/JsonWrite.mlir: the walk itself, where it was C++ recursion over a buffer that doubled), drained once
+  into room of its exact size, with each set layout's order of names kept in a second lane behind an anchor.
   son's pool does not write them yet. `trikeshed.drain` is used by the lowered modules, the tests and mlnixci (its
   columns, the escapes and digits its replies are written with, and the query's and the report's whole replies).
   Since 18 November `combine` and `combineAll` lower as Combine.kt's views: a drain of one drains its parts in turn,
