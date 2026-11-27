@@ -150,3 +150,8 @@ Each merge, `gap-census.py --seal` on the new master and `--diff` against the pr
   Linux (mlnix-os, LLVM 22): mlir 52/0, lang 488/488 exact 231 on both schedules, prims 121, mlnixci 51 PASS, son wrong 0,
   the Composite checks plain and sanitized.  Held: the heap lane (inode-bench +6.2%: a row swap left out of line), the
   json lane (C++ +13, toJSON 1.18-1.43x on the microbenchmark).
+- json, parked on branch gap/json-comp (f7c4ec1 + dda82d8; 24,472 runs identical, C++ -8 for the two).  Moving the
+  JSON printer's stitching into one combineAll per set or list costs toJSON 1.2-1.9x, and moving the per-value dispatch
+  in too costs 1.25-2.5x: a combineAll runs its region twice (size, then drain), and a recursive writer of many tiny
+  pieces pays both passes at every level.  The sub-gap is G1's: a writer of that shape wants a single-pass fill (appends
+  into a lane) and one drain, not a two-pass composition.  Re-measure it on the lanes lowering.
