@@ -209,7 +209,8 @@ int runProgram(std::string_view prog, const composite::MutableSeries<composite::
 // NAR
 //===----------------------------------------------------------------------===//
 
-// The NAR is lowered/nixstore/NarFraming.mlir: the framing (u64, pad, str, the tokens) and the walk (nixstore_ts_nardump:
+// The NAR is lowered/nixstore/NarFraming.mlir: the framed tokens (constant slices), the node framing (one combine each),
+// and the walk (nixstore_ts_nardump:
 // a node's type decides its framing, a directory's names are put in byte order, each entry's path `path/name` is composed
 // into `path` with a NUL after it, the filter is asked, a kept entry framed and walked).  What stays here is what the walk
 // asks for: lstat, the listing, the file's bytes, readlink, the PathFilter, the prefetch notes, the Sink and the wording.

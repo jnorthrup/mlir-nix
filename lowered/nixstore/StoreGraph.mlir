@@ -22,6 +22,8 @@
 !tp = !trikeshed.twinpacked<i32>
 !m = memref<?xi8, strided<[1], offset: ?>>
 !m64 = memref<?xi64, strided<[1], offset: ?>>
+!s32 = !trikeshed.series<i32>
+!m32 = memref<?xi32, strided<[1], offset: ?>>
 !d = !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
 
 memref.global "private" constant @sg_secret : memref<192xi8> = dense<"0xb8fe6c3923a44bbe7c01812cf721ad1cded46de9839097db7240a4a4b7b3671fcb79e64eccc0e578825ad07dccff7221b8084674f743248ee03590e6813a264c3c2852bb91c300cb88d0658b1b532ea371644897a20df94e3819ef46a9deacd8a8fa763fe39c343ff9dcbbc7c70b4f1d8a51e04bcdb45931c89f7ec9d9787364eac5ac8334d3ebc3c581a0fffa1363eb170ddd51b7f0da49d316552629d4689e2b16be587d47a1fc8ff8b8d17ad031ce45cb3a8f95160428afd7fbcabb4b407e">
@@ -965,11 +967,309 @@ func.func @nixstore_ts_closure(%ctx: !llvm.ptr, %seeds: !llvm.ptr, %ns: i64, %ou
 }
 
 // collectGarbage after the roots: the dead paths are the valid ones the live set lacks (where, each bisected into live),
-// both sorted.  Then rounds until one deletes nothing or none is left: each dead path not yet deleted, in order, is
-// deleted (nixstore_walk_gone) unless another one not deleted holds it among its references (nixstore_walk_next 2: q's info's
-// sorted references, read once and kept in %refs, bisected), the search stopping at the first that does.  A path deleted this round no longer counts as a
-// referrer, nor one deleted before (it is not among the remaining), so one mark a path serves every round.
+// both sorted.  The referrer-safe rounds run on counts (gc_fast): every dead path's references are read once, up front
+// (nixstore_walk_next 3); each reference to another dead path is an edge, and trikeshed.adjacency gives each dead path
+// its count of live referrers (cnt: the edges from paths not yet deleted) and the list of its dead references (out).  A
+// round visits the dead paths in order: one whose count is 0 is deleted (nixstore_walk_gone) and lowers the count of each
+// of its dead references, so a later path in the same round sees the deletion, exactly as a scan over the referrers did.
+// Rounds repeat while one deleted something.  A self reference is no edge; a cycle's counts never reach 0, so it stays.
+// A read that fails (the first pass's -1) deletes nothing: the rounds then run as gc_lazy, the old scan that reads a path's
+// references only when it checks them, so a failure surfaces at the same point and after the same deletions.
 func.func @nixstore_ts_gc(%ctx: !llvm.ptr, %valid: !llvm.ptr, %nvalid: i64, %live: !llvm.ptr, %nlive: i64) -> i64 {
+  %m0 = arith.constant 0 : i64
+  %r = func.call @gc_fast(%ctx, %valid, %nvalid, %live, %nlive) : (!llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64) -> i64
+  %neg = arith.cmpi slt, %r, %m0 : i64
+  %res = scf.if %neg -> (i64) {
+    %l = func.call @gc_lazy(%ctx, %valid, %nvalid, %live, %nlive) : (!llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64) -> i64
+    scf.yield %l : i64
+  } else {
+    scf.yield %r : i64
+  }
+  return %res : i64
+}
+
+// the fast rounds: -1 when a first-pass read fails (nothing is deleted then), else the deleted count
+func.func private @gc_fast(%ctx: !llvm.ptr, %valid: !llvm.ptr, %nvalid: i64, %live: !llvm.ptr, %nlive: i64) -> i64 {
+  %one = arith.constant 1 : i64
+  %m1 = arith.constant -1 : i64
+  %zero = arith.constant 0 : i64
+  %nvi = arith.index_cast %nvalid : i64 to index
+  %nli = arith.index_cast %nlive : i64 to index
+  %idx = trikeshed.series %nvi : !s64 {
+  ^bb0(%i: index):
+    %i64 = arith.index_cast %i : index to i64
+    trikeshed.yield %i64 : i64
+  }
+  %lidx = trikeshed.series %nli : !s64 {
+  ^bb0(%i: index):
+    %i64 = arith.index_cast %i : index to i64
+    trikeshed.yield %i64 : i64
+  }
+  %dead = trikeshed.where %idx : !s64 -> !s64 {
+  ^bb0(%v: i64):
+    %vp, %vn = func.call @sg_win(%valid, %v) : (!llvm.ptr, i64) -> (!llvm.ptr, i64)
+    %j = trikeshed.bisect %lidx, %zero : !s64, i64 -> index by {
+    ^bb0(%e: i64, %key: i64):
+      %lp, %ln = func.call @sg_win(%live, %e) : (!llvm.ptr, i64) -> (!llvm.ptr, i64)
+      %c = func.call @sg_cmp(%lp, %ln, %vp, %vn) : (!llvm.ptr, i64, !llvm.ptr, i64) -> i32
+      trikeshed.yield %c : i32
+    }
+    %iz = arith.constant 0 : index
+    %absent = arith.cmpi slt, %j, %iz : index
+    trikeshed.yield %absent : i1
+  }
+  %nd = trikeshed.size %dead : !s64
+  %i2 = arith.constant 2 : index
+  %nd2 = arith.muli %nd, %i2 : index
+  %refs = memref.alloc(%nd2) : memref<?xi64>
+  %E, %ok = func.call @gc_refs(%ctx, %valid, %dead, %nd, %refs) : (!llvm.ptr, !llvm.ptr, !s64, index, memref<?xi64>) -> (index, i1)
+  %r = scf.if %ok -> (i64) {
+    %g = func.call @gc_run(%ctx, %valid, %dead, %nd, %refs, %E) : (!llvm.ptr, !llvm.ptr, !s64, index, memref<?xi64>, index) -> i64
+    scf.yield %g : i64
+  } else {
+    scf.yield %m1 : i64
+  }
+  return %r : i64
+}
+
+// every dead path's references, read once: refs[2q] the count (-1 for a failed read, which clears ok), refs[2q+1] the
+// window array's address; returns the total of the counts (the edge count) and whether every read succeeded
+func.func private @gc_refs(%ctx: !llvm.ptr, %valid: !llvm.ptr, %dead: !s64, %nd: index, %refs: memref<?xi64>) -> (index, i1) {
+  %zero = arith.constant 0 : i64
+  %one = arith.constant 1 : i64
+  %three = arith.constant 3 : i64
+  %z = arith.constant 0 : index
+  %s1 = arith.constant 1 : index
+  %i2 = arith.constant 2 : index
+  %t1 = arith.constant 1 : i1
+  %cnt = llvm.alloca %one x i64 : (i64) -> !llvm.ptr
+  %r:2 = scf.for %q = %z to %nd step %s1 iter_args(%acc = %z, %ok = %t1) -> (index, i1) {
+    %qi = trikeshed.at %dead[%q] : !s64, index -> i64
+    %qp, %qn = func.call @sg_win(%valid, %qi) : (!llvm.ptr, i64) -> (!llvm.ptr, i64)
+    %got = func.call @nixstore_walk_next(%ctx, %qp, %qn, %three, %cnt) : (!llvm.ptr, !llvm.ptr, i64, i64, !llvm.ptr) -> !llvm.ptr
+    %gc = llvm.load %cnt : !llvm.ptr -> i64
+    %bad = arith.cmpi slt, %gc, %zero : i64
+    %gcs = arith.select %bad, %zero, %gc : i64
+    %gb = llvm.ptrtoint %got : !llvm.ptr to i64
+    %q2 = arith.muli %q, %i2 : index
+    %q21 = arith.addi %q2, %s1 : index
+    memref.store %gcs, %refs[%q2] : memref<?xi64>
+    memref.store %gb, %refs[%q21] : memref<?xi64>
+    %gci = arith.index_cast %gcs : i64 to index
+    %acc2 = arith.addi %acc, %gci : index
+    %good = arith.xori %bad, %t1 : i1
+    %ok2 = arith.andi %ok, %good : i1
+    scf.yield %acc2, %ok2 : index, i1
+  }
+  return %r#0, %r#1 : index, i1
+}
+
+// the edges of the first pass, as series: each reference's window (flat arrays, see gc_flatten), its dead index J (a bisect
+// of the window into the sorted dead set; -1 when it is no dead path), and the two adjacency graphs: out (from the
+// referrer, FA, to the dead index TA: the dead paths a dead path refers to) and in (from the dead index FB, to the
+// referrer O, the cnt counts).  A self reference is no edge: its from is -1, which adjacency leaves out.
+func.func private @gc_graph(%valid: !llvm.ptr, %dead: !s64, %nd: index, %E: index, %fp: memref<?xi64>, %fl: memref<?xi64>, %fo: memref<?xi32>, %ofirst: memref<?xi32>, %ocnt: memref<?xi32>, %oends: memref<?xi32>, %cnt: memref<?xi32>) {
+  %zero = arith.constant 0 : i64
+  %zero32 = arith.constant 0 : i32
+  %neg1 = arith.constant -1 : i32
+  %mp = memref.cast %fp : memref<?xi64> to !m64
+  %P = builtin.unrealized_conversion_cast %mp : !m64 to !s64
+  %ml = memref.cast %fl : memref<?xi64> to !m64
+  %L = builtin.unrealized_conversion_cast %ml : !m64 to !s64
+  %mo = memref.cast %fo : memref<?xi32> to !m32
+  %O = builtin.unrealized_conversion_cast %mo : !m32 to !s32
+  %J = trikeshed.series %E : !s64 {
+  ^bb0(%e: index):
+    %p = trikeshed.at %P[%e] : !s64, index -> i64
+    %n = trikeshed.at %L[%e] : !s64, index -> i64
+    %pp = llvm.inttoptr %p : i64 to !llvm.ptr
+    %j = trikeshed.bisect %dead, %zero : !s64, i64 -> index by {
+    ^bb0(%x: i64, %key: i64):
+      %xp, %xn = func.call @sg_win(%valid, %x) : (!llvm.ptr, i64) -> (!llvm.ptr, i64)
+      %c = func.call @sg_cmp(%xp, %xn, %pp, %n) : (!llvm.ptr, i64, !llvm.ptr, i64) -> i32
+      trikeshed.yield %c : i32
+    }
+    %j64 = arith.index_cast %j : index to i64
+    trikeshed.yield %j64 : i64
+  }
+  %FA = trikeshed.series %E : !s32 {
+  ^bb0(%e: index):
+    %j = trikeshed.at %J[%e] : !s64, index -> i64
+    %q = trikeshed.at %O[%e] : !s32, index -> i32
+    %q64 = arith.extsi %q : i32 to i64
+    %has = arith.cmpi sge, %j, %zero : i64
+    %ne = arith.cmpi ne, %j, %q64 : i64
+    %kp = arith.andi %has, %ne : i1
+    %fa = arith.select %kp, %q, %neg1 : i32
+    trikeshed.yield %fa : i32
+  }
+  %TA = trikeshed.series %E : !s32 {
+  ^bb0(%e: index):
+    %j = trikeshed.at %J[%e] : !s64, index -> i64
+    %has = arith.cmpi sge, %j, %zero : i64
+    %j32 = arith.trunci %j : i64 to i32
+    %ta = arith.select %has, %j32, %zero32 : i32
+    trikeshed.yield %ta : i32
+  }
+  %FB = trikeshed.series %E : !s32 {
+  ^bb0(%e: index):
+    %j = trikeshed.at %J[%e] : !s64, index -> i64
+    %q = trikeshed.at %O[%e] : !s32, index -> i32
+    %q64 = arith.extsi %q : i32 to i64
+    %has = arith.cmpi sge, %j, %zero : i64
+    %ne = arith.cmpi ne, %j, %q64 : i64
+    %kp = arith.andi %has, %ne : i1
+    %j32 = arith.trunci %j : i64 to i32
+    %fb = arith.select %kp, %j32, %neg1 : i32
+    trikeshed.yield %fb : i32
+  }
+  %out, %outs = trikeshed.adjacency %FA, %TA over %nd : !s32, !s32 -> !sp, !s32
+  %inn, %inns = trikeshed.adjacency %FB, %O over %nd : !s32, !s32 -> !sp, !s32
+  %firsts = trikeshed.alpha %out : !sp -> !s32 {
+  ^bb0(%p: !tp):
+    %f = trikeshed.first %p : !tp -> i32
+    trikeshed.yield %f : i32
+  }
+  %counts = trikeshed.alpha %out : !sp -> !s32 {
+  ^bb0(%p: !tp):
+    %c = trikeshed.second %p : !tp -> i32
+    trikeshed.yield %c : i32
+  }
+  %referrers = trikeshed.alpha %inn : !sp -> !s32 {
+  ^bb0(%p: !tp):
+    %c = trikeshed.second %p : !tp -> i32
+    trikeshed.yield %c : i32
+  }
+  %d1 = trikeshed.drain %firsts, %ofirst : !s32, memref<?xi32> -> index
+  %d2 = trikeshed.drain %counts, %ocnt : !s32, memref<?xi32> -> index
+  %d3 = trikeshed.drain %outs, %oends : !s32, memref<?xi32> -> index
+  %d4 = trikeshed.drain %referrers, %cnt : !s32, memref<?xi32> -> index
+  return
+}
+
+// the rounds on the counts (the old rounds' order): each unmarked path with count 0 is deleted, its dead references'
+// counts go down by one; a round that deleted nothing, or none left, ends the rounds.  Returns the deleted count.  The
+// arrays are read through views made once (trikeshed.at); the writes are memref.store on the same buffers.
+func.func private @gc_sweeps(%ctx: !llvm.ptr, %valid: !llvm.ptr, %dead: !s64, %nd: index, %ofirst: memref<?xi32>, %ocnt: memref<?xi32>, %oends: memref<?xi32>, %cnt: memref<?xi32>) -> i64 {
+  %z = arith.constant 0 : index
+  %s1 = arith.constant 1 : index
+  %t1 = arith.constant 1 : i1
+  %f0 = arith.constant 0 : i1
+  %b0 = arith.constant 0 : i8
+  %b1 = arith.constant 1 : i8
+  %z32 = arith.constant 0 : i32
+  %one32 = arith.constant 1 : i32
+  %mark = memref.alloc(%nd) : memref<?xi8>
+  scf.for %i = %z to %nd step %s1 {
+    memref.store %b0, %mark[%i] : memref<?xi8>
+  }
+  %mm = memref.cast %mark : memref<?xi8> to !m
+  %MK = builtin.unrealized_conversion_cast %mm : !m to !s
+  %om = memref.cast %ofirst : memref<?xi32> to !m32
+  %OF = builtin.unrealized_conversion_cast %om : !m32 to !s32
+  %oc = memref.cast %ocnt : memref<?xi32> to !m32
+  %OC = builtin.unrealized_conversion_cast %oc : !m32 to !s32
+  %oe = memref.cast %oends : memref<?xi32> to !m32
+  %OE = builtin.unrealized_conversion_cast %oe : !m32 to !s32
+  %cn = memref.cast %cnt : memref<?xi32> to !m32
+  %CN = builtin.unrealized_conversion_cast %cn : !m32 to !s32
+  %w:2 = scf.while (%prog = %t1, %left = %nd) : (i1, index) -> (i1, index) {
+    %some = arith.cmpi sgt, %left, %z : index
+    %go = arith.andi %prog, %some : i1
+    scf.condition(%go) %prog, %left : i1, index
+  } do {
+  ^bb0(%prog: i1, %left: index):
+    %rd:2 = scf.for %pj = %z to %nd step %s1 iter_args(%pg = %f0, %lf = %left) -> (i1, index) {
+      %mp = trikeshed.at %MK[%pj] : !s, index -> i8
+      %alive = arith.cmpi eq, %mp, %b0 : i8
+      %o:2 = scf.if %alive -> (i1, index) {
+        %c = trikeshed.at %CN[%pj] : !s32, index -> i32
+        %free = arith.cmpi eq, %c, %z32 : i32
+        %o2:2 = scf.if %free -> (i1, index) {
+          %pi = trikeshed.at %dead[%pj] : !s64, index -> i64
+          %pp, %pn = func.call @sg_win(%valid, %pi) : (!llvm.ptr, i64) -> (!llvm.ptr, i64)
+          func.call @nixstore_walk_gone(%ctx, %pp, %pn) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+          memref.store %b1, %mark[%pj] : memref<?xi8>
+          %f32 = trikeshed.at %OF[%pj] : !s32, index -> i32
+          %k32 = trikeshed.at %OC[%pj] : !s32, index -> i32
+          %f = arith.index_cast %f32 : i32 to index
+          %k = arith.index_cast %k32 : i32 to index
+          scf.for %i = %z to %k step %s1 {
+            %ei = arith.addi %f, %i : index
+            %t32 = trikeshed.at %OE[%ei] : !s32, index -> i32
+            %t = arith.index_cast %t32 : i32 to index
+            %ct = trikeshed.at %CN[%t] : !s32, index -> i32
+            %ct1 = arith.subi %ct, %one32 : i32
+            memref.store %ct1, %cnt[%t] : memref<?xi32>
+          }
+          %lf1 = arith.subi %lf, %s1 : index
+          scf.yield %t1, %lf1 : i1, index
+        } else {
+          scf.yield %pg, %lf : i1, index
+        }
+        scf.yield %o2#0, %o2#1 : i1, index
+      } else {
+        scf.yield %pg, %lf : i1, index
+      }
+      scf.yield %o#0, %o#1 : i1, index
+    }
+    scf.yield %rd#0, %rd#1 : i1, index
+  }
+  %gone = arith.subi %nd, %w#1 : index
+  %g64 = arith.index_cast %gone : index to i64
+  return %g64 : i64
+}
+
+// the first pass's counts and windows, flattened: edge o (in dead order, then reference order) is the window of the
+// reference (fp, fl: its address and length) and its referrer's dead index (fo)
+func.func private @gc_flatten(%refs: memref<?xi64>, %nd: index, %fp: memref<?xi64>, %fl: memref<?xi64>, %fo: memref<?xi32>) {
+  %z = arith.constant 0 : index
+  %s1 = arith.constant 1 : index
+  %i2 = arith.constant 2 : index
+  %end = scf.for %q = %z to %nd step %s1 iter_args(%off0 = %z) -> index {
+    %q2 = arith.muli %q, %i2 : index
+    %q21 = arith.addi %q2, %s1 : index
+    %rc64 = memref.load %refs[%q2] : memref<?xi64>
+    %rb = memref.load %refs[%q21] : memref<?xi64>
+    %rp = llvm.inttoptr %rb : i64 to !llvm.ptr
+    %rc = arith.index_cast %rc64 : i64 to index
+    %q32 = arith.index_cast %q : index to i32
+    %off1 = scf.for %k = %z to %rc step %s1 iter_args(%o = %off0) -> index {
+      %k64 = arith.index_cast %k : index to i64
+      %wp, %wn = func.call @sg_win(%rp, %k64) : (!llvm.ptr, i64) -> (!llvm.ptr, i64)
+      %wb = llvm.ptrtoint %wp : !llvm.ptr to i64
+      memref.store %wb, %fp[%o] : memref<?xi64>
+      memref.store %wn, %fl[%o] : memref<?xi64>
+      memref.store %q32, %fo[%o] : memref<?xi32>
+      %o1 = arith.addi %o, %s1 : index
+      scf.yield %o1 : index
+    }
+    scf.yield %off1 : index
+  }
+  return
+}
+
+// the first-pass results into the rounds: the flat windows, the edge graphs, the rounds
+func.func private @gc_run(%ctx: !llvm.ptr, %valid: !llvm.ptr, %dead: !s64, %nd: index, %refs: memref<?xi64>, %E: index) -> i64 {
+  %fp = memref.alloc(%E) : memref<?xi64>
+  %fl = memref.alloc(%E) : memref<?xi64>
+  %fo = memref.alloc(%E) : memref<?xi32>
+  func.call @gc_flatten(%refs, %nd, %fp, %fl, %fo) : (memref<?xi64>, index, memref<?xi64>, memref<?xi64>, memref<?xi32>) -> ()
+  %ofirst = memref.alloc(%nd) : memref<?xi32>
+  %ocnt = memref.alloc(%nd) : memref<?xi32>
+  %oends = memref.alloc(%E) : memref<?xi32>
+  %cnt = memref.alloc(%nd) : memref<?xi32>
+  func.call @gc_graph(%valid, %dead, %nd, %E, %fp, %fl, %fo, %ofirst, %ocnt, %oends, %cnt) : (!llvm.ptr, !s64, index, index, memref<?xi64>, memref<?xi64>, memref<?xi32>, memref<?xi32>, memref<?xi32>, memref<?xi32>, memref<?xi32>) -> ()
+  %g = func.call @gc_sweeps(%ctx, %valid, %dead, %nd, %ofirst, %ocnt, %oends, %cnt) : (!llvm.ptr, !llvm.ptr, !s64, index, memref<?xi32>, memref<?xi32>, memref<?xi32>, memref<?xi32>) -> i64
+  return %g : i64
+}
+
+// The quadratic rounds the fast form replaces, kept verbatim as the fallback for a store whose first-pass read fails.  Its
+// reads are the old ones: a path's references are read when the scan first checks them (nixstore_walk_next 2).
+// collectGarbage's rounds, the old form: each dead path not yet deleted, in order, is deleted (nixstore_walk_gone) unless
+// another one not deleted holds it among its references (nixstore_walk_next 2: q's info's sorted references, read once and
+// kept in %refs, bisected), the search stopping at the first that does.
+func.func private @gc_lazy(%ctx: !llvm.ptr, %valid: !llvm.ptr, %nvalid: i64, %live: !llvm.ptr, %nlive: i64) -> i64 {
   %zero = arith.constant 0 : i64
   %one = arith.constant 1 : i64
   %nvi = arith.index_cast %nvalid : i64 to index

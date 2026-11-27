@@ -29,6 +29,17 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VERSION = "gap-census 3"
 CXX = (".cpp", ".h", ".hpp", ".cc")
 PRODUCT_MLIR = ("lowered/", "utils/mlnixci/src/")
+# The C++ by role, first match wins (a function of the path): scale 1's second table in docs/GAP-ANALYSIS.md.
+ROLES = [("kif-sumo", r"Kif|Sumo|mlnix-kif"),
+         ("mlir-api", r"lib/Dialect/|lib/Composite/(CursorLowering|TrikeShedDialect|TwinRouting)|include/NixDialect/|"
+                      r"include/Composite/(CursorLowering|TrikeShed)\.h|include/mlnix-c/|lib/CAPI/"),
+         ("parser", r"lib/Frontend/"),
+         ("evaluator", r"lib/Eval/|include/Nix/(Eval|Pos|Value|StdBind|EvalSettings)"),
+         ("store", r"lib/Store/|include/Nix/(Store|Prefetch|Os|Numbers|LexRules)"),
+         ("vocabulary", r"include/Composite/|lib/Composite/"),
+         ("tools", r"^tools/"),
+         ("checks", r"^scripts/"),
+         ("tests", r"^test/")]
 SHAPE = collections.OrderedDict([  # kind -> (pattern in C++, TrikeShed's shape, where the algorithm lives)
     ("trie", (r"\bPatricia<", "crit-bit trie over lane rows (keys by path); HashTrie by digest fold", "lowered/nixstore/Patricia.mlir")),
     ("heap", (r"\b(GrowFunnel|Funnel|MinMaxHeap|Pegs)<|\bclusterOrder\b", "heap store: cluster fill, sorted drain, sealed page", "lowered/composite/ClusterOps.mlir")),
@@ -228,6 +239,11 @@ def rows_of(c, top, rev):
     by_area = collections.Counter()
     for m in cxx.values(): by_area[m["area"]] += m["code"]
     for a, n in sorted(by_area.items()): rows.append((1, a, "cxx code lines", n))
+    # and the C++ by role (a function of the path), which says what the recipe can still move (docs/GAP-ANALYSIS.md)
+    by_role = collections.Counter()
+    for p, m in cxx.items():
+        if m["kind"] == "cxx": by_role[next((r for r, pat in ROLES if re.search(pat, p)), "other")] += m["code"]
+    for r, n in sorted(by_role.items()): rows.append((1, "role " + r, "cxx code lines", n))
     by_dir = collections.defaultdict(collections.Counter)
     for p, m in mlir.items():
         d = os.path.dirname(p)
@@ -248,9 +264,17 @@ def rows_of(c, top, rev):
                 ops = mlir[h]["ops"]; t = sum(ops.values())
                 rows.append((2, kind + " " + h, "dialect ops %", round(100.0 * share(ops, DIALECTS) / max(t, 1), 1)))
     # scale 3: the C++ spans left, and the bypass functions of the product MLIR
+    # Function rows are keyed by file and name, not line, so that a function moved by an edit above it is the same row in
+    # --diff; a name repeated in one file gets #2, #3 in order.
+    def keyed(items, fmt):
+        seen = collections.Counter()
+        for v, p, f in items:
+            seen[(p, f["name"])] += 1
+            k = seen[(p, f["name"])]
+            yield v, fmt(p, f["name"] + (f"#{k}" if k > 1 else ""))
     spans = sorted(((f["code"], p, f) for p, m in cxx.items() if not p.startswith("scripts/") for f in m["fns"]), key=lambda x: -x[0])
-    for code, p, f in spans[:top * 3]:
-        rows.append((3, f"cxx {p}:{f['line']} {f['name']}", "code lines", code))
+    for code, key in keyed(spans[:top * 3], lambda p, n: f"cxx {p} {n}"):
+        rows.append((3, key, "code lines", code))
     # A loop of mostly arith ops (rounds of a digest, a hash's mixing) is a scalar core: the dialects have no op for it, and
     # llvm/arith is accepted there.  The bypass is the rest: loops that walk records outside the dialects.
     looping = [(f["ops"] - f["ts"], p, f) for p, m in mlir.items() for f in m["fns"]
@@ -261,8 +285,8 @@ def rows_of(c, top, rev):
     rows.append((3, "mlir bypass", "ops", sum(b[0] for b in bypass)))
     rows.append((3, "mlir scalar cores", "functions", len(cores)))
     rows.append((3, "mlir scalar cores", "ops", sum(b[0] for b in cores)))
-    for n, p, f in bypass[:top * 2]:
-        rows.append((3, f"mlir {p}:{f['line']} @{f['name']}", "non-dialect ops", n))
+    for n, key in keyed(bypass[:top * 2], lambda p, nm: f"mlir {p} @{nm}"):
+        rows.append((3, key, "non-dialect ops", n))
     # scale 4: the roots
     names = set(git("grep", "-h", "-o", "-w", "-E", r"[A-Z][A-Za-z]*Op", rev, "--", "lib/*.cpp").decode().split())
     used = collections.Counter()

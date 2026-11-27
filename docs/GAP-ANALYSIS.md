@@ -55,6 +55,25 @@ functions with returned views).  Compare a census only with itself.
 The writers are where fill-drain lives (nixeval 30%, nixfe 33%, tools 44%).  The readers (nixfrontend's scanners), the
 store's kernels and the Composite ports are not: lowered/composite has no drain at all and 6% dialect ops.
 
+The same C++ by role (scratch gap/cxx-roles.py; 0d02917, 22,817 code lines), which says what the recipe can still move:
+
+| role | code lines | share | what moves it |
+|---|---:|---:|---|
+| the evaluator (Eval.cpp 2,459, Builtins.cpp 965, StoreBuiltins.cpp 816, Eval.h 703, Formats.cpp 413) | 5,460 | 23.9% | G8: the dispatch, forcing and calls; most of the rest is primop registration and forcing glue around algorithms already in MLIR |
+| MLIR dialects, passes, lowering (CursorLowering.cpp 1,172, NixDialect, SonDialect, ConfixDialect, KursiveDialect) | 3,893 | 17.1% | nothing: MLIR's C++ API; a new lowering adds to it |
+| KIF / SUMO (KifTptp 998, KifLean 723, KifChase 409, KifTrikeShed 222, SumoDialect 193) | 2,959 | 13.0% | the user's scope decision |
+| the store (LocalStore 751, StorePaths 699, Store.h 352, Hash 227, Prefetch 217) | 2,713 | 11.9% | I/O and process glue around MLIR algorithms; G3b may move the index |
+| differential checks and benches (confix-check 624, vocab-check 261, cluster-scales 203) | 2,303 | 10.1% | they retire with their subjects |
+| the parser (Parser.cpp 1,960) | 2,102 | 9.2% | it builds nix ops through MLIR's builder API; only a grammar in kursive combinators would move it (the user's word, as G6) |
+| the Composite vocabulary and bridges (Mutable.h 334, Text.h 273, Table.h 205, CharSeries.h 160) | 1,956 | 8.6% | shrinks as its C++ users go |
+| the command-line tools (mlnix.cpp 821, mlnix-parse.cpp 231) | 1,122 | 4.9% | tools2 tried, held back (+20) |
+
+The bridge surface, the extern "C" callbacks the MLIR calls (scratch gap/callbacks.py), is 57 functions and 388 code
+lines: 8 do file I/O (the NAR walker's), 20 force or throw, 19 allocate.  So the sweeps of scale 3 raise the MLIR's
+quality (its dialect share, the bypass) and leave the C++ count where it is: wave 1 moved ten modules into dialect
+forms for a net C++ change of -5.  The C++ falls further by G8, and by decisions that are the user's: the KIF scope
+(13%), the scanners and the parser as combinators, kursive2's lexer (-152 C++ at +5-9% time), the boundary primops.
+
 ## Scale 2: the store shapes
 
 Every keyed or ordered store of the C++, the shape the yardstick gives it, and where its algorithm lives.
@@ -190,3 +209,57 @@ Each merge, `gap-census.py --seal` on the new master and `--diff` against the pr
   mlnix-parse over 39,646 nixpkgs files identical.  Time: instructions retired on the bench workloads -0.17%
   (nixos-toplevel) and -0.20% (nixpkgs-73), outputs identical (scripts/instr-ab.sh).  Left: narw_node and narr_node
   (they need a callback-order harness first) and nixstore_ts_samecontent (a walk that stops at its first mismatch).
+- wave 1 part 4 (2026-11-27, swnar 54f4e5b + swci 3aa1447; C++ +0).  The NAR writer's 14 tokens are one constant blob
+  of framed tokens (a token is a constant slice) and each node header ONE combine drained once (narw_node: 92 non-dialect
+  ops -> 174 ops with 50 dialect, out of the bypass; four helpers deleted); Rows' sort reads its keys through a one-word
+  view.  Dropped by measurement: the sorts' row moves as drains (2.9-3x the instructions of the llvm word moves, and
+  --inline plus the loop-idiom flag did not recover it: G2's row form needs constant-count drains lowered to
+  straight-line moves before row-moving kernels can use it).  Left: the NAR reader (already compare/fold/bounds; a framed
+  compare would change which padding it accepts).  mini-luci's series.mlir and confix.mlir call reads.mlir/index.mlir/
+  text.mlir's trikeshed readers by name (0% -> 7% dialect each).  Repository dialect ops 13.2% -> 13.4%, fill-drain
+  lines 16.8% -> 17.2%; bypass 54 -> 53 functions, 5,696 -> 5,600 ops.  Proof: a NAR callback-order harness (2.76M
+  runs, every callback with its arguments, and the writer against an independent serializer on 1,973 trees), a sort
+  comparison-order harness (17,979 runs, 2,960 throwing), 834 old/new mlnix probes and restores, 5,861 mini-luci
+  replies against the 0d02917 server, each with seeded mutants caught.  Time: instructions retired nixos-toplevel
+  20.07 -> 19.72 G, nixpkgs-73 16.484 -> 16.484 G, `mlnix hash path` over .cache/nixpkgs level (26.98 / 27.00 G; a
+  cold-cache first run read 32.9 G and is not counted).  Census rows of functions are keyed by name since this part, so
+  an edit above a function no longer shows as a removal and an addition.
+- wave 1 part 5 (2026-11-27, gc e8f2453 + 622b023; C++ 22,817 -> 22,821: a no-throw read of a path's info, which the
+  fast pass needs to fall back to the old scan exactly; wave 1 since a8d3ae3: 22,822 -> 22,821).  nixstore_ts_gc reads
+  each dead path's references once, counts referrers among the dead with trikeshed.adjacency (its first product use),
+  and sweeps by the counts in the old visiting order; the old scan stays as the fallback for a malformed info file,
+  where the order of reads decides what is deleted.  Proof: 44,000 random dead graphs (self references, cycles, failing
+  reads, partial deletions before a throw) against the old module and a C++ model of it, four mutants caught; the
+  lane's 27 synthetic stores and the lead's 3 (1,000-20,000 paths, a root every 7th path), dry and real --gc, stdout,
+  stderr and the store's tree afterwards identical.  Time: a dry GC of 20,000 paths 7.1 s -> 0.6 s (53.8 -> 6.4 G
+  instructions, no roots; 19.8 -> 8.0 G with roots); what is left is the read of every info file, G3b's.
+
+## Divergences found on the way (reported, not fixed)
+
+- `mlnix store --gc --print-live` prints the dead paths: tools/mlnix.cpp (cmdStore's flag scan, 0d02917 L581) reads
+  `--print-live` as `--print-dead`.  Nix's `nix-store --gc --print-live` prints the live paths, the roots' closure.
+  Found by the gc lane's store proof (2026-11-27).
+
+## Decisions that are the user's (with the numbers they turn on)
+
+The gap analysis can measure these and a lane can carry them out, but each changes a standing rule or the project's
+scope, so none is taken without the user's word.
+
+1. **G1, MutableSeries in the dialect (lane `lanes`).**  `!trikeshed.lane` with append/anchor/size/at/take/drain lowered
+   in LaneTrie's shape, and fromJSON's index on a lane (nixev_json_grow and JsonRec deleted), proven (3.6M old/new
+   cases, the gates on both platforms at 2ed7fa0, deep recursion to 20,000 identical).  Cost: C++ +224 (the lowering is
+   C++ on MLIR's API), against a wave that has cut 1.  It is the root of G3c and the single-pass writers (the parked
+   JSON printer).  The lane is assessing a runtime written in MLIR with thin C++ rewrites (cluster_order's pattern).
+2. **The scanners (G6).**  ConfixScan, LexScan, TomlScan and the readers are the largest bypass rows (confix_scan_nix
+   944 non-dialect ops, lx_default 482, the TOML scan 204 + 115 + 74).  The standing rule: a scanner already merged is
+   redone only on the user's word; regex goes only to combinators.  kursive2's lexer as a kursive grammar is proven
+   (152M text positions) and deletes 152 C++ lines, but costs 5-9% on both bench workloads (held back as 2fffc12).
+3. **KIF/SUMO's C++ (2,959 code lines, 13.0%).**  KifTptp, KifLean, KifChase, KifTrikeShed and SumoDialect: whether
+   they stay in mlir-nix as C++, move to MLIR, or move out (sumo-nix) is a scope decision.
+4. **The boundary primops.**  fsMkdir, fsSymlink, fsRename, fsWrite, fsUnlink, fsReadLink, procSelf, procRun, procExec
+   (StoreBuiltins.cpp registerBoundary, 103 code lines, for lib/Corepkgs/cli.nix) are global names in every
+   evaluation, --pure-eval and --restrict-eval included; in Nix they are undefined variables.  Any expression mlnix
+   evaluates can run programs and write files.  Gating them (to cli.nix's own evaluation) or removing them is the
+   user's call; it was raised on 2026-11-25.
+5. **The parser (2,102 code lines, 9.2%).**  It builds nix ops through MLIR's builder API; only a grammar in kursive
+   combinators would move it, which is G6's question at the scale of the whole language.

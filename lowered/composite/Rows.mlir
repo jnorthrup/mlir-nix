@@ -400,6 +400,17 @@ func.func private @nx_rows_copy1(%dst: !llvm.ptr, %src: !llvm.ptr, %rb: i64) {
   return
 }
 
+// the leading u32 key of the row at p: a view of its one word
+func.func private @nx_rows_key(%p: !llvm.ptr) -> i32 {
+  %c1 = arith.constant 1 : i64
+  %i0 = arith.constant 0 : index
+  %d = func.call @rows_desc(%p, %c1) : (!llvm.ptr, i64) -> !d
+  %m = builtin.unrealized_conversion_cast %d : !d to !m
+  %w = builtin.unrealized_conversion_cast %m : !m to !w
+  %k = trikeshed.at %w[%i0] : !w, index -> i32
+  return %k : i32
+}
+
 func.func @mlnix_rows_sort(%src: !llvm.ptr, %dst: !llvm.ptr, %temp: !llvm.ptr, %n: i64, %rb: i64, %less: (!llvm.ptr, !llvm.ptr, !llvm.ptr) -> i32, %ctx: !llvm.ptr) {
   %k0 = arith.constant 0 : i64
   %k1 = arith.constant 1 : i64
@@ -579,11 +590,9 @@ func.func @mlnix_rows_sort_u32(%src: !llvm.ptr, %dst: !llvm.ptr, %temp: !llvm.pt
           %km123 = arith.subi %k, %k1 : i64
   %off24 = arith.muli %km123, %rb : i64
   %p25 = llvm.getelementptr %a08[%off24] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %k3226 = llvm.load %xbuf1 : !llvm.ptr -> i32
-  %key27 = arith.extui %k3226 : i32 to i64
-  %k3228 = llvm.load %p25 : !llvm.ptr -> i32
-  %key29 = arith.extui %k3228 : i32 to i64
-          %cb30 = arith.cmpi ult, %key27, %key29 : i64
+  %k3226 = func.call @nx_rows_key(%xbuf1) : (!llvm.ptr) -> i32
+  %k3228 = func.call @nx_rows_key(%p25) : (!llvm.ptr) -> i32
+          %cb30 = arith.cmpi ult, %k3226, %k3228 : i32
           scf.yield %cb30 : i1
         } else {
           scf.yield %k7 : i1
@@ -629,11 +638,9 @@ func.func @mlnix_rows_sort_u32(%src: !llvm.ptr, %dst: !llvm.ptr, %temp: !llvm.pt
   %p54 = llvm.getelementptr %a[%off53] : (!llvm.ptr, i64) -> !llvm.ptr, i8
   %off55 = arith.muli %i, %rb : i64
   %p56 = llvm.getelementptr %a[%off55] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %k3257 = llvm.load %p54 : !llvm.ptr -> i32
-  %key58 = arith.extui %k3257 : i32 to i64
-  %k3259 = llvm.load %p56 : !llvm.ptr -> i32
-  %key60 = arith.extui %k3259 : i32 to i64
-        %cb61 = arith.cmpi ult, %key58, %key60 : i64
+  %k3257 = func.call @nx_rows_key(%p54) : (!llvm.ptr) -> i32
+  %k3259 = func.call @nx_rows_key(%p56) : (!llvm.ptr) -> i32
+        %cb61 = arith.cmpi ult, %k3257, %k3259 : i32
   %off62 = arith.muli %k, %rb : i64
   %p63 = llvm.getelementptr %b[%off62] : (!llvm.ptr, i64) -> !llvm.ptr, i8
         scf.if %cb61 {
