@@ -27,84 +27,22 @@ namespace nixstore {
 // File utilities
 //===----------------------------------------------------------------------===//
 
-composite::Text readFile(std::string_view path) {
-  nixsys::CStr file(path);
-  nixprefetch::note('F', file);
-  int fd = open(file, O_RDONLY | O_CLOEXEC);
-  if (fd < 0) throw Error(composite::cat("opening file '", path, "': ", strerror(errno)));
-  composite::Text s;
-  char buf[65536];
-  while (true) {
-    ssize_t n = read(fd, buf, sizeof buf);
-    if (n < 0) {
-      int e = errno;
-      close(fd);
-      throw Error(composite::cat("reading file '", path, "': ", strerror(e)));
-    }
-    if (n == 0) break;
-    s.put(buf, size_t(n));
-  }
-  close(fd);
-  return s;
+// The store's files are lowered/nixstore/FileOps.mlir: the system calls (through the C library, the system's words in
+// FileOs<System>.mlir.in), a directory's names filled and folded over, and the wording of what fails.  A forward makes
+// the path a C string and throws the message an entry leaves; nixstore_text_sized is how an entry sizes a Text once.
+extern "C" {
+char *nixstore_text_sized(composite::Text *t, int64_t n) { t->room(size_t(n)), t->bytes.n = uint32_t(n), t->terminate(); return t->begin(); }
+int64_t nixstore_fs_read(const char *path, int64_t n, composite::Text *out);
+int64_t nixstore_fs_write(const char *path, int64_t n, const char *data, int64_t dn, int64_t mode, composite::Text *err);
+int64_t nixstore_fs_exists(const char *path);
+int64_t nixstore_fs_mkdirs(const char *path, int64_t n, composite::Text *err);
+int64_t nixstore_fs_delete(const char *path, int64_t n, composite::Text *err);
 }
-
-void writeFile(std::string_view path, std::string_view data, mode_t mode) {
-  nixsys::CStr file(path);
-  int fd = open(file, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode);
-  if (fd < 0) throw Error(composite::cat("creating file '", path, "': ", strerror(errno)));
-  size_t off = 0;
-  while (off < data.size()) {
-    ssize_t n = write(fd, data.data() + off, data.size() - off);
-    if (n < 0) {
-      close(fd);
-      throw Error(composite::cat("writing file '", path, "': ", strerror(errno)));
-    }
-    off += n;
-  }
-  close(fd);
-}
-
-bool pathExists(std::string_view path) {
-  struct stat st;
-  nixsys::CStr file(path);
-  nixprefetch::note('L', file);
-  return lstat(file, &st) == 0;
-}
-
-void createDirs(std::string_view path) {
-  if (path.empty() || path == "/") return;
-  struct stat st;
-  nixsys::CStr file(path);
-  if (lstat(file, &st) == 0) {
-    if (S_ISDIR(st.st_mode)) return;
-    if (S_ISLNK(st.st_mode) && stat(file, &st) == 0 && S_ISDIR(st.st_mode)) return;
-    throw Error(composite::cat("'", path, "' is not a directory"));
-  }
-  createDirs(dirOf(path));
-  if (mkdir(file, 0777) != 0 && errno != EEXIST)
-    throw Error(composite::cat("creating directory '", path, "': ", strerror(errno)));
-}
-
-void deletePathRecursive(std::string_view path) {
-  struct stat st;
-  nixsys::CStr file(path);
-  if (lstat(file, &st) != 0) return;
-  if (S_ISDIR(st.st_mode)) {
-    chmod(file, st.st_mode | S_IRWXU);
-    if (DIR *d = opendir(file)) {
-      composite::MutableSeries<composite::Text> names;
-      while (auto *e = readdir(d)) {
-        std::string_view n = e->d_name;
-        if (n != "." && n != "..") names.append(composite::Text(n));
-      }
-      closedir(d);
-      for (auto &n : names) deletePathRecursive(composite::cat(path, '/', n));
-    }
-    if (rmdir(file) != 0) throw Error(composite::cat("removing '", path, "': ", strerror(errno)));
-  } else {
-    if (unlink(file) != 0) throw Error(composite::cat("removing '", path, "': ", strerror(errno)));
-  }
-}
+composite::Text readFile(std::string_view path) { composite::Text s; if (nixstore_fs_read(nixsys::CStr(path), path.size(), &s)) throw Error(s); return s; }
+void writeFile(std::string_view path, std::string_view data, mode_t mode) { composite::Text e; if (nixstore_fs_write(nixsys::CStr(path), path.size(), data.data(), data.size(), mode, &e)) throw Error(e); }
+bool pathExists(std::string_view path) { return nixstore_fs_exists(nixsys::CStr(path)); }
+void createDirs(std::string_view path) { composite::Text e; if (nixstore_fs_mkdirs(nixsys::CStr(path), path.size(), &e)) throw Error(e); }
+void deletePathRecursive(std::string_view path) { composite::Text e; if (nixstore_fs_delete(nixsys::CStr(path), path.size(), &e)) throw Error(e); }
 
 // nixstore::baseNameOf and dirOf are hollowed out to MLIR: lowered/nixstore/PathOps.mlir (trikeshed.at / slice / text /
 // drain over the byte series), built into NixStore by lib/CMakeLists.txt.  The bridges size the Text and adopt the

@@ -200,6 +200,28 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/Encoders.mlir Encoders)
 # The pure path algebra of nixstore::baseNameOf / dirOf (StorePaths.cpp's bodies are gone; the bridges size the Text and
 # call these entries).  The slash algebra is trikeshed.at / slice / text / drain over the byte series.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/PathOps.mlir PathOps)
+# The store's files (StorePaths.cpp's readFile, writeFile, pathExists, createDirs and deletePathRecursive are forwards):
+# FileOps.mlir makes the system calls through the C library, sizes a file's Text once to what the file says it holds,
+# fills a directory's names and folds over them, and words what fails (one combine drained into the caller's Text).  The
+# system's words it needs beside the store index's are the system's module, made for the machine: an Intel Mac's stat is
+# stat$INODE64, and a stat record's mode is at 24 on Linux x86_64 and at 16 in the kernel's generic layout.
+mlnix_lower_trikeshed(NixStore lowered/nixstore/FileOps.mlir FileOps)
+if(APPLE)
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    set(NIXFS_INODE64 "$INODE64")
+  else()
+    set(NIXFS_INODE64 "")
+  endif()
+  configure_file(${PROJECT_SOURCE_DIR}/lowered/nixstore/FileOsDarwin.mlir.in ${MLNIX_LOWERED_DIR}/FileOs.mlir @ONLY)
+else()
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+    set(NIXFS_ST_MODE 24)
+  else()
+    set(NIXFS_ST_MODE 16)
+  endif()
+  configure_file(${PROJECT_SOURCE_DIR}/lowered/nixstore/FileOsLinux.mlir.in ${MLNIX_LOWERED_DIR}/FileOs.mlir @ONLY)
+endif()
+mlnix_lower_interface(NixStore ${MLNIX_LOWERED_DIR}/FileOs.mlir FileOs)
 # The pure store-path naming algebra of nixstore::checkName / outputPathName / isStorePath / storePathName /
 # storePathHashPart (StorePaths.cpp's bodies are gone; checkName's bridge keeps the error wording, the others size the
 # Text and call these entries).  The naming rules are trikeshed.at / slice / text / compare / combine / drain over the

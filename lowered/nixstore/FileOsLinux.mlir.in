@@ -1,0 +1,49 @@
+// The system's words for the store's files, paths and hashes (lowered/nixstore/FileOps.mlir and the modules after it), on
+// Linux (glibc and musl alike): what the C library does not give under one name and one layout everywhere.  They stand
+// beside the store index's (StoreIndexLinux.mlir: open, fstat, lstat, opendir, readdir, a directory entry's name), which
+// those modules call as they are.  Each word is held against the system's headers by the lane's check (store-files-os.c).
+//   nixfs_os_errno     what the last failed call said (errno: the thread's, through __errno_location)
+//   nixfs_os_create    a file made or cut, opened to be written, never kept across an exec: O_WRONLY | O_CREAT | O_TRUNC
+//                      | O_CLOEXEC, with the mode given (the process's mask applies)
+//   nixfs_os_stat      stat, the call whose record has this layout
+//   nixfs_os_mode      a stat record's st_mode, a word of 32 bits: at 24 on x86_64, at 16 on aarch64 and the other
+//                      machines of the kernel's generic layout (lib/CMakeLists.txt puts the place in)
+//   nixfs_os_size      a stat record's st_size: a word at 48 on both
+//   nixfs_os_pathmax   PATH_MAX, the room the C++ gave getcwd: 4096
+module {
+  llvm.func @open(!llvm.ptr, i32, ...) -> i32
+  llvm.func @stat(!llvm.ptr, !llvm.ptr) -> i32
+  llvm.func @__errno_location() -> !llvm.ptr
+
+  llvm.func @nixfs_os_errno() -> i32 {
+    %p = llvm.call @__errno_location() : () -> !llvm.ptr
+    %e = llvm.load %p : !llvm.ptr -> i32
+    llvm.return %e : i32
+  }
+  llvm.func @nixfs_os_create(%path: !llvm.ptr, %mode: i32) -> i32 {
+    // O_WRONLY 1 | O_CREAT 0x40 | O_TRUNC 0x200 | O_CLOEXEC 0x80000
+    %flags = llvm.mlir.constant(524865 : i32) : i32
+    %fd = llvm.call @open(%path, %flags, %mode) vararg(!llvm.func<i32 (ptr, i32, ...)>) : (!llvm.ptr, i32, i32) -> i32
+    llvm.return %fd : i32
+  }
+  llvm.func @nixfs_os_stat(%path: !llvm.ptr, %buf: !llvm.ptr) -> i32 {
+    %r = llvm.call @stat(%path, %buf) : (!llvm.ptr, !llvm.ptr) -> i32
+    llvm.return %r : i32
+  }
+  llvm.func @nixfs_os_mode(%buf: !llvm.ptr) -> i32 {
+    %at = llvm.mlir.constant(@NIXFS_ST_MODE@ : i64) : i64
+    %p = llvm.getelementptr %buf[%at] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+    %r = llvm.load %p : !llvm.ptr -> i32
+    llvm.return %r : i32
+  }
+  llvm.func @nixfs_os_size(%buf: !llvm.ptr) -> i64 {
+    %c48 = llvm.mlir.constant(48 : i64) : i64
+    %p = llvm.getelementptr %buf[%c48] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+    %r = llvm.load %p : !llvm.ptr -> i64
+    llvm.return %r : i64
+  }
+  llvm.func @nixfs_os_pathmax() -> i64 {
+    %c = llvm.mlir.constant(4096 : i64) : i64
+    llvm.return %c : i64
+  }
+}
