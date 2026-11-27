@@ -34,7 +34,7 @@
 !d = !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
 
 memref.global "private" constant @fs_words : memref<112xi8> =
-  dense<"0x6f70656e696e672066696c65202772656164696e672066696c652027273a206372656174696e672066696c65202777726974696e672066696c65202727206973206e6f742061206469726563746f72796372656174696e67206469726563746f7279202772656d6f76696e6720272f00">
+  dense<"0x6f70656e696e672066696c652027273a2072656164696e672066696c6520276372656174696e672066696c65202777726974696e672066696c65202727206973206e6f742061206469726563746f72796372656174696e67206469726563746f7279202772656d6f76696e6720272f00">
 
 // the C library
 func.func private @close(i32) -> i32
@@ -143,6 +143,17 @@ func.func private @fs_kind(%st: !llvm.ptr) -> i32 {
 // readFile
 //===----------------------------------------------------------------------===//
 
+// What readFile says of a file that could not be opened (e: the system's error): `opening file '<path>': <what the
+// system says>`.  The one place that wording is made.
+func.func private @fs_read_notopened(%err: !llvm.ptr, %cp: !llvm.ptr, %n: i64, %e: i32) -> i64 {
+  %opening_o = arith.constant 0 : index  // "opening file '"
+  %opening_n = arith.constant 14 : index
+  %why_o = arith.constant 14 : index  // "': "
+  %why_n = arith.constant 3 : index
+  %f = func.call @fs_fail(%err, %opening_o, %opening_n, %cp, %n, %why_o, %why_n, %e) : (!llvm.ptr, index, index, !llvm.ptr, i64, index, index, i32) -> i64
+  return %f : i64
+}
+
 func.func @nixstore_fs_read(%cp: !llvm.ptr, %n: i64, %out: !llvm.ptr) -> i64 {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
@@ -154,11 +165,9 @@ func.func @nixstore_fs_read(%cp: !llvm.ptr, %n: i64, %out: !llvm.ptr) -> i64 {
   %kF = arith.constant 70 : i32
   %regular = arith.constant 32768 : i32
   %null = llvm.mlir.zero : !llvm.ptr
-  %opening_o = arith.constant 0 : index  // "opening file '"
-  %opening_n = arith.constant 14 : index
-  %reading_o = arith.constant 14 : index  // "reading file '"
+  %reading_o = arith.constant 17 : index  // "reading file '"
   %reading_n = arith.constant 14 : index
-  %why_o = arith.constant 28 : index  // "': "
+  %why_o = arith.constant 14 : index  // "': "
   %why_n = arith.constant 3 : index
   %st = llvm.alloca %c20 x i64 : (i64) -> !llvm.ptr
   %cell = llvm.alloca %c1 x i8 : (i64) -> !llvm.ptr
@@ -257,7 +266,7 @@ func.func @nixstore_fs_read(%cp: !llvm.ptr, %n: i64, %out: !llvm.ptr) -> i64 {
     scf.yield %res : i64
   } else {
     %e0 = func.call @nixfs_os_errno() : () -> i32
-    %f0 = func.call @fs_fail(%out, %opening_o, %opening_n, %cp, %n, %why_o, %why_n, %e0) : (!llvm.ptr, index, index, !llvm.ptr, i64, index, index, i32) -> i64
+    %f0 = func.call @fs_read_notopened(%out, %cp, %n, %e0) : (!llvm.ptr, !llvm.ptr, i64, i32) -> i64
     scf.yield %f0 : i64
   }
   return %r : i64
@@ -275,7 +284,7 @@ func.func @nixstore_fs_write(%cp: !llvm.ptr, %n: i64, %data: !llvm.ptr, %dn: i64
   %creating_n = arith.constant 15 : index
   %writing_o = arith.constant 46 : index  // "writing file '"
   %writing_n = arith.constant 14 : index
-  %why_o = arith.constant 28 : index  // "': "
+  %why_o = arith.constant 14 : index  // "': "
   %why_n = arith.constant 3 : index
   %mode32 = arith.trunci %mode : i64 to i32
   %fd = func.call @nixfs_os_create(%cp, %mode32) : (!llvm.ptr, i32) -> i32
@@ -357,7 +366,7 @@ func.func @nixstore_fs_mkdirs(%cp: !llvm.ptr, %n: i64, %err: !llvm.ptr) -> i64 {
   %notdir_n = arith.constant 20 : index
   %creating_o = arith.constant 80 : index  // "creating directory '"
   %creating_n = arith.constant 20 : index
-  %why_o = arith.constant 28 : index  // "': "
+  %why_o = arith.constant 14 : index  // "': "
   %why_n = arith.constant 3 : index
   %st = llvm.alloca %c20 x i64 : (i64) -> !llvm.ptr
   %empty = arith.cmpi eq, %n, %c0 : i64
@@ -550,7 +559,7 @@ func.func @nixstore_fs_delete(%cp: !llvm.ptr, %n: i64, %err: !llvm.ptr) -> i64 {
   %mine = arith.constant 448 : i32
   %removing_o = arith.constant 100 : index  // "removing '"
   %removing_n = arith.constant 10 : index
-  %why_o = arith.constant 28 : index  // "': "
+  %why_o = arith.constant 14 : index  // "': "
   %why_n = arith.constant 3 : index
   %words_g = memref.get_global @fs_words : memref<112xi8>
   %words = trikeshed.text %words_g : memref<112xi8> -> !s
