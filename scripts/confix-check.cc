@@ -8,9 +8,11 @@
 //   - random documents (nesting, whitespace, escapes, surrogate pairs, integers at every boundary of 64 bits, floats, duplicate keys) and
 //     random mutations of them (a byte deleted, inserted, replaced, a cut),
 //   - the .json files under the directories given on the command line.
-// The library is the oracle for the numbers (strtoll, strtoull, strtod), as in numbers-check.cc; the index the scan leaves in the record is
-// also held to its own laws (rows in the order they open, every row but the first the child of one row after which it comes, a child inside
-// its parent, an object's children in pairs whose first is a string, each row's span holding what its tag says).  The values are made by
+// The library is the oracle for the numbers (strtoll, strtoull, strtod), as in numbers-check.cc; the index the scan fills is also held to
+// its own laws (rows in the order they open, every row but the first inside one row after which it comes, a child inside its parent, an
+// object's children in pairs whose first is a string, each row's span holding what its tag says).  The index is a lane (TrikeShed.td,
+// !trikeshed.lane: a MutableSeries in LaneTrie's shape) that the entry makes and frees, so the laws are read off a second scan into a lane
+// this file owns, laid out as trikeshed-lower-cursors lays one out (Index, below).  The values are made by
 // the lowered entry itself (nixev_json_read) through the callbacks below, which stand in for the evaluator's arena: a Value here has the
 // evaluator's layout (type u8 @0, payload @8), and EvalState::mkList is defined here under the evaluator's mangled name.  The text is read
 // from a buffer whose end is the end of a page followed by an unmapped one, so that a read past its end is a fault (the lowered object is not
@@ -273,27 +275,35 @@ void EvalState::mkList(Value &v, size_t n) {
 } // namespace nixev
 using nixev::EvalState;
 using nixev::Value;
-struct Rec { // confix.checked's record (Confix.td), its arrays grown as the bridge in Formats.cpp grows them
-  uint64_t w[16] = {};
-  std::vector<uint64_t> span, kids, stack;
-  std::vector<uint8_t> tag;
-  std::vector<uint32_t> kid, pend;
-  long grows = 0;
-  void size(uint64_t rows, uint64_t depth) {
-    span.resize(rows), kids.resize(rows), tag.resize(rows), kid.resize(rows), pend.resize(rows), stack.resize(depth);
-    w[3] = rows, w[4] = uint64_t(span.data()), w[5] = uint64_t(tag.data()), w[6] = uint64_t(kids.data()), w[7] = uint64_t(kid.data());
-    w[9] = uint64_t(stack.data()), w[11] = depth, w[12] = uint64_t(pend.data());
+// A lane as trikeshed-lower-cursors lays one out: its count, and for each column a box, the one cell that holds the directory in force,
+// whose slots are the pages; the count, a box, a directory and a page are each a rank-one memref, and a function is handed a memref as the
+// five words of its descriptor.  All zero is an empty lane over cells this side owns: the scan opens its pages (4096 rows of one to four
+// bytes) and replaces its directory, and they are freed here, the pages the count needed and a directory longer than four slots.
+struct Cells { void *alloc, *data; int64_t offset, size, stride; };
+#define MEMREF void *, void *, int64_t, int64_t, int64_t
+#define CELLS(x) (void *)(x), (void *)(x), int64_t(0), int64_t(1), int64_t(1)
+template <class T> struct Column {
+  Cells dir{};
+  T operator[](uint32_t i) const { return static_cast<T *>(static_cast<Cells *>(dir.data)[i >> 12].data)[i & 4095]; }
+  void release(uint64_t rows) {
+    for (uint64_t at = 0; at < rows; at += 4096) std::free(static_cast<Cells *>(dir.data)[at >> 12].alloc);
+    if (dir.size > 4) std::free(dir.alloc);
   }
+};
+// confix.checked's rows (Confix.td): open, close, tag and up, the row of the container an element is in.
+struct Index {
+  uint64_t n = 0;
+  Column<uint32_t> open, close;
+  Column<uint8_t> tag;
+  Column<int32_t> up;
+  ~Index() { open.release(n), close.release(n), tag.release(n), up.release(n); }
 };
 struct Chars { uint32_t n; const char *p; }; // composite::Chars: u32 count @0, ptr @8
 extern "C" {
-int32_t nixev_json_read(Rec *r, EvalState *st, Value *root);
+int32_t confix_scan_checked(uint64_t *rec, MEMREF, MEMREF, MEMREF, MEMREF, MEMREF); // the record (src, n, at, end), the count, a box a column
+int32_t nixev_json_read(uint64_t *rec, EvalState *st, Value *root);
 uint64_t nixev_json_decode(const char *s, uint64_t from, uint64_t to, char *into, int64_t shown);
 const char *nixev_json_what(int64_t fault, uint64_t *len);
-void nixev_json_grow(Rec *r, int64_t stack) {
-  r->grows++;
-  stack ? r->size(r->w[3], 2 * r->w[11]) : r->size(2 * r->w[3], r->w[11]);
-}
 Value *nixev_json_value(EvalState *st) { return &st->values.emplace_back(); }
 void nixev_json_string(EvalState *st, Value *v, const char *p, uint64_t n) {
   st->strings.emplace_back(p, n);
@@ -328,18 +338,7 @@ static string dump(const Value &v) {
   }
   return "?";
 }
-// The rows the scan left in the record.
 enum Tag : uint8_t { Nothing, Boolean, Long, Double, String, Object, Array };
-struct Index {
-  const Rec &r;
-  uint32_t size() const { return uint32_t(r.w[2]); }
-  uint32_t open(uint32_t i) const { return uint32_t(r.span[i] >> 32); }
-  uint32_t close(uint32_t i) const { return uint32_t(r.span[i]); }
-  Tag tag(uint32_t i) const { return Tag(r.tag[i]); }
-  uint32_t first(uint32_t i) const { return uint32_t(r.kids[i] >> 32); }
-  uint32_t count(uint32_t i) const { return uint32_t(r.kids[i]); }
-  uint32_t kidAt(uint32_t i, uint32_t k) const { return r.kid[first(i) + k]; }
-};
 // What a row's span holds, by its tag: the bytes the element is written in, read here with no help from the scan.
 static bool spells(const char *s, uint32_t from, uint32_t to, const char *w) {
   uint32_t len = uint32_t(std::strlen(w));
@@ -366,33 +365,27 @@ static string spanLaw(const char *s, Tag t, uint32_t from, uint32_t to) {
 }
 // The laws of the index of a text of `size` bytes that scanned.
 static string laws(const char *s, uint32_t size, const Index &ix) {
-  uint32_t n = ix.size();
+  uint32_t n = uint32_t(ix.n);
   if (n == 0) return "no rows";
-  if (ix.r.w[8] != n - 1) return "kids is not rows - 1";
-  if (ix.r.w[10] != 0 || ix.r.w[13] != 0) return "a container left open";
-  std::vector<int> parent(n, -1);
+  if (ix.up[0] != -1) return "a first row inside another";
+  std::vector<uint32_t> kids(n, 0);
   for (uint32_t i = 0; i < n; i++) {
-    if (i + 1 < n && ix.open(i) >= ix.open(i + 1)) return "rows not in the order they open";
-    if (ix.open(i) > ix.close(i)) return "span reversed";
-    if (ix.close(i) >= size) return "a span past the end of the text";
-    if (string l = spanLaw(s, ix.tag(i), ix.open(i), ix.close(i)); !l.empty()) return l;
-    uint32_t count = ix.count(i);
-    bool container = ix.tag(i) == Object || ix.tag(i) == Array;
-    if (!container && count) return "a leaf with children";
-    if (ix.tag(i) == Object && count % 2) return "an object with an odd number of children";
-    uint32_t last = i;
-    for (uint32_t k = 0; k < count; k++) {
-      uint32_t c = ix.kidAt(i, k);
-      if (c <= i || c >= n) return "a child not after its parent";
-      if (c <= last && k) return "children out of order";
-      last = c;
-      if (parent[c] != -1) return "a row with two parents";
-      parent[c] = int(i);
-      if (!(ix.open(i) < ix.open(c) && ix.close(c) < ix.close(i))) return "a child not inside its parent";
-      if (ix.tag(i) == Object && k % 2 == 0 && ix.tag(c) != String) return "a key that is not a string";
-    }
+    Tag t = Tag(ix.tag[i]);
+    if (i + 1 < n && ix.open[i] >= ix.open[i + 1]) return "rows not in the order they open";
+    if (ix.open[i] > ix.close[i]) return "span reversed";
+    if (ix.close[i] >= size) return "a span past the end of the text";
+    if (string l = spanLaw(s, t, ix.open[i], ix.close[i]); !l.empty()) return l; // a container left open has no closer at its close
+    if (i == 0) continue;
+    int32_t p = ix.up[i];
+    if (p < 0) return "a row with no parent";
+    if (uint32_t(p) >= i) return "a child not after its parent";
+    Tag pt = Tag(ix.tag[p]);
+    if (pt != Object && pt != Array) return "a leaf with children";
+    if (!(ix.open[p] < ix.open[i] && ix.close[i] < ix.close[p])) return "a child not inside its parent";
+    if (pt == Object && kids[p]++ % 2 == 0 && t != String) return "a key that is not a string";
   }
-  for (uint32_t i = 1; i < n; i++) if (parent[i] == -1) return "a row with no parent";
+  for (uint32_t i = 0; i < n; i++)
+    if (Tag(ix.tag[i]) == Object && kids[i] % 2) return "an object with an odd number of children";
   return "";
 }
 // The text at the end of a mapping whose next page is unmapped: a read past its end faults.
@@ -411,19 +404,18 @@ static const char *fenced(const string &text) {
   std::memcpy(at, text.data(), text.size());
   return at;
 }
-static long long grown = 0;
+static int32_t scan(const char *s, uint64_t size, Index &ix) {
+  uint64_t r[4] = {uint64_t(s), size};
+  return confix_scan_checked(r, CELLS(&ix.n), CELLS(&ix.open.dir), CELLS(&ix.close.dir), CELLS(&ix.tag.dir), CELLS(&ix.up.dir));
+}
 static string newRead(const string &text) {
   uint32_t size = uint32_t(text.size());
   const char *s = fenced(text);
-  Rec r;
-  r.w[0] = uint64_t(s), r.w[1] = size;
-  if (cases % 2) r.size(size / 8 + 16, 16); // the bridge's first room
-  else r.size(1, 1);                        // or none to speak of: the scan grows the arrays as it goes
+  uint64_t r[4] = {uint64_t(s), size};
   EvalState st;
   Value root;
-  int32_t f = nixev_json_read(&r, &st, &root);
-  grown += r.grows;
-  uint32_t at = uint32_t(r.w[14]), end = uint32_t(r.w[15]);
+  int32_t f = nixev_json_read(r, &st, &root);
+  uint32_t at = uint32_t(r[2]), end = uint32_t(r[3]);
   if (f == 14) return "ERROR unsigned " + string(s + at, end - at);
   if (f == 15) {
     string k(end - at, '\0');
@@ -435,7 +427,9 @@ static string newRead(const string &text) {
     const char *w = nixev_json_what(f, &len);
     return "ERROR col " + std::to_string(at + 1) + ": " + string(w, len);
   }
-  if (string l = laws(s, size, Index{r}); !l.empty()) return "LAW " + l;
+  Index ix;
+  if (scan(s, size, ix)) return "LAW a text that reads and does not scan";
+  if (string l = laws(s, size, ix); !l.empty()) return "LAW " + l;
   return dump(root);
 }
 // A reading that does not end is a mismatch too: the old reader ends on every text, so each new reading gets 10 seconds.
@@ -656,31 +650,27 @@ int main(int argc, char **argv) {
   int nfiles = 0;
   for (int i = 4; i < argc; i++) files(argv[i], nfiles);
   if (nfiles) std::printf("%d files\n", nfiles);
-  // A document nested a million deep: the scan keeps its own stack and the values are made in one walk, not on the machine's stack.
+  // A document nested a million deep: the open containers are rows of the index, and the values are made in one walk, not on the machine's stack.
   {
     string deep = string(1000000, '[') + "1" + string(1000000, ']');
-    Rec r;
-    r.w[0] = uint64_t(deep.data()), r.w[1] = deep.size();
-    r.size(16, 16);
+    uint64_t r[4] = {uint64_t(deep.data()), deep.size()};
     EvalState st;
     Value root;
-    int32_t f = nixev_json_read(&r, &st, &root);
+    int32_t f = nixev_json_read(r, &st, &root);
     const Value *v = &root;
     uint32_t depth = 0;
     while (v->type == 12 && v->aux == 1) v = v->elems[0], depth++;
-    if (f || r.w[2] != 1000001 || depth != 1000000 || v->type != 5 || v->integer != 1) {
+    Index ix;
+    if (f || scan(deep.data(), deep.size(), ix) || ix.n != 1000001 || depth != 1000000 || v->type != 5 || v->integer != 1) {
       std::printf("MISMATCH: a million deep did not read (%d)\n", f);
       failures++;
     }
     cases++;
     string unclosed(1000000, '[');
-    Rec u;
-    u.w[0] = uint64_t(unclosed.data()), u.w[1] = unclosed.size();
-    u.size(16, 16);
-    if (nixev_json_read(&u, &st, &root) != 1 || u.w[14] != 1000000) { std::printf("MISMATCH: a million brackets, never closed\n"); failures++; }
+    uint64_t u[4] = {uint64_t(unclosed.data()), unclosed.size()};
+    if (nixev_json_read(u, &st, &root) != 1 || u[2] != 1000000) { std::printf("MISMATCH: a million brackets, never closed\n"); failures++; }
     cases++;
   }
-  std::printf("%lld grows of the record's arrays\n", grown);
   std::printf("%lld cases, %lld mismatches\n", cases, failures);
   return failures ? 1 : 0;
 }

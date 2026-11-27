@@ -1,10 +1,11 @@
 // lib/Store/StructuredAttrs.cpp's structuredAttrsFiles, whole: the (.attrs.json, .attrs.sh) pair a structured-attrs
 // derivation's builder reads, as upstream's ParsedDerivation / writeStructuredAttrsShell writes it, from __json.  The C++
-// keeps the record's arrays (confix.checked's, grown on request), the rooms the bytes land in, and the words of the two
-// errors; nothing of the reading or the writing.  In order:
+// keeps the rooms the bytes land in and the words of the two errors; nothing of the reading or the writing.  In order:
 //
-//   the reading   confix.checked over __json: the index's rows (span, tag, kids), checked as builtins.fromJSON's reader
-//                 checks JSON (word 15 set: an integer past 2^63 and a \u0000 are values here, as nlohmann reads them).
+//   the reading   confix.checked over __json fills the index's lane (a row is open, close, tag and the row it is in),
+//                 checked as builtins.fromJSON's reader checks JSON (the record's `end` set: an integer past 2^63
+//                 and a \u0000 are values here, as nlohmann reads them); the rows are read where the fill left them,
+//                 and a row's children are trikeshed.adjacency of the rows they are in, drained for it.
 //                 No DOM: a node is a row, its text a window -- a number its span of the source, a string its bytes
 //                 decoded by JsonRead.mlir's nixev_json_decode into one room of n bytes.
 //   the members   each object's members in key order (trikeshed.sorted over row indices, a region comparing two slices
@@ -31,9 +32,11 @@
 !s64 = !trikeshed.series<i64>
 !tp = !trikeshed.twinpacked<i32>
 !pieces = !trikeshed.series<!tp>
+// confix.checked's rows while they are filled (open, close, tag, up), and one column of them
+!rows = !trikeshed.lane<i32, i32, i8, i32>
+!l32 = !trikeshed.lane<i32>
+!l8 = !trikeshed.lane<i8>
 !m8 = memref<?xi8, strided<[1], offset: ?>>
-!m32 = memref<?xi32, strided<[1], offset: ?>>
-!m64 = memref<?xi64, strided<[1], offset: ?>>
 !d = !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
 
 // the bridge's rooms (StructuredAttrs.cpp): room(ctx, n) n bytes that live until the bridge returns; out(ctx, which, n)
@@ -104,8 +107,8 @@ func.func private @nx_sa_row(%rows: !llvm.ptr, %j: i64) -> (i64, i64, i64, i64) 
 // ---- the nodes: a kind and a window for every row.  Kinds: 0 null, 1 false, 2 true, 3 number, 4 string, 5 array,
 // 6 object.  A string's window is its decoded bytes (one room of n bytes: no string decodes longer than its text), any
 // other row's its span of the source.
-func.func private @nx_sa_nodes(%rec: !llvm.ptr, %ctx: !llvm.ptr, %nkind: memref<?xi64>, %nptr: memref<?xi64>,
-                               %nlen: memref<?xi64>) {
+func.func private @nx_sa_nodes(%rec: !llvm.ptr, %ctx: !llvm.ptr, %opens: !l32, %closes: !l32, %tags: !l8,
+                               %nkind: memref<?xi64>, %nptr: memref<?xi64>, %nlen: memref<?xi64>) {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
   %c2 = arith.constant 2 : i64
@@ -113,32 +116,20 @@ func.func private @nx_sa_nodes(%rec: !llvm.ptr, %ctx: !llvm.ptr, %nkind: memref<
   %c4 = arith.constant 4 : i64
   %c5 = arith.constant 5 : i64
   %c6 = arith.constant 6 : i64
-  %c32 = arith.constant 32 : i64
-  %mask = arith.constant 4294967295 : i64
   %z = arith.constant 0 : index
   %one = arith.constant 1 : index
   %srcw = func.call @nx_sa_w(%rec, %c0) : (!llvm.ptr, i64) -> i64
   %src = llvm.inttoptr %srcw : i64 to !llvm.ptr
   %n = func.call @nx_sa_w(%rec, %c1) : (!llvm.ptr, i64) -> i64
-  %rows = func.call @nx_sa_w(%rec, %c2) : (!llvm.ptr, i64) -> i64
-  %spw = func.call @nx_sa_w(%rec, %c4) : (!llvm.ptr, i64) -> i64
-  %spp = llvm.inttoptr %spw : i64 to !llvm.ptr
-  %tgw = func.call @nx_sa_w(%rec, %c5) : (!llvm.ptr, i64) -> i64
-  %tgp = llvm.inttoptr %tgw : i64 to !llvm.ptr
-  %sd = func.call @nx_sa_desc8(%spp, %rows) : (!llvm.ptr, i64) -> !d
-  %sm = builtin.unrealized_conversion_cast %sd : !d to !m64
-  %spans = builtin.unrealized_conversion_cast %sm : !m64 to !s64
-  %td = func.call @nx_sa_desc8(%tgp, %rows) : (!llvm.ptr, i64) -> !d
-  %tm = builtin.unrealized_conversion_cast %td : !d to !m8
-  %tags = builtin.unrealized_conversion_cast %tm : !m8 to !s8
   %dbuf = func.call @nixsa_room(%ctx, %n) : (!llvm.ptr, i64) -> !llvm.ptr
   %dbw = llvm.ptrtoint %dbuf : !llvm.ptr to i64
-  %ri = arith.index_cast %rows : i64 to index
+  %ri = trikeshed.size %tags : !l8
   %used = scf.for %r = %z to %ri step %one iter_args(%off = %c0) -> (i64) {
-    %sp = trikeshed.at %spans[%r] : !s64, index -> i64
-    %from = arith.shrui %sp, %c32 : i64
-    %to = arith.andi %sp, %mask : i64
-    %tg8 = trikeshed.at %tags[%r] : !s8, index -> i8
+    %from32 = trikeshed.at %opens[%r] : !l32, index -> i32
+    %to32 = trikeshed.at %closes[%r] : !l32, index -> i32
+    %from = arith.extui %from32 : i32 to i64
+    %to = arith.extui %to32 : i32 to i64
+    %tg8 = trikeshed.at %tags[%r] : !l8, index -> i8
     %tg = arith.extui %tg8 : i8 to i64
     %isstr = arith.cmpi eq, %tg, %c4 : i64
     %off2 = scf.if %isstr -> (i64) {
@@ -179,7 +170,7 @@ func.func private @nx_sa_nodes(%rec: !llvm.ptr, %ctx: !llvm.ptr, %nkind: memref<
 // ---- the members of every container: (key window, value node) from nfirst[x], ncnt[x] of them.  An array's are its
 // elements (key length -1); an object's its keys in byte order, the last of equal keys kept; the root's one more, the
 // `outputs` object (node rows), whose members are the outputs (node rows + 1 + i: the path, a string).
-func.func private @nx_sa_members(%rec: !llvm.ptr, %outs: !llvm.ptr, %nout: i64, %nkind: memref<?xi64>,
+func.func private @nx_sa_members(%kids: !pieces, %kid: !s32, %outs: !llvm.ptr, %nout: i64, %nkind: memref<?xi64>,
                                  %nptr: memref<?xi64>, %nlen: memref<?xi64>, %nfirst: memref<?xi64>,
                                  %ncnt: memref<?xi64>, %mkp: memref<?xi64>, %mkl: memref<?xi64>, %mval: memref<?xi64>) {
   %c0 = arith.constant 0 : i64
@@ -190,35 +181,23 @@ func.func private @nx_sa_members(%rec: !llvm.ptr, %outs: !llvm.ptr, %nout: i64, 
   %c5 = arith.constant 5 : i64
   %c6 = arith.constant 6 : i64
   %c7 = arith.constant 7 : i64
-  %c8 = arith.constant 8 : i64
-  %c32 = arith.constant 32 : i64
   %cm1 = arith.constant -1 : i64
-  %mask = arith.constant 4294967295 : i64
   %zero32 = arith.constant 0 : i32
   %z = arith.constant 0 : index
   %one = arith.constant 1 : index
-  %rows = func.call @nx_sa_w(%rec, %c2) : (!llvm.ptr, i64) -> i64
-  %kdw = func.call @nx_sa_w(%rec, %c6) : (!llvm.ptr, i64) -> i64
-  %kdp = llvm.inttoptr %kdw : i64 to !llvm.ptr
-  %kw = func.call @nx_sa_w(%rec, %c7) : (!llvm.ptr, i64) -> i64
-  %kpp = llvm.inttoptr %kw : i64 to !llvm.ptr
-  %nkid = func.call @nx_sa_w(%rec, %c8) : (!llvm.ptr, i64) -> i64
-  %kdd = func.call @nx_sa_desc8(%kdp, %rows) : (!llvm.ptr, i64) -> !d
-  %kdm = builtin.unrealized_conversion_cast %kdd : !d to !m64
-  %kids = builtin.unrealized_conversion_cast %kdm : !m64 to !s64
-  %kd2 = func.call @nx_sa_desc8(%kpp, %nkid) : (!llvm.ptr, i64) -> !d
-  %km2 = builtin.unrealized_conversion_cast %kd2 : !d to !m32
-  %kid = builtin.unrealized_conversion_cast %km2 : !m32 to !s32
+  %ri = trikeshed.size %kids : !pieces
+  %rows = arith.index_cast %ri : index to i64
   // the key `outputs`: the constant's own bytes
   %og = memref.get_global @sa_outputs : memref<7xi8>
   %oa = memref.extract_aligned_pointer_as_index %og : memref<7xi8> -> index
   %ow = arith.index_cast %oa : index to i64
-  %ri = arith.index_cast %rows : i64 to index
   %mo = scf.for %r = %z to %ri step %one iter_args(%at = %c0) -> (i64) {
     %kind = memref.load %nkind[%r] : memref<?xi64>
-    %kd = trikeshed.at %kids[%r] : !s64, index -> i64
-    %first = arith.shrui %kd, %c32 : i64
-    %count = arith.andi %kd, %mask : i64
+    %kd = trikeshed.at %kids[%r] : !pieces, index -> !tp
+    %first32 = trikeshed.first %kd : !tp -> i32
+    %count32 = trikeshed.second %kd : !tp -> i32
+    %first = arith.extui %first32 : i32 to i64
+    %count = arith.extui %count32 : i32 to i64
     memref.store %at, %nfirst[%r] : memref<?xi64>
     %isarr = arith.cmpi eq, %kind, %c5 : i64
     %isobj = arith.cmpi eq, %kind, %c6 : i64
@@ -498,13 +477,11 @@ func.func private @nx_sa_rewrite1(%ctx: !llvm.ptr, %rws: !llvm.ptr, %nrw: i64, %
 }
 
 // every string of the text rewritten (not the keys: a key's window is the member table's, taken before)
-func.func private @nx_sa_rewrite(%ctx: !llvm.ptr, %rec: !llvm.ptr, %rws: !llvm.ptr, %nrw: i64, %nkind: memref<?xi64>,
+func.func private @nx_sa_rewrite(%ctx: !llvm.ptr, %rows: i64, %rws: !llvm.ptr, %nrw: i64, %nkind: memref<?xi64>,
                                  %nptr: memref<?xi64>, %nlen: memref<?xi64>) {
-  %c2 = arith.constant 2 : i64
   %c4 = arith.constant 4 : i64
   %z = arith.constant 0 : index
   %one = arith.constant 1 : index
-  %rows = func.call @nx_sa_w(%rec, %c2) : (!llvm.ptr, i64) -> i64
   %ri = arith.index_cast %rows : i64 to index
   scf.for %r = %z to %ri step %one {
     %kind = memref.load %nkind[%r] : memref<?xi64>
@@ -1115,33 +1092,48 @@ func.func private @nx_sa_sh(%ctx: !llvm.ptr, %nkind: memref<?xi64>, %nptr: memre
 }
 
 // ---- the entry: 0 the two files written (through nixsa_out), 1 __json is not JSON, 2 it is not an object.
-// rec is confix.checked's record (word 15 set: the store's reading); outs the outputs' SortedMap rows (name, path),
-// rws the rewrites' (placeholder, path), both read in place (nx_sa_row).
+// rec is confix.checked's record (`end` set: the store's reading); outs the outputs' SortedMap rows (name, path),
+// rws the rewrites' (placeholder, path), both read in place (nx_sa_row).  The index is this function's lane: filled by
+// confix.checked, read here, gone when it returns.
 func.func @nixstore_ts_sattrs(%ctx: !llvm.ptr, %rec: !llvm.ptr, %outs: !llvm.ptr, %nout: i64, %rws: !llvm.ptr,
                               %nrw: i64) -> i32 {
-  %c0 = arith.constant 0 : i64
+  %index = trikeshed.lane : !rows
   %c1 = arith.constant 1 : i64
   %c2 = arith.constant 2 : i64
-  %c5 = arith.constant 5 : i64
-  %c8 = arith.constant 8 : i64
   %c11 = arith.constant 11 : i64
   %t5 = arith.constant 5 : i8
   %ok = arith.constant 0 : i32
   %notjson = arith.constant 1 : i32
   %notobj = arith.constant 2 : i32
   %z = arith.constant 0 : index
-  %fault = confix.checked %rec : !llvm.ptr
+  %i1 = arith.constant 1 : index
+  %i2 = arith.constant 2 : index
+  %i3 = arith.constant 3 : index
+  %fault = confix.checked %rec, %index : !llvm.ptr, !rows
   %bad = arith.cmpi ne, %fault, %ok : i32
   %r = scf.if %bad -> (i32) {
     scf.yield %notjson : i32
   } else {
-    %tgw = func.call @nx_sa_w(%rec, %c5) : (!llvm.ptr, i64) -> i64
-    %tgp = llvm.inttoptr %tgw : i64 to !llvm.ptr
-    %t0 = llvm.load %tgp : !llvm.ptr -> i8
+    %ltags = trikeshed.take %index[%i2] : !rows -> !l8
+    %t0 = trikeshed.at %ltags[%z] : !l8, index -> i8
     %isobj = arith.cmpi eq, %t0, %t5 : i8
     %r2 = scf.if %isobj -> (i32) {
-      %rows = func.call @nx_sa_w(%rec, %c2) : (!llvm.ptr, i64) -> i64
-      %nkid = func.call @nx_sa_w(%rec, %c8) : (!llvm.ptr, i64) -> i64
+      // open, close and tag are read where the fill left them; `up` is drained into one series, for each row's
+      // children out of the rows they are in
+      %opens = trikeshed.take %index[%z] : !rows -> !l32
+      %closes = trikeshed.take %index[%i1] : !rows -> !l32
+      %lups = trikeshed.take %index[%i3] : !rows -> !l32
+      %ups = trikeshed.drain %lups : !l32 -> !s32
+      %nrows = trikeshed.size %ups : !s32
+      %ids = trikeshed.series %nrows : !s32 {
+      ^bb0(%i: index):
+        %id = arith.index_cast %i : index to i32
+        trikeshed.yield %id : i32
+      }
+      %kids, %kid = trikeshed.adjacency %ups, %ids over %nrows : !s32, !s32 -> !pieces, !s32
+      %nkidi = trikeshed.size %kid : !s32
+      %rows = arith.index_cast %nrows : index to i64
+      %nkid = arith.index_cast %nkidi : index to i64
       %r1 = arith.addi %rows, %c1 : i64
       %nodes = arith.addi %r1, %nout : i64
       %k1 = arith.addi %nkid, %c1 : i64
@@ -1161,13 +1153,13 @@ func.func @nixstore_ts_sattrs(%ctx: !llvm.ptr, %rec: !llvm.ptr, %outs: !llvm.ptr
       %decn = arith.muli %rows, %c11 : i64
       %deci = arith.index_cast %decn : i64 to index
       %dec = memref.alloc(%deci) : memref<?xi8>
-      func.call @nx_sa_nodes(%rec, %ctx, %nkind, %nptr, %nlen)
-        : (!llvm.ptr, !llvm.ptr, memref<?xi64>, memref<?xi64>, memref<?xi64>) -> ()
-      func.call @nx_sa_members(%rec, %outs, %nout, %nkind, %nptr, %nlen, %nfirst, %ncnt, %mkp, %mkl, %mval)
-        : (!llvm.ptr, !llvm.ptr, i64, memref<?xi64>, memref<?xi64>, memref<?xi64>, memref<?xi64>, memref<?xi64>,
+      func.call @nx_sa_nodes(%rec, %ctx, %opens, %closes, %ltags, %nkind, %nptr, %nlen)
+        : (!llvm.ptr, !llvm.ptr, !l32, !l32, !l8, memref<?xi64>, memref<?xi64>, memref<?xi64>) -> ()
+      func.call @nx_sa_members(%kids, %kid, %outs, %nout, %nkind, %nptr, %nlen, %nfirst, %ncnt, %mkp, %mkl, %mval)
+        : (!pieces, !s32, !llvm.ptr, i64, memref<?xi64>, memref<?xi64>, memref<?xi64>, memref<?xi64>, memref<?xi64>,
            memref<?xi64>, memref<?xi64>, memref<?xi64>) -> ()
-      func.call @nx_sa_rewrite(%ctx, %rec, %rws, %nrw, %nkind, %nptr, %nlen)
-        : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, memref<?xi64>, memref<?xi64>, memref<?xi64>) -> ()
+      func.call @nx_sa_rewrite(%ctx, %rows, %rws, %nrw, %nkind, %nptr, %nlen)
+        : (!llvm.ptr, i64, !llvm.ptr, i64, memref<?xi64>, memref<?xi64>, memref<?xi64>) -> ()
       func.call @nx_sa_numbers(%nodes, %nkind, %nptr, %nsimple, %dec, %declen)
         : (i64, memref<?xi64>, memref<?xi64>, memref<?xi64>, memref<?xi8>, memref<?xi64>) -> ()
       %ne2 = arith.muli %nodes, %c2 : i64
