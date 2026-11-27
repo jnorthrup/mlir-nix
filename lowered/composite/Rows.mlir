@@ -377,24 +377,33 @@ func.func @mlnix_rows_union_into(%x: !llvm.ptr, %rb: i64, %nx: i64, %y: !llvm.pt
 // The sorts: kRun = 24 insertion-sorted runs merged bottom-up (stable: the right run only when strictly less),
 // mlnix_rows_sort calling the C++ comparator back for each comparison in the template's order, mlnix_rows_sort_u32
 // comparing the leading u32 keys itself; the bridge owns the merge's temp run.
+// A row's move is a drain of the row's bytes into the destination's cells: one block move (a row's alignment is not
+// assumed, so the bytes are i8).  The 16- and 8-byte rows (Attr, the word rows) are slices of a constant length, which
+// clang moves in registers; any other width is one block of rb bytes.
+!bb = !trikeshed.series<i8>
+!mb = memref<?xi8, strided<[1], offset: ?>>
 func.func private @nx_rows_copy1(%dst: !llvm.ptr, %src: !llvm.ptr, %rb: i64) {
-  %k0 = arith.constant 8 : i64
-  %k1 = arith.constant 16 : i64
-  %is161 = arith.cmpi eq, %rb, %k1 : i64
-  scf.if %is161 {
-    %w2 = llvm.load %src {alignment = 1 : i64} : !llvm.ptr -> i64
-    %s83 = llvm.getelementptr %src[8] : (!llvm.ptr) -> !llvm.ptr, i8
-    %w4 = llvm.load %s83 {alignment = 1 : i64} : !llvm.ptr -> i64
-    %d85 = llvm.getelementptr %dst[8] : (!llvm.ptr) -> !llvm.ptr, i8
-    llvm.store %w2, %dst {alignment = 1 : i64} : i64, !llvm.ptr
-    llvm.store %w4, %d85 {alignment = 1 : i64} : i64, !llvm.ptr
+  %k8 = arith.constant 8 : i64
+  %k16 = arith.constant 16 : i64
+  %i0 = arith.constant 0 : index
+  %i8 = arith.constant 8 : index
+  %i16 = arith.constant 16 : index
+  %sd = func.call @rows_desc(%src, %rb) : (!llvm.ptr, i64) -> !d
+  %sm = builtin.unrealized_conversion_cast %sd : !d to !mb
+  %s = builtin.unrealized_conversion_cast %sm : !mb to !bb
+  %dd = func.call @rows_desc(%dst, %rb) : (!llvm.ptr, i64) -> !d
+  %cells = builtin.unrealized_conversion_cast %dd : !d to !mb
+  %is16 = arith.cmpi eq, %rb, %k16 : i64
+  scf.if %is16 {
+    %row = trikeshed.slice %s[%i0, %i16] : !bb -> !bb
+    %e = trikeshed.drain %row, %cells : !bb, !mb -> index
   } else {
-    %is86 = arith.cmpi eq, %rb, %k0 : i64
-    scf.if %is86 {
-      %w7 = llvm.load %src {alignment = 1 : i64} : !llvm.ptr -> i64
-      llvm.store %w7, %dst {alignment = 1 : i64} : i64, !llvm.ptr
+    %is8 = arith.cmpi eq, %rb, %k8 : i64
+    scf.if %is8 {
+      %row = trikeshed.slice %s[%i0, %i8] : !bb -> !bb
+      %e = trikeshed.drain %row, %cells : !bb, !mb -> index
     } else {
-      "llvm.intr.memcpy"(%dst, %src, %rb) <{isVolatile = false}> : (!llvm.ptr, !llvm.ptr, i64) -> ()
+      %e = trikeshed.drain %s, %cells : !bb, !mb -> index
     }
   }
   return
