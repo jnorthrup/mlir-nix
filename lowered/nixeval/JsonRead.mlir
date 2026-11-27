@@ -1,17 +1,24 @@
 // builtins.fromJSON's reader (lib/Eval/Formats.cpp parseJSON; the C++ port of TrikeShed's Confix it replaces was
 // include/Composite/Confix.h), in three parts:
 //
-//   confix_scan_checked(rec) -> fault   the body of the confix dialect's confix.checked (Confix.td): the text scanned
-//     once into the index's rows, in the order the elements open (span, tag, kids), checked as the reader of
-//     builtins.fromJSON checks it.  The faults are nlohmann's, at the offsets that reader had reached; Unsigned (an
-//     integer from 2^63 to 2^64 - 1) and Nul (a string with \u0000) are a number and a string a Nix value cannot be.
-//     A number without a fraction or an exponent that fits 64 bits is a Long, any other a Double.  The open containers
-//     are a stack in the record, not the machine's: a document nested a million deep needs no more stack than a flat one.
-//     The state machine is cf blocks (Value, Key, After), lifted to scf at build time.
+//   confix_scan_checked(rec, rows) -> fault   the body of the confix dialect's confix.checked (Confix.td): the text
+//     scanned once into the index's rows, in the order the elements open, checked as the reader of builtins.fromJSON
+//     checks it.  The rows are a lane the caller made (!trikeshed.lane: a MutableSeries in LaneTrie's shape), filled by
+//     trikeshed.append: a row is (open, close, tag, up), `up` the row of the container it is in (-1 for the root's).
+//     So the open containers are no stack at all, the machine's or the record's: the container on top is a row, the
+//     one under it that row's `up`, and a document nested a million deep needs nothing a flat one does not.  A
+//     container's `close` is 0 until its closer is read: trikeshed.anchor mints it there.  The faults are nlohmann's,
+//     at the offsets that reader had reached; Unsigned (an integer from 2^63 to 2^64 - 1) and Nul (a string with
+//     \u0000) are a number and a string a Nix value cannot be.  A number without a fraction or an exponent that fits
+//     64 bits is a Long, any other a Double.  The state machine is cf blocks (Value, Key, After), lifted to scf at
+//     build time.
 //
-//   nixev_json_read(rec, st, root) -> fault   confix.checked, then (when the text is one) the values of the index made
-//     now: a Value for each row, a container's filled from the Values of its children, which are made before they are
-//     visited because a child's row comes after its parent's.  An object's members are sorted by their keys' bytes
+//   nixev_json_read(rec, st, root) -> fault   the fill, then the drain: the lane made here, confix.checked, and (when
+//     the text is one) each column drained into one series of exactly the rows; a row's children are
+//     trikeshed.adjacency of `up` (each row an edge from the row it is in: the counting sort gives every row its
+//     (first, count) into the children, in the order of the text).  Then the values of the index made now: a Value
+//     for each row, a container's filled from the Values of its children, which are made before they are visited
+//     because a child's row comes after its parent's.  An object's members are sorted by their keys' bytes
 //     (trikeshed.sorted, stable: of equal keys the last in the text is the last in the order, and it is the one kept,
 //     as the sorted map the reader before kept it).  Null, booleans, integers and floats are written into the Value
 //     here (VType Int 5, Float 6, Bool 7, Null 8: type u8 @0, payload @8); the evaluator's arena stays C++, behind
@@ -23,24 +30,29 @@
 //     reader before computed it, whatever the second half is), a lone half as its three bytes.  With shown, a NUL is
 //     written as U+2400 (the Nul fault's message).  nixev_json_what(fault, &len) is a syntax fault's words.
 //
-// The record (16 words, the bridge owns it and its arrays; Confix.td): src, n, rows, rowCap, span (u64 open << 32 |
-// close), tag (u8), kids (u64 first << 32 | count into kid), kid (u32), nkid, stack (u64 row << 32 | pend start), sp,
-// stackCap, pend (u32), npend, at, end.  When rows reach rowCap, or sp stackCap, nixev_json_grow(rec, which) doubles
-// the arrays and writes their new places back.  The faults (also Confix.td): 1 EndOfInput, 2 InvalidLiteral,
+// The record (4 words, the bridge's; Confix.td): src, n, at, end.  The index is not the bridge's: its rows are the
+// lane of whoever calls confix.checked, which grows a page at a time and never asks.  The faults (also Confix.td):
+// 1 EndOfInput, 2 InvalidLiteral,
 // 3 ExpectedKey, 4 ExpectedColon, 5 ExpectedBrace, 6 ExpectedBracket, 7 Trailing, 8 MissingQuote, 9 ControlChar,
 // 10 InvalidString, 11 Hex4, 12 Surrogate, 13 Backslash, 14 Unsigned, 15 Nul; `at` the offset (for Unsigned and Nul
 // where the number or the string opens, and `end` one past it; `end` nonzero on entry is the store's reading of __json,
 // StructuredAttrsOps.mlir's, where those two are a Long and a String).  The tags: 0 Nothing, 1 Boolean, 2 Long, 3 Double,
 // 4 String, 5 Object, 6 Array.
 !s8 = !trikeshed.series<i8>
+!s32 = !trikeshed.series<i32>
 !s64 = !trikeshed.series<i64>
 !m8 = memref<?xi8, strided<[1], offset: ?>>
+// the index while it is filled: a row is (open, close, tag, up); one column of it; and a row's children, drained
+!rows = !trikeshed.lane<i32, i32, i8, i32>
+!l32 = !trikeshed.lane<i32>
+!l8 = !trikeshed.lane<i8>
+!tp = !trikeshed.twinpacked<i32>
+!kids = !trikeshed.series<!tp>
 
 llvm.mlir.global internal constant @js_what_blob("unexpected end of input; expected '[', '{', or a literalinvalid literalinvalid literal; expected string literalsyntax error; expected ':'syntax error; expected '}'syntax error; expected ']'syntax error while parsing value - unexpected trailing content; expected end of inputinvalid string: missing closing quoteinvalid string: control character must be escapedinvalid stringinvalid string: '\5Cu' must be followed by 4 hex digitsinvalid string: surrogate U+D800..U+DBFF must be followed by U+DC00..U+DFFFinvalid string: forbidden character after backslash") {addr_space = 0 : i32}
 llvm.mlir.global internal constant @js_what_off(dense<[0, 0, 56, 71, 111, 137, 163, 189, 274, 311, 360, 374, 427, 502]> : tensor<14xi32>) {addr_space = 0 : i32} : !llvm.array<14 x i32>
 llvm.mlir.global internal constant @js_what_len(dense<[0, 56, 15, 40, 26, 26, 26, 85, 37, 49, 14, 53, 75, 51]> : tensor<14xi32>) {addr_space = 0 : i32} : !llvm.array<14 x i32>
 
-func.func private @nixev_json_grow(!llvm.ptr, i64)
 func.func private @nixev_json_value(!llvm.ptr) -> !llvm.ptr
 func.func private @nixev_json_string(!llvm.ptr, !llvm.ptr, !llvm.ptr, i64)
 func.func private @nixev_json_attrs(!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64)
@@ -64,26 +76,9 @@ func.func private @js_rp(%r: !llvm.ptr, %k: i64) -> !llvm.ptr {
   %v = llvm.load %p : !llvm.ptr -> !llvm.ptr
   return %v : !llvm.ptr
 }
-func.func private @js_a64(%p: !llvm.ptr, %i: i64) -> i64 {
-  %q = llvm.getelementptr %p[%i] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-  %v = llvm.load %q : !llvm.ptr -> i64
-  return %v : i64
-}
 func.func private @js_s64(%p: !llvm.ptr, %i: i64, %v: i64) {
   %q = llvm.getelementptr %p[%i] : (!llvm.ptr, i64) -> !llvm.ptr, i64
   llvm.store %v, %q : i64, !llvm.ptr
-  return
-}
-func.func private @js_a32(%p: !llvm.ptr, %i: i64) -> i64 {
-  %q = llvm.getelementptr %p[%i] : (!llvm.ptr, i64) -> !llvm.ptr, i32
-  %v = llvm.load %q : !llvm.ptr -> i32
-  %w = arith.extui %v : i32 to i64
-  return %w : i64
-}
-func.func private @js_s32(%p: !llvm.ptr, %i: i64, %v: i64) {
-  %q = llvm.getelementptr %p[%i] : (!llvm.ptr, i64) -> !llvm.ptr, i32
-  %t = arith.trunci %v : i64 to i32
-  llvm.store %t, %q : i32, !llvm.ptr
   return
 }
 func.func private @js_a8(%p: !llvm.ptr, %i: i64) -> i8 {
@@ -153,115 +148,6 @@ func.func private @js_digits(%src: !llvm.ptr, %n: i64, %p: i64) -> i64 {
   return %r : i64
 }
 
-// a row: its span from..to, its tag, no children yet; and its place among the children of the container it is in
-func.func private @js_row(%rec: !llvm.ptr, %tag: i8, %from: i64, %to: i64) -> i64 {
-  %c0 = arith.constant 0 : i64
-  %c1 = arith.constant 1 : i64
-  %c2 = arith.constant 2 : i64
-  %c3 = arith.constant 3 : i64
-  %c4 = arith.constant 4 : i64
-  %c5 = arith.constant 5 : i64
-  %c6 = arith.constant 6 : i64
-  %c10 = arith.constant 10 : i64
-  %c12 = arith.constant 12 : i64
-  %c13 = arith.constant 13 : i64
-  %c32 = arith.constant 32 : i64
-  %rows = func.call @js_rd(%rec, %c2) : (!llvm.ptr, i64) -> i64
-  %cap = func.call @js_rd(%rec, %c3) : (!llvm.ptr, i64) -> i64
-  %full = arith.cmpi uge, %rows, %cap : i64
-  scf.if %full {
-    func.call @nixev_json_grow(%rec, %c0) : (!llvm.ptr, i64) -> ()
-  }
-  %span = func.call @js_rp(%rec, %c4) : (!llvm.ptr, i64) -> !llvm.ptr
-  %hi = arith.shli %from, %c32 : i64
-  %sv = arith.ori %hi, %to : i64
-  func.call @js_s64(%span, %rows, %sv) : (!llvm.ptr, i64, i64) -> ()
-  %tags = func.call @js_rp(%rec, %c5) : (!llvm.ptr, i64) -> !llvm.ptr
-  func.call @js_s8(%tags, %rows, %tag) : (!llvm.ptr, i64, i8) -> ()
-  %kids = func.call @js_rp(%rec, %c6) : (!llvm.ptr, i64) -> !llvm.ptr
-  func.call @js_s64(%kids, %rows, %c0) : (!llvm.ptr, i64, i64) -> ()
-  %rows1 = arith.addi %rows, %c1 : i64
-  func.call @js_wr(%rec, %c2, %rows1) : (!llvm.ptr, i64, i64) -> ()
-  %sp = func.call @js_rd(%rec, %c10) : (!llvm.ptr, i64) -> i64
-  %inside = arith.cmpi ne, %sp, %c0 : i64
-  scf.if %inside {
-    %pend = func.call @js_rp(%rec, %c12) : (!llvm.ptr, i64) -> !llvm.ptr
-    %np = func.call @js_rd(%rec, %c13) : (!llvm.ptr, i64) -> i64
-    func.call @js_s32(%pend, %np, %rows) : (!llvm.ptr, i64, i64) -> ()
-    %np1 = arith.addi %np, %c1 : i64
-    func.call @js_wr(%rec, %c13, %np1) : (!llvm.ptr, i64, i64) -> ()
-  }
-  return %rows : i64
-}
-// a container opens: its row and where its children start in pend, on the stack
-func.func private @js_push(%rec: !llvm.ptr, %v: i64) {
-  %c1 = arith.constant 1 : i64
-  %c9 = arith.constant 9 : i64
-  %c10 = arith.constant 10 : i64
-  %c11 = arith.constant 11 : i64
-  %sp = func.call @js_rd(%rec, %c10) : (!llvm.ptr, i64) -> i64
-  %cap = func.call @js_rd(%rec, %c11) : (!llvm.ptr, i64) -> i64
-  %full = arith.cmpi uge, %sp, %cap : i64
-  scf.if %full {
-    func.call @nixev_json_grow(%rec, %c1) : (!llvm.ptr, i64) -> ()
-  }
-  %stack = func.call @js_rp(%rec, %c9) : (!llvm.ptr, i64) -> !llvm.ptr
-  func.call @js_s64(%stack, %sp, %v) : (!llvm.ptr, i64, i64) -> ()
-  %sp1 = arith.addi %sp, %c1 : i64
-  func.call @js_wr(%rec, %c10, %sp1) : (!llvm.ptr, i64, i64) -> ()
-  return
-}
-// the container on top closes at offset `at`: its end, and its children, which leave pend for kid
-func.func private @js_shut(%rec: !llvm.ptr, %at: i64) {
-  %c1 = arith.constant 1 : i64
-  %c4 = arith.constant 4 : i64
-  %c6 = arith.constant 6 : i64
-  %c7 = arith.constant 7 : i64
-  %c8 = arith.constant 8 : i64
-  %c9 = arith.constant 9 : i64
-  %c10 = arith.constant 10 : i64
-  %c12 = arith.constant 12 : i64
-  %c13 = arith.constant 13 : i64
-  %c32 = arith.constant 32 : i64
-  %mask = arith.constant 4294967295 : i64
-  %sp = func.call @js_rd(%rec, %c10) : (!llvm.ptr, i64) -> i64
-  %sp1 = arith.subi %sp, %c1 : i64
-  func.call @js_wr(%rec, %c10, %sp1) : (!llvm.ptr, i64, i64) -> ()
-  %stack = func.call @js_rp(%rec, %c9) : (!llvm.ptr, i64) -> !llvm.ptr
-  %top = func.call @js_a64(%stack, %sp1) : (!llvm.ptr, i64) -> i64
-  %r = arith.shrui %top, %c32 : i64
-  %from = arith.andi %top, %mask : i64
-  %np = func.call @js_rd(%rec, %c13) : (!llvm.ptr, i64) -> i64
-  %count = arith.subi %np, %from : i64
-  %first = func.call @js_rd(%rec, %c8) : (!llvm.ptr, i64) -> i64
-  %kid = func.call @js_rp(%rec, %c7) : (!llvm.ptr, i64) -> !llvm.ptr
-  %pend = func.call @js_rp(%rec, %c12) : (!llvm.ptr, i64) -> !llvm.ptr
-  %lo = arith.index_cast %from : i64 to index
-  %hi = arith.index_cast %np : i64 to index
-  %one = arith.constant 1 : index
-  scf.for %i = %lo to %hi step %one {
-    %i64 = arith.index_cast %i : index to i64
-    %row = func.call @js_a32(%pend, %i64) : (!llvm.ptr, i64) -> i64
-    %k = arith.subi %i64, %from : i64
-    %at2 = arith.addi %first, %k : i64
-    func.call @js_s32(%kid, %at2, %row) : (!llvm.ptr, i64, i64) -> ()
-  }
-  %nk = arith.addi %first, %count : i64
-  func.call @js_wr(%rec, %c8, %nk) : (!llvm.ptr, i64, i64) -> ()
-  func.call @js_wr(%rec, %c13, %from) : (!llvm.ptr, i64, i64) -> ()
-  %span = func.call @js_rp(%rec, %c4) : (!llvm.ptr, i64) -> !llvm.ptr
-  %old = func.call @js_a64(%span, %r) : (!llvm.ptr, i64) -> i64
-  %open = arith.shrui %old, %c32 : i64
-  %openhi = arith.shli %open, %c32 : i64
-  %sv = arith.ori %openhi, %at : i64
-  func.call @js_s64(%span, %r, %sv) : (!llvm.ptr, i64, i64) -> ()
-  %kids = func.call @js_rp(%rec, %c6) : (!llvm.ptr, i64) -> !llvm.ptr
-  %fhi = arith.shli %first, %c32 : i64
-  %kv = arith.ori %fhi, %count : i64
-  func.call @js_s64(%kids, %r, %kv) : (!llvm.ptr, i64, i64) -> ()
-  return
-}
-
 // four hex digits from p: whether they are, their value, and where the reading got to (on a fault, past the digits read)
 func.func private @js_hex4(%src: !llvm.ptr, %n: i64, %p: i64) -> (i1, i32, i64) {
   %c1 = arith.constant 1 : i64
@@ -310,13 +196,13 @@ func.func private @js_hex4(%src: !llvm.ptr, %n: i64, %p: i64) -> (i1, i32, i64) 
   return %rok, %rv, %rp : i1, i32, i64
 }
 
-// a string from the quote at `from`, as a row: (0, past its closing quote), or (fault, the offset the reading had got to)
+// a string from the quote at `from`: (0, past its closing quote), or (fault, the offset the reading had got to)
 func.func private @js_string(%rec: !llvm.ptr, %src: !llvm.ptr, %n: i64, %from: i64) -> (i32, i64) {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
   %c2 = arith.constant 2 : i64
-  %c14 = arith.constant 14 : i64
-  %c15 = arith.constant 15 : i64
+  %kat = arith.constant 2 : i64
+  %kend = arith.constant 3 : i64
   %ok = arith.constant 0 : i32
   %kq = arith.constant 34 : i32
   %kbs = arith.constant 92 : i32
@@ -417,35 +303,30 @@ func.func private @js_string(%rec: !llvm.ptr, %src: !llvm.ptr, %n: i64, %from: i
   cf.cond_br %lok, ^run(%lp, %nul : i64, i64), ^fail(%f11, %lp : i32, i64)
 ^closed(%cp: i64, %cnul: i64):
   %anynul = arith.cmpi ne, %cnul, %c0 : i64
-  // word 15 set on entry: the store's reading of __json, where a NUL is a byte of the string
-  %storew = func.call @js_rd(%rec, %c15) : (!llvm.ptr, i64) -> i64
+  // `end` set on entry: the store's reading of __json, where a NUL is a byte of the string
+  %storew = func.call @js_rd(%rec, %kend) : (!llvm.ptr, i64) -> i64
   %evalw = arith.cmpi eq, %storew, %c0 : i64
   %isnul = arith.andi %anynul, %evalw : i1
-  cf.cond_br %isnul, ^nul, ^good
+  cf.cond_br %isnul, ^nul, ^ret(%ok, %cp : i32, i64)
 ^nul:
-  func.call @js_wr(%rec, %c14, %from) : (!llvm.ptr, i64, i64) -> ()
-  func.call @js_wr(%rec, %c15, %cp) : (!llvm.ptr, i64, i64) -> ()
+  func.call @js_wr(%rec, %kat, %from) : (!llvm.ptr, i64, i64) -> ()
+  func.call @js_wr(%rec, %kend, %cp) : (!llvm.ptr, i64, i64) -> ()
   cf.br ^ret(%f15, %cp : i32, i64)
-^good:
-  %to = arith.subi %cp, %c1 : i64
-  %t4 = arith.constant 4 : i8
-  %row = func.call @js_row(%rec, %t4, %from, %to) : (!llvm.ptr, i8, i64, i64) -> i64
-  cf.br ^ret(%ok, %cp : i32, i64)
 ^fail(%ff: i32, %fat: i64):
-  func.call @js_wr(%rec, %c14, %fat) : (!llvm.ptr, i64, i64) -> ()
+  func.call @js_wr(%rec, %kat, %fat) : (!llvm.ptr, i64, i64) -> ()
   cf.br ^ret(%ff, %fat : i32, i64)
 ^ret(%rf: i32, %rp: i64):
   return %rf, %rp : i32, i64
 }
 
-// a number from `from` (a '-' or a digit there), as a row: a Long, or a Double when it has a fraction or an exponent or
-// does not fit 64 bits; the fault Unsigned for an integer from 2^63 to 2^64 - 1.  Up to 18 digits cannot overflow;
+// a number from `from` (a '-' or a digit there): past it, and its tag, a Long (2), or a Double (3) when it has a
+// fraction or an exponent or does not fit 64 bits; the fault Unsigned for an integer from 2^63 to 2^64 - 1.  Up to 18 digits cannot overflow;
 // longer ones are read as strtoll (negative) and strtoull read them: the magnitude against 2^63 or 2^64 - 1.
-func.func private @js_number(%rec: !llvm.ptr, %src: !llvm.ptr, %n: i64, %from: i64) -> (i32, i64) {
+func.func private @js_number(%rec: !llvm.ptr, %src: !llvm.ptr, %n: i64, %from: i64) -> (i32, i64, i8) {
   %c1 = arith.constant 1 : i64
   %c10 = arith.constant 10 : i64
-  %c14 = arith.constant 14 : i64
-  %c15 = arith.constant 15 : i64
+  %kat = arith.constant 2 : i64
+  %kend = arith.constant 3 : i64
   %c18 = arith.constant 18 : i64
   %c48 = arith.constant 48 : i64
   %yes = arith.constant 1 : i1
@@ -527,26 +408,24 @@ func.func private @js_number(%rec: !llvm.ptr, %src: !llvm.ptr, %n: i64, %from: i
     scf.yield %k : i32
   }
   %anyuns = arith.cmpi eq, %kind, %k2 : i32
-  // word 15 set on entry: the store's reading of __json, where such an integer is a Long row
-  %storew = func.call @js_rd(%rec, %c15) : (!llvm.ptr, i64) -> i64
+  // `end` set on entry: the store's reading of __json, where such an integer is a Long row
+  %storew = func.call @js_rd(%rec, %kend) : (!llvm.ptr, i64) -> i64
   %z64 = arith.constant 0 : i64
   %evalw = arith.cmpi eq, %storew, %z64 : i64
   %isuns = arith.andi %anyuns, %evalw : i1
   %f = scf.if %isuns -> (i32) {
-    func.call @js_wr(%rec, %c14, %from) : (!llvm.ptr, i64, i64) -> ()
-    func.call @js_wr(%rec, %c15, %p3) : (!llvm.ptr, i64, i64) -> ()
+    func.call @js_wr(%rec, %kat, %from) : (!llvm.ptr, i64, i64) -> ()
+    func.call @js_wr(%rec, %kend, %p3) : (!llvm.ptr, i64, i64) -> ()
     %u = arith.constant 14 : i32
     scf.yield %u : i32
   } else {
-    %isd = arith.cmpi eq, %kind, %k1 : i32
-    %t2 = arith.constant 2 : i8
-    %t3 = arith.constant 3 : i8
-    %t = arith.select %isd, %t3, %t2 : i8
-    %to = arith.subi %p3, %c1 : i64
-    %row = func.call @js_row(%rec, %t, %from, %to) : (!llvm.ptr, i8, i64, i64) -> i64
     scf.yield %k0 : i32
   }
-  return %f, %p3 : i32, i64
+  %isd = arith.cmpi eq, %kind, %k1 : i32
+  %t2 = arith.constant 2 : i8
+  %t3 = arith.constant 3 : i8
+  %t = arith.select %isd, %t3, %t2 : i8
+  return %f, %p3, %t : i32, i64, i8
 }
 
 // which literal is at p: 1 true, 2 false, 3 null, 0 none
@@ -606,17 +485,19 @@ func.func private @js_lit(%src: !llvm.ptr, %n: i64, %p: i64) -> i32 {
   return %r3 : i32
 }
 
-// confix.checked: the scan.  The states are blocks: ^value (a value is expected), ^key (a key after `{` or `,`),
-// ^after (an element ended: `,` or the closer of the container on top, or the end of the document).
-func.func @confix_scan_checked(%rec: !llvm.ptr) -> i32 {
+// confix.checked: the scan, the fill of the index.  The states are blocks: ^value (a value is expected), ^key (a key
+// after `{` or `,`), ^after (an element ended: `,` or the closer of the container on top, or the end of the document).
+// Each carries the row of the container on top, -1 outside any.  A row is appended when its element is read: a
+// container's when it opens (its close 0: not minted yet), a scalar's when it ends.
+func.func @confix_scan_checked(%rec: !llvm.ptr, %rows: !rows) -> i32 {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
-  %c5 = arith.constant 5 : i64
-  %c9 = arith.constant 9 : i64
-  %c10 = arith.constant 10 : i64
-  %c13 = arith.constant 13 : i64
-  %c14 = arith.constant 14 : i64
-  %c32 = arith.constant 32 : i64
+  %kat = arith.constant 2 : i64
+  %i1 = arith.constant 1 : index
+  %i2 = arith.constant 2 : index
+  %i3 = arith.constant 3 : index
+  %z32 = arith.constant 0 : i32
+  %none = arith.constant -1 : i32
   %ok = arith.constant 0 : i32
   %f1 = arith.constant 1 : i32
   %f2 = arith.constant 2 : i32
@@ -637,12 +518,17 @@ func.func @confix_scan_checked(%rec: !llvm.ptr) -> i32 {
   %q9 = arith.constant 57 : i32
   %t0 = arith.constant 0 : i8
   %t1 = arith.constant 1 : i8
+  %t4 = arith.constant 4 : i8
   %t5 = arith.constant 5 : i8
   %t6 = arith.constant 6 : i8
+  // the columns the scan reads back while it fills: a container's close, its tag, and the row it is in
+  %closes = trikeshed.take %rows[%i1] : !rows -> !l32
+  %tags = trikeshed.take %rows[%i2] : !rows -> !l8
+  %ups = trikeshed.take %rows[%i3] : !rows -> !l32
   %src = func.call @js_rp(%rec, %c0) : (!llvm.ptr, i64) -> !llvm.ptr
   %n = func.call @js_rd(%rec, %c1) : (!llvm.ptr, i64) -> i64
-  cf.br ^value(%c0 : i64)
-^value(%p: i64):
+  cf.br ^value(%c0, %none : i64, i32)
+^value(%p: i64, %top: i32):
   %vq = func.call @js_ws(%src, %n, %p) : (!llvm.ptr, i64, i64) -> i64
   %vend = arith.cmpi uge, %vq, %n : i64
   cf.cond_br %vend, ^fail(%f1, %vq : i32, i64), ^vgo
@@ -653,31 +539,26 @@ func.func @confix_scan_checked(%rec: !llvm.ptr) -> i32 {
   %vopen = arith.ori %vob, %vab : i1
   cf.cond_br %vopen, ^open, ^vstr
 ^open:
+  // a container opens: its row, and it is the one on top
   %otag = arith.select %vob, %t5, %t6 : i8
-  %orow = func.call @js_row(%rec, %otag, %vq, %vq) : (!llvm.ptr, i8, i64, i64) -> i64
-  %onp = func.call @js_rd(%rec, %c13) : (!llvm.ptr, i64) -> i64
-  %orh = arith.shli %orow, %c32 : i64
-  %ov = arith.ori %orh, %onp : i64
-  func.call @js_push(%rec, %ov) : (!llvm.ptr, i64) -> ()
+  %oat = arith.trunci %vq : i64 to i32
+  %orow = trikeshed.append %rows, %oat, %z32, %otag, %top : !rows, i32, i32, i8, i32 -> index
+  %otop = arith.index_cast %orow : index to i32
   %oq1 = arith.addi %vq, %c1 : i64
   %oq2 = func.call @js_ws(%src, %n, %oq1) : (!llvm.ptr, i64, i64) -> i64
   %oc = func.call @js_at(%src, %n, %oq2) : (!llvm.ptr, i64, i64) -> i32
   %ocl = arith.select %vob, %qrbrace, %qrbrack : i32
   %oempty = arith.cmpi eq, %oc, %ocl : i32
-  cf.cond_br %oempty, ^oshut, ^onot
-^oshut:
-  func.call @js_shut(%rec, %oq2) : (!llvm.ptr, i64) -> ()
-  %oq3 = arith.addi %oq2, %c1 : i64
-  cf.br ^after(%oq3 : i64)
+  cf.cond_br %oempty, ^shut(%oq2, %otop : i64, i32), ^onot
 ^onot:
-  cf.cond_br %vob, ^key(%oq2 : i64), ^value(%oq2 : i64)
+  cf.cond_br %vob, ^key(%oq2, %otop : i64, i32), ^value(%oq2, %otop : i64, i32)
 ^vstr:
   %visq = arith.cmpi eq, %vc, %qquote : i32
   cf.cond_br %visq, ^str, ^vlit
 ^str:
   %sf, %sp = func.call @js_string(%rec, %src, %n, %vq) : (!llvm.ptr, !llvm.ptr, i64, i64) -> (i32, i64)
   %sbad = arith.cmpi ne, %sf, %ok : i32
-  cf.cond_br %sbad, ^ret(%sf : i32), ^after(%sp : i64)
+  cf.cond_br %sbad, ^ret(%sf : i32), ^row(%t4, %vq, %sp, %top : i8, i64, i64, i32)
 ^vlit:
   %lit = func.call @js_lit(%src, %n, %vq) : (!llvm.ptr, i64, i64) -> i32
   %islit = arith.cmpi ne, %lit, %ok : i32
@@ -692,9 +573,7 @@ func.func @confix_scan_checked(%rec: !llvm.ptr) -> i32 {
   %llen = arith.select %lfalse, %l5, %l4 : i64
   %ltag = arith.select %lnull, %t0, %t1 : i8
   %lend = arith.addi %vq, %llen : i64
-  %lto = arith.subi %lend, %c1 : i64
-  %lrow = func.call @js_row(%rec, %ltag, %vq, %lto) : (!llvm.ptr, i8, i64, i64) -> i64
-  cf.br ^after(%lend : i64)
+  cf.br ^row(%ltag, %vq, %lend, %top : i8, i64, i64, i32)
 ^vnum:
   %nmin = arith.cmpi eq, %vc, %qminus : i32
   %nge = arith.cmpi sge, %vc, %q0 : i32
@@ -703,10 +582,17 @@ func.func @confix_scan_checked(%rec: !llvm.ptr) -> i32 {
   %isnum = arith.ori %nmin, %ndig : i1
   cf.cond_br %isnum, ^num, ^fail(%f2, %vq : i32, i64)
 ^num:
-  %nf, %np = func.call @js_number(%rec, %src, %n, %vq) : (!llvm.ptr, !llvm.ptr, i64, i64) -> (i32, i64)
+  %nf, %np, %nt = func.call @js_number(%rec, %src, %n, %vq) : (!llvm.ptr, !llvm.ptr, i64, i64) -> (i32, i64, i8)
   %nbad = arith.cmpi ne, %nf, %ok : i32
-  cf.cond_br %nbad, ^ret(%nf : i32), ^after(%np : i64)
-^key(%kp: i64):
+  cf.cond_br %nbad, ^ret(%nf : i32), ^row(%nt, %vq, %np, %top : i8, i64, i64, i32)
+^row(%rtag: i8, %rfrom: i64, %rend: i64, %rtop: i32):
+  // a string, a number or a literal ended: its row, from its first byte to its last
+  %rlast = arith.subi %rend, %c1 : i64
+  %ropen = arith.trunci %rfrom : i64 to i32
+  %rclose = arith.trunci %rlast : i64 to i32
+  %rrow = trikeshed.append %rows, %ropen, %rclose, %rtag, %rtop : !rows, i32, i32, i8, i32 -> index
+  cf.br ^after(%rend, %rtop : i64, i32)
+^key(%kp: i64, %ktop: i32):
   %kq = func.call @js_ws(%src, %n, %kp) : (!llvm.ptr, i64, i64) -> i64
   %kc = func.call @js_at(%src, %n, %kq) : (!llvm.ptr, i64, i64) -> i32
   %kisq = arith.cmpi eq, %kc, %qquote : i32
@@ -716,44 +602,50 @@ func.func @confix_scan_checked(%rec: !llvm.ptr) -> i32 {
   %kbad = arith.cmpi ne, %kf, %ok : i32
   cf.cond_br %kbad, ^ret(%kf : i32), ^kcolon
 ^kcolon:
+  // the key's row, then the colon
+  %klast = arith.subi %kp2, %c1 : i64
+  %kopen = arith.trunci %kq : i64 to i32
+  %kclose = arith.trunci %klast : i64 to i32
+  %krow = trikeshed.append %rows, %kopen, %kclose, %t4, %ktop : !rows, i32, i32, i8, i32 -> index
   %kq3 = func.call @js_ws(%src, %n, %kp2) : (!llvm.ptr, i64, i64) -> i64
   %kc3 = func.call @js_at(%src, %n, %kq3) : (!llvm.ptr, i64, i64) -> i32
   %kiscol = arith.cmpi eq, %kc3, %qcolon : i32
   %kq4 = arith.addi %kq3, %c1 : i64
-  cf.cond_br %kiscol, ^value(%kq4 : i64), ^fail(%f4, %kq3 : i32, i64)
-^after(%ap: i64):
-  %asp = func.call @js_rd(%rec, %c10) : (!llvm.ptr, i64) -> i64
-  %aempty = arith.cmpi eq, %asp, %c0 : i64
+  cf.cond_br %kiscol, ^value(%kq4, %ktop : i64, i32), ^fail(%f4, %kq3 : i32, i64)
+^after(%ap: i64, %atop: i32):
+  %aempty = arith.cmpi slt, %atop, %z32 : i32
   cf.cond_br %aempty, ^done(%ap : i64), ^amore
 ^amore:
   %aq = func.call @js_ws(%src, %n, %ap) : (!llvm.ptr, i64, i64) -> i64
-  %astack = func.call @js_rp(%rec, %c9) : (!llvm.ptr, i64) -> !llvm.ptr
-  %asp1 = arith.subi %asp, %c1 : i64
-  %atop = func.call @js_a64(%astack, %asp1) : (!llvm.ptr, i64) -> i64
-  %arow = arith.shrui %atop, %c32 : i64
-  %atags = func.call @js_rp(%rec, %c5) : (!llvm.ptr, i64) -> !llvm.ptr
-  %atag = func.call @js_a8(%atags, %arow) : (!llvm.ptr, i64) -> i8
+  %atag = trikeshed.at %tags[%atop] : !l8, i32 -> i8
   %aobj = arith.cmpi eq, %atag, %t5 : i8
   %ac = func.call @js_at(%src, %n, %aq) : (!llvm.ptr, i64, i64) -> i32
   %acomma = arith.cmpi eq, %ac, %qcomma : i32
   %aq1 = arith.addi %aq, %c1 : i64
   cf.cond_br %acomma, ^anext, ^aclose
 ^anext:
-  cf.cond_br %aobj, ^key(%aq1 : i64), ^value(%aq1 : i64)
+  cf.cond_br %aobj, ^key(%aq1, %atop : i64, i32), ^value(%aq1, %atop : i64, i32)
 ^aclose:
   %acl = arith.select %aobj, %qrbrace, %qrbrack : i32
   %ais = arith.cmpi eq, %ac, %acl : i32
   %af = arith.select %aobj, %f5, %f6 : i32
-  cf.cond_br %ais, ^ashut, ^fail(%af, %aq : i32, i64)
-^ashut:
-  func.call @js_shut(%rec, %aq) : (!llvm.ptr, i64) -> ()
-  cf.br ^after(%aq1 : i64)
+  cf.cond_br %ais, ^shut(%aq, %atop : i64, i32), ^fail(%af, %aq : i32, i64)
+^shut(%sat: i64, %stop: i32):
+  // the container on top closes at sat: its close is minted, and the container it is in is on top again
+  %srow = arith.index_cast %stop : i32 to index
+  %sclose = arith.trunci %sat : i64 to i32
+  %sminted = trikeshed.anchor %closes[%srow] : !l32 -> i32 {
+    trikeshed.yield %sclose : i32
+  }
+  %sup = trikeshed.at %ups[%stop] : !l32, i32 -> i32
+  %sq1 = arith.addi %sat, %c1 : i64
+  cf.br ^after(%sq1, %sup : i64, i32)
 ^done(%dp: i64):
   %dq = func.call @js_ws(%src, %n, %dp) : (!llvm.ptr, i64, i64) -> i64
   %dend = arith.cmpi eq, %dq, %n : i64
   cf.cond_br %dend, ^ret(%ok : i32), ^fail(%f7, %dq : i32, i64)
 ^fail(%ff: i32, %fat: i64):
-  func.call @js_wr(%rec, %c14, %fat) : (!llvm.ptr, i64, i64) -> ()
+  func.call @js_wr(%rec, %kat, %fat) : (!llvm.ptr, i64, i64) -> ()
   cf.br ^ret(%ff : i32)
 ^ret(%rf: i32):
   return %rf : i32
@@ -1043,27 +935,24 @@ func.func private @js_mk_string(%src: !llvm.ptr, %st: !llvm.ptr, %v: !llvm.ptr, 
   return
 }
 // an Array: a fresh Value for each child (vals[child]), then the list of them
-func.func private @js_mk_array(%rec: !llvm.ptr, %st: !llvm.ptr, %v: !llvm.ptr, %vals: memref<?xi64>, %first: i64, %count: i64) {
-  %c7 = arith.constant 7 : i64
-  %kid = func.call @js_rp(%rec, %c7) : (!llvm.ptr, i64) -> !llvm.ptr
-  %mi = arith.index_cast %count : i64 to index
-  %cells = memref.alloc(%mi) : memref<?xi64>
+func.func private @js_mk_array(%st: !llvm.ptr, %v: !llvm.ptr, %vals: memref<?xi64>, %kid: !s32, %first: index, %count: index) {
+  %cells = memref.alloc(%count) : memref<?xi64>
   %zero = arith.constant 0 : index
   %one = arith.constant 1 : index
-  scf.for %k = %zero to %mi step %one {
-    %k64 = arith.index_cast %k : index to i64
-    %at = arith.addi %first, %k64 : i64
-    %row = func.call @js_a32(%kid, %at) : (!llvm.ptr, i64) -> i64
-    %ri = arith.index_cast %row : i64 to index
+  scf.for %k = %zero to %count step %one {
+    %at = arith.addi %first, %k : index
+    %row = trikeshed.at %kid[%at] : !s32, index -> i32
+    %ri = arith.index_castui %row : i32 to index
     %cell = func.call @nixev_json_value(%st) : (!llvm.ptr) -> !llvm.ptr
     %cw = llvm.ptrtoint %cell : !llvm.ptr to i64
     memref.store %cw, %vals[%ri] : memref<?xi64>
     memref.store %cw, %cells[%k] : memref<?xi64>
   }
-  func.call @_ZN5nixev9EvalState6mkListERNS_5ValueEm(%st, %v, %count) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+  %count64 = arith.index_cast %count : index to i64
+  func.call @_ZN5nixev9EvalState6mkListERNS_5ValueEm(%st, %v, %count64) : (!llvm.ptr, !llvm.ptr, i64) -> ()
   %ep = llvm.getelementptr %v[8] : (!llvm.ptr) -> !llvm.ptr, i8
   %elems = llvm.load %ep : !llvm.ptr -> !llvm.ptr
-  scf.for %k = %zero to %mi step %one {
+  scf.for %k = %zero to %count step %one {
     %k64 = arith.index_cast %k : index to i64
     %cw = memref.load %cells[%k] : memref<?xi64>
     func.call @js_s64(%elems, %k64, %cw) : (!llvm.ptr, i64, i64) -> ()
@@ -1072,31 +961,23 @@ func.func private @js_mk_array(%rec: !llvm.ptr, %st: !llvm.ptr, %v: !llvm.ptr, %
 }
 // an Object: each member's key decoded into one buffer and a fresh Value for its value, in the order they came; the
 // members sorted by their keys' bytes (stable); of equal keys the last is kept; the rows handed to the attrs builder
-func.func private @js_mk_object(%rec: !llvm.ptr, %st: !llvm.ptr, %v: !llvm.ptr, %vals: memref<?xi64>, %first: i64, %count: i64) {
+func.func private @js_mk_object(%src: !llvm.ptr, %st: !llvm.ptr, %v: !llvm.ptr, %vals: memref<?xi64>, %opens: !s32,
+                                %closes: !s32, %kid: !s32, %first: index, %count: index) {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
-  %c2 = arith.constant 2 : i64
-  %c4 = arith.constant 4 : i64
-  %c7 = arith.constant 7 : i64
-  %c32 = arith.constant 32 : i64
-  %mask = arith.constant 4294967295 : i64
-  %src = func.call @js_rp(%rec, %c0) : (!llvm.ptr, i64) -> !llvm.ptr
-  %span = func.call @js_rp(%rec, %c4) : (!llvm.ptr, i64) -> !llvm.ptr
-  %kid = func.call @js_rp(%rec, %c7) : (!llvm.ptr, i64) -> !llvm.ptr
-  %m = arith.divui %count, %c2 : i64
-  %mi = arith.index_cast %m : i64 to index
   %zero = arith.constant 0 : index
   %one = arith.constant 1 : index
   %c2i = arith.constant 2 : index
+  %mi = arith.divui %count, %c2i : index
   // room for the keys: the bytes between their quotes, which their values never outgrow
   %room = scf.for %k = %zero to %mi step %one iter_args(%acc = %c0) -> (i64) {
-    %k64 = arith.index_cast %k : index to i64
-    %k2 = arith.muli %k64, %c2 : i64
-    %at = arith.addi %first, %k2 : i64
-    %row = func.call @js_a32(%kid, %at) : (!llvm.ptr, i64) -> i64
-    %sp = func.call @js_a64(%span, %row) : (!llvm.ptr, i64) -> i64
-    %from = arith.shrui %sp, %c32 : i64
-    %to = arith.andi %sp, %mask : i64
+    %k2 = arith.muli %k, %c2i : index
+    %at = arith.addi %first, %k2 : index
+    %row = trikeshed.at %kid[%at] : !s32, index -> i32
+    %from32 = trikeshed.at %opens[%row] : !s32, i32 -> i32
+    %to32 = trikeshed.at %closes[%row] : !s32, i32 -> i32
+    %from = arith.extui %from32 : i32 to i64
+    %to = arith.extui %to32 : i32 to i64
     %d = arith.subi %to, %from : i64
     %d1 = arith.subi %d, %c1 : i64
     %acc2 = arith.addi %acc, %d1 : i64
@@ -1110,20 +991,20 @@ func.func private @js_mk_object(%rec: !llvm.ptr, %st: !llvm.ptr, %v: !llvm.ptr, 
   %kbase = func.call @js_addr8(%keys) : (memref<?xi8>) -> !llvm.ptr
   %kbw = llvm.ptrtoint %kbase : !llvm.ptr to i64
   %used = scf.for %k = %zero to %mi step %one iter_args(%off = %c0) -> (i64) {
-    %k64 = arith.index_cast %k : index to i64
-    %k2 = arith.muli %k64, %c2 : i64
-    %at = arith.addi %first, %k2 : i64
-    %row = func.call @js_a32(%kid, %at) : (!llvm.ptr, i64) -> i64
-    %sp = func.call @js_a64(%span, %row) : (!llvm.ptr, i64) -> i64
-    %from = arith.shrui %sp, %c32 : i64
-    %to = arith.andi %sp, %mask : i64
+    %k2 = arith.muli %k, %c2i : index
+    %at = arith.addi %first, %k2 : index
+    %row = trikeshed.at %kid[%at] : !s32, index -> i32
+    %from32 = trikeshed.at %opens[%row] : !s32, i32 -> i32
+    %to32 = trikeshed.at %closes[%row] : !s32, i32 -> i32
+    %from = arith.extui %from32 : i32 to i64
+    %to = arith.extui %to32 : i32 to i64
     %into = llvm.getelementptr %kbase[%off] : (!llvm.ptr, i64) -> !llvm.ptr, i8
     %w = func.call @nixev_json_decode(%src, %from, %to, %into, %c0) : (!llvm.ptr, i64, i64, !llvm.ptr, i64) -> i64
     memref.store %off, %koff[%k] : memref<?xi64>
     memref.store %w, %klen[%k] : memref<?xi64>
-    %at1 = arith.addi %at, %c1 : i64
-    %vrow = func.call @js_a32(%kid, %at1) : (!llvm.ptr, i64) -> i64
-    %vri = arith.index_cast %vrow : i64 to index
+    %at1 = arith.addi %at, %one : index
+    %vrow = trikeshed.at %kid[%at1] : !s32, index -> i32
+    %vri = arith.index_castui %vrow : i32 to index
     %cell = func.call @nixev_json_value(%st) : (!llvm.ptr) -> !llvm.ptr
     %cw = llvm.ptrtoint %cell : !llvm.ptr to i64
     memref.store %cw, %vals[%vri] : memref<?xi64>
@@ -1206,21 +1087,11 @@ func.func private @js_mk_object(%rec: !llvm.ptr, %st: !llvm.ptr, %v: !llvm.ptr, 
   return
 }
 
-// the values of the index the scan left in rec, made now, the first row's into root
-func.func private @js_reify(%rec: !llvm.ptr, %st: !llvm.ptr, %root: !llvm.ptr) {
+// the values of the drained index, made now, the first row's into root
+func.func private @js_reify(%src: !llvm.ptr, %st: !llvm.ptr, %root: !llvm.ptr, %opens: !s32, %closes: !s32, %tags: !s8,
+                            %kids: !kids, %kid: !s32) {
   %c0 = arith.constant 0 : i64
-  %c2 = arith.constant 2 : i64
-  %c4 = arith.constant 4 : i64
-  %c5 = arith.constant 5 : i64
-  %c6 = arith.constant 6 : i64
-  %c32 = arith.constant 32 : i64
-  %mask = arith.constant 4294967295 : i64
-  %src = func.call @js_rp(%rec, %c0) : (!llvm.ptr, i64) -> !llvm.ptr
-  %rows = func.call @js_rd(%rec, %c2) : (!llvm.ptr, i64) -> i64
-  %span = func.call @js_rp(%rec, %c4) : (!llvm.ptr, i64) -> !llvm.ptr
-  %tags = func.call @js_rp(%rec, %c5) : (!llvm.ptr, i64) -> !llvm.ptr
-  %kids = func.call @js_rp(%rec, %c6) : (!llvm.ptr, i64) -> !llvm.ptr
-  %ri = arith.index_cast %rows : i64 to index
+  %ri = trikeshed.size %tags : !s8
   %vals = memref.alloc(%ri) : memref<?xi64>
   %zero = arith.constant 0 : index
   %one = arith.constant 1 : index
@@ -1234,14 +1105,11 @@ func.func private @js_reify(%rec: !llvm.ptr, %st: !llvm.ptr, %root: !llvm.ptr) {
     %made = arith.cmpi ne, %vb, %c0 : i64
     scf.if %made {
       %v = llvm.inttoptr %vb : i64 to !llvm.ptr
-      %i64 = arith.index_cast %i : index to i64
-      %sp = func.call @js_a64(%span, %i64) : (!llvm.ptr, i64) -> i64
-      %from = arith.shrui %sp, %c32 : i64
-      %to = arith.andi %sp, %mask : i64
-      %tag = func.call @js_a8(%tags, %i64) : (!llvm.ptr, i64) -> i8
-      %kc = func.call @js_a64(%kids, %i64) : (!llvm.ptr, i64) -> i64
-      %first = arith.shrui %kc, %c32 : i64
-      %count = arith.andi %kc, %mask : i64
+      %from32 = trikeshed.at %opens[%i] : !s32, index -> i32
+      %to32 = trikeshed.at %closes[%i] : !s32, index -> i32
+      %from = arith.extui %from32 : i32 to i64
+      %to = arith.extui %to32 : i32 to i64
+      %tag = trikeshed.at %tags[%i] : !s8, index -> i8
       %t1 = arith.constant 1 : i8
       %t2 = arith.constant 2 : i8
       %t3 = arith.constant 3 : i8
@@ -1281,11 +1149,18 @@ func.func private @js_reify(%rec: !llvm.ptr, %st: !llvm.ptr, %root: !llvm.ptr) {
           scf.if %isstring {
             func.call @js_mk_string(%src, %st, %v, %from, %to) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64) -> ()
           } else {
+            // a container's children: its (first, count) into kid
+            %kc = trikeshed.at %kids[%i] : !kids, index -> !tp
+            %first32 = trikeshed.first %kc : !tp -> i32
+            %count32 = trikeshed.second %kc : !tp -> i32
+            %first = arith.index_castui %first32 : i32 to index
+            %count = arith.index_castui %count32 : i32 to index
             %isobject = arith.cmpi eq, %tag, %t5 : i8
             scf.if %isobject {
-              func.call @js_mk_object(%rec, %st, %v, %vals, %first, %count) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, memref<?xi64>, i64, i64) -> ()
+              func.call @js_mk_object(%src, %st, %v, %vals, %opens, %closes, %kid, %first, %count)
+                : (!llvm.ptr, !llvm.ptr, !llvm.ptr, memref<?xi64>, !s32, !s32, !s32, index, index) -> ()
             } else {
-              func.call @js_mk_array(%rec, %st, %v, %vals, %first, %count) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, memref<?xi64>, i64, i64) -> ()
+              func.call @js_mk_array(%st, %v, %vals, %kid, %first, %count) : (!llvm.ptr, !llvm.ptr, memref<?xi64>, !s32, index, index) -> ()
             }
           }
         }
@@ -1325,13 +1200,37 @@ func.func private @js_long(%src: !llvm.ptr, %from: i64, %to: i64) -> i64 {
   return %r : i64
 }
 
-// builtins.fromJSON's reader: confix.checked, then, when the text is one, its values.  The fault, 0 for none.
+// builtins.fromJSON's reader, a fill and a drain: the index's lane, confix.checked filling it, and, when the text is one,
+// each column drained and the children counted out of `up` (trikeshed.adjacency), then its values.  The fault, 0 for none.
 func.func @nixev_json_read(%rec: !llvm.ptr, %st: !llvm.ptr, %root: !llvm.ptr) -> i32 {
-  %f = confix.checked %rec : !llvm.ptr
+  %rows = trikeshed.lane : !rows
+  %f = confix.checked %rec, %rows : !llvm.ptr, !rows
   %z = arith.constant 0 : i32
   %ok = arith.cmpi eq, %f, %z : i32
   scf.if %ok {
-    func.call @js_reify(%rec, %st, %root) : (!llvm.ptr, !llvm.ptr, !llvm.ptr) -> ()
+    %c0 = arith.constant 0 : i64
+    %i0 = arith.constant 0 : index
+    %i1 = arith.constant 1 : index
+    %i2 = arith.constant 2 : index
+    %i3 = arith.constant 3 : index
+    %src = func.call @js_rp(%rec, %c0) : (!llvm.ptr, i64) -> !llvm.ptr
+    %lopens = trikeshed.take %rows[%i0] : !rows -> !l32
+    %lcloses = trikeshed.take %rows[%i1] : !rows -> !l32
+    %ltags = trikeshed.take %rows[%i2] : !rows -> !l8
+    %lups = trikeshed.take %rows[%i3] : !rows -> !l32
+    %opens = trikeshed.drain %lopens : !l32 -> !s32
+    %closes = trikeshed.drain %lcloses : !l32 -> !s32
+    %tags = trikeshed.drain %ltags : !l8 -> !s8
+    %ups = trikeshed.drain %lups : !l32 -> !s32
+    %n = trikeshed.size %tags : !s8
+    %ids = trikeshed.series %n : !s32 {
+    ^bb0(%i: index):
+      %r = arith.index_cast %i : index to i32
+      trikeshed.yield %r : i32
+    }
+    %kids, %kid = trikeshed.adjacency %ups, %ids over %n : !s32, !s32 -> !kids, !s32
+    func.call @js_reify(%src, %st, %root, %opens, %closes, %tags, %kids, %kid)
+      : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !s32, !s32, !s8, !kids, !s32) -> ()
   }
   return %f : i32
 }

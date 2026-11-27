@@ -170,25 +170,25 @@ def Confix_BandsOp : Confix_Op<"bands"> {
 // The record, which the caller owns (all fields 8 bytes, in this order):
 //
 //   src     ptr   in   the text's bytes
-//   n       i64   in   its size (below 2^32 - 1: the spans are 32-bit)
-//   rows    i64   out  the rows found, in the order the elements open
-//   rowCap  i64   in   the room of span, tag, kids, kid and pend
-//   span    ptr   out  [rowCap] of u64: open << 32 | close, the first and the last byte (a string's quotes included)
-//   tag     ptr   out  [rowCap] of u8: TagKind (Nothing, Boolean, Long, Double, String, Object, Array)
-//   kids    ptr   out  [rowCap] of u64: first << 32 | count into kid, a row's direct children (an object's keys and
-//                      values alternating)
-//   kid     ptr   out  [rowCap] of u32; nkid i64 out: how many
-//   stack   ptr   --   [stackCap] of u64: the open containers, row << 32 | where their children start in pend; sp i64
-//   stackCap i64  in
-//   pend    ptr   --   [rowCap] of u32: the rows finished inside the open containers; npend i64
+//   n       i64   in   its size (below 2^32 - 1: the offsets are 32-bit)
 //   at      i64   out  where the reading had got to when it stopped (the column of nlohmann's message is at + 1); for
 //                      Unsigned and Nul where the number or the string opens
 //   end     i64   out  for Unsigned and Nul, one past it; in: nonzero for the store's reading of __json
 //                      (lowered/nixstore/StructuredAttrsOps.mlir), where an Unsigned is a Long row and a Nul a String row,
 //                      as nlohmann reads them, not faults
 //
-// When rows reach rowCap or sp reaches stackCap, the scan calls nixev_json_grow(rec, 0 or 1), which makes the arrays
-// larger and writes their places back.  The fault, 0 for none: 1 the text ended where a value was expected, 2 an invalid
+// The rows are not the record's: they are a lane of the caller's, `!trikeshed.lane<i32, i32, i8, i32>` (TrikeShed.td: a
+// MutableSeries in LaneTrie's shape), which the scan fills by trikeshed.append, in the order the elements open:
+//
+//   open    i32   the first byte of the element (a string's quote included)
+//   close   i32   its last byte; a container's is 0 until its closer is read, where trikeshed.anchor mints it
+//   tag     i8    TagKind (Nothing, Boolean, Long, Double, String, Object, Array)
+//   up      i32   the row of the container the element is in, -1 for the root: the open containers are these links, not
+//                 a stack, and a row's direct children (an object's keys and values alternating) are the rows whose `up`
+//                 it is, in order: trikeshed.adjacency of `up` over the drained rows gives each row its (first, count)
+//
+// So nothing is sized ahead and nothing is asked of the caller while the scan runs.  The fault, 0 for none: 1 the text
+// ended where a value was expected, 2 an invalid
 // literal, 3 a key expected, 4 ':' expected, 5 '}' expected, 6 ']' expected, 7 trailing content, 8 a string without its
 // closing quote, 9 a control character in a string, 10 a backslash at the end, 11 \u without four hex digits, 12 a high
 // surrogate not followed by \u, 13 a backslash before a character that is not an escape, 14 Unsigned (an integer from
@@ -196,9 +196,9 @@ def Confix_BandsOp : Confix_Op<"bands"> {
 
 def Confix_CheckedOp : Confix_Op<"checked"> {
   let summary = "scan a JSON text, checking it as builtins.fromJSON does, into the rows of its index";
-  let arguments = (ins Arg<LLVM_AnyPointer, "", [MemWrite]>:$rec);
+  let arguments = (ins Arg<LLVM_AnyPointer, "", [MemWrite]>:$rec, AnyType:$rows);
   let results = (outs I32:$fault);
-  let assemblyFormat = "$rec attr-dict `:` type($rec)";
+  let assemblyFormat = "$rec `,` $rows attr-dict `:` type($rec) `,` type($rows)";
 }
 
 // ---- the index as TrikeShed's series and cursor (PRELOAD-DIALECTS step 5): ConfixIndex's facets, lowered below TrikeShed.
