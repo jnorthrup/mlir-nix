@@ -161,6 +161,12 @@ mlnix_lower_interface(NixStore lowered/nixstore/IsInStore.mlir IsInStore)
 # each block's 8-byte slices plus scf.for rounds; the padding a combine of a pad slice and a length series, drained; the
 # field/point/scalar arithmetic is scf/arith over i64 limb memrefs with trikeshed.fold/compare for the S < L and R checks.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/Sha512.mlir Sha512)
+# MD5, SHA-1 and SHA-256 (lib/Store/Hash.cpp's CommonCrypto / OpenSSL / llvm:: contexts are gone; HashSink calls these
+# entries on the same 112-byte context shape as SHA-512's).  Each is the Sha512.mlir pattern: block words by trikeshed.fold
+# over 4-byte slices, the rounds as scf loops, the padding one combine drained into the context's buffer.
+mlnix_lower_trikeshed(NixStore lowered/nixstore/Md5.mlir Md5)
+mlnix_lower_trikeshed(NixStore lowered/nixstore/Sha1.mlir Sha1)
+mlnix_lower_trikeshed(NixStore lowered/nixstore/Sha256.mlir Sha256)
 mlnix_lower_trikeshed(NixStore lowered/nixstore/Ed25519.mlir Ed25519)
 # The byte encoders appendBase16, appendNix32, base64Encode (lib/Store/Hash.cpp's bodies are gone; the bridges size the
 # Text and call these entries).  The encoding algebra is trikeshed.series / at / alpha / drain over the byte series.

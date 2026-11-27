@@ -4,20 +4,6 @@
 #include "Nix/Prefetch.h"
 #include "Nix/Store.h"
 
-#include "llvm/ADT/ArrayRef.h"
-#include "llvm/Support/MD5.h"
-#include "llvm/Support/SHA1.h"
-// SHA-256 is where the hashing of a run goes (53 MB of a run of nixos-toplevel), so it is not LLVM's portable C: libcrypto where there
-// is one (it picks the SHA extensions or the AVX2 code of the CPU; it is what Nix hashes with), CommonCrypto on macOS.  lib/CMakeLists.txt.
-#if defined(MLNIX_SHA256_OPENSSL)
-#define OPENSSL_SUPPRESS_DEPRECATED // the low-level SHA256_* calls: no provider lookup per hash
-#include <openssl/sha.h>
-#elif defined(__APPLE__) && !defined(MLNIX_SHA256_LLVM)
-#include <CommonCrypto/CommonDigest.h>
-#else
-#include "llvm/Support/SHA256.h"
-#endif
-
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -54,76 +40,46 @@ composite::Maybe<HashAlgo> parseHashAlgo(std::string_view s) {
   return nullptr;
 }
 
-// SHA-512 is hollowed out to MLIR: lowered/nixstore/Sha512.mlir (the compression, update's buffering, final's padding),
-// built into NixStore by lib/CMakeLists.txt.  Its context is plain state in HashSink::impl: h[8], buf[128], bufLen, totalLen.
+// The four digests are lowered MLIR: lowered/nixstore/{Md5,Sha1,Sha256,Sha512}.mlir, built into NixStore by lib/CMakeLists.txt.
+// Each context is plain state in HashSink::impl (112 bytes for the first three, 208 for SHA-512, the old struct's layout).
 extern "C" {
+void mlnix_md5_init(void *ctx);
+void mlnix_md5_update(void *ctx, const uint8_t *p, size_t n);
+void mlnix_md5_final(void *ctx, uint8_t *out);
+void mlnix_sha1_init(void *ctx);
+void mlnix_sha1_update(void *ctx, const uint8_t *p, size_t n);
+void mlnix_sha1_final(void *ctx, uint8_t *out);
+void mlnix_sha256_init(void *ctx);
+void mlnix_sha256_update(void *ctx, const uint8_t *p, size_t n);
+void mlnix_sha256_final(void *ctx, uint8_t *out);
 void mlnix_sha512_init(void *ctx);
 void mlnix_sha512_update(void *ctx, const uint8_t *p, size_t n);
 void mlnix_sha512_final(void *ctx, uint8_t *out);
 }
-constexpr size_t sha512CtxSize = 208;
-
-namespace {
-#if defined(MLNIX_SHA256_OPENSSL)
-struct Sha256Ctx {
-  SHA256_CTX c;
-  Sha256Ctx() { SHA256_Init(&c); }
-  void update(const uint8_t *p, size_t n) { SHA256_Update(&c, p, n); }
-  void final(uint8_t *out) { SHA256_Final(out, &c); }
-};
-#elif defined(__APPLE__) && !defined(MLNIX_SHA256_LLVM)
-struct Sha256Ctx {
-  CC_SHA256_CTX c;
-  Sha256Ctx() { CC_SHA256_Init(&c); }
-  void update(const uint8_t *p, size_t n) {
-    for (size_t off = 0; off < n; off += 1u << 30)
-      CC_SHA256_Update(&c, p + off, (CC_LONG)composite::min<size_t>(1u << 30, n - off));
-  }
-  void final(uint8_t *out) { CC_SHA256_Final(out, &c); }
-};
-#else
-struct Sha256Ctx {
-  llvm::SHA256 c;
-  void update(const uint8_t *p, size_t n) { c.update(llvm::ArrayRef<uint8_t>(p, n)); }
-  void final(uint8_t *out) {
-    auto r = c.final();
-    memcpy(out, r.data(), 32);
-  }
-};
-#endif
-} // namespace
-
-static_assert(sizeof(llvm::MD5) <= sizeof(HashSink::impl) && sizeof(llvm::SHA1) <= sizeof(HashSink::impl) &&
-                  sizeof(Sha256Ctx) <= sizeof(HashSink::impl) && sha512CtxSize <= sizeof(HashSink::impl),
+constexpr size_t md5CtxSize = 112, sha1CtxSize = 112, sha256CtxSize = 112, sha512CtxSize = 208;
+static_assert(md5CtxSize <= sizeof(HashSink::impl) && sha1CtxSize <= sizeof(HashSink::impl) &&
+                  sha256CtxSize <= sizeof(HashSink::impl) && sha512CtxSize <= sizeof(HashSink::impl),
               "a hash context fits in its sink");
-static_assert(alignof(llvm::MD5) <= 16 && alignof(llvm::SHA1) <= 16 && alignof(Sha256Ctx) <= 16);
 
 HashSink::HashSink(HashAlgo a) : algo(a) {
   switch (a) {
-  case HashAlgo::MD5: ::new (static_cast<void *>(impl)) llvm::MD5(); break;
-  case HashAlgo::SHA1: ::new (static_cast<void *>(impl)) llvm::SHA1(); break;
-  case HashAlgo::SHA256: ::new (static_cast<void *>(impl)) Sha256Ctx(); break;
+  case HashAlgo::MD5: mlnix_md5_init(impl); break;
+  case HashAlgo::SHA1: mlnix_sha1_init(impl); break;
+  case HashAlgo::SHA256: mlnix_sha256_init(impl); break;
   case HashAlgo::SHA512: mlnix_sha512_init(impl); break;
   }
 }
 
-HashSink::~HashSink() {
-  switch (algo) {
-  case HashAlgo::MD5: reinterpret_cast<llvm::MD5 *>(impl)->~MD5(); break;
-  case HashAlgo::SHA1: reinterpret_cast<llvm::SHA1 *>(impl)->~SHA1(); break;
-  case HashAlgo::SHA256: reinterpret_cast<Sha256Ctx *>(impl)->~Sha256Ctx(); break;
-  case HashAlgo::SHA512: break;
-  }
-}
+HashSink::~HashSink() {}
 
 void HashSink::update(std::string_view data) {
   total += data.size();
-  llvm::ArrayRef<uint8_t> a((const uint8_t *)data.data(), data.size());
+  const uint8_t *p = (const uint8_t *)data.data();
   switch (algo) {
-  case HashAlgo::MD5: reinterpret_cast<llvm::MD5 *>(impl)->update(a); break;
-  case HashAlgo::SHA1: reinterpret_cast<llvm::SHA1 *>(impl)->update(a); break;
-  case HashAlgo::SHA256: reinterpret_cast<Sha256Ctx *>(impl)->update(a.data(), a.size()); break;
-  case HashAlgo::SHA512: mlnix_sha512_update(impl, a.data(), a.size()); break;
+  case HashAlgo::MD5: mlnix_md5_update(impl, p, data.size()); break;
+  case HashAlgo::SHA1: mlnix_sha1_update(impl, p, data.size()); break;
+  case HashAlgo::SHA256: mlnix_sha256_update(impl, p, data.size()); break;
+  case HashAlgo::SHA512: mlnix_sha512_update(impl, p, data.size()); break;
   }
 }
 
@@ -131,18 +87,9 @@ Hash HashSink::finish() {
   Hash h;
   h.algo = algo;
   switch (algo) {
-  case HashAlgo::MD5: {
-    llvm::MD5::MD5Result r;
-    reinterpret_cast<llvm::MD5 *>(impl)->final(r);
-    memcpy(h.bytes, r.data(), 16);
-    break;
-  }
-  case HashAlgo::SHA1: {
-    auto r = reinterpret_cast<llvm::SHA1 *>(impl)->final();
-    memcpy(h.bytes, r.data(), 20);
-    break;
-  }
-  case HashAlgo::SHA256: reinterpret_cast<Sha256Ctx *>(impl)->final(h.bytes); break;
+  case HashAlgo::MD5: mlnix_md5_final(impl, h.bytes); break;
+  case HashAlgo::SHA1: mlnix_sha1_final(impl, h.bytes); break;
+  case HashAlgo::SHA256: mlnix_sha256_final(impl, h.bytes); break;
   case HashAlgo::SHA512: mlnix_sha512_final(impl, h.bytes); break;
   }
   return h;

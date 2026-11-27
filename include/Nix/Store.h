@@ -155,7 +155,6 @@ struct Hash {
 
 struct HashSink {
   explicit HashSink(HashAlgo a);
-  ~HashSink();
   HashSink(const HashSink &) = delete;
   void update(std::string_view data);
   Hash finish();
