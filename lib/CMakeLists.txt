@@ -91,7 +91,11 @@ find_program(MLNIX_LOWER_CLANG clang HINTS ${LLVM_TOOLS_BINARY_DIR} REQUIRED)
 set(MLNIX_LOWERED_DIR ${CMAKE_CURRENT_BINARY_DIR}/lowered)
 file(MAKE_DIRECTORY ${MLNIX_LOWERED_DIR})
 function(mlnix_lower_interface target mlir stem)
-  set(src ${PROJECT_SOURCE_DIR}/${mlir})
+  if(IS_ABSOLUTE ${mlir})
+    set(src ${mlir})
+  else()
+    set(src ${PROJECT_SOURCE_DIR}/${mlir})
+  endif()
   set(ll ${MLNIX_LOWERED_DIR}/${stem}.ll)
   set(o ${MLNIX_LOWERED_DIR}/${stem}.o)
   add_custom_command(OUTPUT ${ll}
@@ -231,6 +235,24 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/StructuredAttrsOps.mlir Structur
 # worklist and visited set (bisect + insert), collectGarbage's dead set and referrer-safe rounds,
 # queryPathInfo's lines (parts), contentFingerprint (a fold through XXH3-64, written here) and sameContent's walk.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/StoreGraph.mlir StoreGraph)
+# The local store's index (LocalStore.cpp's allValidPaths, queryReferrers' candidates, queryPathInfo's text, the info
+# file's write and unlink are calls): `<stateDir>/info.trie`, the info directory's entries as a trie CAS in TrikeShed's
+# shape (HashTrie: rows keyed by the hash part, a byte of fan-out a level, open leaves sealed as sorted, delta-coded
+# pages), derived from the info files and checked against the directory before it answers.  It reads the files and the
+# directory through the C library; what that does not give under one name and one layout everywhere is the system's
+# module (the macOS one is made for the machine: an Intel Mac's 64-bit-inode calls end in $INODE64).
+mlnix_lower_trikeshed(NixStore lowered/nixstore/StoreIndex.mlir StoreIndex)
+if(APPLE)
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    set(NIXSI_INODE64 "$INODE64")
+  else()
+    set(NIXSI_INODE64 "")
+  endif()
+  configure_file(${PROJECT_SOURCE_DIR}/lowered/nixstore/StoreIndexDarwin.mlir.in ${MLNIX_LOWERED_DIR}/StoreIndexOs.mlir @ONLY)
+  mlnix_lower_interface(NixStore ${MLNIX_LOWERED_DIR}/StoreIndexOs.mlir StoreIndexOs)
+else()
+  mlnix_lower_interface(NixStore lowered/nixstore/StoreIndexLinux.mlir StoreIndexOs)
+endif()
 # The local store's builder (LocalStore.cpp; the fork, the exec, the walks and the reads stay there): runBuilder's
 # environment and argv as one combineAll of `k=v` NUL pieces each, drained once, the pointer table the coordinates;
 # scanForReferences' table (the hash parts sorted, the last of equal ones kept) and its scan (32-digit nix32 windows
