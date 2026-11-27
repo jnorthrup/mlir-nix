@@ -187,8 +187,9 @@ def Confix_BandsOp : Confix_Op<"bands"> {
 //                 a stack, and a row's direct children (an object's keys and values alternating) are the rows whose `up`
 //                 it is, in order: trikeshed.adjacency of `up` over the drained rows gives each row its (first, count)
 //
-// So nothing is sized ahead and nothing is asked of the caller while the scan runs.  The fault, 0 for none: 1 the text
-// ended where a value was expected, 2 an invalid
+// So nothing is sized ahead and nothing is asked of the caller while the scan runs.
+//
+// The fault, 0 for none: 1 the text ended where a value was expected, 2 an invalid
 // literal, 3 a key expected, 4 ':' expected, 5 '}' expected, 6 ']' expected, 7 trailing content, 8 a string without its
 // closing quote, 9 a control character in a string, 10 a backslash at the end, 11 \u without four hex digits, 12 a high
 // surrogate not followed by \u, 13 a backslash before a character that is not an escape, 14 Unsigned (an integer from

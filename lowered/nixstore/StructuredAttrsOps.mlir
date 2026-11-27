@@ -38,8 +38,6 @@
 !l32 = !trikeshed.lane<i32>
 !l8 = !trikeshed.lane<i8>
 !m8 = memref<?xi8, strided<[1], offset: ?>>
-!m32 = memref<?xi32, strided<[1], offset: ?>>
-!m64 = memref<?xi64, strided<[1], offset: ?>>
 !d = !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
 
 // the bridge's rooms (StructuredAttrs.cpp): room(ctx, n) n bytes that live until the bridge returns; out(ctx, which, n)
