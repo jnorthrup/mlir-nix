@@ -959,6 +959,20 @@ func.func private @nxsi_ws(%off: i64, %v: i64) {
   memref.store %v, %m[%z] : !m64
   return
 }
+// The whole image as one word view, made once by a function that reads many of its words (what nxsi_w makes per word).
+// The base of the mapping does not move while a function holds it (only nxsi_openfile, nxsi_anon and nxsi_drop change
+// it, and no caller of this view makes those calls); the view reads nothing, so the file's length may grow under it.
+func.func private @nxsi_image() -> !d {
+  %c0 = arith.constant 0 : i64
+  %c3 = arith.constant 3 : i64
+  %c4 = arith.constant 4 : i64
+  %b = func.call @nxsi_hg(%c0) : (i64) -> i64
+  %bp = llvm.inttoptr %b : i64 to !llvm.ptr
+  %sz = func.call @nxsi_hg(%c4) : (i64) -> i64
+  %n = arith.shrui %sz, %c3 : i64
+  %d = func.call @nxsi_d(%bp, %n) : (!llvm.ptr, i64) -> !d
+  return %d : !d
+}
 // The image's first words are summed as they are written: a word's part is its place and its value mixed, and word 15
 // is the sum of the parts of words 0 to 14.  nxsi_hw writes one of them; nxsi_inc adds to one.
 func.func private @nxsi_hw(%off: i64, %v: i64) {
@@ -1801,6 +1815,7 @@ func.func private @nxsi_put(%rel: i64, %key: i64, %val: i64) -> i64 {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
   %c2 = arith.constant 2 : i64
+  %c3 = arith.constant 3 : i64
   %c4 = arith.constant 4 : i64
   %c8 = arith.constant 8 : i64
   %c16 = arith.constant 16 : i64
@@ -1809,12 +1824,19 @@ func.func private @nxsi_put(%rel: i64, %key: i64, %val: i64) -> i64 {
   %m1 = arith.constant -1 : i64
   %rel8 = arith.muli %rel, %c8 : i64
   %root = arith.addi %rel8, %c24 : i64
+  // the image held for the descent: a slot is read as its word of the view (every slot lies in a node the descent has
+  // checked, or at the root, so it is word-aligned)
+  %imgd = func.call @nxsi_image() : () -> !d
+  %imgm = builtin.unrealized_conversion_cast %imgd : !d to !m64
+  %is = builtin.unrealized_conversion_cast %imgm : !m64 to !s64
   %pe, %se, %de, %ste = scf.while (%par = %c0, %sl = %root, %d = %c0, %st = %c2) : (i64, i64, i64, i64) -> (i64, i64, i64, i64) {
     %going = arith.cmpi eq, %st, %c2 : i64
     scf.condition(%going) %par, %sl, %d, %st : i64, i64, i64, i64
   } do {
   ^bb0(%pa: i64, %sa: i64, %da: i64, %sta: i64):
-    %ref0 = func.call @nxsi_w(%sa) : (i64) -> i64
+    %sa8 = arith.shrui %sa, %c3 : i64
+    %sai = arith.index_cast %sa8 : i64 to index
+    %ref0 = trikeshed.at %is[%sai] : !s64, index -> i64
     %empty = arith.cmpi eq, %ref0, %c0 : i64
     %ref = scf.if %empty -> (i64) {
       %leaf = func.call @nxsi_leaf(%rel, %c16) : (i64, i64) -> i64
@@ -3201,8 +3223,16 @@ func.func private @nxsi_index(%np: !llvm.ptr, %nn: i64, %ident: i64, %tp: !llvm.
   %rm = builtin.unrealized_conversion_cast %rd : !d to !m64
   %rv = builtin.unrealized_conversion_cast %rm : !m64 to !s64
   %ki = arith.index_cast %k : i64 to index
-  // a line that would not read: a hash parseHash refuses, a size that is not one to nineteen digits
-  %bad = scf.for %i = %z to %ki step %one iter_args(%b = %c0) -> (i64) {
+  // a line that would not read: a hash parseHash refuses, a size that is not one to nineteen digits (a fold over the
+  // rows in order: parseHash writes only the scratch, so the rows are read and nothing else moves)
+  %ids = trikeshed.series %ki : !s64 {
+  ^bb0(%ix: index):
+    %ix64 = arith.index_cast %ix : index to i64
+    trikeshed.yield %ix64 : i64
+  }
+  %bad = trikeshed.fold %ids, %c0 : !s64, i64 -> i64 {
+  ^bb0(%b: i64, %irow: i64):
+    %i = arith.index_cast %irow : i64 to index
     %i3x = arith.muli %i, %i3 : index
     %i3a = arith.addi %i3x, %one : index
     %i3b = arith.addi %i3x, %i2 : index
@@ -3245,7 +3275,7 @@ func.func private @nxsi_index(%np: !llvm.ptr, %nn: i64, %ident: i64, %tp: !llvm.
       scf.yield %b2 : i64
     }
     %bn = arith.ori %b, %b1 : i64
-    scf.yield %bn : i64
+    trikeshed.yield %bn : i64
   }
   %clean = arith.cmpi eq, %bad, %c0 : i64
   %regular = arith.andi %readable, %clean : i1
@@ -3286,12 +3316,22 @@ func.func private @nxsi_index(%np: !llvm.ptr, %nn: i64, %ident: i64, %tp: !llvm.
     %w0a = arith.ori %fs, %c1 : i64
     %w0b = arith.ori %w0a, %ns : i64
     %w0 = arith.ori %w0b, %ts : i64
-    func.call @nxsi_ws(%x, %w0) : (i64, i64) -> ()
-    func.call @nxsi_ws(%x8, %ident) : (i64, i64) -> ()
     %seed = arith.xori %w0, %ident : i64
     %bw = arith.shrui %body, %c3 : i64
     %sum = func.call @nxsi_sum(%bp, %bw, %seed) : (!llvm.ptr, i64, i64) -> i64
-    func.call @nxsi_ws(%x16, %sum) : (i64, i64) -> ()
+    // the record's three words (what it was, its identity, the sum of its body) drained into its head in one fill
+    %hp = func.call @nxsi_p(%x) : (i64) -> !llvm.ptr
+    %hdd = func.call @nxsi_d(%hp, %c3) : (!llvm.ptr, i64) -> !d
+    %hdm = builtin.unrealized_conversion_cast %hdd : !d to !m64
+    %hwd = trikeshed.series %i3 : !s64 {
+    ^bb0(%hi: index):
+      %hz = arith.cmpi eq, %hi, %z : index
+      %ho = arith.cmpi eq, %hi, %one : index
+      %hw1 = arith.select %ho, %ident, %sum : i64
+      %hw2 = arith.select %hz, %w0, %hw1 : i64
+      trikeshed.yield %hw2 : i64
+    }
+    %he = trikeshed.drain %hwd, %hdm : !s64, !m64 -> index
     %st1 = scf.if %regular -> (i64) {
       %s = scf.for %j = %z to %ki step %one iter_args(%st = %c1) -> (i64) {
         %j3 = arith.muli %j, %i3 : index
@@ -3534,6 +3574,13 @@ func.func private @nxsi_pass(%look: i64) -> i64 {
   %z = arith.constant 0 : index
   %i1 = arith.constant 1 : index
   %looks = arith.cmpi ne, %look, %c0 : i64
+  // the header words read through the image's view (made here: the mapping does not move in this function)
+  %imgd = func.call @nxsi_image() : () -> !d
+  %imgm = builtin.unrealized_conversion_cast %imgd : !d to !m64
+  %is = builtin.unrealized_conversion_cast %imgm : !m64 to !s64
+  %i5 = arith.constant 5 : index
+  %i10 = arith.constant 10 : index
+  %i11 = arith.constant 11 : index
   func.call @nxsi_hs(%c8, %c0) : (i64, i64) -> ()
   %dp = func.call @nxsi_buf(%c10, %c0) : (i64, i64) -> !llvm.ptr
   %dir = func.call @nixsi_os_opendir(%dp) : (!llvm.ptr) -> !llvm.ptr
@@ -3626,13 +3673,13 @@ func.func private @nxsi_pass(%look: i64) -> i64 {
       // in the middle of a change they did not, and are taken from this reading; nxsi_sync believes them again once
       // the directory did not change under the pass.
       %c88 = arith.constant 88 : i64
-      %flag = func.call @nxsi_w(%c88) : (i64) -> i64
+      %flag = trikeshed.at %is[%i11] : !s64, index -> i64
       %doubt = arith.cmpi ne, %flag, %c0 : i64
       %swept = arith.cmpi eq, %sw, %c1 : i64
       %mend = arith.andi %swept, %doubt : i1
       scf.if %mend {
-        %l2 = func.call @nxsi_w(%c40) : (i64) -> i64
-        %h2 = func.call @nxsi_w(%c80) : (i64) -> i64
+        %l2 = trikeshed.at %is[%i5] : !s64, index -> i64
+        %h2 = trikeshed.at %is[%i10] : !s64, index -> i64
         %ld = arith.cmpi ne, %l2, %cnt : i64
         %hd = arith.cmpi ne, %h2, %sum : i64
         scf.if %ld {
@@ -3648,8 +3695,8 @@ func.func private @nxsi_pass(%look: i64) -> i64 {
     }
     scf.yield %r2 : i64
   } else {
-    %lives = func.call @nxsi_w(%c40) : (i64) -> i64
-    %kept = func.call @nxsi_w(%c80) : (i64) -> i64
+    %lives = trikeshed.at %is[%i5] : !s64, index -> i64
+    %kept = trikeshed.at %is[%i10] : !s64, index -> i64
     %a = arith.cmpi eq, %lives, %cnt : i64
     %b = arith.cmpi eq, %kept, %sum : i64
     %both = arith.andi %a, %b : i1
@@ -3675,7 +3722,17 @@ func.func private @nxsi_sync(%force: i64) -> i64 {
   %c40 = arith.constant 40 : i64
   %c64 = arith.constant 64 : i64
   %c4096 = arith.constant 4096 : i64
-  %cur = func.call @nxsi_w(%c16) : (i64) -> i64
+  // the header words are read through the image's view (made here: nothing in this function moves the mapping); the
+  // header's writes stay nxsi_hw, which keeps the sum of the first words
+  %imgd = func.call @nxsi_image() : () -> !d
+  %imgm = builtin.unrealized_conversion_cast %imgd : !d to !m64
+  %is = builtin.unrealized_conversion_cast %imgm : !m64 to !s64
+  %i2 = arith.constant 2 : index
+  %i5 = arith.constant 5 : index
+  %i8 = arith.constant 8 : index
+  %i10 = arith.constant 10 : index
+  %i11 = arith.constant 11 : index
+  %cur = trikeshed.at %is[%i2] : !s64, index -> i64
   %t0 = func.call @nxsi_token() : () -> i64
   %set = arith.cmpi ne, %cur, %c0 : i64
   %eq = arith.cmpi eq, %t0, %cur : i64
@@ -3685,8 +3742,8 @@ func.func private @nxsi_sync(%force: i64) -> i64 {
   %r = scf.if %quick -> (i64) {
     scf.yield %c1 : i64
   } else {
-    %dead = func.call @nxsi_w(%c64) : (i64) -> i64
-    %lives = func.call @nxsi_w(%c40) : (i64) -> i64
+    %dead = trikeshed.at %is[%i8] : !s64, index -> i64
+    %lives = trikeshed.at %is[%i5] : !s64, index -> i64
     %lim = arith.addi %lives, %c4096 : i64
     %bloated = arith.cmpi sgt, %dead, %lim : i64
     scf.if %bloated {
@@ -3723,8 +3780,8 @@ func.func private @nxsi_sync(%force: i64) -> i64 {
       // directory's entries counted and summed; a pass only when they are not the index's, and the token cleared
       // before the pass changes anything (a pass that dies leaves an index that knows it has not read the directory)
       %c88 = arith.constant 88 : i64
-      %held = func.call @nxsi_w(%c40) : (i64) -> i64
-      %flag = func.call @nxsi_w(%c88) : (i64) -> i64
+      %held = trikeshed.at %is[%i5] : !s64, index -> i64
+      %flag = trikeshed.at %is[%i11] : !s64, index -> i64
       %some0 = arith.cmpi ne, %held, %c0 : i64
       %sure = arith.cmpi eq, %flag, %c0 : i64
       %some = arith.andi %some0, %sure : i1
@@ -3738,7 +3795,7 @@ func.func private @nxsi_sync(%force: i64) -> i64 {
       %p = scf.if %asis -> (i64) {
         scf.yield %c1 : i64
       } else {
-        %tokw = func.call @nxsi_w(%c16) : (i64) -> i64
+        %tokw = trikeshed.at %is[%i2] : !s64, index -> i64
         %tokthere = arith.cmpi ne, %tokw, %c0 : i64
         scf.if %tokthere {
           func.call @nxsi_hw(%c16, %c0) : (i64, i64) -> ()
@@ -3753,7 +3810,7 @@ func.func private @nxsi_sync(%force: i64) -> i64 {
       %last = arith.cmpi sge, %pa, %c2 : i64
       %okp = arith.cmpi eq, %p, %c1 : i64
       // a pass the directory did not change under: the count and the sum it left are the rows', and are believed again
-      %flag2 = func.call @nxsi_w(%c88) : (i64) -> i64
+      %flag2 = trikeshed.at %is[%i11] : !s64, index -> i64
       %doubt2 = arith.cmpi ne, %flag2, %c0 : i64
       %whole = arith.andi %okp, %stable : i1
       %mended = arith.andi %whole, %doubt2 : i1
@@ -3774,7 +3831,7 @@ func.func private @nxsi_sync(%force: i64) -> i64 {
     %pub = arith.andi %pub0, %holds : i1
     %okimg = func.call @nxsi_ok() : () -> i1
     %new = arith.select %pub, %te, %c0 : i64
-    %was = func.call @nxsi_w(%c16) : (i64) -> i64
+    %was = trikeshed.at %is[%i2] : !s64, index -> i64
     %differs = arith.cmpi ne, %was, %new : i64
     %write = arith.andi %okimg, %differs : i1
     scf.if %write {
