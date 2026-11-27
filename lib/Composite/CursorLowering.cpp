@@ -848,13 +848,8 @@ struct AdjacencyLowering : Lowering<AdjacencyOp> {
     Value zero = cIndex(rw, loc, 0), one = cIndex(rw, loc, 1);
     Value c32 = cInt(rw, loc, i64, 32);
     Value n32 = arith::IndexCastOp::create(rw, loc, i32, n);
-    Value zero32 = cInt(rw, loc, i32, 0);
-    // the node of edge e when it is one: 0 <= from[e] < n
-    auto inRange = [&](Value f) -> Value {
-      Value ge = arith::CmpIOp::create(rw, loc, arith::CmpIPredicate::sge, f, zero32);
-      Value lt = arith::CmpIOp::create(rw, loc, arith::CmpIPredicate::slt, f, n32);
-      return arith::AndIOp::create(rw, loc, ge, lt);
-    };
+    // the node of edge e when it is one: 0 <= from[e] < n, which is one unsigned comparison (n is a count)
+    auto inRange = [&](Value f) -> Value { return arith::CmpIOp::create(rw, loc, arith::CmpIPredicate::ult, f, n32); };
     // counts, kept in the low half of the index while they are counted
     Value index = newSeriesBuffer(rw, loc, i64, n);
     {
