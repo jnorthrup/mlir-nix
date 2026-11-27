@@ -46,110 +46,107 @@ struct CallDepth {
 };
 } // namespace
 
-// The byte emission of JSON (an integer's digits, a string's escaping) is hollowed into lowered/nixeval/PrintOps.mlir
-// (trikeshed.fold / series / combine / combineAll / slice / drain), lowered by --trikeshed-lower-cursors and linked into
-// NixEval.  Each entry drains into room reserved here and returns how many bytes it wrote; the count is adopted as
-// appendAll adopts a copied run (the cells are plain chars, already written).
-extern "C" {
-size_t nixev_ts_int(int64_t x, char *into, size_t cap);
-size_t nixev_ts_escape(const char *p, size_t n, char *into, size_t cap);
-}
-
-void JsonOut::putInt(int64_t x) {
-  uint32_t off = bytes.size();
-  bytes.reserve(size_t(off) + 21); // a sign and at most 19 digits
-  bytes.n += uint32_t(nixev_ts_int(x, bytes.data() + off, 21));
-}
+// The JSON string escaping (quotes, Nix's escapes, \u00xx) is lowered/nixeval/PrintOps.mlir: nixev_ts_escape drains into
+// room the caller reserves and returns how many bytes it wrote.  putString is still a bridge for the __structuredAttrs
+// key (StoreBuiltins.cpp); the value and set/list composition goes through nixev_ts_json_comp.
+extern "C" size_t nixev_ts_escape(const char *p, size_t n, char *into, size_t cap);
 
 void JsonOut::putString(std::string_view s) {
   uint32_t off = bytes.size();
-  size_t room = 2 + 6 * s.size(); // two quotes and at most six bytes a byte (\u00xx)
+  size_t room = 2 + 6 * s.size(); // two quotes and at most six bytes a byte (\\u00xx)
   bytes.reserve(size_t(off) + room);
   bytes.n += uint32_t(nixev_ts_escape(s.data(), s.size(), bytes.data() + off, room));
 }
 
-// A set's or list's composition is lowered/nixeval/JsonCompOps.mlir: one combineAll of the rows (separator, escaped key,
-// ':', the value's text), drained once into `out`.  nixev_json_piece renders each piece once, in order, into the
-// composition's arena (the combineAll's region runs for its size and again for its drain); a value's bytes are appended
-// by printValueAsJSON itself.  Forcing, contexts, store copies and the error traces stay here, in the callback.
-extern "C" size_t nixev_ts_json_comp(void *ctx, int32_t kind, int64_t n, char *into, size_t cap);
-struct JsonComp {
-  EvalState *st; JsonOut arena; const composite::Frozen<const Attr *> *rows; Value *list; bool strict; NixStringContext *ctx;
+// A set's, a list's or a single value's JSON is lowered/nixeval/JsonCompOps.mlir: one combineAll of the rows, each row's
+// pieces (separator, quoted key, ':', the value) chosen and emitted by MLIR from the row's record (JsonRow).
+// nixev_json_row describes a row ONCE, on its first use (the combineAll's size pass): the forcing, the coercions
+// (copyContext, checkUTF8, copyPathToStore, tryAttrsToString, the outPath short cut), CallDepth and the error traces stay
+// here, in the old order.  The bytes a row needs that are not in the input (a copied path, a __toString result, a nested
+// set's or list's rendering) are appended to the composition's arena; the record holds their offset.
+extern "C" size_t nixev_ts_json_comp(void *ctx, int32_t kind, int64_t n, void *recs, const char *base, char *into,
+                                     size_t cap);
+extern "C" void nixev_json_row(void *p, int64_t j, void *rec);
+struct JsonRow { int64_t kind = 0, payload = 0, off = 0, n = 0; const char *kp = ""; int64_t kn = 0; };
+struct JsonComp { // the rows: a set's sorted attributes (rows), a list's elements (list), or one value (root)
+  EvalState *st; const composite::Frozen<const Attr *> *rows; Value *list; Value *root; bool strict; NixStringContext *ctx;
   bool copyToStore; PosPtr pos;
-  composite::MutableSeries<uint64_t, composite::Spill<uint64_t, 16>> spans; // per piece: offset << 32 | (length + 1); 0 until rendered
+  composite::MutableSeries<JsonRow, composite::Spill<JsonRow, 8>> recs; // kind 0 until described
+  JsonOut arena;                                                         // the bytes of the rows that are not the input's
 };
-extern "C" void nixev_json_piece(void *p, int64_t j, void **pp, int64_t *nn) {
-  JsonComp &c = *static_cast<JsonComp *>(p);
-  if (!c.spans[uint32_t(j)]) {
-    uint32_t off = c.arena.bytes.size();
-    if (c.list) {
-      try { c.st->printValueAsJSON(c.arena, *c.list->list.elems[j], c.strict, *c.ctx, c.copyToStore, c.pos); }
-      catch (EvalError &e) { e.addTrace(c.pos, composite::cat("while evaluating list element at index ", size_t(j))); throw; }
-    } else if (j & 1) {
-      const Attr *a = (*c.rows)[uint32_t(j / 2)];
-      try { c.st->printValueAsJSON(c.arena, *a->value, c.strict, *c.ctx, c.copyToStore, c.st->positionOf(*a)); }
-      catch (EvalError &e) { e.addTrace(c.st->positionOf(*a), composite::cat("while evaluating attribute '", c.st->symbols[a->name], "'")); throw; }
-    } else c.arena.putString(c.st->symbols[(*c.rows)[uint32_t(j / 2)]->name]);
-    c.spans[uint32_t(j)] = uint64_t(off) << 32 | (uint64_t(c.arena.bytes.size() - off) + 1);
-  }
-  uint64_t s = c.spans[uint32_t(j)];
-  *pp = c.arena.bytes.data() + (s >> 32);
-  *nn = int64_t(s & 0xffffffffu) - 1;
-}
-// the size pass (cap 0) renders every piece; the drain then reserves exactly that room in `out` and writes it there
-static void jsonComp(JsonOut &out, JsonComp &c, size_t n) {
-  int32_t kind = c.list ? 1 : 0;
-  c.spans.resize(c.list ? n : 2 * n);
-  c.arena.bytes.reserve(64); // a small composition's pieces fit one buffer (the arena doubles from 4 otherwise)
-  size_t need = nixev_ts_json_comp(&c, kind, int64_t(n), nullptr, 0);
+extern "C" const char *nixev_json_base(void *p) { return static_cast<JsonComp *>(p)->arena.bytes.data(); }
+
+// the size pass (cap 0) describes the rows; the drain writes them into the room reserved in `out`
+static void jsonCompose(JsonOut &out, JsonComp &c, int32_t kind, size_t n) {
+  c.recs.resize(n);
+  size_t need = nixev_ts_json_comp(&c, kind, int64_t(n), c.recs.base(), c.arena.bytes.data(), nullptr, 0);
   uint32_t off = out.bytes.size();
   out.bytes.reserve(size_t(off) + need);
-  out.bytes.n += uint32_t(nixev_ts_json_comp(&c, kind, int64_t(n), out.bytes.data() + off, need));
+  out.bytes.n += uint32_t(nixev_ts_json_comp(&c, kind, int64_t(n), c.recs.base(), c.arena.bytes.data(), out.bytes.data() + off, need));
 }
 
-void EvalState::printValueAsJSON(JsonOut &out, Value &v, bool strict, NixStringContext &ctx, bool copyToStore,
-                                 PosPtr pos) {
-  CallDepth guard(*this, pos);
-  if (strict) forceValue(v, pos);
+static void arenaBytes(JsonComp &c, JsonRow &r, std::string_view s, int64_t kind) {
+  r.kind = kind; r.off = c.arena.bytes.size(); r.n = int64_t(s.size());
+  c.arena.put(s);
+}
+
+// a nested composition renders into the arena of the composition it is a row of (its drain is that arena's tail)
+static void composed(JsonComp &c, JsonRow &r, JsonComp &sub, int32_t kind, size_t n) {
+  r.kind = 6; r.off = c.arena.bytes.size();
+  jsonCompose(c.arena, sub, kind, n);
+  r.n = int64_t(c.arena.bytes.size()) - r.off;
+}
+
+static void jsonDescribe(EvalState &st, JsonComp &c, Value &v, PosPtr pos, JsonRow &r) {
+  if (c.strict) st.forceValue(v, pos);
   switch (v.type) {
-  case VType::Int: out.putInt(v.integer); break;
-  case VType::Bool: out.put(v.boolean ? "true" : "false"); break;
-  case VType::String:
-    copyContext(v, ctx);
-    checkUTF8(v.sv());
-    out.putString(v.sv());
-    break;
+  case VType::Int: r.kind = 1; r.payload = v.integer; break;
+  case VType::Bool: r.kind = 2; r.payload = v.boolean; break;
+  case VType::String: st.copyContext(v, *c.ctx); checkUTF8(v.sv()); arenaBytes(c, r, v.sv(), 5); break;
   case VType::Path:
-    if (copyToStore) out.putString(copyPathToStore(ctx, v.pathView()));
-    else out.putString(v.pathView());
+    if (c.copyToStore) arenaBytes(c, r, st.copyPathToStore(*c.ctx, v.pathView()), 5);
+    else arenaBytes(c, r, v.pathView(), 5);
     break;
-  case VType::Null: out.put("null"); break;
+  case VType::Null: case VType::Thunk: case VType::App: case VType::AttrApp: case VType::Failed: case VType::Blackhole: r.kind = 3; break;
+  case VType::Float: { union { double d; int64_t i; } u; u.d = v.fpoint; r.kind = 4; r.payload = u.i; break; }
   case VType::Attrs: {
-    if (auto s2 = tryAttrsToString(v, ctx, false, false)) {
-      out.putString(*s2);
-      break;
-    }
-    if (const Attr *o = v.attrs->get(s.outPath)) {
-      printValueAsJSON(out, *o->value, strict, ctx, copyToStore, positionOf(*o));
-      break;
-    }
-    auto rows = v.attrs->lexicographicOrder(symbols); // the sorted rows: the composition's keys and values, in that order
-    JsonComp c{this, {}, &rows, nullptr, strict, &ctx, copyToStore, pos, {}};
-    jsonComp(out, c, rows.size());
+    if (auto s2 = st.tryAttrsToString(v, *c.ctx, false, false)) { arenaBytes(c, r, *s2, 5); break; }
+    if (const Attr *o = v.attrs->get(st.s.outPath)) { CallDepth guard(st, st.positionOf(*o)); jsonDescribe(st, c, *o->value, st.positionOf(*o), r); break; }
+    auto rows = v.attrs->lexicographicOrder(st.symbols);
+    JsonComp sub{&st, &rows, nullptr, nullptr, c.strict, c.ctx, c.copyToStore, pos, {}, {}};
+    composed(c, r, sub, 0, rows.size());
     break;
   }
   case VType::List: {
-    JsonComp c{this, {}, nullptr, &v, strict, &ctx, copyToStore, pos, {}};
-    jsonComp(out, c, v.listSize());
+    JsonComp sub{&st, nullptr, &v, nullptr, c.strict, c.ctx, c.copyToStore, pos, {}, {}};
+    composed(c, r, sub, 1, v.listSize());
     break;
   }
-  case VType::Float: out.put(nixstore::jsonFloat(v.fpoint)); break;
-  case VType::Thunk: case VType::App: case VType::AttrApp: case VType::Failed: case VType::Blackhole:
-    out.put("null");
-    break;
-  default:
-    throw EvalError(composite::cat("cannot convert ", showType(v), " to JSON"), pos);
+  default: throw EvalError(composite::cat("cannot convert ", st.showType(v), " to JSON"), pos);
   }
+}
+
+// row j's record under its trace: a set's attribute or a list's element (the CallDepth guard inside the try, as
+// printValueAsJSON(child) had it).  The root (kind 2) has neither: printValueAsJSON's guard covers it.
+extern "C" void nixev_json_row(void *p, int64_t j, void *rec) {
+  JsonComp &c = *static_cast<JsonComp *>(p);
+  JsonRow &r = *static_cast<JsonRow *>(rec);
+  if (c.root) return jsonDescribe(*c.st, c, *c.root, c.pos, r);
+  const Attr *a = c.rows ? (*c.rows)[uint32_t(j)] : nullptr;
+  PosPtr at = a ? c.st->positionOf(*a) : c.pos;
+  if (a) { std::string_view nm = c.st->symbols[a->name]; r.kp = nm.data(); r.kn = int64_t(nm.size()); }
+  try { CallDepth guard(*c.st, at); jsonDescribe(*c.st, c, a ? *a->value : *c.list->list.elems[j], at, r); }
+  catch (EvalError &e) {
+    if (a) e.addTrace(at, composite::cat("while evaluating attribute '", c.st->symbols[a->name], "'"));
+    else e.addTrace(c.pos, composite::cat("while evaluating list element at index ", size_t(j)));
+    throw;
+  }
+}
+
+void EvalState::printValueAsJSON(JsonOut &out, Value &v, bool strict, NixStringContext &ctx, bool copyToStore, PosPtr pos) {
+  CallDepth guard(*this, pos);
+  JsonComp c{this, nullptr, nullptr, &v, strict, &ctx, copyToStore, pos, {}, {}};
+  jsonCompose(out, c, 2, 1);
 }
 
 //===----------------------------------------------------------------------===//

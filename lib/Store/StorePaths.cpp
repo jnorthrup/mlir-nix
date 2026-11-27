@@ -138,18 +138,9 @@ composite::Text jsonEscape(std::string_view s) {
   return o;
 }
 
-// jsonFloat is lowered/nixstore/JsonFloat.mlir (the shortest round-tripping digits, format_buffer's layout, one combine
-// drained once); the snprintf, a variadic call, is this callback.
+// The JSON float's digits and layout are lowered/nixstore/JsonFloat.mlir (nixstore_ts_jsonfloat, called by the JSON
+// composition in lowered/nixeval/JsonCompOps.mlir); the snprintf, a variadic call, is this callback.
 extern "C" int64_t nixstore_jf_sci(double d, int64_t prec, char *buf) { return snprintf(buf, 64, "%.*e", int(prec - 1), d); }
-extern "C" int64_t nixstore_ts_jsonfloat(double, char *, char *);
-
-composite::Text jsonFloat(double d) {
-  char buf[64];
-  composite::Text out;
-  out.resize(32);
-  out.truncate(size_t(nixstore_ts_jsonfloat(d, out.begin(), buf)));
-  return out;
-}
 
 // runProgram's argv pointer fill is lowered/nixstore/StorePathOps.mlir (allocation-free, it runs in the fork child):
 // into[0]=prog, into[k+1]=args[k].c_str() (the Text row's NUL-terminated data ptr), into[n+1]=null.
