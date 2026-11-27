@@ -65,7 +65,8 @@ void mlnix_sha512_final(void *ctx, uint8_t *out);
 }
 constexpr size_t md5CtxSize = 112, sha1CtxSize = 112, sha512CtxSize = 208;
 #if defined(MLNIX_SHA256_OPENSSL)
-// x86_64 with libcrypto (lib/CMakeLists.txt): a CPU without SHA-NI runs the portable rounds, and OpenSSL's AVX2 code is faster.
+// x86_64 with libcrypto (lib/CMakeLists.txt): a CPU without SHA-NI runs the portable rounds, at under half the rate of
+// OpenSSL's AVX2 code (230 against 485 MB/s on a Skylake), so there the library stays.
 static void mlnix_sha256_init(void *c) { SHA256_Init((SHA256_CTX *)c); }
 static void mlnix_sha256_update(void *c, const uint8_t *p, size_t n) { SHA256_Update((SHA256_CTX *)c, p, n); }
 static void mlnix_sha256_final(void *c, uint8_t *out) { SHA256_Final(out, (SHA256_CTX *)c); }

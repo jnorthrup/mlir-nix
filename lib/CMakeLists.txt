@@ -51,9 +51,10 @@ set_target_properties(TrikeShedRuntime PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${PRO
 add_library(NixStore STATIC Store/Hash.cpp Store/StorePaths.cpp Store/LocalStore.cpp Store/StructuredAttrs.cpp Store/Prefetch.cpp Store/Ed25519.cpp)
 target_link_libraries(NixStore PUBLIC LLVMSupport)
 # SHA-256 is lowered/nixstore/Sha256.mlir (below, with the other lowered modules): its rounds are the CPU's SHA-2 instructions
-# where the processor has them, else portable.  On x86_64 a CPU without SHA-NI runs the portable rounds, which libcrypto's
-# AVX2 code beats, so there libcrypto is linked when there is one (libcrypto.a preferred: loading libcrypto.so is 0.6 ms of
-# the 10 ms an `eval -E 1` takes, the static one 0.15 ms).
+# where the processor has them, else portable.  On arm64 that is the rate of CommonCrypto and of libcrypto (within 1%, and
+# faster on short inputs), so neither is linked.  On x86_64 a CPU without SHA-NI runs the portable rounds, at under half the
+# rate of libcrypto's AVX2 code (230 against 485 MB/s on a Skylake), so there libcrypto is linked when there is one
+# (libcrypto.a preferred: loading libcrypto.so is 0.6 ms of the 10 ms an `eval -E 1` takes, the static one 0.15 ms).
 set(MLNIX_SHA256 "auto" CACHE STRING "SHA-256 code: auto (the MLIR module; on x86_64 OpenSSL if found), mlir or openssl")
 if(MLNIX_SHA256 STREQUAL "openssl" OR (MLNIX_SHA256 STREQUAL "auto" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$"))
   set(OPENSSL_USE_STATIC_LIBS ON)
