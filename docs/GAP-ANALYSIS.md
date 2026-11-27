@@ -184,6 +184,12 @@ G2's lowering started too (lane `drain` from eae7ad5): a drain of plain elements
 semantics; the old element loop smears only under an overlap no product drain may have), constant counts kept constant,
 then Rows' row moves as drains and ClusterOps without its loop-idiom flag, each within 2% by instructions retired.
 G5's remainder runs as lane `sha256hw` (SHA-256 with the CPU's SHA-2 instructions; a platform switches within 5%).
+Its first pass (13:25, wip ebc0236, C++ -25): Sha256.mlir (buffering, the portable rounds), Sha256Arm64.mlir and
+Sha256X86.mlir (one block a call, the state as two vectors), the form chosen once per process (getauxval on Linux, always
+on Apple, cpuid on x86).  The Mac's CommonCrypto (cycles a message 0.91-1.03x) and mlnix-os's OpenSSL (1.000-1.013x) give
+way to it; Kali's x86 without SHA-NI keeps OpenSSL (the portable rounds run at half its AVX2 code's rate).  CommonCrypto
+and llvm::SHA256 are deleted.  The SHA-NI form is verified under qemu-x86_64 -cpu max only.  Finishing: one commit, the
+bench by instructions, the 1M-case harness on the Mac.
 
 ## Ledger
 
@@ -256,6 +262,9 @@ Each merge, `gap-census.py --seal` on the new master and `--diff` against the pr
 - `mlnix store --gc --print-live` prints the dead paths: tools/mlnix.cpp (cmdStore's flag scan, 0d02917 L581) reads
   `--print-live` as `--print-dead`.  Nix's `nix-store --gc --print-live` prints the live paths, the roots' closure.
   Found by the gc lane's store proof (2026-11-27).
+- llvm::SHA256, master's SHA-256 on a non-Apple build without OpenSSL, gives a wrong digest for an input of 4 GiB or
+  more (a 32-bit byte count); CommonCrypto, OpenSSL and the MLIR form agree.  Found by the sha256hw lane (2026-11-27),
+  whose branch deletes the variant.
 
 ## Decisions that are the user's (with the numbers they turn on)
 
