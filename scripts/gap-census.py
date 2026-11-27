@@ -29,6 +29,17 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VERSION = "gap-census 3"
 CXX = (".cpp", ".h", ".hpp", ".cc")
 PRODUCT_MLIR = ("lowered/", "utils/mlnixci/src/")
+# The C++ by role, first match wins (a function of the path): scale 1's second table in docs/GAP-ANALYSIS.md.
+ROLES = [("kif-sumo", r"Kif|Sumo|mlnix-kif"),
+         ("mlir-api", r"lib/Dialect/|lib/Composite/(CursorLowering|TrikeShedDialect|TwinRouting)|include/NixDialect/|"
+                      r"include/Composite/(CursorLowering|TrikeShed)\.h|include/mlnix-c/|lib/CAPI/"),
+         ("parser", r"lib/Frontend/"),
+         ("evaluator", r"lib/Eval/|include/Nix/(Eval|Pos|Value|StdBind|EvalSettings)"),
+         ("store", r"lib/Store/|include/Nix/(Store|Prefetch|Os|Numbers|LexRules)"),
+         ("vocabulary", r"include/Composite/|lib/Composite/"),
+         ("tools", r"^tools/"),
+         ("checks", r"^scripts/"),
+         ("tests", r"^test/")]
 SHAPE = collections.OrderedDict([  # kind -> (pattern in C++, TrikeShed's shape, where the algorithm lives)
     ("trie", (r"\bPatricia<", "crit-bit trie over lane rows (keys by path); HashTrie by digest fold", "lowered/nixstore/Patricia.mlir")),
     ("heap", (r"\b(GrowFunnel|Funnel|MinMaxHeap|Pegs)<|\bclusterOrder\b", "heap store: cluster fill, sorted drain, sealed page", "lowered/composite/ClusterOps.mlir")),
@@ -228,6 +239,11 @@ def rows_of(c, top, rev):
     by_area = collections.Counter()
     for m in cxx.values(): by_area[m["area"]] += m["code"]
     for a, n in sorted(by_area.items()): rows.append((1, a, "cxx code lines", n))
+    # and the C++ by role (a function of the path), which says what the recipe can still move (docs/GAP-ANALYSIS.md)
+    by_role = collections.Counter()
+    for p, m in cxx.items():
+        if m["kind"] == "cxx": by_role[next((r for r, pat in ROLES if re.search(pat, p)), "other")] += m["code"]
+    for r, n in sorted(by_role.items()): rows.append((1, "role " + r, "cxx code lines", n))
     by_dir = collections.defaultdict(collections.Counter)
     for p, m in mlir.items():
         d = os.path.dirname(p)

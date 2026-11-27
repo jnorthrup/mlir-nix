@@ -55,6 +55,25 @@ functions with returned views).  Compare a census only with itself.
 The writers are where fill-drain lives (nixeval 30%, nixfe 33%, tools 44%).  The readers (nixfrontend's scanners), the
 store's kernels and the Composite ports are not: lowered/composite has no drain at all and 6% dialect ops.
 
+The same C++ by role (scratch gap/cxx-roles.py; 0d02917, 22,817 code lines), which says what the recipe can still move:
+
+| role | code lines | share | what moves it |
+|---|---:|---:|---|
+| the evaluator (Eval.cpp 2,459, Builtins.cpp 965, StoreBuiltins.cpp 816, Eval.h 703, Formats.cpp 413) | 5,460 | 23.9% | G8: the dispatch, forcing and calls; most of the rest is primop registration and forcing glue around algorithms already in MLIR |
+| MLIR dialects, passes, lowering (CursorLowering.cpp 1,172, NixDialect, SonDialect, ConfixDialect, KursiveDialect) | 3,893 | 17.1% | nothing: MLIR's C++ API; a new lowering adds to it |
+| KIF / SUMO (KifTptp 998, KifLean 723, KifChase 409, KifTrikeShed 222, SumoDialect 193) | 2,959 | 13.0% | the user's scope decision |
+| the store (LocalStore 751, StorePaths 699, Store.h 352, Hash 227, Prefetch 217) | 2,713 | 11.9% | I/O and process glue around MLIR algorithms; G3b may move the index |
+| differential checks and benches (confix-check 624, vocab-check 261, cluster-scales 203) | 2,303 | 10.1% | they retire with their subjects |
+| the parser (Parser.cpp 1,960) | 2,102 | 9.2% | it builds nix ops through MLIR's builder API; only a grammar in kursive combinators would move it (the user's word, as G6) |
+| the Composite vocabulary and bridges (Mutable.h 334, Text.h 273, Table.h 205, CharSeries.h 160) | 1,956 | 8.6% | shrinks as its C++ users go |
+| the command-line tools (mlnix.cpp 821, mlnix-parse.cpp 231) | 1,122 | 4.9% | tools2 tried, held back (+20) |
+
+The bridge surface, the extern "C" callbacks the MLIR calls (scratch gap/callbacks.py), is 57 functions and 388 code
+lines: 8 do file I/O (the NAR walker's), 20 force or throw, 19 allocate.  So the sweeps of scale 3 raise the MLIR's
+quality (its dialect share, the bypass) and leave the C++ count where it is: wave 1 moved ten modules into dialect
+forms for a net C++ change of -5.  The C++ falls further by G8, and by decisions that are the user's: the KIF scope
+(13%), the scanners and the parser as combinators, kursive2's lexer (-152 C++ at +5-9% time), the boundary primops.
+
 ## Scale 2: the store shapes
 
 Every keyed or ordered store of the C++, the shape the yardstick gives it, and where its algorithm lives.
