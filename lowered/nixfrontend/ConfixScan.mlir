@@ -59,11 +59,6 @@ func.func private @nx_a8(%p: !llvm.ptr, %i: i64) -> i8 {
   %v = llvm.load %q : !llvm.ptr -> i8
   llvm.return %v : i8
 }
-func.func private @nx_a32(%p: !llvm.ptr, %i: i64) -> i32 {
-  %q = llvm.getelementptr %p[%i] : (!llvm.ptr, i64) -> !llvm.ptr, i32
-  %v = llvm.load %q : !llvm.ptr -> i32
-  llvm.return %v : i32
-}
 func.func private @nx_s64(%p: !llvm.ptr, %i: i64, %v: i64) {
   %q = llvm.getelementptr %p[%i] : (!llvm.ptr, i64) -> !llvm.ptr, i64
   llvm.store %v, %q : i64, !llvm.ptr

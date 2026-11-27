@@ -61,7 +61,7 @@ at mkForce priority 50, and the page reports what it changes.
   the places it could start, in chunks of 16, or 256 in a long text: a chunk's bytes equal to the text's first are
   counted by a branch-free `fold`, only the first chunk that has one is searched at the next scale, the places that
   agree are `compare`d, and nothing after the chunk that found it is read), a decimal as atol reads one (`rd_number`:
-  three folds), two texts the same (`rd_same`), and an evaluation's errors without its warnings (`rd_kept`: the lines,
+  three folds), and an evaluation's errors without its warnings (`rd_kept`: the lines,
   `parts` at '\n', kept by a `where`, then `combineAll`ed).
 - `src/*.mlir` is the rest of the server, written in the func/scf/arith/llvm dialects.  series.mlir and confix.mlir carry
   trikeshed ops too (text, compare and drain of the byte windows; the cursor's readers are index.mlir's), so they are in

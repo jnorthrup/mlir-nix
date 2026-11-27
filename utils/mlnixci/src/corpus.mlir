@@ -86,12 +86,6 @@ func.func @st64(%a: !llvm.ptr, %i: i64, %v: i64) {
   llvm.store %v, %s : i64, !llvm.ptr
   return
 }
-func.func @ld32(%a: !llvm.ptr, %i: i64) -> i64 {
-  %s = llvm.getelementptr %a[%i] : (!llvm.ptr, i64) -> !llvm.ptr, i32
-  %v = llvm.load %s : !llvm.ptr -> i32
-  %z = arith.extsi %v : i32 to i64
-  return %z : i64
-}
 func.func @st32(%a: !llvm.ptr, %i: i64, %v: i64) {
   %s = llvm.getelementptr %a[%i] : (!llvm.ptr, i64) -> !llvm.ptr, i32
   %t = arith.trunci %v : i64 to i32
