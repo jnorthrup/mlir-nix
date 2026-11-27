@@ -9,8 +9,6 @@ namespace composite {
 
 /// iota(n): the Series 0..n-1, the domain every index transform ranges over.
 constexpr auto iota(uint32_t n) { return n |j| [](uint32_t i) { return i; }; }
-/// iotaN<N>(): the indices 0..N-1 as a constant-size Series.
-template <uint32_t N> constexpr auto iotaN() { return Size<N>{} |j| [](uint32_t i) { return i; }; }
 
 /// vec<N>(f): Kotlin's `List(N) { f(it) }`.  The size is a constant, the generator is called once per index, and the layout is the flat
 /// array of N cells -- nothing to discover.  The indices are walked by recursion in the type, so it is straight-line code.

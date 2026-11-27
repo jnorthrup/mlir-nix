@@ -68,13 +68,6 @@ struct Text {
     do *--p = char('0' + u % 10); while (u /= 10);
     return put(p, size_t(e - p));
   }
-  /// x in lower-case hex, at least `digits` of them (zero-padded).
-  Text &putHex(uint64_t x, unsigned digits = 1) {
-    static constexpr char hex[] = "0123456789abcdef";
-    char buf[16], *e = buf + sizeof buf, *p = e;
-    do *--p = hex[x & 15]; while ((x >>= 4) || e - p < digits);
-    return put(p, size_t(e - p));
-  }
   Text &operator+=(const char *s) { return put(s); }
   Text &operator+=(char c) { return put(c); }
   template <class V> requires ByteView<V> Text &operator+=(const V &v) { return put(v); }

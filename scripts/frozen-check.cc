@@ -30,7 +30,6 @@ static_assert(Marks<std::remove_cvref_t<decltype(four)>>::constant && Marks<std:
 static_assert(!Marks<Series<int (*)(uint32_t)>>::constant, "a runtime-size Series keeps the loop");
 static_assert(fold(four, 0, [](int a, int x) { return a + x; }) == 10, "fold over a constant size, evaluated at compile time");
 static_assert(fold(four, 0, [](int a, int x) { return a + x; }, [](int a) { return a >= 3; }) == 3, "halt works on the straight-line path");
-static_assert(fold(iotaN<5>(), 0u, [](uint32_t a, uint32_t k) { return a + k; }) == 10);
 static_assert(four.size() == 4 && four[2] == 3 && std::is_same_v<decltype(four.a), Size<4>>);
 static_assert(argMin(four, [](int x, int y) { return x < y; }) == 0 && firstWhere(four, [](int x) { return x == 3; }) == 2);
 } // namespace premark
