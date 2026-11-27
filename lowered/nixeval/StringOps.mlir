@@ -15,6 +15,8 @@
 !d = !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
 !bnds = !llvm.struct<(i64, i64)>
 !chars = !llvm.struct<(i32, ptr)>
+!s64 = !trikeshed.series<i64>
+!m64 = memref<?xi64, strided<[1], offset: ?>>
 
 func.func private @nixev_str_room(!llvm.ptr, i64) -> !llvm.ptr
 func.func private @nixev_str_toobig()
@@ -164,35 +166,41 @@ func.func @nixev_ts_concat(%st: !llvm.ptr, %pieces: !llvm.ptr, %np: i64, %v: !ll
 
 // the first j whose from[j] (a Chars at from + 16*j) equals the bytes at p, else -1: a slice of the string compared
 // unsigned (Kotlin's Char order) with the piece.  A piece longer than what is left cannot match; an empty one matches
-// anywhere (p <= size).  The first match wins, as std::string_view::compare's scan does.
+// anywhere (p <= size).  The first match wins, as std::string_view::compare's scan does.  The pieces are read as a word
+// view made once: word 2j is the count (the low half; the high half is the Chars' padding), word 2j+1 the bytes' address.
 func.func private @strops_match_at(%ss: !s, %sz: index, %p: index, %from: !llvm.ptr, %m: i64) -> i64 {
   %c0 = arith.constant 0 : i64
   %c032 = arith.constant 0 : i32
+  %c2 = arith.constant 2 : i64
   %zi = arith.constant 0 : index
   %oi = arith.constant 1 : index
-  %c16 = arith.constant 16 : i64
-  %c8 = arith.constant 8 : i64
   %cm1 = arith.constant -1 : i64
   %rest = arith.subi %sz, %p : index
   %mi = arith.index_cast %m : i64 to index
+  %m2 = arith.muli %m, %c2 : i64
+  %fd = func.call @strops_desc8(%from, %m2) : (!llvm.ptr, i64) -> !d
+  %fm = builtin.unrealized_conversion_cast %fd : !d to !m64
+  %fs = builtin.unrealized_conversion_cast %fm : !m64 to !s64
   %r = scf.for %j = %zi to %mi step %oi iter_args(%found = %cm1) -> i64 {
     %go = arith.cmpi slt, %found, %c0 : i64
     %next = scf.if %go -> i64 {
       %j64 = arith.index_cast %j : index to i64
-      %off = arith.muli %j64, %c16 : i64
-      %ap = llvm.getelementptr %from[%off] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-      %l32 = llvm.load %ap : !llvm.ptr -> i32
-      %l = llvm.zext %l32 : i32 to i64
+      %j2 = arith.muli %j64, %c2 : i64
+      %j2x = arith.index_cast %j2 : i64 to index
+      %j2y = arith.addi %j2x, %oi : index
+      %cw = trikeshed.at %fs[%j2x] : !s64, index -> i64
+      %l32 = arith.trunci %cw : i64 to i32
+      %l = arith.extui %l32 : i32 to i64
+      %fpw = trikeshed.at %fs[%j2y] : !s64, index -> i64
+      %fp = llvm.inttoptr %fpw : i64 to !llvm.ptr
       %li = arith.index_cast %l : i64 to index
-      %dp = llvm.getelementptr %ap[%c8] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-      %fp = llvm.load %dp : !llvm.ptr -> !llvm.ptr
       %ok = arith.cmpi ule, %li, %rest : index
       %hit = scf.if %ok -> i64 {
         %sl = trikeshed.slice %ss[%p, %li] : !s -> !s
-        %fd = func.call @strops_desc8(%fp, %l) : (!llvm.ptr, i64) -> !d
-  %fm = builtin.unrealized_conversion_cast %fd : !d to !m
-  %fs = builtin.unrealized_conversion_cast %fm : !m to !s
-        %c = trikeshed.compare %sl, %fs unsigned : !s, !s
+        %fd2 = func.call @strops_desc8(%fp, %l) : (!llvm.ptr, i64) -> !d
+        %fm2 = builtin.unrealized_conversion_cast %fd2 : !d to !m
+        %fs2 = builtin.unrealized_conversion_cast %fm2 : !m to !s
+        %c = trikeshed.compare %sl, %fs2 unsigned : !s, !s
         %eq = arith.cmpi eq, %c, %c032 : i32
         %sel = arith.select %eq, %j64, %cm1 : i64
         scf.yield %sel : i64
@@ -212,16 +220,23 @@ func.func private @strops_match_at(%ss: !s, %sz: index, %p: index, %from: !llvm.
 // cached, its context merged -- the callback keeps Nix's order), an empty from inserting to[j] before the byte at p; a
 // position with no match keeps its byte.  Pass one counts the result (forcing the replacements in match order), pass two
 // drains the pieces into one arena buffer.  The bridge has forced the two lists (checked equal), every from[j], and the
-// string, and settles the result's context.
+// string, and settles the result's context.  The record reads are word views made once: the from pieces (2m words), and
+// the callback's out Chars (word 0: the count in its low half, word 1: the bytes' address).
 func.func @nixev_ts_replace(%st: !llvm.ptr, %r: !llvm.ptr, %p: !llvm.ptr, %sn: i64, %from: !llvm.ptr, %m: i64, %v: !llvm.ptr) {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
+  %c2 = arith.constant 2 : i64
   %c1i = arith.constant 1 : index
-  %c8i = arith.constant 8 : i64
-  %c16 = arith.constant 16 : i64
   // one out-slot for both loops, at the entry block: an alloca inside a loop body is a dynamic alloca that grows the
   // stack on every match
   %out = llvm.alloca %c1 x !chars : (i64) -> !llvm.ptr
+  %od = func.call @strops_desc8(%out, %c2) : (!llvm.ptr, i64) -> !d
+  %om = builtin.unrealized_conversion_cast %od : !d to !m64
+  %os = builtin.unrealized_conversion_cast %om : !m64 to !s64
+  %m2 = arith.muli %m, %c2 : i64
+  %fd = func.call @strops_desc8(%from, %m2) : (!llvm.ptr, i64) -> !d
+  %fm = builtin.unrealized_conversion_cast %fd : !d to !m64
+  %fs = builtin.unrealized_conversion_cast %fm : !m64 to !s64
   %sd = func.call @strops_desc8(%p, %sn) : (!llvm.ptr, i64) -> !d
   %sm = builtin.unrealized_conversion_cast %sd : !d to !m
   %ss = builtin.unrealized_conversion_cast %sm : !m to !s
@@ -239,12 +254,14 @@ func.func @nixev_ts_replace(%st: !llvm.ptr, %r: !llvm.ptr, %p: !llvm.ptr, %sn: i
     %hit = arith.cmpi sge, %j, %c0 : i64
     %tlfl:2 = scf.if %hit -> (i64, i64) {
       func.call @nixev_replace_to(%r, %j, %out) : (!llvm.ptr, i64, !llvm.ptr) -> ()
-      %tl32 = llvm.load %out : !llvm.ptr -> i32
-      %tl = llvm.zext %tl32 : i32 to i64
-      %off = arith.muli %j, %c16 : i64
-      %ap = llvm.getelementptr %from[%off] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-      %fl32 = llvm.load %ap : !llvm.ptr -> i32
-      %fl = llvm.zext %fl32 : i32 to i64
+      %tlw = trikeshed.at %os[%zero] : !s64, index -> i64
+      %tl32 = arith.trunci %tlw : i64 to i32
+      %tl = arith.extui %tl32 : i32 to i64
+      %j2 = arith.muli %j, %c2 : i64
+      %j2x = arith.index_cast %j2 : i64 to index
+      %flw = trikeshed.at %fs[%j2x] : !s64, index -> i64
+      %fl32 = arith.trunci %flw : i64 to i32
+      %fl = arith.extui %fl32 : i32 to i64
       scf.yield %tl, %fl : i64, i64
     } else {
       scf.yield %c0, %c0 : i64, i64
@@ -280,22 +297,24 @@ func.func @nixev_ts_replace(%st: !llvm.ptr, %r: !llvm.ptr, %p: !llvm.ptr, %sn: i
     %hit = arith.cmpi sge, %j, %c0 : i64
     %step:2 = scf.if %hit -> (index, i64) {
       func.call @nixev_replace_to(%r, %j, %out) : (!llvm.ptr, i64, !llvm.ptr) -> ()
-      %tl32 = llvm.load %out : !llvm.ptr -> i32
-      %tl = llvm.zext %tl32 : i32 to i64
-      %dp = llvm.getelementptr %out[%c8i] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-      %tp = llvm.load %dp : !llvm.ptr -> !llvm.ptr
-      %td = func.call @strops_desc8(%tp, %tl) : (!llvm.ptr, i64) -> !d
-  %tm = builtin.unrealized_conversion_cast %td : !d to !m
-  %ts = builtin.unrealized_conversion_cast %tm : !m to !s
+      %tlw = trikeshed.at %os[%zero] : !s64, index -> i64
+      %tl32 = arith.trunci %tlw : i64 to i32
+      %tl = arith.extui %tl32 : i32 to i64
+      %tpw = trikeshed.at %os[%c1i] : !s64, index -> i64
+      %tpv = llvm.inttoptr %tpw : i64 to !llvm.ptr
+      %td = func.call @strops_desc8(%tpv, %tl) : (!llvm.ptr, i64) -> !d
+      %tm = builtin.unrealized_conversion_cast %td : !d to !m
+      %ts = builtin.unrealized_conversion_cast %tm : !m to !s
       %ati = arith.index_cast %at : i64 to index
       %tli = arith.index_cast %tl : i64 to index
       %cells = memref.subview %into[%ati] [%tli] [1] : !m to !m
       %e1 = trikeshed.drain %ts, %cells : !s, !m -> index
       %at1 = arith.addi %at, %tl : i64
-      %off = arith.muli %j, %c16 : i64
-      %ap = llvm.getelementptr %from[%off] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-      %fl32 = llvm.load %ap : !llvm.ptr -> i32
-      %fl = llvm.zext %fl32 : i32 to i64
+      %j2 = arith.muli %j, %c2 : i64
+      %j2x = arith.index_cast %j2 : i64 to index
+      %flw = trikeshed.at %fs[%j2x] : !s64, index -> i64
+      %fl32 = arith.trunci %flw : i64 to i32
+      %fl = arith.extui %fl32 : i32 to i64
       %empty = arith.cmpi eq, %fl, %c0 : i64
       %inside = arith.cmpi ult, %pos, %szi : index
       %need = arith.andi %empty, %inside : i1

@@ -22,6 +22,8 @@
 !m = memref<?xi8, strided<[1], offset: ?>>
 !d = !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
 !coords = !trikeshed.series<!trikeshed.twinpacked<i32>>
+!s64 = !trikeshed.series<i64>
+!m64 = memref<?xi64, strided<[1], offset: ?>>
 
 func.func private @nixev_cc_part(!llvm.ptr, i64, i64, i64, !llvm.ptr)
 func.func private @nixev_cc_overflow(!llvm.ptr, i64, i64, i64)
@@ -39,23 +41,47 @@ func.func private @cc_desc8(%p: !llvm.ptr, %n: i64) -> !d {
   return %f : !d
 }
 
+// the descriptor of n i64 words at p (the same struct: the caller casts it to an i64 memref at its own use site)
+func.func private @cc_words(%p: !llvm.ptr, %n: i64) -> !d {
+  %c0 = arith.constant 0 : i64
+  %c1 = arith.constant 1 : i64
+  %u = llvm.mlir.undef : !d
+  %a = llvm.insertvalue %p, %u[0] : !d
+  %b = llvm.insertvalue %p, %a[1] : !d
+  %c = llvm.insertvalue %c0, %b[2] : !d
+  %e = llvm.insertvalue %n, %c[3, 0] : !d
+  %f = llvm.insertvalue %c1, %e[4, 0] : !d
+  return %f : !d
+}
+
+
 func.func @nixev_ts_concat_parts(%ctx: !llvm.ptr, %np: i64, %fs: i64, %views: !llvm.ptr, %res: !llvm.ptr) {
   %zi = arith.constant 0 : index
   %oi = arith.constant 1 : index
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
+  %c2 = arith.constant 2 : i64
+  %c4 = arith.constant 4 : i64
   %c5 = arith.constant 5 : i64
   %c6 = arith.constant 6 : i64
   %c8 = arith.constant 8 : i64
-  %c16 = arith.constant 16 : i64
-  %c24 = arith.constant 24 : i64
-  %c32 = arith.constant 32 : i64
   %ft0 = arith.constant 9 : i64
-  %k0 = arith.constant 0 : i8
   %k1 = arith.constant 1 : i8
   %k2 = arith.constant 2 : i8
-  %rec = llvm.alloca %c1 x !llvm.array<32 x i8> : (i64) -> !llvm.ptr
+  %c2i = arith.constant 2 : index
+  %c3i = arith.constant 3 : index
+  // the callback's record: four words (word 0 holds ft in its low byte and kind in the next, word 1 the payload, words
+  // 2 and 3 the Chars: the count in the low half of word 2, the bytes' address in word 3).  i64-aligned so the word
+  // reads are aligned.
+  %rec = llvm.alloca %c4 x i64 : (i64) -> !llvm.ptr
   %npi = arith.index_cast %np : i64 to index
+  %np2 = arith.muli %np, %c2 : i64
+  // the views' cells: two words each (the count, then the address); the bridge's array holds np of them
+  %vd = func.call @cc_words(%views, %np2) : (!llvm.ptr, i64) -> !d
+  %vm = builtin.unrealized_conversion_cast %vd : !d to !m64
+  %rd = func.call @cc_words(%rec, %c4) : (!llvm.ptr, i64) -> !d
+  %rm = builtin.unrealized_conversion_cast %rd : !d to !m64
+  %rs = builtin.unrealized_conversion_cast %rm : !m64 to !s64
   %r:5 = scf.for %k = %zi to %npi step %oi iter_args(%ft = %ft0, %n = %c0, %nfb = %c0, %nv = %c0, %tot = %c0) -> (i64, i64, i64, i64, i64) {
     %k64 = arith.index_cast %k : index to i64
     %kz = arith.cmpi eq, %k, %zi : index
@@ -63,13 +89,12 @@ func.func @nixev_ts_concat_parts(%ctx: !llvm.ptr, %np: i64, %fs: i64, %views: !l
     %isf = arith.andi %kz, %fsz : i1
     %isf64 = arith.extui %isf : i1 to i64
     func.call @nixev_cc_part(%ctx, %k64, %ft, %isf64, %rec) : (!llvm.ptr, i64, i64, i64, !llvm.ptr) -> ()
-    %ftp = llvm.getelementptr %rec[%c0] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-    %ft8 = llvm.load %ftp : !llvm.ptr -> i8
+    %w0 = trikeshed.at %rs[%zi] : !s64, index -> i64
+    %pay = trikeshed.at %rs[%oi] : !s64, index -> i64
+    %ft8 = arith.trunci %w0 : i64 to i8
     %ft2 = arith.extui %ft8 : i8 to i64
-    %kp = llvm.getelementptr %rec[%c1] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-    %kind = llvm.load %kp : !llvm.ptr -> i8
-    %pp = llvm.getelementptr %rec[%c8] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-    %pay = llvm.load %pp : !llvm.ptr -> i64
+    %kw = arith.shrui %w0, %c8 : i64
+    %kind = arith.trunci %kw : i64 to i8
     %isInt = arith.cmpi eq, %kind, %k1 : i8
     %isFlt = arith.cmpi eq, %kind, %k2 : i8
     %num = arith.ori %isInt, %isFlt : i1
@@ -112,34 +137,35 @@ func.func @nixev_ts_concat_parts(%ctx: !llvm.ptr, %np: i64, %fs: i64, %views: !l
       }
       scf.yield %ia#0, %ia#1, %ia#2, %nv, %tot : i64, i64, i64, i64, i64
     } else {
-      // a string/path window: views[nv] = w, nv++, total += w.size()
-      %lp = llvm.getelementptr %rec[%c16] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-      %l32 = llvm.load %lp : !llvm.ptr -> i32
-      %len = arith.extui %l32 : i32 to i64
-      %dp = llvm.getelementptr %rec[%c24] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-      %wp = llvm.load %dp : !llvm.ptr -> !llvm.ptr
-      %voff = arith.muli %nv, %c16 : i64
-      %vp = llvm.getelementptr %views[%voff] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-      llvm.store %l32, %vp : i32, !llvm.ptr
-      %vpp = llvm.getelementptr %vp[%c8] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-      llvm.store %wp, %vpp : !llvm.ptr, !llvm.ptr
+      // a string/path window: views[nv] = w, nv++, total += w.size() (the count word is the Chars' low half)
+      %w2 = trikeshed.at %rs[%c2i] : !s64, index -> i64
+      %len32 = arith.trunci %w2 : i64 to i32
+      %len = arith.extui %len32 : i32 to i64
+      %wp = trikeshed.at %rs[%c3i] : !s64, index -> i64
+      %nvi = arith.index_cast %nv : i64 to index
+      %vo = arith.muli %nv, %c2 : i64
+      %voi = arith.index_cast %vo : i64 to index
+      %vpi = arith.addi %voi, %oi : index
+      memref.store %len, %vm[%voi] : !m64
+      memref.store %wp, %vm[%vpi] : !m64
       %nv2 = arith.addi %nv, %c1 : i64
       %tot2 = arith.addi %tot, %len : i64
       scf.yield %ft2, %n, %nfb, %nv2, %tot2 : i64, i64, i64, i64, i64
     }
     scf.yield %o#0, %o#1, %o#2, %o#3, %o#4 : i64, i64, i64, i64, i64
   }
-  %r0 = llvm.getelementptr %res[%c0] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  llvm.store %r#0, %r0 : i64, !llvm.ptr
-  %r8 = llvm.getelementptr %res[%c8] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  llvm.store %r#1, %r8 : i64, !llvm.ptr
-  %r16 = llvm.getelementptr %res[%c16] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %nfd = arith.bitcast %r#2 : i64 to f64
-  llvm.store %nfd, %r16 : f64, !llvm.ptr
-  %r24 = llvm.getelementptr %res[%c24] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  llvm.store %r#3, %r24 : i64, !llvm.ptr
-  %r32 = llvm.getelementptr %res[%c32] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  llvm.store %r#4, %r32 : i64, !llvm.ptr
+  // the result's five words: firstType, n, nf (its bits), nv, total
+  %resd = func.call @cc_words(%res, %c5) : (!llvm.ptr, i64) -> !d
+  %resm = builtin.unrealized_conversion_cast %resd : !d to !m64
+  memref.store %r#0, %resm[%zi] : !m64
+  %i1 = arith.constant 1 : index
+  %i2 = arith.constant 2 : index
+  %i3 = arith.constant 3 : index
+  %i4 = arith.constant 4 : index
+  memref.store %r#1, %resm[%i1] : !m64
+  memref.store %r#2, %resm[%i2] : !m64
+  memref.store %r#3, %resm[%i3] : !m64
+  memref.store %r#4, %resm[%i4] : !m64
   return
 }
 

@@ -1124,8 +1124,9 @@ func.func private @fr_ekey(%em: !m64, %e: index) -> (i64, i64) {
   %five = arith.constant 5 : index
   %b = arith.muli %e, %five : index
   %b1 = arith.addi %b, %one : index
-  %kp = memref.load %em[%b] : !m64
-  %kl = memref.load %em[%b1] : !m64
+  %es = builtin.unrealized_conversion_cast %em : !m64 to !s64
+  %kp = trikeshed.at %es[%b] : !s64, index -> i64
+  %kl = trikeshed.at %es[%b1] : !s64, index -> i64
   return %kp, %kl : i64, i64
 }
 
@@ -1519,6 +1520,8 @@ func.func @nixev_ts_flake_unparse(%ents: !llvm.ptr, %n: i64, %into: !llvm.ptr, %
   %n5 = arith.muli %n, %five64 : i64
   %ed = func.call @fr_desc(%ents, %n5) : (!llvm.ptr, i64) -> !d
   %em = builtin.unrealized_conversion_cast %ed : !d to !m64
+  // the entries as a word view, made once: five words per entry, read with trikeshed.at
+  %es = builtin.unrealized_conversion_cast %em : !m64 to !s64
   %n21 = arith.muli %n, %c21 : i64
   %base = arith.subi %cap, %n21 : i64
   %n2 = arith.muli %ni, %two : index
@@ -1529,9 +1532,9 @@ func.func @nixev_ts_flake_unparse(%ents: !llvm.ptr, %n: i64, %into: !llvm.ptr, %
     %eb2 = arith.addi %eb, %two : index
     %eb3 = arith.addi %eb, %three : index
     %eb4 = arith.addi %eb, %four : index
-    %kind = memref.load %em[%eb4] : !m64
-    %vp = memref.load %em[%eb2] : !m64
-    %vx = memref.load %em[%eb3] : !m64
+    %kind = trikeshed.at %es[%eb4] : !s64, index -> i64
+    %vp = trikeshed.at %es[%eb2] : !s64, index -> i64
+    %vx = trikeshed.at %es[%eb3] : !s64, index -> i64
     %isstr = arith.cmpi eq, %kind, %z64 : i64
     %w:2 = scf.if %isstr -> (i64, i64) {
       scf.yield %vp, %vx : i64, i64

@@ -182,22 +182,39 @@ func.func private @ceq_list_eq(%st: !llvm.ptr, %v1: !llvm.ptr, %v2: !llvm.ptr, %
 
 // the attribute walk (eqValues): one set (the same Bindings) is equal without a look; two derivations compare by their
 // outPath cells when both have one (isDerivation forces each type attribute, v1 first, as the C++ && did); else the sizes
-// must match and the rows walk in symbol order: a different name decides, a shared value cell is equal without a look
+// must match and the rows walk in symbol order: a different name decides, a shared value cell is equal without a look.
+// The record reads are trikeshed.at over word views: a Value is 3 words (word 1 is its union: the Bindings pointer), a
+// Bindings is 2 header words then 2 words per row (word 2+2k: the name in the low 32 bits; word 3+2k: the value), an
+// Attr is 2 words (its name and position, then its value pointer).  The walk itself stays an scf.while: a later
+// element is never forced once the answer is known.
+func.func private @ceq_attr_value(%p: !llvm.ptr) -> i64 {
+  %c2 = arith.constant 2 : i64
+  %oi = arith.constant 1 : index
+  %d = func.call @ceq_desc(%p, %c2) : (!llvm.ptr, i64) -> !d
+  %m = builtin.unrealized_conversion_cast %d : !d to !m
+  %s = builtin.unrealized_conversion_cast %m : !m to !s
+  %x = trikeshed.at %s[%oi] : !s, index -> i64
+  return %x : i64
+}
+
 func.func private @ceq_attrs_eq(%st: !llvm.ptr, %v1: !llvm.ptr, %v2: !llvm.ptr, %pos: !llvm.ptr) -> !ev {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
+  %c2 = arith.constant 2 : i64
+  %c3 = arith.constant 3 : i64
   %cm1 = arith.constant -1 : i64
   %c0_8 = arith.constant 0 : i8
-  %c16 = arith.constant 16 : i64
   %zi = arith.constant 0 : index
   %oi = arith.constant 1 : index
-  %b1p = llvm.getelementptr %v1[8] : (!llvm.ptr) -> !llvm.ptr, i8
-  %b1 = llvm.load %b1p : !llvm.ptr -> !llvm.ptr
-  %b2p = llvm.getelementptr %v2[8] : (!llvm.ptr) -> !llvm.ptr, i8
-  %b2 = llvm.load %b2p : !llvm.ptr -> !llvm.ptr
-  %b1i = llvm.ptrtoint %b1 : !llvm.ptr to i64
-  %b2i = llvm.ptrtoint %b2 : !llvm.ptr to i64
-  %sameb = arith.cmpi eq, %b1i, %b2i : i64
+  %vd1 = func.call @ceq_desc(%v1, %c3) : (!llvm.ptr, i64) -> !d
+  %vm1 = builtin.unrealized_conversion_cast %vd1 : !d to !m
+  %vs1 = builtin.unrealized_conversion_cast %vm1 : !m to !s
+  %vd2 = func.call @ceq_desc(%v2, %c3) : (!llvm.ptr, i64) -> !d
+  %vm2 = builtin.unrealized_conversion_cast %vd2 : !d to !m
+  %vs2 = builtin.unrealized_conversion_cast %vm2 : !m to !s
+  %b1 = trikeshed.at %vs1[%oi] : !s, index -> i64
+  %b2 = trikeshed.at %vs2[%oi] : !s, index -> i64
+  %sameb = arith.cmpi eq, %b1, %b2 : i64
   %r_same = scf.if %sameb -> (i64) {
     scf.yield %c1 : i64
   } else {
@@ -219,18 +236,16 @@ func.func private @ceq_attrs_eq(%st: !llvm.ptr, %v1: !llvm.ptr, %v2: !llvm.ptr, 
         %jnz = arith.cmpi ne, %ji, %c0 : i64
         %both = arith.andi %inz, %jnz : i1
         %r_both = scf.if %both -> (!ev) {
-          %ivp = llvm.getelementptr %i[8] : (!llvm.ptr) -> !llvm.ptr, i8
-          %iv = llvm.load %ivp : !llvm.ptr -> !llvm.ptr
-          %jvp = llvm.getelementptr %j[8] : (!llvm.ptr) -> !llvm.ptr, i8
-          %jv = llvm.load %jvp : !llvm.ptr -> !llvm.ptr
-          %ivi = llvm.ptrtoint %iv : !llvm.ptr to i64
-          %jvi = llvm.ptrtoint %jv : !llvm.ptr to i64
-          %peq = arith.cmpi eq, %ivi, %jvi : i64
+          %iv = func.call @ceq_attr_value(%i) : (!llvm.ptr) -> i64
+          %jv = func.call @ceq_attr_value(%j) : (!llvm.ptr) -> i64
+          %peq = arith.cmpi eq, %iv, %jv : i64
           %r_pe = scf.if %peq -> (!ev) {
             %one = func.call @ceq_right(%c1) : (i64) -> !ev
             scf.yield %one : !ev
           } else {
-            %e = func.call @ceq_eq(%st, %iv, %jv, %pos) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr) -> !ev
+            %ivp = llvm.inttoptr %iv : i64 to !llvm.ptr
+            %jvp = llvm.inttoptr %jv : i64 to !llvm.ptr
+            %e = func.call @ceq_eq(%st, %ivp, %jvp, %pos) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr) -> !ev
             scf.yield %e : !ev
           }
           scf.yield %r_pe : !ev
@@ -255,17 +270,35 @@ func.func private @ceq_attrs_eq(%st: !llvm.ptr, %v1: !llvm.ptr, %v2: !llvm.ptr, 
   }
   %und2 = func.call @ceq_is(%r_drv, %cm1) : (!ev, i64) -> i1
   %r = scf.if %und2 -> (!ev) {
-    %s1p = llvm.getelementptr %b1[0] : (!llvm.ptr) -> !llvm.ptr, i8
-    %s1 = llvm.load %s1p : !llvm.ptr -> i32
-    %s2p = llvm.getelementptr %b2[0] : (!llvm.ptr) -> !llvm.ptr, i8
-    %s2 = llvm.load %s2p : !llvm.ptr -> i32
+    %bp1 = llvm.inttoptr %b1 : i64 to !llvm.ptr
+    %bp2 = llvm.inttoptr %b2 : i64 to !llvm.ptr
+    // the header: the size is the low 32 bits of word 0
+    %hd1 = func.call @ceq_desc(%bp1, %c2) : (!llvm.ptr, i64) -> !d
+    %hm1 = builtin.unrealized_conversion_cast %hd1 : !d to !m
+    %hs1 = builtin.unrealized_conversion_cast %hm1 : !m to !s
+    %hd2 = func.call @ceq_desc(%bp2, %c2) : (!llvm.ptr, i64) -> !d
+    %hm2 = builtin.unrealized_conversion_cast %hd2 : !d to !m
+    %hs2 = builtin.unrealized_conversion_cast %hm2 : !m to !s
+    %h1 = trikeshed.at %hs1[%zi] : !s, index -> i64
+    %h2 = trikeshed.at %hs2[%zi] : !s, index -> i64
+    %s1 = arith.trunci %h1 : i64 to i32
+    %s2 = arith.trunci %h2 : i64 to i32
     %sizediff = arith.cmpi ne, %s1, %s2 : i32
     %r_sz = scf.if %sizediff -> (!ev) {
       %z = func.call @ceq_right(%c0) : (i64) -> !ev
       scf.yield %z : !ev
     } else {
-      %n = llvm.zext %s1 : i32 to i64
+      %n = arith.extui %s1 : i32 to i64
       %ni = arith.index_cast %n : i64 to index
+      // the words: 2 header words, then 2 per row
+      %n2 = arith.muli %n, %c2 : i64
+      %nw = arith.addi %n2, %c2 : i64
+      %rd1 = func.call @ceq_desc(%bp1, %nw) : (!llvm.ptr, i64) -> !d
+      %rm1 = builtin.unrealized_conversion_cast %rd1 : !d to !m
+      %rs1 = builtin.unrealized_conversion_cast %rm1 : !m to !s
+      %rd2 = func.call @ceq_desc(%bp2, %nw) : (!llvm.ptr, i64) -> !d
+      %rm2 = builtin.unrealized_conversion_cast %rd2 : !d to !m
+      %rs2 = builtin.unrealized_conversion_cast %rm2 : !m to !s
       %start = func.call @ceq_right(%c1) : (i64) -> !ev
       %w:2 = scf.while (%k = %zi, %acc = %start) : (index, !ev) -> (index, !ev) {
         %inside = arith.cmpi ult, %k, %ni : index
@@ -274,26 +307,25 @@ func.func private @ceq_attrs_eq(%st: !llvm.ptr, %v1: !llvm.ptr, %v2: !llvm.ptr, 
         scf.condition(%go) %k, %acc : index, !ev
       } do {
       ^bb0(%wk: index, %wacc: !ev):
-        %k64 = arith.index_cast %wk : index to i64
-        %rowoff = arith.muli %k64, %c16 : i64
-        %off = arith.addi %rowoff, %c16 : i64
-        %ra = llvm.getelementptr %b1[%off] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-        %rb = llvm.getelementptr %b2[%off] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-        %na = llvm.load %ra : !llvm.ptr -> i32
-        %nb = llvm.load %rb : !llvm.ptr -> i32
+        %two = arith.constant 2 : index
+        %rk = arith.muli %wk, %two : index
+        %nidx = arith.addi %rk, %two : index
+        %vidx = arith.addi %nidx, %oi : index
+        %na64 = trikeshed.at %rs1[%nidx] : !s, index -> i64
+        %nb64 = trikeshed.at %rs2[%nidx] : !s, index -> i64
+        %na = arith.trunci %na64 : i64 to i32
+        %nb = arith.trunci %nb64 : i64 to i32
         %namesame = arith.cmpi eq, %na, %nb : i32
         %acc2 = scf.if %namesame -> (!ev) {
-          %avp = llvm.getelementptr %ra[8] : (!llvm.ptr) -> !llvm.ptr, i8
-          %av = llvm.load %avp : !llvm.ptr -> !llvm.ptr
-          %bvp = llvm.getelementptr %rb[8] : (!llvm.ptr) -> !llvm.ptr, i8
-          %bv = llvm.load %bvp : !llvm.ptr -> !llvm.ptr
-          %avi = llvm.ptrtoint %av : !llvm.ptr to i64
-          %bvi = llvm.ptrtoint %bv : !llvm.ptr to i64
-          %peq = arith.cmpi eq, %avi, %bvi : i64
+          %av = trikeshed.at %rs1[%vidx] : !s, index -> i64
+          %bv = trikeshed.at %rs2[%vidx] : !s, index -> i64
+          %peq = arith.cmpi eq, %av, %bv : i64
           %acc3 = scf.if %peq -> (!ev) {
             scf.yield %wacc : !ev
           } else {
-            %e = func.call @ceq_eq(%st, %av, %bv, %pos) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr) -> !ev
+            %avp = llvm.inttoptr %av : i64 to !llvm.ptr
+            %bvp = llvm.inttoptr %bv : i64 to !llvm.ptr
+            %e = func.call @ceq_eq(%st, %avp, %bvp, %pos) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr) -> !ev
             scf.yield %e : !ev
           }
           scf.yield %acc3 : !ev
