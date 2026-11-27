@@ -759,7 +759,8 @@ func.func @nixsi_page_find(%page: !llvm.ptr, %avail: i64, %key: i64, %out: !llvm
 // 32 words, then a heap that only grows.  The words: 0 the magic, 1 the heap's end, 2 the token (the info directory's
 // state the index holds, 0 when no pass has read the directory since it changed), 3 and 4 the roots (the paths, the
 // references), 5 the paths in the directory, 6 and 7 the rows put (paths, references), 8 the rows struck out, 9 this
-// boot's name, 15 the sum of words 0 to 14.
+// boot's name, 10 the sum of the paths in the directory (each its name and identity as one word, nxsi_eh), 15 the sum
+// of words 0 to 14.
 // A blob of the heap begins with a word whose low byte is its kind:
 //   1 a record   1 | flags << 8 | name bytes << 16 | text bytes << 32; the entry's identity; the sum; the name, the
 //                text (an info file as it is), zeros to a word.  flags: 1 listed (a valid path's: 34 bytes of name at
@@ -791,8 +792,10 @@ func.func @nixsi_page_find(%page: !llvm.ptr, %avail: i64, %key: i64, %out: !llvm
 //   an older mlnix        takes no lock and knows no index: its changes change the directory's token.  A change this
 //                         process makes (a register, an unlink) clears the token even though the index is told of it,
 //                         because an older mlnix may have changed the directory in the same moment and a directory's
-//                         time does not count changes; the next list makes a pass (the directory read, every entry
-//                         matched with its row by name and identity, no file opened that was read before)
+//                         time does not count changes.  The next list reads the directory once: its entries counted
+//                         and summed (nxsi_eh) are the index's when nobody else changed it, and no row is looked up;
+//                         when they are not, a pass matches every entry with its row by name and identity, reads the
+//                         files that are new and strikes out the rows of those gone
 //   the file system       the file is kept only where the system says the directory's file system is a local one that
 //                         tells its changes (nixsi_os_local).  Anywhere else a process answers from an index of its
 //                         own that it begins again for every query, reading the files as the old code did; where the
@@ -806,8 +809,8 @@ func.func @nixsi_page_find(%page: !llvm.ptr, %avail: i64, %key: i64, %out: !llvm
 // lock held (1 shared, 2 alone), 8 the entries a pass has seen, 9 the file as it was when last locked (its length and
 // time), 10 this boot (0 not asked yet, 1 not known), 11 what the directory's file system is trusted with (0 nothing:
 // no index is kept beside it; 1 an entry's number and time; 2 its number alone), 12 the last stamp held, 13 the
-// directory was looked for; from 16 the rooms' pointers and bytes (two words a room).  The handle is the store's
-// thread's alone, as the store is.
+// directory was looked for, 14 the times an index was begun again, 15 the info files read; from 16 the rooms' pointers
+// and bytes (two words a room).  The handle is the store's thread's alone, as the store is.
 memref.global "private" @nxsi_h : memref<40xi64> = dense<0>
 memref.global "private" constant @nxsi_zero : memref<32xi64> = dense<0>
 // the code of a byte in a key: its place in nix32's alphabet, the low 5 bits of any other byte
@@ -1109,6 +1112,10 @@ func.func private @nxsi_init() -> i1 {
     func.call @nxsi_ws(%c120, %parts) : (i64, i64) -> ()
     func.call @nxsi_hw(%c0, %magic) : (i64, i64) -> ()
     func.call @nxsi_forget() : () -> ()
+    %c14 = arith.constant 14 : i64
+    %inits = func.call @nxsi_hg(%c14) : (i64) -> i64
+    %inits1 = arith.addi %inits, %c1 : i64
+    func.call @nxsi_hs(%c14, %inits1) : (i64, i64) -> ()
   }
   return %room : i1
 }
@@ -1320,6 +1327,27 @@ func.func private @nxsi_key(%p: !llvm.ptr, %n: i64) -> i64 {
   %k0 = arith.shli %a12, %c4 : i64
   %key = arith.ori %k0, %last : i64
   return %key : i64
+}
+
+// An entry as one word, its name and its identity mixed (a fold of the name's bytes, FNV's step).  The sum of the
+// entries the paths hold is the image's word 10: a directory whose entries sum to it, and are as many, is the one the
+// index holds, and is known to be without one lookup (nxsi_glance).
+func.func private @nxsi_eh(%np: !llvm.ptr, %nn: i64, %ident: i64) -> i64 {
+  %basis = arith.constant -3750763034362895579 : i64
+  %prime = arith.constant 1099511628211 : i64
+  %nd = func.call @nxsi_d(%np, %nn) : (!llvm.ptr, i64) -> !d
+  %nm = builtin.unrealized_conversion_cast %nd : !d to !m
+  %name = builtin.unrealized_conversion_cast %nm : !m to !s
+  %h = trikeshed.fold %name, %basis : !s, i64 -> i64 {
+  ^bb0(%acc: i64, %b: i8):
+    %x = arith.extui %b : i8 to i64
+    %a1 = arith.xori %acc, %x : i64
+    %a2 = arith.muli %a1, %prime : i64
+    trikeshed.yield %a2 : i64
+  }
+  %e1 = func.call @nxsi_mix(%h, %ident) : (i64, i64) -> i64
+  %e2 = func.call @nxsi_mix(%e1, %nn) : (i64, i64) -> i64
+  return %e2 : i64
 }
 
 // Whether a name is a valid path's as allValidPaths took them from the directory: 34 bytes at least and no ".tmp" in
@@ -2418,8 +2446,15 @@ func.func private @nxsi_strike(%x: i64) -> i64 {
     %st = func.call @nxsi_put(%c0, %key, %strike) : (i64, i64, i64) -> i64
     %done = arith.cmpi eq, %st, %c1 : i64
     scf.if %done {
+      %c8 = arith.constant 8 : i64
+      %c80 = arith.constant 80 : i64
+      %x8 = arith.addi %x, %c8 : i64
+      %id = func.call @nxsi_w(%x8) : (i64) -> i64
+      %e = func.call @nxsi_eh(%np, %nl, %id) : (!llvm.ptr, i64, i64) -> i64
+      %ne = arith.subi %c0, %e : i64
       func.call @nxsi_inc(%c40, %m1) : (i64, i64) -> ()
       func.call @nxsi_inc(%c64, %c1) : (i64, i64) -> ()
+      func.call @nxsi_inc(%c80, %ne) : (i64, i64) -> ()
     }
     scf.yield %st : i64
   } else {
@@ -2994,6 +3029,10 @@ func.func private @nxsi_slurp(%path: !llvm.ptr) -> i64 {
   %cmax = arith.constant 1048576 : i64
   %m1 = arith.constant -1 : i64
   %z32 = arith.constant 0 : i32
+  %c15 = arith.constant 15 : i64
+  %reads = func.call @nxsi_hg(%c15) : (i64) -> i64
+  %reads1 = arith.addi %reads, %c1 : i64
+  func.call @nxsi_hs(%c15, %reads1) : (i64, i64) -> ()
   %fd = func.call @nixsi_os_open(%path, %c0) : (!llvm.ptr, i64) -> i32
   %has = arith.cmpi sge, %fd, %z32 : i32
   %r = scf.if %has -> (i64) {
@@ -3226,7 +3265,10 @@ func.func private @nxsi_index(%np: !llvm.ptr, %nn: i64, %ident: i64, %tp: !llvm.
     }
     %ok2 = arith.cmpi eq, %st2, %c1 : i64
     scf.if %ok2 {
+      %c80 = arith.constant 80 : i64
+      %eh = func.call @nxsi_eh(%np, %nn, %ident) : (!llvm.ptr, i64, i64) -> i64
       func.call @nxsi_inc(%c40, %c1) : (i64, i64) -> ()
+      func.call @nxsi_inc(%c80, %eh) : (i64, i64) -> ()
     }
     %rr = arith.select %ok2, %x, %st2 : i64
     scf.yield %rr : i64
@@ -3236,25 +3278,17 @@ func.func private @nxsi_index(%np: !llvm.ptr, %nn: i64, %ident: i64, %tp: !llvm.
   return %r : i64
 }
 
-// One entry of the directory met by a pass: seen, when the paths hold a record of its name with its identity; else the
-// record of its name struck out, its file read (a regular file's: type 8; anything else is not opened, and its text
-// not held) and it indexed anew.  1, 0 (no room) or -1 (not sound).
-func.func private @nxsi_entry(%np: !llvm.ptr, %nn: i64, %dino: i64, %type: i64) -> i64 {
+// An entry's path (the directory, a slash, the name, a NUL), composed in room 6: one combine drained once.
+func.func private @nxsi_path(%np: !llvm.ptr, %nn: i64) -> !llvm.ptr {
   %c0 = arith.constant 0 : i64
-  %c1 = arith.constant 1 : i64
   %c2 = arith.constant 2 : i64
   %c5 = arith.constant 5 : i64
   %c6 = arith.constant 6 : i64
   %c8 = arith.constant 8 : i64
   %c10 = arith.constant 10 : i64
-  %c32 = arith.constant 32 : i64
-  %m1 = arith.constant -1 : i64
-  %z32 = arith.constant 0 : i32
   %i1 = arith.constant 1 : index
   %i4 = arith.constant 4 : index
   %i15 = arith.constant 15 : index
-  %sbuf = llvm.alloca %c32 x i64 : (i64) -> !llvm.ptr
-  // the entry's path: the directory, a slash, the name, a NUL
   %dl = func.call @nxsi_hg(%c5) : (i64) -> i64
   %dp = func.call @nxsi_buf(%c10, %c0) : (i64, i64) -> !llvm.ptr
   %pb0 = arith.addi %dl, %nn : i64
@@ -3275,10 +3309,21 @@ func.func private @nxsi_entry(%np: !llvm.ptr, %nn: i64, %dino: i64, %type: i64) 
   %pd = func.call @nxsi_d(%pp, %pl) : (!llvm.ptr, i64) -> !d
   %pm = builtin.unrealized_conversion_cast %pd : !d to !m
   %e = trikeshed.drain %path, %pm : !s, !m -> index
+  return %pp : !llvm.ptr
+}
+
+// An entry's identity as the directory's reading gives it: the file's number the entry carries, or, where a number is
+// given again, what lstat says of the entry (nxsi_ident).
+func.func private @nxsi_whose(%np: !llvm.ptr, %nn: i64, %dino: i64) -> i64 {
+  %c2 = arith.constant 2 : i64
   %c11 = arith.constant 11 : i64
+  %c32 = arith.constant 32 : i64
+  %z32 = arith.constant 0 : i32
+  %sbuf = llvm.alloca %c32 x i64 : (i64) -> !llvm.ptr
   %pol = func.call @nxsi_hg(%c11) : (i64) -> i64
   %timed = arith.cmpi ne, %pol, %c2 : i64
   %ident = scf.if %timed -> (i64) {
+    %pp = func.call @nxsi_path(%np, %nn) : (!llvm.ptr, i64) -> !llvm.ptr
     %rc = func.call @nixsi_os_lstat(%pp, %sbuf) : (!llvm.ptr, !llvm.ptr) -> i32
     %ok = arith.cmpi eq, %rc, %z32 : i32
     %id = scf.if %ok -> (i64) {
@@ -3291,6 +3336,18 @@ func.func private @nxsi_entry(%np: !llvm.ptr, %nn: i64, %dino: i64, %type: i64) 
   } else {
     scf.yield %dino : i64
   }
+  return %ident : i64
+}
+
+// One entry of the directory met by a pass, with its identity: seen, when the paths hold a record of its name with
+// that identity; else the record of its name struck out, its file read (a regular file's: type 8; anything else is not
+// opened, and its text not held) and it indexed anew.  1, 0 (no room) or -1 (not sound).
+func.func private @nxsi_entry(%np: !llvm.ptr, %nn: i64, %ident: i64, %type: i64) -> i64 {
+  %c0 = arith.constant 0 : i64
+  %c1 = arith.constant 1 : i64
+  %c2 = arith.constant 2 : i64
+  %c8 = arith.constant 8 : i64
+  %m1 = arith.constant -1 : i64
   %x = func.call @nxsi_live(%np, %nn) : (!llvm.ptr, i64) -> i64
   %sound = arith.cmpi sge, %x, %c0 : i64
   %r = scf.if %sound -> (i64) {
@@ -3317,6 +3374,7 @@ func.func private @nxsi_entry(%np: !llvm.ptr, %nn: i64, %dino: i64, %type: i64) 
       %s1 = scf.if %ok0 -> (i64) {
         %isfile = arith.cmpi eq, %type, %c8 : i64
         %tn = scf.if %isfile -> (i64) {
+          %pp = func.call @nxsi_path(%np, %nn) : (!llvm.ptr, i64) -> !llvm.ptr
           %got = func.call @nxsi_slurp(%pp) : (!llvm.ptr) -> i64
           scf.yield %got : i64
         } else {
@@ -3349,7 +3407,6 @@ func.func private @nxsi_sweep() -> i64 {
   %c1 = arith.constant 1 : i64
   %c5 = arith.constant 5 : i64
   %c8 = arith.constant 8 : i64
-  %c40 = arith.constant 40 : i64
   %m1 = arith.constant -1 : i64
   %z = arith.constant 0 : index
   %m = func.call @nxsi_live_rows() : () -> i64
@@ -3383,10 +3440,6 @@ func.func private @nxsi_sweep() -> i64 {
       }
       trikeshed.yield %next : i64
     }
-    %done = arith.cmpi eq, %st, %c1 : i64
-    scf.if %done {
-      func.call @nxsi_ws(%c40, %s) : (i64, i64) -> ()
-    }
     scf.yield %st : i64
   } else {
     scf.yield %m1 : i64
@@ -3394,36 +3447,41 @@ func.func private @nxsi_sweep() -> i64 {
   return %r : i64
 }
 
-// One pass over the directory: each entry matched with its row or indexed anew (si_entry), then, when the entries seen
-// are not as many as the paths the index holds, the rows of those gone struck out.  A directory that is not there has
-// no entry.  1, 0 or -1.
-func.func private @nxsi_pass() -> i64 {
+// One reading of the directory.  Every entry but `.` and `..` is counted and summed (nxsi_eh: its name and identity).
+// Without `look` that is all: 1 when the count and the sum are the ones the index keeps of the paths it holds (the
+// directory is the one it holds, and no row was looked up to know it), 2 when they are not.  With `look` each entry is
+// matched with its row or indexed anew (nxsi_entry), then, when the entries seen are not as many as the paths the index
+// holds, the rows of those gone are struck out (nxsi_sweep), and the count and the sum the index keeps are made the
+// directory's: 1, 0 (no room) or -1 (not sound).  A directory that is not there has no entry.
+func.func private @nxsi_pass(%look: i64) -> i64 {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
   %c2 = arith.constant 2 : i64
   %c8 = arith.constant 8 : i64
   %c10 = arith.constant 10 : i64
   %c40 = arith.constant 40 : i64
+  %c80 = arith.constant 80 : i64
   %dot = arith.constant 46 : i8
   %nob = arith.constant 0 : i8
   %z = arith.constant 0 : index
   %i1 = arith.constant 1 : index
+  %looks = arith.cmpi ne, %look, %c0 : i64
   func.call @nxsi_hs(%c8, %c0) : (i64, i64) -> ()
   %dp = func.call @nxsi_buf(%c10, %c0) : (i64, i64) -> !llvm.ptr
   %dir = func.call @nixsi_os_opendir(%dp) : (!llvm.ptr) -> !llvm.ptr
   %db = llvm.ptrtoint %dir : !llvm.ptr to i64
   %open = arith.cmpi ne, %db, %c0 : i64
-  %st = scf.if %open -> (i64) {
+  %st, %sum, %cnt = scf.if %open -> (i64, i64, i64) {
     %noff = func.call @nixsi_os_name() : () -> i64
     %e0 = func.call @nixsi_os_readdir(%dir) : (!llvm.ptr) -> !llvm.ptr
     %e0b = llvm.ptrtoint %e0 : !llvm.ptr to i64
-    %ee, %se = scf.while (%e = %e0b, %s = %c1) : (i64, i64) -> (i64, i64) {
+    %ee, %se, %he, %ce = scf.while (%e = %e0b, %s = %c1, %h = %c0, %c = %c0) : (i64, i64, i64, i64) -> (i64, i64, i64, i64) {
       %more = arith.cmpi ne, %e, %c0 : i64
       %fine = arith.cmpi eq, %s, %c1 : i64
       %run = arith.andi %more, %fine : i1
-      scf.condition(%run) %e, %s : i64, i64
+      scf.condition(%run) %e, %s, %h, %c : i64, i64, i64, i64
     } do {
-    ^bb0(%ea: i64, %sa: i64):
+    ^bb0(%ea: i64, %sa: i64, %ha: i64, %ca: i64):
       %ep = llvm.inttoptr %ea : i64 to !llvm.ptr
       %np = llvm.getelementptr %ep[%noff] : (!llvm.ptr, i64) -> !llvm.ptr, i8
       %nn = func.call @strlen(%np) : (!llvm.ptr) -> i64
@@ -3456,45 +3514,79 @@ func.func private @nxsi_pass() -> i64 {
       %up0 = arith.andi %two, %d0 : i1
       %up = arith.andi %up0, %d1 : i1
       %skip = arith.ori %self, %up : i1
-      %r = scf.if %skip -> (i64) {
-        scf.yield %c1 : i64
+      %r, %hn, %cn = scf.if %skip -> (i64, i64, i64) {
+        scf.yield %c1, %ha, %ca : i64, i64, i64
       } else {
-        // the entry's type, the byte before its name: 8 a regular file
-        %tp0 = arith.subi %noff, %c1 : i64
-        %tpp = llvm.getelementptr %ep[%tp0] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-        %tyd = func.call @nxsi_d(%tpp, %c1) : (!llvm.ptr, i64) -> !d
-        %tym = builtin.unrealized_conversion_cast %tyd : !d to !m
-        %tys = builtin.unrealized_conversion_cast %tym : !m to !s
-        %ty8 = trikeshed.at %tys[%z] : !s, index -> i8
-        %ty = arith.extui %ty8 : i8 to i64
-        %k = func.call @nxsi_entry(%np, %nn, %dino, %ty) : (!llvm.ptr, i64, i64, i64) -> i64
-        scf.yield %k : i64
+        %ident = func.call @nxsi_whose(%np, %nn, %dino) : (!llvm.ptr, i64, i64) -> i64
+        %eh = func.call @nxsi_eh(%np, %nn, %ident) : (!llvm.ptr, i64, i64) -> i64
+        %h1 = arith.addi %ha, %eh : i64
+        %c1x = arith.addi %ca, %c1 : i64
+        %k = scf.if %looks -> (i64) {
+          // the entry's type, the byte before its name: 8 a regular file
+          %tp0 = arith.subi %noff, %c1 : i64
+          %tpp = llvm.getelementptr %ep[%tp0] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+          %tyd = func.call @nxsi_d(%tpp, %c1) : (!llvm.ptr, i64) -> !d
+          %tym = builtin.unrealized_conversion_cast %tyd : !d to !m
+          %tys = builtin.unrealized_conversion_cast %tym : !m to !s
+          %ty8 = trikeshed.at %tys[%z] : !s, index -> i8
+          %ty = arith.extui %ty8 : i8 to i64
+          %kk = func.call @nxsi_entry(%np, %nn, %ident, %ty) : (!llvm.ptr, i64, i64, i64) -> i64
+          scf.yield %kk : i64
+        } else {
+          scf.yield %c1 : i64
+        }
+        scf.yield %k, %h1, %c1x : i64, i64, i64
       }
       %en = func.call @nixsi_os_readdir(%dir) : (!llvm.ptr) -> !llvm.ptr
       %enb = llvm.ptrtoint %en : !llvm.ptr to i64
-      scf.yield %enb, %r : i64, i64
+      scf.yield %enb, %r, %hn, %cn : i64, i64, i64, i64
     }
     %rc = func.call @closedir(%dir) : (!llvm.ptr) -> i32
-    scf.yield %se : i64
+    scf.yield %se, %he, %ce : i64, i64, i64
   } else {
-    scf.yield %c1 : i64
+    scf.yield %c1, %c0, %c0 : i64, i64, i64
   }
-  %ok = arith.cmpi eq, %st, %c1 : i64
-  %r2 = scf.if %ok -> (i64) {
-    %seen = func.call @nxsi_hg(%c8) : (i64) -> i64
-    %lives = func.call @nxsi_w(%c40) : (i64) -> i64
-    %differ = arith.cmpi ne, %seen, %lives : i64
-    %sw = scf.if %differ -> (i64) {
-      %w = func.call @nxsi_sweep() : () -> i64
-      scf.yield %w : i64
+  %res = scf.if %looks -> (i64) {
+    %ok = arith.cmpi eq, %st, %c1 : i64
+    %r2 = scf.if %ok -> (i64) {
+      %seen = func.call @nxsi_hg(%c8) : (i64) -> i64
+      %lives = func.call @nxsi_w(%c40) : (i64) -> i64
+      %differ = arith.cmpi ne, %seen, %lives : i64
+      %sw = scf.if %differ -> (i64) {
+        %w = func.call @nxsi_sweep() : () -> i64
+        scf.yield %w : i64
+      } else {
+        scf.yield %c1 : i64
+      }
+      // what the index keeps of the paths it holds is now the directory's: their count and their sum
+      %swept = arith.cmpi eq, %sw, %c1 : i64
+      scf.if %swept {
+        %l2 = func.call @nxsi_w(%c40) : (i64) -> i64
+        %h2 = func.call @nxsi_w(%c80) : (i64) -> i64
+        %ld = arith.cmpi ne, %l2, %cnt : i64
+        %hd = arith.cmpi ne, %h2, %sum : i64
+        scf.if %ld {
+          func.call @nxsi_hw(%c40, %cnt) : (i64, i64) -> ()
+        }
+        scf.if %hd {
+          func.call @nxsi_hw(%c80, %sum) : (i64, i64) -> ()
+        }
+      }
+      scf.yield %sw : i64
     } else {
-      scf.yield %c1 : i64
+      scf.yield %st : i64
     }
-    scf.yield %sw : i64
+    scf.yield %r2 : i64
   } else {
-    scf.yield %st : i64
+    %lives = func.call @nxsi_w(%c40) : (i64) -> i64
+    %kept = func.call @nxsi_w(%c80) : (i64) -> i64
+    %a = arith.cmpi eq, %lives, %cnt : i64
+    %b = arith.cmpi eq, %kept, %sum : i64
+    %both = arith.andi %a, %b : i1
+    %g = arith.select %both, %c1, %c2 : i64
+    scf.yield %g : i64
   }
-  return %r2 : i64
+  return %res : i64
 }
 
 // The index made to hold the directory as it is.  Nothing to do when its token is the directory's (unless `force`: a
@@ -3545,7 +3637,15 @@ func.func private @nxsi_sync(%force: i64) -> i64 {
         %ts = func.call @nxsi_stamp() : () -> i64
         scf.yield %ts : i64
       }
-      %p = func.call @nxsi_pass() : () -> i64
+      // a glance first: the directory's entries counted and summed; a pass only when they are not the index's
+      %g = func.call @nxsi_pass(%c0) : (i64) -> i64
+      %asis = arith.cmpi eq, %g, %c1 : i64
+      %p = scf.if %asis -> (i64) {
+        scf.yield %c1 : i64
+      } else {
+        %pp = func.call @nxsi_pass(%c1) : (i64) -> i64
+        scf.yield %pp : i64
+      }
       %t2 = func.call @nxsi_token() : () -> i64
       %stable = arith.cmpi eq, %t2, %t : i64
       %last = arith.cmpi sge, %pa, %c2 : i64
@@ -3653,12 +3753,138 @@ func.func private @nxsi_cands(%np: !llvm.ptr, %nn: i64) -> i64 {
   return %r : i64
 }
 
-// The names of n records (their places at offs), given to the store: the listed ones (a valid path's), in the order
-// of their bytes (sorted, the comparison of two names), each once (where: unlike the one before), as one combineAll of
-// the names drained once into room 9; the lock let go; then each name, by the combineAll's coordinates.
-func.func private @nxsi_emit(%offs: !llvm.ptr, %n: i64, %ctx: !llvm.ptr, %ctx2: !llvm.ptr) {
+// The name of the record at x in the image (its bytes are the image's from x + 24; its length is in its first word).
+// The records an answer is made of have been read back whole by whoever gathered them.
+func.func private @nxsi_cmp_names(%xa: i64, %xb: i64) -> i32 {
+  %c8 = arith.constant 8 : i64
+  %c16 = arith.constant 16 : i64
+  %c24 = arith.constant 24 : i64
+  %c0 = arith.constant 0 : i64
+  %c65535 = arith.constant 65535 : i64
+  %end = func.call @nxsi_w(%c8) : (i64) -> i64
+  %base = func.call @nxsi_p(%c0) : (i64) -> !llvm.ptr
+  %id = func.call @nxsi_d(%base, %end) : (!llvm.ptr, i64) -> !d
+  %im = builtin.unrealized_conversion_cast %id : !d to !m
+  %img = builtin.unrealized_conversion_cast %im : !m to !s
+  %ta = func.call @nxsi_w(%xa) : (i64) -> i64
+  %tb = func.call @nxsi_w(%xb) : (i64) -> i64
+  %la0 = arith.shrui %ta, %c16 : i64
+  %lb0 = arith.shrui %tb, %c16 : i64
+  %la = arith.andi %la0, %c65535 : i64
+  %lb = arith.andi %lb0, %c65535 : i64
+  %oa = arith.addi %xa, %c24 : i64
+  %ob = arith.addi %xb, %c24 : i64
+  %oai = arith.index_cast %oa : i64 to index
+  %obi = arith.index_cast %ob : i64 to index
+  %lai = arith.index_cast %la : i64 to index
+  %lbi = arith.index_cast %lb : i64 to index
+  %na = trikeshed.slice %img[%oai, %lai] : !s -> !s
+  %nb = trikeshed.slice %img[%obi, %lbi] : !s -> !s
+  %c = trikeshed.compare %na, %nb unsigned : !s, !s
+  return %c : i32
+}
+
+// The listed records among the n at offs (a valid path's name: 34 bytes at least and no ".tmp"), put in the order of
+// their names' bytes into room 7: how many.  The records come in the order of their keys, which is the order of their
+// names wherever the names begin with nix32 digits, so the order is first only looked at (one fold of the neighbours):
+// when it holds, the records are drained as they stand, and sorted by their names only when it does not.
+func.func private @nxsi_order(%offs: !llvm.ptr, %n: i64) -> i64 {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
+  %c7 = arith.constant 7 : i64
+  %c8 = arith.constant 8 : i64
+  %z32 = arith.constant 0 : i32
+  %i1 = arith.constant 1 : index
+  %od = func.call @nxsi_d(%offs, %n) : (!llvm.ptr, i64) -> !d
+  %om = builtin.unrealized_conversion_cast %od : !d to !m64
+  %ov = builtin.unrealized_conversion_cast %om : !m64 to !s64
+  %ni = arith.index_cast %n : i64 to index
+  %idx = trikeshed.series %ni : !s64 {
+  ^bb0(%i: index):
+    %i64x = arith.index_cast %i : index to i64
+    trikeshed.yield %i64x : i64
+  }
+  %lst = trikeshed.where %idx : !s64 -> !s64 {
+  ^bb0(%j: i64):
+    %ji = arith.index_cast %j : i64 to index
+    %x = trikeshed.at %ov[%ji] : !s64, index -> i64
+    %t = func.call @nxsi_w(%x) : (i64) -> i64
+    %fl = arith.shrui %t, %c8 : i64
+    %l = arith.andi %fl, %c1 : i64
+    %is = arith.cmpi eq, %l, %c1 : i64
+    trikeshed.yield %is : i1
+  }
+  %m = trikeshed.size %lst : !s64
+  %m64x = arith.index_cast %m : index to i64
+  %rb0 = arith.addi %m64x, %c1 : i64
+  %rb = arith.muli %rb0, %c8 : i64
+  %room = func.call @nxsi_buf(%c7, %rb) : (i64, i64) -> !llvm.ptr
+  %rd = func.call @nxsi_d(%room, %m64x) : (!llvm.ptr, i64) -> !d
+  %rm = builtin.unrealized_conversion_cast %rd : !d to !m64
+  %pos = trikeshed.series %m : !s64 {
+  ^bb0(%i: index):
+    %i64y = arith.index_cast %i : index to i64
+    trikeshed.yield %i64y : i64
+  }
+  %out = trikeshed.fold %pos, %c0 : !s64, i64 -> i64 {
+  ^bb0(%acc: i64, %k: i64):
+    %first = arith.cmpi eq, %k, %c0 : i64
+    %next = scf.if %first -> (i64) {
+      scf.yield %acc : i64
+    } else {
+      %ki = arith.index_cast %k : i64 to index
+      %kp = arith.subi %ki, %i1 : index
+      %ea = trikeshed.at %lst[%kp] : !s64, index -> i64
+      %eb = trikeshed.at %lst[%ki] : !s64, index -> i64
+      %eai = arith.index_cast %ea : i64 to index
+      %ebi = arith.index_cast %eb : i64 to index
+      %xa = trikeshed.at %ov[%eai] : !s64, index -> i64
+      %xb = trikeshed.at %ov[%ebi] : !s64, index -> i64
+      %c = func.call @nxsi_cmp_names(%xa, %xb) : (i64, i64) -> i32
+      %gt = arith.cmpi sgt, %c, %z32 : i32
+      %a1 = arith.select %gt, %c1, %acc : i64
+      scf.yield %a1 : i64
+    }
+    trikeshed.yield %next : i64
+  }
+  %inorder = arith.cmpi eq, %out, %c0 : i64
+  scf.if %inorder {
+    %recs = trikeshed.series %m : !s64 {
+    ^bb0(%q: index):
+      %e = trikeshed.at %lst[%q] : !s64, index -> i64
+      %ei = arith.index_cast %e : i64 to index
+      %x = trikeshed.at %ov[%ei] : !s64, index -> i64
+      trikeshed.yield %x : i64
+    }
+    %en = trikeshed.drain %recs, %rm : !s64, !m64 -> index
+  } else {
+    %srt = trikeshed.sorted %lst : !s64 -> !s64 by {
+    ^bb0(%a: i64, %b: i64):
+      %ai = arith.index_cast %a : i64 to index
+      %bi = arith.index_cast %b : i64 to index
+      %xa = trikeshed.at %ov[%ai] : !s64, index -> i64
+      %xb = trikeshed.at %ov[%bi] : !s64, index -> i64
+      %c = func.call @nxsi_cmp_names(%xa, %xb) : (i64, i64) -> i32
+      trikeshed.yield %c : i32
+    }
+    %recs = trikeshed.series %m : !s64 {
+    ^bb0(%q: index):
+      %e = trikeshed.at %srt[%q] : !s64, index -> i64
+      %ei = arith.index_cast %e : i64 to index
+      %x = trikeshed.at %ov[%ei] : !s64, index -> i64
+      trikeshed.yield %x : i64
+    }
+    %en = trikeshed.drain %recs, %rm : !s64, !m64 -> index
+  }
+  return %m64x : i64
+}
+
+// The names of n records (their places at offs), given to the store: the listed ones in the order of their bytes
+// (nxsi_order), each once (where: unlike the one before), as one combineAll of the names drained once into room 9; the
+// lock let go; then each name, by the combineAll's coordinates.
+func.func private @nxsi_emit(%offs: !llvm.ptr, %n: i64, %ctx: !llvm.ptr, %ctx2: !llvm.ptr) {
+  %c0 = arith.constant 0 : i64
+  %c7 = arith.constant 7 : i64
   %c8 = arith.constant 8 : i64
   %c9 = arith.constant 9 : i64
   %c16 = arith.constant 16 : i64
@@ -3669,54 +3895,17 @@ func.func private @nxsi_emit(%offs: !llvm.ptr, %n: i64, %ctx: !llvm.ptr, %ctx2: 
   %i1 = arith.constant 1 : index
   %some = arith.cmpi sgt, %n, %c0 : i64
   scf.if %some {
+    %m64x = func.call @nxsi_order(%offs, %n) : (!llvm.ptr, i64) -> i64
+    %op = func.call @nxsi_buf(%c7, %c0) : (i64, i64) -> !llvm.ptr
+    %od = func.call @nxsi_d(%op, %m64x) : (!llvm.ptr, i64) -> !d
+    %om = builtin.unrealized_conversion_cast %od : !d to !m64
+    %srt = builtin.unrealized_conversion_cast %om : !m64 to !s64
     %end = func.call @nxsi_w(%c8) : (i64) -> i64
     %base = func.call @nxsi_p(%c0) : (i64) -> !llvm.ptr
     %id = func.call @nxsi_d(%base, %end) : (!llvm.ptr, i64) -> !d
     %im = builtin.unrealized_conversion_cast %id : !d to !m
     %img = builtin.unrealized_conversion_cast %im : !m to !s
-    %od = func.call @nxsi_d(%offs, %n) : (!llvm.ptr, i64) -> !d
-    %om = builtin.unrealized_conversion_cast %od : !d to !m64
-    %ov = builtin.unrealized_conversion_cast %om : !m64 to !s64
-    %ni = arith.index_cast %n : i64 to index
-    %idx = trikeshed.series %ni : !s64 {
-    ^bb0(%i: index):
-      %i64x = arith.index_cast %i : index to i64
-      trikeshed.yield %i64x : i64
-    }
-    %lst = trikeshed.where %idx : !s64 -> !s64 {
-    ^bb0(%j: i64):
-      %ji = arith.index_cast %j : i64 to index
-      %x = trikeshed.at %ov[%ji] : !s64, index -> i64
-      %t = func.call @nxsi_rec(%x) : (i64) -> i64
-      %fl = arith.shrui %t, %c8 : i64
-      %l = arith.andi %fl, %c1 : i64
-      %is = arith.cmpi eq, %l, %c1 : i64
-      trikeshed.yield %is : i1
-    }
-    %srt = trikeshed.sorted %lst : !s64 -> !s64 by {
-    ^bb0(%a: i64, %b: i64):
-      %ai = arith.index_cast %a : i64 to index
-      %bi = arith.index_cast %b : i64 to index
-      %xa = trikeshed.at %ov[%ai] : !s64, index -> i64
-      %xb = trikeshed.at %ov[%bi] : !s64, index -> i64
-      %ta = func.call @nxsi_w(%xa) : (i64) -> i64
-      %tb = func.call @nxsi_w(%xb) : (i64) -> i64
-      %la0 = arith.shrui %ta, %c16 : i64
-      %lb0 = arith.shrui %tb, %c16 : i64
-      %la = arith.andi %la0, %c65535 : i64
-      %lb = arith.andi %lb0, %c65535 : i64
-      %oa = arith.addi %xa, %c24 : i64
-      %ob = arith.addi %xb, %c24 : i64
-      %oai = arith.index_cast %oa : i64 to index
-      %obi = arith.index_cast %ob : i64 to index
-      %lai = arith.index_cast %la : i64 to index
-      %lbi = arith.index_cast %lb : i64 to index
-      %na = trikeshed.slice %img[%oai, %lai] : !s -> !s
-      %nb = trikeshed.slice %img[%obi, %lbi] : !s -> !s
-      %c = trikeshed.compare %na, %nb unsigned : !s, !s
-      trikeshed.yield %c : i32
-    }
-    %ms = trikeshed.size %srt : !s64
+    %ms = arith.index_cast %m64x : i64 to index
     %pos = trikeshed.series %ms : !s64 {
     ^bb0(%i: index):
       %i64y = arith.index_cast %i : index to i64
@@ -3730,27 +3919,9 @@ func.func private @nxsi_emit(%offs: !llvm.ptr, %n: i64, %ctx: !llvm.ptr, %ctx2: 
       } else {
         %ki = arith.index_cast %k : i64 to index
         %kp = arith.subi %ki, %i1 : index
-        %ea = trikeshed.at %srt[%kp] : !s64, index -> i64
-        %eb = trikeshed.at %srt[%ki] : !s64, index -> i64
-        %eai = arith.index_cast %ea : i64 to index
-        %ebi = arith.index_cast %eb : i64 to index
-        %ya = trikeshed.at %ov[%eai] : !s64, index -> i64
-        %yb = trikeshed.at %ov[%ebi] : !s64, index -> i64
-        %ua = func.call @nxsi_w(%ya) : (i64) -> i64
-        %ub = func.call @nxsi_w(%yb) : (i64) -> i64
-        %ma0 = arith.shrui %ua, %c16 : i64
-        %mb0 = arith.shrui %ub, %c16 : i64
-        %ma = arith.andi %ma0, %c65535 : i64
-        %mb = arith.andi %mb0, %c65535 : i64
-        %pa = arith.addi %ya, %c24 : i64
-        %pb = arith.addi %yb, %c24 : i64
-        %pai = arith.index_cast %pa : i64 to index
-        %pbi = arith.index_cast %pb : i64 to index
-        %mai = arith.index_cast %ma : i64 to index
-        %mbi = arith.index_cast %mb : i64 to index
-        %sa = trikeshed.slice %img[%pai, %mai] : !s -> !s
-        %sb = trikeshed.slice %img[%pbi, %mbi] : !s -> !s
-        %cc = trikeshed.compare %sa, %sb unsigned : !s, !s
+        %ya = trikeshed.at %srt[%kp] : !s64, index -> i64
+        %yb = trikeshed.at %srt[%ki] : !s64, index -> i64
+        %cc = func.call @nxsi_cmp_names(%ya, %yb) : (i64, i64) -> i32
         %ne = arith.cmpi ne, %cc, %z32 : i32
         scf.yield %ne : i1
       }
@@ -3761,9 +3932,7 @@ func.func private @nxsi_emit(%offs: !llvm.ptr, %n: i64, %ctx: !llvm.ptr, %ctx2: 
     ^bb0(%k: index):
       %u = trikeshed.at %uniq[%k] : !s64, index -> i64
       %ui = arith.index_cast %u : i64 to index
-      %ee = trikeshed.at %srt[%ui] : !s64, index -> i64
-      %eei = arith.index_cast %ee : i64 to index
-      %y = trikeshed.at %ov[%eei] : !s64, index -> i64
+      %y = trikeshed.at %srt[%ui] : !s64, index -> i64
       %ty = func.call @nxsi_w(%y) : (i64) -> i64
       %ly0 = arith.shrui %ty, %c16 : i64
       %ly = arith.andi %ly0, %c65535 : i64
@@ -4079,6 +4248,17 @@ func.func @nixsi_names(%f: !llvm.ptr, %referring: i64, %ctx: !llvm.ptr, %ctx2: !
   %lp = func.call @nxsi_buf(%c8, %c0) : (i64, i64) -> !llvm.ptr
   func.call @nxsi_emit(%lp, %me, %ctx, %ctx2) : (!llvm.ptr, i64, !llvm.ptr, !llvm.ptr) -> ()
   return
+}
+
+// What the index has done in this process, for its checks (scripts/store-index-check.sh): the times an index was begun
+// again (i 14) and the info files read (i 15).
+func.func @nixsi_count(%i: i64) -> i64 {
+  %c14 = arith.constant 14 : i64
+  %c15 = arith.constant 15 : i64
+  %reads = arith.cmpi eq, %i, %c15 : i64
+  %w = arith.select %reads, %c15, %c14 : i64
+  %v = func.call @nxsi_hg(%w) : (i64) -> i64
+  return %v : i64
 }
 
 // The index told of a change this process made to the directory, when it held the directory as it was before (keep):
