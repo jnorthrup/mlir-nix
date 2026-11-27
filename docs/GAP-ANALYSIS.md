@@ -261,6 +261,60 @@ Each merge, `gap-census.py --seal` on the new master and `--diff` against the pr
   no C++ library linked, the seven Composite checks plain and sanitized with the same funnel statistics as on arm64.
   (The first run read PASS 0, FAIL 0 for mlnixci: build-test.sh named mlnix-os's nixpkgs lib, which Kali does not have,
   so the server exited at start; NIXPKGS_LIB is a setting now.)
+- wave 1 part 6 (2026-11-27, gap/wave1 28b4a17: sha256 d51ee6d, the residue sweep 44cbcd8 + 3fdadec + 96320aa, drain
+  debd0ef; C++ 22,821 -> 22,660, -161; wave 1 since a8d3ae3: 22,822 -> 22,660).  SHA-256 in MLIR with the CPU's SHA-2
+  instructions (Sha256.mlir's buffering and portable rounds, Sha256Arm64.mlir / Sha256X86.mlir one block a call, the form
+  chosen once per process); CommonCrypto and llvm::SHA256 deleted (C++ -25); the Mac and mlnix-os at their libraries'
+  rate, Kali's x86 without SHA-NI on OpenSSL (the portable rounds at half its AVX2 rate); the SHA-NI form verified under
+  qemu -cpu max only.  The census's llvm share rises with it: the hardware rounds are llvm-dialect intrinsics, by design.
+  The residue a conversion leaves, swept for the first time (the skill's vocab-dead.py, cxx-dead.py, bridge-dead.py,
+  mlir-stale-decls.py): header vocabulary no live code named (the Spill body, six CharSeries verbs, Text::putHex,
+  Maybe::or_, iotaN; C++ -127, and -33 of the checks that tested only them), nixstore::jsonEscape and its lowered escape
+  (C++ -9, MLIR -36), eleven mini-luci readers and helpers with ConfixScan's nx_a32 and their stale declarations (MLIR
+  -118); the tools report nothing left at 28b4a17, and a clang -Wunused-* pass over all 37 product sources found nothing
+  in the repository's own files (it cannot see headers or external linkage: hence the tools).  G2's root: a drain of
+  plain elements is one llvm.intr.memmove (moveBlock, C++ +33, paid inside the part), so Rows' sort row moves are drains
+  at parity (5.368 -> 5.369 G and 7.092 -> 7.087 G; as element loops they had measured 15.98 G and 20.47 G) and
+  ClusterOps needs no clang flag (cluster phase -3.1%); an instrumented old lowering showed no product drain overlapping
+  ahead of its cells (636 of 640 sites ran, 0 hits).  Gates at 28b4a17: mac-gates (lang 488/488 exact 231 on both
+  schedules, mlir 55/0, prims 121, native-check 125/16/0), the seven Composite checks plain and sanitized on the Mac
+  and on mlnix-os (its first run died with the VM, restarted by OrbStack at load ~200; the rerun passed), mlnix-os
+  build-test (LLVM 22), mlnixci 51 PASS, son wrong 0, numbers-check 31,010,205 comparisons 0 mismatches.
+- queued on top, gated next (2026-11-27): the store index, sidx 8fd7eef cherry-picked as 1b96b68 on branch
+  gap/wave1-sidx (C++ 22,660 -> 22,659).  <stateDir>/info.trie: an append-only mapped file derived from the info files (still the truth, written as
+  before, so older binaries share the store), paths and references keyed by the hash part's first 64 bits, 256-way
+  nodes over leaves sealed as pages of sorted deltas (restarts every 16 rows, a RAW fallback), records holding the info
+  text; staleness by the directory's token and its entries' count and sum, flock between processes, another boot's
+  index rebuilt, untrusted file systems given a per-process index.  Its proofs found and fixed a stale name after a
+  writer killed between a row and its count, and a GC that read every live info file before the index.  Instructions
+  retired, eae7ad5 -> 1b96b68's tree: referrers at 20,000 paths 8.0-10.9 G -> 0.19 G once the index is built; 20
+  deletes at 5,000 paths 38.4 G -> 4.4 G (a process each), 35.5 G -> 0.90 G (one process); a dry GC at 20,000 paths
+  2.2 G after the first; the index is about twice the info files' bytes.  On the combined tree (drains as block moves:
+  StoreIndex.mlir's 22 drains screened statically first, the skill's drain-chains.py, none can overlap): the
+  store-index check (system words, 40,000 page row sets, index seeds with damage and killed writers, no-stamp,
+  no-lock, orphan, uncounted: 0 failures), 594 + 1,244 store commands old/new identical (the --big stores to 20,000
+  paths and a 12,000-referrer hub).  The census pays for it: dialect ops 13.5% -> 12.7% of the product MLIR, bypass
+  53 -> 62 functions (nine StoreIndex functions loop outside the dialect: a sweep after the merge).
+
+## Where the C++ left is, and who holds it (1b96b68: 22,659 code lines)
+
+Wave 1 has cut 0.7% of the C++.  Of an earlier wave that cut 0.6%, the user said "that's adversarial sandbagging", and
+their standing word is to hollow the C++ out to interfaces and constants, pushing it into the trikeshed dialect, new
+dialects and the existing ones not yet used.  By role (scripts/gap-census.py scale 1), with what holds each:
+
+| role | lines | held by |
+|---|---|---|
+| evaluator | 5,460 | another session, now (branch gaps/loop, worktree wt-gaps: Nix 2.35.4's forcing and error wording in lib/Eval/*, include/Nix/Eval.h, tools/mlnix.cpp); its biggest bodies: registerBuiltins 636, registerStoreBuiltins 203, derivationStrict 202, printStats 163, registerBoundary 103 (decision 4), Indexer::index 96, callFunction 86 |
+| MLIR's API | 3,926 | free, with a design first: the dialects' hand-written C++ (NixDialect 580, SonDialect 490, ConfixDialect 483, KursiveDialect 448) and the lowering (CursorLowering about 1,200).  The repository already defines its 105 primops' 11 dialects in IRDL (include/NixDialect/NixPrims.irdl.mlir); IRDL for the rest and PDL for the rewrite patterns are the unused dialects the user means; the lowering itself would lower into calls of a runtime written in MLIR (cluster_order's pattern) |
+| KIF/SUMO | 2,959 | decision 3 |
+| store | 2,682 | free: lanes `stb` (the build and add path) and `stf` (files, paths, hashes, prefetch), hollowing lib/Store to interfaces; the growth callbacks are lane g1land's |
+| checks | 2,270 | shrink with their subjects (the residue tools after each merge) |
+| parser | 2,102 | decision 5 |
+| vocabulary | 1,829 | shrinks with its users |
+| tools | 1,122 | mlnix.cpp (821) with the evaluator's session; mlnix-parse.cpp's main 209, mlnix-kif.cpp's 118 (KIF) |
+
+The old recipe kept "process and file I/O" in C++; the store index (libc from MLIR, with per-system words) and
+mini-luci (liburing from MLIR) retired it.
 
 ## Divergences found on the way (reported, not fixed)
 
@@ -301,6 +355,10 @@ the form timed out, so all five stand open.
    write no answer showed, now killed by fencing each allocation); timing 0.94-0.98x of a8d3ae3 on five JSON workloads.
    Asked again with these numbers at 13:05 (one question); unanswered within the form's minute, so G1 stays parked on
    gap/lanes, the rule's default, until the user's word or cuts in its wave.
+   The wave's cuts came (part 6: -161): with them, G1 on top would leave the wave at +11 since a8d3ae3.  Lane g1land
+   (16:00, from 1b96b68; brief scratch gap/g1land-brief.md) rebases G1, moves the parked JSON printer onto lanes as a
+   single-pass writer and retires the growth callbacks, so that the wave's net stays at or below zero; it stops and
+   reports the numbers if that cannot be done honestly.
 2. **The scanners (G6).**  ConfixScan, LexScan, TomlScan and the readers are the largest bypass rows (confix_scan_nix
    944 non-dialect ops, lx_default 482, the TOML scan 204 + 115 + 74).  The standing rule: a scanner already merged is
    redone only on the user's word; regex goes only to combinators.  kursive2's lexer as a kursive grammar is proven
