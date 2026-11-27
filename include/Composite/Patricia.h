@@ -74,7 +74,7 @@ template <class V> struct Patricia {
   struct Node {
     uint32_t child[2]; // a node's index, or a row's index with kLeaf set
     uint32_t byte;
-    uint8_t other;
+    uint32_t other; // the node's bit cleared out of 0xFF (a word: Patricia.mlir reads four u32 words a node)
   };
   static_assert(sizeof(Node) == 16 && __builtin_offsetof(Node, byte) == 8 && __builtin_offsetof(Node, other) == 12, "Patricia.mlir's !node");
   static_assert(__builtin_offsetof(Row, len) == 8, "Patricia.mlir's row: key@0, len@8");
