@@ -7,19 +7,23 @@
 // can start with room for a reply's head, so that the head is written in front of the body and nothing moves.  What the
 // builder writes besides pieces, a string's escapes, text.mlir makes in TrikeShed's ops, as it makes the query's and the
 // report's replies whole.  A piece is searched and read (a byte's place, a text's place, a decimal, two pieces the same)
-// by reads.mlir's folds, over a view of its bytes (@view, the descriptor the LLVM lowering lays a series out as).
+// by reads.mlir's folds over its bytes as a text: @sr_desc makes the view's descriptor, the caller casts it to a memref
+// and makes the text of it (trikeshed.text), and a view never crosses a return.  The module is lowered by
+// --trikeshed-lower-cursors (the Makefile's TRIKESHED list).
+
+!d = !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+!text = !trikeshed.series<i8>
 
 llvm.func @realloc(!llvm.ptr, i64) -> !llvm.ptr
-llvm.func @free(!llvm.ptr)
-llvm.func @memcpy(!llvm.ptr, !llvm.ptr, i64) -> !llvm.ptr
-// text.mlir's and reads.mlir's C interfaces (TrikeShed's ops)
-llvm.func @_mlir_ciface_json_escape(!llvm.ptr, !llvm.ptr) -> i64
-llvm.func @_mlir_ciface_rd_find(!llvm.ptr, i8) -> i64
-llvm.func @_mlir_ciface_rd_search(!llvm.ptr, !llvm.ptr) -> i64
-llvm.func @_mlir_ciface_rd_number(!llvm.ptr) -> i64
-llvm.func @_mlir_ciface_rd_same(!llvm.ptr, !llvm.ptr) -> i1
+// reads.mlir's, text.mlir's and index.mlir's (TrikeShed's ops; read by plain name, they are not C interfaces here)
+func.func private @rd_find(!text, i8) -> i64
+func.func private @rd_search(!text, !text) -> i64
+func.func private @rd_number(!text) -> i64
+func.func private @json_escape(!text, memref<?xi8>) -> index
 
-// ---- coordinates
+// ---- coordinates: the word itself (TwinPacked's i64: start << 32 | length).  The word stays integer arithmetic: an i64
+// cannot be cast into a !trikeshed.twinpacked inside a function (the conversion leaves it unresolved), and these are the
+// ABI's words that every module passes.
 
 // the piece [s, e)
 func.func @tw(%s: i64, %e: i64) -> i64 {
@@ -72,31 +76,38 @@ func.func @view(%d: !llvm.ptr, %p: !llvm.ptr, %n: i64) {
   return
 }
 
-// ---- bytes where they lie: reads.mlir's folds over a view of them
+// ---- bytes where they lie: reads.mlir's folds over a text of them
 
 func.func @off(%p: !llvm.ptr, %i: i64) -> !llvm.ptr {
   %q = llvm.getelementptr %p[%i] : (!llvm.ptr, i64) -> !llvm.ptr, i8
   return %q : !llvm.ptr
 }
 
-// the n bytes at p + from, as a descriptor in d
-func.func @sr_window(%d: !llvm.ptr, %p: !llvm.ptr, %from: i64, %n: i64) {
+// the n bytes at p + from, as a view's descriptor (a struct: what a function returns; the caller casts it to memref<?xi8>
+// and makes the text of it)
+func.func private @sr_desc(%p: !llvm.ptr, %from: i64, %n: i64) -> !d {
+  %one = arith.constant 1 : i32
   %q = func.call @off(%p, %from) : (!llvm.ptr, i64) -> !llvm.ptr
+  %d = llvm.alloca %one x !d : (i32) -> !llvm.ptr
   func.call @view(%d, %q, %n) : (!llvm.ptr, !llvm.ptr, i64) -> ()
-  return
+  %s = llvm.load %d : !llvm.ptr -> !d
+  return %s : !d
 }
 
 // the piece of a at ta has the bytes of the n bytes at b
 func.func @is(%a: !llvm.ptr, %ta: i64, %b: !llvm.ptr, %n: i64) -> i1 {
-  %one = arith.constant 1 : i32
   %c0 = arith.constant 0 : i64
+  %z = arith.constant 0 : i32
   %s = func.call @tw_s(%ta) : (i64) -> i64
   %la = func.call @tw_n(%ta) : (i64) -> i64
-  %da = llvm.alloca %one x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
-  func.call @sr_window(%da, %a, %s, %la) : (!llvm.ptr, !llvm.ptr, i64, i64) -> ()
-  %db = llvm.alloca %one x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
-  func.call @sr_window(%db, %b, %c0, %n) : (!llvm.ptr, !llvm.ptr, i64, i64) -> ()
-  %r = llvm.call @_mlir_ciface_rd_same(%da, %db) : (!llvm.ptr, !llvm.ptr) -> i1
+  %da = func.call @sr_desc(%a, %s, %la) : (!llvm.ptr, i64, i64) -> !d
+  %ma = builtin.unrealized_conversion_cast %da : !d to memref<?xi8>
+  %xa = trikeshed.text %ma : memref<?xi8> -> !text
+  %db = func.call @sr_desc(%b, %c0, %n) : (!llvm.ptr, i64, i64) -> !d
+  %mb = builtin.unrealized_conversion_cast %db : !d to memref<?xi8>
+  %xb = trikeshed.text %mb : memref<?xi8> -> !text
+  %order = trikeshed.compare %xa, %xb : !text, !text
+  %r = arith.cmpi eq, %order, %z : i32
   return %r : i1
 }
 
@@ -111,13 +122,13 @@ func.func @same(%a: !llvm.ptr, %ta: i64, %b: !llvm.ptr, %tb: i64) -> i1 {
 
 // the first byte b in [from, to), or -1
 func.func @find(%p: !llvm.ptr, %from: i64, %to: i64, %b: i8) -> i64 {
-  %one = arith.constant 1 : i32
   %c0 = arith.constant 0 : i64
   %n0 = arith.subi %to, %from : i64
   %n = arith.maxsi %n0, %c0 : i64
-  %d = llvm.alloca %one x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
-  func.call @sr_window(%d, %p, %from, %n) : (!llvm.ptr, !llvm.ptr, i64, i64) -> ()
-  %i = llvm.call @_mlir_ciface_rd_find(%d, %b) : (!llvm.ptr, i8) -> i64
+  %d = func.call @sr_desc(%p, %from, %n) : (!llvm.ptr, i64, i64) -> !d
+  %dm = builtin.unrealized_conversion_cast %d : !d to memref<?xi8>
+  %xs = trikeshed.text %dm : memref<?xi8> -> !text
+  %i = func.call @rd_find(%xs, %b) : (!text, i8) -> i64
   %r = func.call @sr_placed(%from, %i) : (i64, i64) -> i64
   return %r : i64
 }
@@ -134,7 +145,6 @@ func.func @sr_placed(%from: i64, %i: i64) -> i64 {
 
 // the first place the n bytes at q appear in [from, to), or -1
 func.func @search(%p: !llvm.ptr, %from: i64, %to: i64, %q: !llvm.ptr, %n: i64) -> i64 {
-  %one = arith.constant 1 : i32
   %c0 = arith.constant 0 : i64
   %m1 = arith.constant -1 : i64
   %len = arith.subi %to, %from : i64
@@ -142,11 +152,13 @@ func.func @search(%p: !llvm.ptr, %from: i64, %to: i64, %q: !llvm.ptr, %n: i64) -
   %r = scf.if %short -> (i64) {
     scf.yield %m1 : i64
   } else {
-    %d = llvm.alloca %one x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
-    func.call @sr_window(%d, %p, %from, %len) : (!llvm.ptr, !llvm.ptr, i64, i64) -> ()
-    %dq = llvm.alloca %one x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
-    func.call @sr_window(%dq, %q, %c0, %n) : (!llvm.ptr, !llvm.ptr, i64, i64) -> ()
-    %i = llvm.call @_mlir_ciface_rd_search(%d, %dq) : (!llvm.ptr, !llvm.ptr) -> i64
+    %d = func.call @sr_desc(%p, %from, %len) : (!llvm.ptr, i64, i64) -> !d
+    %dm = builtin.unrealized_conversion_cast %d : !d to memref<?xi8>
+    %xs = trikeshed.text %dm : memref<?xi8> -> !text
+    %dq = func.call @sr_desc(%q, %c0, %n) : (!llvm.ptr, i64, i64) -> !d
+    %qm = builtin.unrealized_conversion_cast %dq : !d to memref<?xi8>
+    %qs = trikeshed.text %qm : memref<?xi8> -> !text
+    %i = func.call @rd_search(%xs, %qs) : (!text, !text) -> i64
     %at = func.call @sr_placed(%from, %i) : (i64, i64) -> i64
     scf.yield %at : i64
   }
@@ -155,13 +167,13 @@ func.func @search(%p: !llvm.ptr, %from: i64, %to: i64, %q: !llvm.ptr, %n: i64) -
 
 // a decimal at [from, to), read as atol reads one: blanks, a minus, digits; the first other byte ends it
 func.func @number(%p: !llvm.ptr, %from: i64, %to: i64) -> i64 {
-  %one = arith.constant 1 : i32
   %c0 = arith.constant 0 : i64
   %n0 = arith.subi %to, %from : i64
   %n = arith.maxsi %n0, %c0 : i64
-  %d = llvm.alloca %one x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
-  func.call @sr_window(%d, %p, %from, %n) : (!llvm.ptr, !llvm.ptr, i64, i64) -> ()
-  %v = llvm.call @_mlir_ciface_rd_number(%d) : (!llvm.ptr) -> i64
+  %d = func.call @sr_desc(%p, %from, %n) : (!llvm.ptr, i64, i64) -> !d
+  %dm = builtin.unrealized_conversion_cast %d : !d to memref<?xi8>
+  %xs = trikeshed.text %dm : memref<?xi8> -> !text
+  %v = func.call @rd_number(%xs) : (!text) -> i64
   return %v : i64
 }
 
@@ -239,9 +251,16 @@ func.func @ob_take() -> !llvm.ptr {
   return %p : !llvm.ptr
 }
 
+// the k bytes at src, drained into the room: the text of them (a view) drained once into the room's view
 func.func @ob_bytes(%src: !llvm.ptr, %k: i64) {
+  %c0 = arith.constant 0 : i64
   %end = func.call @ob_room(%k) : (i64) -> !llvm.ptr
-  %r = llvm.call @memcpy(%end, %src, %k) : (!llvm.ptr, !llvm.ptr, i64) -> !llvm.ptr
+  %ds = func.call @sr_desc(%src, %c0, %k) : (!llvm.ptr, i64, i64) -> !d
+  %sm = builtin.unrealized_conversion_cast %ds : !d to memref<?xi8>
+  %xs = trikeshed.text %sm : memref<?xi8> -> !text
+  %de = func.call @sr_desc(%end, %c0, %k) : (!llvm.ptr, i64, i64) -> !d
+  %into = builtin.unrealized_conversion_cast %de : !d to memref<?xi8>
+  %w = trikeshed.drain %xs, %into : !text, memref<?xi8> -> index
   func.call @ob_used(%k) : (i64) -> ()
   return
 }
@@ -254,20 +273,22 @@ func.func @ob_piece(%base: !llvm.ptr, %t: i64) {
   return
 }
 
-// the piece as the inside of a JSON string: text.mlir's json_escape, written into the room (six bytes a byte at most)
+// the piece as the inside of a JSON string: text.mlir's json_escape (a composition drained once into the room; six bytes
+// a byte at most), of the piece's text
 func.func @ob_esc(%base: !llvm.ptr, %t: i64) {
-  %one = arith.constant 1 : i32
+  %c0 = arith.constant 0 : i64
   %c6 = arith.constant 6 : i64
   %s = func.call @tw_s(%t) : (i64) -> i64
   %n = func.call @tw_n(%t) : (i64) -> i64
   %room = arith.muli %n, %c6 : i64
   %dst = func.call @ob_room(%room) : (i64) -> !llvm.ptr
-  %src = func.call @off(%base, %s) : (!llvm.ptr, i64) -> !llvm.ptr
-  %from = llvm.alloca %one x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
-  func.call @view(%from, %src, %n) : (!llvm.ptr, !llvm.ptr, i64) -> ()
-  %into = llvm.alloca %one x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
-  func.call @view(%into, %dst, %room) : (!llvm.ptr, !llvm.ptr, i64) -> ()
-  %k = llvm.call @_mlir_ciface_json_escape(%from, %into) : (!llvm.ptr, !llvm.ptr) -> i64
-  func.call @ob_used(%k) : (i64) -> ()
+  %ds = func.call @sr_desc(%base, %s, %n) : (!llvm.ptr, i64, i64) -> !d
+  %sm = builtin.unrealized_conversion_cast %ds : !d to memref<?xi8>
+  %xs = trikeshed.text %sm : memref<?xi8> -> !text
+  %de = func.call @sr_desc(%dst, %c0, %room) : (!llvm.ptr, i64, i64) -> !d
+  %into = builtin.unrealized_conversion_cast %de : !d to memref<?xi8>
+  %k = func.call @json_escape(%xs, %into) : (!text, memref<?xi8>) -> index
+  %k64 = arith.index_cast %k : index to i64
+  func.call @ob_used(%k64) : (i64) -> ()
   return
 }

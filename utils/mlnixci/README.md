@@ -63,7 +63,9 @@ at mkForce priority 50, and the page reports what it changes.
   agree are `compare`d, and nothing after the chunk that found it is read), a decimal as atol reads one (`rd_number`:
   three folds), two texts the same (`rd_same`), and an evaluation's errors without its warnings (`rd_kept`: the lines,
   `parts` at '\n', kept by a `where`, then `combineAll`ed).
-- `src/*.mlir` is the rest of the server, written in the func/scf/arith/llvm dialects. The stock MLIR pipeline lowers it,
+- `src/*.mlir` is the rest of the server, written in the func/scf/arith/llvm dialects.  series.mlir and confix.mlir carry
+  trikeshed ops too (text, compare and drain of the byte windows; the cursor's readers are index.mlir's), so they are in
+  the Makefile's TRIKESHED list.  The stock MLIR pipeline lowers it,
   and it links with libc and liburing-ffi only. There is no C++ and no C++ library.
   - `series.mlir`: coordinates into byte series (TrikeShed's TwinPacked: an i64, start << 32 | length, half-open), and
     the reply builder, which leaves room for the head in front of the body; its escapes and digits are text.mlir's, and
