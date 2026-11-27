@@ -1248,7 +1248,13 @@ struct LaneLowering : Lowering<LaneOp> {
     auto f = dyn_cast<func::FuncOp>(op->getParentOp());
     auto cells = converted(types(), op.getType());
     if (!f || !op->getBlock()->isEntryBlock() || cells.size() < 2)
-      return rw.notifyMatchFailure(op, "a lane of integer or float columns is made in its function's entry block");
+      return op.emitOpError("makes a lane of integer or float columns, in the entry block of its function: the lane lives until it returns");
+    SmallVector<Operation *> returns;
+    for (Block &block : f.getBody())
+      if (!block.empty() && isa<func::ReturnOp>(block.back())) returns.push_back(&block.back());
+    for (Operation *r : returns)
+      if (llvm::any_of(r->getOperandTypes(), [](Type t) { return isa<LaneType>(t); }))
+        return op.emitOpError("is in a function that returns a lane: a lane lives in its maker's frame, and is handed down, never back");
     Value zero = cIndex(rw, loc, 0);
     SmallVector<Value> lane;
     for (Type t : cells) lane.push_back(memref::AllocaOp::create(rw, loc, cast<MemRefType>(t)));
@@ -1257,9 +1263,8 @@ struct LaneLowering : Lowering<LaneOp> {
       Value first = memref::AllocaOp::create(rw, loc, MemRefType::get({kLaneFrame}, c.page));
       store(rw, loc, memref::CastOp::create(rw, loc, c.dir, first), c.box, zero);
     }
-    for (Block &block : f.getBody()) {
-      if (block.empty() || !isa<func::ReturnOp>(block.back())) continue;
-      rw.setInsertionPoint(&block.back());
+    for (Operation *r : returns) {
+      rw.setInsertionPoint(r);
       Value n = load(rw, loc, lane[0], zero);
       for (LaneColumn c : ArrayRef<Value>(lane).drop_front()) {
         c.pages(rw, loc, n, [&](Value page, Value) { manual(memref::DeallocOp::create(rw, loc, page)); });
@@ -1277,10 +1282,10 @@ struct AppendLowering : Lowering<AppendOp> {
     Location loc = op.getLoc();
     ValueRange lane = a.getLane();
     ArrayRef<ValueRange> cells = a.getCells();
-    if (cells.size() + 1 != lane.size()) return rw.notifyMatchFailure(op, "append takes one cell a column");
+    bool fits = cells.size() + 1 == lane.size();
     for (auto [box, cell] : llvm::zip(lane.drop_front(), cells))
-      if (cell.size() != 1 || cell[0].getType() != LaneColumn(box).page.getElementType())
-        return rw.notifyMatchFailure(op, "append takes each column's cell, of the column's type");
+      fits = fits && cell.size() == 1 && cell[0].getType() == LaneColumn(box).page.getElementType();
+    if (!fits) return op.emitOpError("takes one cell a column of its lane, of the column's type");
     Value zero = cIndex(rw, loc, 0), n = load(rw, loc, lane[0], zero);
     for (auto [box, cell] : llvm::zip(lane.drop_front(), cells)) {
       LaneColumn c(box);
@@ -1307,8 +1312,8 @@ struct LaneAtLowering : Lowering<AtOp> {
   using Lowering::Lowering;
   LogicalResult matchAndRewrite(AtOp op, OneToNOpAdaptor a, ConversionPatternRewriter &rw) const override {
     ValueRange lane = a.getSeries();
-    if (!isa<LaneType>(op.getSeries().getType()) || lane.size() != 2 || a.getIndex().size() != 1)
-      return rw.notifyMatchFailure(op, "at reads a lane of one column (trikeshed.take gives one)");
+    if (!isa<LaneType>(op.getSeries().getType())) return failure();
+    if (lane.size() != 2 || a.getIndex().size() != 1) return op.emitOpError("reads a lane of one column (trikeshed.take gives one)");
     auto [page, at] = LaneColumn(lane[1]).cell(rw, op.getLoc(), toIndex(rw, op.getLoc(), a.getIndex()[0]));
     rw.replaceOp(op, load(rw, op.getLoc(), page, at));
     return success();
@@ -1321,8 +1326,9 @@ struct LaneTakeLowering : Lowering<TakeOp> {
   LogicalResult matchAndRewrite(TakeOp op, OneToNOpAdaptor a, ConversionPatternRewriter &rw) const override {
     ValueRange lane = a.getOf();
     APInt c;
-    if (!isa<LaneType>(op.getOf().getType()) || !matchPattern(op.getColumn(), m_ConstantInt(&c)) || c.getZExtValue() + 1 >= lane.size())
-      return rw.notifyMatchFailure(op, "a lane's column is taken by a constant index");
+    if (!isa<LaneType>(op.getOf().getType())) return failure();
+    if (!matchPattern(op.getColumn(), m_ConstantInt(&c)) || c.getZExtValue() + 1 >= lane.size())
+      return op.emitOpError("takes a lane's column by a constant index");
     replaceWith(rw, op, ValueRange{lane[0], lane[1 + c.getZExtValue()]});
     return success();
   }
@@ -1335,7 +1341,7 @@ struct AnchorLowering : Lowering<AnchorOp> {
     Location loc = op.getLoc();
     ValueRange lane = a.getCells();
     if (lane.size() != 2 || !isa<IntegerType>(LaneColumn(lane[1]).page.getElementType()))
-      return rw.notifyMatchFailure(op, "an anchor's cells are a lane of one integer column");
+      return op.emitOpError("anchors in a lane of one integer column (a cell never forced is 0)");
     LaneColumn c(lane[1]);
     Value i = a.getIndex()[0];
     auto [page, at] = c.cell(rw, loc, i);
@@ -1347,7 +1353,7 @@ struct AnchorLowering : Lowering<AnchorOp> {
     rw.setInsertionPointToStart(read.elseBlock());
     auto minted = inlineBody(rw, types(), op.getMint(), ValueRange{i}.take_front(op.getMint().front().getNumArguments()));
     if (failed(minted) || minted->size() != 1 || (*minted)[0].getType() != cell.getType())
-      return rw.notifyMatchFailure(op, "an anchor's mint yields the cell");
+      return op.emitOpError("has a mint that yields the cell, of the lane's column type");
     auto [pageNow, atNow] = c.cell(rw, loc, i);
     store(rw, loc, (*minted)[0], pageNow, atNow);
     scf::YieldOp::create(rw, loc, *minted);
@@ -1363,8 +1369,9 @@ struct LaneDrainLowering : Lowering<DrainOp> {
   LogicalResult matchAndRewrite(DrainOp op, OneToNOpAdaptor a, ConversionPatternRewriter &rw) const override {
     Location loc = op.getLoc();
     ValueRange lane = a.getSeries();
-    if (!isa<LaneType>(op.getSeries().getType()) || lane.size() != 2 || (op.getInto() && !isa<MemRefType>(a.getInto()[0].getType())))
-      return rw.notifyMatchFailure(op, "a lane of one column drains into a memref, or into a buffer of its own");
+    if (!isa<LaneType>(op.getSeries().getType())) return failure();
+    if (lane.size() != 2 || (op.getInto() && !isa<MemRefType>(a.getInto()[0].getType())))
+      return op.emitOpError("drains a lane of one column, into a memref or into a buffer of its own");
     LaneColumn c(lane[1]);
     Value n = load(rw, loc, lane[0], cIndex(rw, loc, 0));
     Value into = op.getInto() ? a.getInto()[0] : newSeriesBuffer(rw, loc, c.page.getElementType(), n);
