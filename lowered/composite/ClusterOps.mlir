@@ -53,8 +53,8 @@ func.func private @mmx_row(%base: !llvm.ptr, %rs: i64, %i: i32) -> !llvm.ptr {
 
 // Copy one row: a drain of the row's series into the destination's, as words when rs is a whole number of words (the
 // cluster's 16 B rows are a constant two-word drain), else bytes.  A row whole in words is 8-aligned: the C++ rows are
-// (MinMaxHeap.h asserts alignof >= 8 for them), so the word lane needs no test per copy.  A row is never copied onto
-// itself: the callers that could do so skip it (LLVM would turn the byte drain into a memcpy, undefined for overlap).
+// (MinMaxHeap.h asserts alignof >= 8 for them), so the word lane needs no test per copy.  A drain is a block move that
+// reads the row whole before it writes, so a row copied onto itself (a pop of the last row) stays what it was.
 func.func private @mmx_copy(%dst: !llvm.ptr, %src: !llvm.ptr, %rs: i64) {
   %c0 = arith.constant 0 : i64
   %c3 = arith.constant 3 : i64
@@ -359,10 +359,7 @@ func.func @mmx_heap_pop_min(%base: !llvm.ptr, %np: !llvm.ptr, %rs: i64, %less: !
   func.call @mmx_copy(%out, %base, %rs) : (!llvm.ptr, !llvm.ptr, i64) -> ()
   %nm1 = arith.subi %n, %c1 : i32
   %last = func.call @mmx_row(%base, %rs, %nm1) : (!llvm.ptr, i64, i32) -> !llvm.ptr
-  %moved = arith.cmpi ne, %nm1, %c0 : i32
-  scf.if %moved {
-    func.call @mmx_copy(%base, %last, %rs) : (!llvm.ptr, !llvm.ptr, i64) -> ()
-  }
+  func.call @mmx_copy(%base, %last, %rs) : (!llvm.ptr, !llvm.ptr, i64) -> ()
   llvm.store %nm1, %np : i32, !llvm.ptr
   %gt1 = arith.cmpi ugt, %nm1, %c1 : i32
   scf.if %gt1 {
@@ -385,10 +382,7 @@ func.func @mmx_heap_pop_max(%base: !llvm.ptr, %np: !llvm.ptr, %rs: i64, %less: !
     func.call @mmx_copy(%out, %mp, %rs) : (!llvm.ptr, !llvm.ptr, i64) -> ()
     %nm1 = arith.subi %n, %c1 : i32
     %last = func.call @mmx_row(%base, %rs, %nm1) : (!llvm.ptr, i64, i32) -> !llvm.ptr
-    %moved = arith.cmpi ne, %m, %nm1 : i32
-    scf.if %moved {
-      func.call @mmx_copy(%mp, %last, %rs) : (!llvm.ptr, !llvm.ptr, i64) -> ()
-    }
+    func.call @mmx_copy(%mp, %last, %rs) : (!llvm.ptr, !llvm.ptr, i64) -> ()
     llvm.store %nm1, %np : i32, !llvm.ptr
     %below = arith.cmpi ult, %m, %nm1 : i32
     scf.if %below {
@@ -431,10 +425,7 @@ func.func @mmx_peg_pop(%pb: !llvm.ptr, %pnp: !llvm.ptr, %rs: i64, %less: !llvm.p
   func.call @mmx_copy(%out, %mp, %rs) : (!llvm.ptr, !llvm.ptr, i64) -> ()
   %nm1 = arith.subi %pn, %c1 : i32
   %lastRow = func.call @mmx_row(%pb, %rs, %nm1) : (!llvm.ptr, i64, i32) -> !llvm.ptr
-  %moved = arith.cmpi ne, %m, %nm1 : i32
-  scf.if %moved {
-    func.call @mmx_copy(%mp, %lastRow, %rs) : (!llvm.ptr, !llvm.ptr, i64) -> ()
-  }
+  func.call @mmx_copy(%mp, %lastRow, %rs) : (!llvm.ptr, !llvm.ptr, i64) -> ()
   llvm.store %nm1, %pnp : i32, !llvm.ptr
   return
 }

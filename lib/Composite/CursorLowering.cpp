@@ -1,8 +1,8 @@
 //===- CursorLowering.cpp - TrikeShed's series and cursor ops as loops over buffers ----------------------------------===//
 //
-// `trikeshed-lower-cursors`: the ops of borg.trikeshed.lib that a query is written in, lowered to scf, arith and memref, so
-// the stock pipeline takes them on to LLVM.  The laws are the ones TrikeShed.td states for each op; this is one way to keep
-// them with buffers.
+// `trikeshed-lower-cursors`: the ops of borg.trikeshed.lib that a query is written in, lowered to scf, arith and memref (and
+// a drain's block move to llvm.intr.memmove), so the stock pipeline takes them on to LLVM.  The laws are the ones
+// TrikeShed.td states for each op; this is one way to keep them with buffers.
 //
 //   !trikeshed.series<T>            memref<?xT, strided<[1], offset: ?>>: a series is materialised where it is made
 //                                   (series, alpha, where, project, sorted); a slice is a view at an offset
@@ -28,7 +28,8 @@
 //   j, first, second                shifts of the word a packed pair is (a bitcast more for a float half); the halves
 //                                   themselves where the pair is split
 //   facet(c, k) {col -> r}          the region with col = column(c, k)
-//   drain(xs, into)                 a loop storing xs into `into`; the result is size(xs)
+//   drain(xs, into)                 one block move of xs into `into` (llvm.intr.memmove: xs is read whole before the cells
+//                                   are written); a loop of stores where the elements are not plain; the result is size(xs)
 //   combine(a, b, ..)               Combine.kt's view, rewritten before the conversion (Combine.kt's views, below):
 //   combineAll(n) {k -> part}       its size the parts' sizes added, its drain the parts' drains in turn, and a buffer
 //                                   only where something reads it by index
@@ -58,6 +59,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Func/Transforms/FuncConversions.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Transforms/Patterns.h"
@@ -148,6 +150,45 @@ Value load(OpBuilder &b, Location loc, Value buffer, Value i) {
 }
 void store(OpBuilder &b, Location loc, Value v, Value buffer, Value i) {
   memref::StoreOp::create(b, loc, v, buffer, ValueRange{toIndex(b, loc, i)});
+}
+
+/// The bytes of one element of `t` where a block of them can be moved as bytes, every bit of each its value: an integer
+/// or a float of 1, 2, 4 or 8 bytes, or an index (a word).  Else 0: such an element is moved by a load and a store.
+unsigned plainBytes(Type t) {
+  if (t.isIndex()) return kWordBits / 8;
+  if (!isa<IntegerType, FloatType>(t)) return 0;
+  unsigned bits = t.getIntOrFloatBitWidth();
+  return bits >= 8 && bits <= kWordBits && llvm::isPowerOf2_32(bits) ? bits / 8 : 0;
+}
+
+/// `count` elements moved from `src` to `dst` as ONE block, each side from its offset on (none: from its first element):
+/// llvm.intr.memmove between the two addresses (a buffer's aligned pointer and the offset its descriptor holds).  The
+/// elements are read whole before the cells are written, a drain's value semantics, so the two may overlap either way.
+/// A count that is constant where the series is made is a constant length once the dims fold (--canonicalize), and
+/// clang then moves a small block in registers.  False, with nothing made, where the two are not 1-D buffers of unit
+/// stride of one plain element: the caller's element loop stays.
+bool moveBlock(OpBuilder &b, Location loc, Value src, Value srcOffset, Value dst, Value dstOffset, Value count) {
+  auto from = dyn_cast<MemRefType>(src.getType()), to = dyn_cast<MemRefType>(dst.getType());
+  auto unit = [](MemRefType t) {
+    SmallVector<int64_t> strides;
+    int64_t offset;
+    return t.getRank() == 1 && !t.getMemorySpace() && succeeded(t.getStridesAndOffset(strides, offset)) && strides[0] == 1;
+  };
+  unsigned bytes = from && to && from.getElementType() == to.getElementType() && unit(from) && unit(to) ? plainBytes(from.getElementType()) : 0;
+  if (!bytes) return false;
+  Type i64 = b.getI64Type(), ptr = LLVM::LLVMPointerType::get(b.getContext());
+  auto address = [&](Value buffer, Value at) -> Value {
+    Value base = arith::IndexCastUIOp::create(b, loc, i64, memref::ExtractAlignedPointerAsIndexOp::create(b, loc, buffer));
+    Value offset = memref::ExtractStridedMetadataOp::create(b, loc, buffer).getOffset();
+    if (at) offset = arith::AddIOp::create(b, loc, offset, at);
+    Value first = LLVM::IntToPtrOp::create(b, loc, ptr, ValueRange{base});
+    return LLVM::GEPOp::create(b, loc, ptr, b.getIntegerType(8 * bytes), first,
+                               ArrayRef<LLVM::GEPArg>{arith::IndexCastOp::create(b, loc, i64, offset).getResult()});
+  };
+  Value read = address(src, srcOffset), written = address(dst, dstOffset);
+  Value length = arith::MulIOp::create(b, loc, arith::IndexCastOp::create(b, loc, i64, count), cInt(b, loc, i64, bytes));
+  LLVM::MemmoveOp::create(b, loc, written, read, length, /*isVolatile=*/false);
+  return true;
 }
 
 /// The element type of a series after conversion (null where the element is a pair that lies apart).
@@ -1142,16 +1183,20 @@ void populateEitherLowering(CursorTypes &types, RewritePatternSet &patterns, Con
                EitherCastLowering>(types, patterns.getContext());
 }
 
+/// drain(xs, into): the elements of xs moved into the cells as one block (moveBlock); stored one by one only where they
+/// are not plain elements in buffers of unit stride.  The result is size(xs).
 struct DrainLowering : Lowering<DrainOp> {
   using Lowering::Lowering;
   LogicalResult matchAndRewrite(DrainOp op, OpAdaptor a, ConversionPatternRewriter &rw) const override {
     Location loc = op.getLoc();
     if (!isa<MemRefType>(a.getInto().getType())) return rw.notifyMatchFailure(op, "drain needs a memref to write into");
     Value xs = a.getSeries(), n = length(rw, loc, xs);
-    auto loop = scf::ForOp::create(rw, loc, cIndex(rw, loc, 0), n, cIndex(rw, loc, 1));
-    rw.setInsertionPoint(loop.getBody()->getTerminator());
-    store(rw, loc, load(rw, loc, xs, loop.getInductionVar()), a.getInto(), loop.getInductionVar());
-    rw.setInsertionPointAfter(loop);
+    if (!moveBlock(rw, loc, xs, {}, a.getInto(), {}, n)) {
+      auto loop = scf::ForOp::create(rw, loc, cIndex(rw, loc, 0), n, cIndex(rw, loc, 1));
+      rw.setInsertionPoint(loop.getBody()->getTerminator());
+      store(rw, loc, load(rw, loc, xs, loop.getInductionVar()), a.getInto(), loop.getInductionVar());
+      rw.setInsertionPointAfter(loop);
+    }
     Type end = op.getEnd().getType();
     rw.replaceOp(op, end.isIndex() ? n : arith::IndexCastOp::create(rw, loc, end, n).getResult());
     return success();
@@ -1343,13 +1388,14 @@ struct LowerCursors : PassWrapper<LowerCursors, OperationPass<ModuleOp>> {
   StringRef getArgument() const final { return "trikeshed-lower-cursors"; }
   StringRef getDescription() const final { return "Lower TrikeShed's series and cursor ops to scf, arith and memref"; }
   void getDependentDialects(DialectRegistry &r) const final {
-    r.insert<arith::ArithDialect, func::FuncDialect, memref::MemRefDialect, scf::SCFDialect>();
+    r.insert<arith::ArithDialect, func::FuncDialect, memref::MemRefDialect, scf::SCFDialect, LLVM::LLVMDialect>();
   }
   void runOnOperation() final {
     MLIRContext *ctx = &getContext();
     CursorTypes types;
     ConversionTarget target(*ctx);
     target.addLegalDialect<arith::ArithDialect, memref::MemRefDialect, scf::SCFDialect>();
+    target.addLegalOp<LLVM::IntToPtrOp, LLVM::GEPOp, LLVM::MemmoveOp>(); // moveBlock's: a block's two addresses and its move
     target.addIllegalDialect<TrikeShedDialect>();
     target.addLegalOp<KeyOp>(); // read by the patterns, erased below
     target.addLegalOp<ClusterOrderOp>(); // trikeshed-lower-clusters' business
