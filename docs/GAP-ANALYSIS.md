@@ -209,3 +209,9 @@ Each merge, `gap-census.py --seal` on the new master and `--diff` against the pr
   mlnix-parse over 39,646 nixpkgs files identical.  Time: instructions retired on the bench workloads -0.17%
   (nixos-toplevel) and -0.20% (nixpkgs-73), outputs identical (scripts/instr-ab.sh).  Left: narw_node and narr_node
   (they need a callback-order harness first) and nixstore_ts_samecontent (a walk that stops at its first mismatch).
+
+## Divergences found on the way (reported, not fixed)
+
+- `mlnix store --gc --print-live` prints the dead paths: tools/mlnix.cpp (cmdStore's flag scan, 0d02917 L581) reads
+  `--print-live` as `--print-dead`.  Nix's `nix-store --gc --print-live` prints the live paths, the roots' closure.
+  Found by the gc lane's store proof (2026-11-27).
