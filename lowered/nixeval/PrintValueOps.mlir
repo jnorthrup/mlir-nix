@@ -2,7 +2,7 @@
 // EvalState::printValue and the TracePrinter (printValueForTrace), the integer digits, and the elision counts.
 // The C++ keeps the recursion / forcing / seen-table (firstTime/WordTable) / depth guard and the attribute-name
 // sorting; the bytes are here, drained from a constant word table (trikeshed.slice / text / at / drain), the digits
-// a fold over the powers of ten (as PrintOps.mlir's nixev_ts_int), the elision one combine.  One entry
+// a fold over the powers of ten, the elision one combine.  One entry
 // nixev_ts_pv(kind, a, b, into, cap) writes into room the caller reserved and returns how many it wrote:
 //   kind 0: the fixed word a (id into the table below)
 //   kind 1: the integer a in decimal (a sign and at most 19 digits)

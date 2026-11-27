@@ -474,8 +474,6 @@ void createDirs(std::string_view path);
 void deletePathRecursive(std::string_view path);
 composite::Text baseNameOf(std::string_view p);
 composite::Text dirOf(std::string_view p);
-/// Number formatting as done by nlohmann::json for doubles.
-composite::Text jsonFloat(double d);
 /// Run a program, capturing stdout. Returns exit status.
 int runProgram(std::string_view prog, const composite::MutableSeries<composite::Text> &args,
                composite::Text *out, const composite::Text *input = nullptr,

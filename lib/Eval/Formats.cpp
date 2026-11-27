@@ -33,33 +33,10 @@ static void checkUTF8(std::string_view s) {
                                  hex[byte >> 4], hex[byte & 15]));
 }
 
-namespace {
-struct CallDepth {
-  unsigned &d;
-  CallDepth(EvalState &st, PosPtr pos) : d(st.callDepth) {
-    if (++d > st.settings.maxCallDepth) {
-      --d;
-      throw StackOverflowError("stack overflow; max-call-depth exceeded", pos);
-    }
-  }
-  ~CallDepth() { --d; }
-};
-} // namespace
-
-// The byte emission of JSON (an integer's digits, a string's escaping) is hollowed into lowered/nixeval/PrintOps.mlir
-// (trikeshed.fold / series / combine / combineAll / slice / drain), lowered by --trikeshed-lower-cursors and linked into
-// NixEval.  Each entry drains into room reserved here and returns how many bytes it wrote; the count is adopted as
-// appendAll adopts a copied run (the cells are plain chars, already written).
-extern "C" {
-size_t nixev_ts_int(int64_t x, char *into, size_t cap);
-size_t nixev_ts_escape(const char *p, size_t n, char *into, size_t cap);
-}
-
-void JsonOut::putInt(int64_t x) {
-  uint32_t off = bytes.size();
-  bytes.reserve(size_t(off) + 21); // a sign and at most 19 digits
-  bytes.n += uint32_t(nixev_ts_int(x, bytes.data() + off, 21));
-}
+// A string's JSON escaping (quotes, Nix's escapes, \u00xx) for a key written apart from its value (derivationStrict's
+// __structuredAttrs members) is lowered/nixeval/PrintOps.mlir's nixev_ts_escape: it drains into room reserved here and
+// returns how many bytes it wrote; the count is adopted as appendAll adopts a copied run.
+extern "C" size_t nixev_ts_escape(const char *p, size_t n, char *into, size_t cap);
 
 void JsonOut::putString(std::string_view s) {
   uint32_t off = bytes.size();
@@ -68,69 +45,78 @@ void JsonOut::putString(std::string_view s) {
   bytes.n += uint32_t(nixev_ts_escape(s.data(), s.size(), bytes.data() + off, room));
 }
 
+// A value's JSON is lowered/nixeval/JsonWrite.mlir, whole: the walk (the depth guard, when a cell is forced, a set's
+// members in the byte order of their names, the stitching, the escapes, the digits), filled a piece at a time into a
+// lane (trikeshed's MutableSeries) and drained ONCE into `out`, in room of the text's exact size (nixev_jw_room).  Here:
+// what the walk asks of the evaluator, and the errors.  No callback throws through the walk's frames: one that fails
+// keeps its error in `err` and says so, the walk winds up (each open set and list adds its trace, innermost first, as
+// their catch blocks did; the lane's pages go back), and the error is thrown again here.
+namespace {
+struct JsonWalk {
+  EvalState *st;
+  NixStringContext *ctx;
+  JsonOut *out;
+  std::exception_ptr err;
+  composite::Text kept; // the latest text made for the walk (a copied path's name, a __toString's result), until it is written
+};
+template <class F> int64_t jsonKeep(JsonWalk *c, F f) {
+  try {
+    f();
+    return 0;
+  } catch (...) {
+    c->err = std::current_exception();
+    return 1;
+  }
+}
+} // namespace
+extern "C" {
+int64_t nixev_ts_json(JsonWalk *c, Value *v, PosPtr pos, unsigned *depth, uint64_t limit, uint64_t flags);
+int64_t nixev_jw_force(JsonWalk *c, Value *v, PosPtr pos) { return jsonKeep(c, [&] { c->st->forceValue(*v, pos); }); }
+int64_t nixev_jw_string(JsonWalk *c, Value *v) { return jsonKeep(c, [&] { c->st->copyContext(*v, *c->ctx), checkUTF8(v->sv()); }); }
+int64_t nixev_jw_path(JsonWalk *c, Value *v, uint64_t *w) {
+  return jsonKeep(c, [&] { c->kept = c->st->copyPathToStore(*c->ctx, v->pathView()), w[0] = uint64_t(c->kept.data()), w[1] = c->kept.size(); });
+}
+/// A set: 1 its __toString's text (w: the bytes, their count), 2 its outPath (w: the value, its position), 0 its members.
+int64_t nixev_jw_attrs(JsonWalk *c, Value *v, uint64_t *w) {
+  int64_t kind = 0;
+  return jsonKeep(c, [&] {
+    if (auto s = c->st->tryAttrsToString(*v, *c->ctx, false, false)) c->kept = composite::mv(*s), w[0] = uint64_t(c->kept.data()), w[1] = c->kept.size(), kind = 1;
+    else if (const Attr *o = v->attrs->get(c->st->s.outPath)) w[0] = uint64_t(o->value), w[1] = uint64_t(c->st->positionOf(*o)), kind = 2;
+  }) ? -1 : kind;
+}
+void nixev_jw_syms(JsonWalk *c, uint64_t *w) { w[0] = uint64_t(c->st->symbols.prefix.data()), w[1] = uint64_t(c->st->symbols.names.data()); }
+PosPtr nixev_jw_row(JsonWalk *c, const Attr *a, uint64_t *w) {
+  llvm::StringRef name = c->st->symbols[a->name];
+  w[0] = uint64_t(name.data()), w[1] = name.size();
+  return c->st->positionOf(*a);
+}
+/// The error of a value that has no JSON, or (no value) of a walk past the depth's limit.
+int64_t nixev_jw_fail(JsonWalk *c, Value *v, PosPtr pos) {
+  return jsonKeep(c, [&] {
+    if (!v) throw StackOverflowError("stack overflow; max-call-depth exceeded", pos);
+    throw EvalError(composite::cat("cannot convert ", EvalState::showType(*v), " to JSON"), pos);
+  });
+}
+void nixev_jw_trace(JsonWalk *c, const Attr *a, uint64_t i, PosPtr pos) {
+  try {
+    std::rethrow_exception(c->err);
+  } catch (EvalError &e) {
+    e.addTrace(pos, a ? composite::cat("while evaluating attribute '", c->st->symbols[a->name], "'") : composite::cat("while evaluating list element at index ", size_t(i)));
+  } catch (...) {
+  }
+}
+char *nixev_jw_room(JsonWalk *c, uint64_t n) {
+  uint32_t at = c->out->bytes.size();
+  c->out->bytes.reserve(size_t(at) + n);
+  c->out->bytes.n += uint32_t(n);
+  return c->out->bytes.data() + at;
+}
+}
+
 void EvalState::printValueAsJSON(JsonOut &out, Value &v, bool strict, NixStringContext &ctx, bool copyToStore,
                                  PosPtr pos) {
-  CallDepth guard(*this, pos);
-  if (strict) forceValue(v, pos);
-  switch (v.type) {
-  case VType::Int: out.putInt(v.integer); break;
-  case VType::Bool: out.put(v.boolean ? "true" : "false"); break;
-  case VType::String:
-    copyContext(v, ctx);
-    checkUTF8(v.sv());
-    out.putString(v.sv());
-    break;
-  case VType::Path:
-    if (copyToStore) out.putString(copyPathToStore(ctx, v.pathView()));
-    else out.putString(v.pathView());
-    break;
-  case VType::Null: out.put("null"); break;
-  case VType::Attrs: {
-    if (auto s2 = tryAttrsToString(v, ctx, false, false)) {
-      out.putString(*s2);
-      break;
-    }
-    if (const Attr *o = v.attrs->get(s.outPath)) {
-      printValueAsJSON(out, *o->value, strict, ctx, copyToStore, positionOf(*o));
-      break;
-    }
-    out.put('{');
-    bool first = true;
-    for (const Attr *a : v.attrs->lexicographicOrder(symbols)) {
-      if (!first) out.put(',');
-      first = false;
-      out.putString(symbols[a->name]);
-      out.put(':');
-      try {
-        printValueAsJSON(out, *a->value, strict, ctx, copyToStore, positionOf(*a));
-      } catch (EvalError &e) {
-        e.addTrace(positionOf(*a), composite::cat("while evaluating attribute '", symbols[a->name], "'"));
-        throw;
-      }
-    }
-    out.put('}');
-    break;
-  }
-  case VType::List:
-    out.put('[');
-    for (size_t i = 0; i < v.listSize(); i++) {
-      if (i) out.put(',');
-      try {
-        printValueAsJSON(out, *v.list.elems[i], strict, ctx, copyToStore, pos);
-      } catch (EvalError &e) {
-        e.addTrace(pos, composite::cat("while evaluating list element at index ", i));
-        throw;
-      }
-    }
-    out.put(']');
-    break;
-  case VType::Float: out.put(nixstore::jsonFloat(v.fpoint)); break;
-  case VType::Thunk: case VType::App: case VType::AttrApp: case VType::Failed: case VType::Blackhole:
-    out.put("null");
-    break;
-  default:
-    throw EvalError(composite::cat("cannot convert ", showType(v), " to JSON"), pos);
-  }
+  JsonWalk c{this, &ctx, &out, {}, {}};
+  if (nixev_ts_json(&c, &v, pos, &callDepth, settings.maxCallDepth, strict | statsEnabled << 1 | copyToStore << 2)) std::rethrow_exception(c.err);
 }
 
 //===----------------------------------------------------------------------===//

@@ -171,12 +171,12 @@ struct PieceContexts {
 
 struct PrimOp;
 
-/// JSON being written: one growing run of bytes (a MutableSeries), strings escaped into it a run at a time, no stream and no string a value.
+/// JSON being written: one run of bytes (a MutableSeries), no stream and no string a value.  A value's text is the lowered
+/// writer's (lowered/nixeval/JsonWrite.mlir, through EvalState::printValueAsJSON): it lands here at its exact size.
 struct JsonOut {
   composite::MutableSeries<char> bytes;
   void put(std::string_view s) { bytes.appendAll(s.data(), uint32_t(s.size())); }
   void put(char c) { bytes.append(c); }
-  void putInt(int64_t x);
   /// `s` as a JSON string: quoted, and escaped as Nix escapes (\" \\ \b \f \n \r \t, \u00xx for the other control bytes).
   void putString(std::string_view s);
   std::string_view view() const { return {bytes.data(), bytes.size()}; }
