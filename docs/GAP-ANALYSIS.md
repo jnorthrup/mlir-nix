@@ -209,6 +209,21 @@ Each merge, `gap-census.py --seal` on the new master and `--diff` against the pr
   mlnix-parse over 39,646 nixpkgs files identical.  Time: instructions retired on the bench workloads -0.17%
   (nixos-toplevel) and -0.20% (nixpkgs-73), outputs identical (scripts/instr-ab.sh).  Left: narw_node and narr_node
   (they need a callback-order harness first) and nixstore_ts_samecontent (a walk that stops at its first mismatch).
+- wave 1 part 4 (2026-11-27, swnar 54f4e5b + swci 3aa1447; C++ +0).  The NAR writer's 14 tokens are one constant blob
+  of framed tokens (a token is a constant slice) and each node header ONE combine drained once (narw_node: 92 non-dialect
+  ops -> 174 ops with 50 dialect, out of the bypass; four helpers deleted); Rows' sort reads its keys through a one-word
+  view.  Dropped by measurement: the sorts' row moves as drains (2.9-3x the instructions of the llvm word moves, and
+  --inline plus the loop-idiom flag did not recover it: G2's row form needs constant-count drains lowered to
+  straight-line moves before row-moving kernels can use it).  Left: the NAR reader (already compare/fold/bounds; a framed
+  compare would change which padding it accepts).  mini-luci's series.mlir and confix.mlir call reads.mlir/index.mlir/
+  text.mlir's trikeshed readers by name (0% -> 7% dialect each).  Repository dialect ops 13.2% -> 13.4%, fill-drain
+  lines 16.8% -> 17.2%; bypass 54 -> 53 functions, 5,696 -> 5,600 ops.  Proof: a NAR callback-order harness (2.76M
+  runs, every callback with its arguments, and the writer against an independent serializer on 1,973 trees), a sort
+  comparison-order harness (17,979 runs, 2,960 throwing), 834 old/new mlnix probes and restores, 5,861 mini-luci
+  replies against the 0d02917 server, each with seeded mutants caught.  Time: instructions retired nixos-toplevel
+  20.07 -> 19.72 G, nixpkgs-73 16.484 -> 16.484 G, `mlnix hash path` over .cache/nixpkgs level (26.98 / 27.00 G; a
+  cold-cache first run read 32.9 G and is not counted).  Census rows of functions are keyed by name since this part, so
+  an edit above a function no longer shows as a removal and an addition.
 
 ## Divergences found on the way (reported, not fixed)
 

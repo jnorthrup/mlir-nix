@@ -264,9 +264,17 @@ def rows_of(c, top, rev):
                 ops = mlir[h]["ops"]; t = sum(ops.values())
                 rows.append((2, kind + " " + h, "dialect ops %", round(100.0 * share(ops, DIALECTS) / max(t, 1), 1)))
     # scale 3: the C++ spans left, and the bypass functions of the product MLIR
+    # Function rows are keyed by file and name, not line, so that a function moved by an edit above it is the same row in
+    # --diff; a name repeated in one file gets #2, #3 in order.
+    def keyed(items, fmt):
+        seen = collections.Counter()
+        for v, p, f in items:
+            seen[(p, f["name"])] += 1
+            k = seen[(p, f["name"])]
+            yield v, fmt(p, f["name"] + (f"#{k}" if k > 1 else ""))
     spans = sorted(((f["code"], p, f) for p, m in cxx.items() if not p.startswith("scripts/") for f in m["fns"]), key=lambda x: -x[0])
-    for code, p, f in spans[:top * 3]:
-        rows.append((3, f"cxx {p}:{f['line']} {f['name']}", "code lines", code))
+    for code, key in keyed(spans[:top * 3], lambda p, n: f"cxx {p} {n}"):
+        rows.append((3, key, "code lines", code))
     # A loop of mostly arith ops (rounds of a digest, a hash's mixing) is a scalar core: the dialects have no op for it, and
     # llvm/arith is accepted there.  The bypass is the rest: loops that walk records outside the dialects.
     looping = [(f["ops"] - f["ts"], p, f) for p, m in mlir.items() for f in m["fns"]
@@ -277,8 +285,8 @@ def rows_of(c, top, rev):
     rows.append((3, "mlir bypass", "ops", sum(b[0] for b in bypass)))
     rows.append((3, "mlir scalar cores", "functions", len(cores)))
     rows.append((3, "mlir scalar cores", "ops", sum(b[0] for b in cores)))
-    for n, p, f in bypass[:top * 2]:
-        rows.append((3, f"mlir {p}:{f['line']} @{f['name']}", "non-dialect ops", n))
+    for n, key in keyed(bypass[:top * 2], lambda p, nm: f"mlir {p} @{nm}"):
+        rows.append((3, key, "non-dialect ops", n))
     # scale 4: the roots
     names = set(git("grep", "-h", "-o", "-w", "-E", r"[A-Z][A-Za-z]*Op", rev, "--", "lib/*.cpp").decode().split())
     used = collections.Counter()
