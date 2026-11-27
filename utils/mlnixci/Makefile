@@ -20,7 +20,7 @@ CHECK_PORT ?= 8081
 
 # series (coordinates, the builder) | confix (the handle of a JSON text's index) | corpus (the columns) | eval (mlnix as a
 # child) | api (the routes) | http (the ring, connections, main)
-MODULES = series confix corpus eval api http
+MODULES = series confix corpus eval http
 LOWER = --convert-scf-to-cf --convert-arith-to-llvm --convert-index-to-llvm --convert-cf-to-llvm --convert-func-to-llvm \
   --reconcile-unrealized-casts
 # after mlnix-opt: buffers freed where they die, a slice's offset (an affine.apply once the metadata is expanded) lowered
@@ -33,8 +33,9 @@ all: $(BUILD)/mlnixci
 # Written in TrikeShed's ops (and confix's index): query.mlir (the facets), src/index.mlir (a JSON text's index),
 # src/columns.mlir (the columns' codes, the rows' order), src/text.mlir (a string's escapes, a number's digits),
 # src/load.mlir (a corpus's columns, made at load) and src/reads.mlir (a text's bytes searched and read)
-# -> scf/arith/memref (mlnix-opt) -> LLVM dialect -> LLVM IR.
-TRIKESHED = index columns text load reads
+# -> scf/arith/memref (mlnix-opt) -> LLVM dialect -> LLVM IR.  src/api.mlir: the routes, whose query_run composes its
+# code counts, selections and offsets in the same ops (api.mlir's header).
+TRIKESHED = index columns text load reads api
 $(BUILD)/query.ll: query.mlir
 	mkdir -p $(BUILD)
 	$(MLNIX_OPT) $< --trikeshed-lower-cursors > $(BUILD)/query.lowered.mlir

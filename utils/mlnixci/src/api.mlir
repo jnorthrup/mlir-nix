@@ -4,6 +4,9 @@
 // A reply is made in the builder after 256 bytes of room, where http.mlir writes its head.  A request's body is read
 // where it lies in its connection's buffer: a JSON body is scanned there and its strings are coordinates into it.  The
 // overlay is a JSON text held whole; an edit is a splice at the coordinates of its index, made into the next text.
+// query_run's compositions (the code counts, the selections laid out column after column, the fixed names) are
+// TrikeShed's: series, fold, combineAll and drain.  The module is lowered by --trikeshed-lower-cursors (the Makefile's
+// TRIKESHED list); its routes' buffers are the caller's (calloc) and reach the ops as memref views (api_mview).
 
 llvm.func @malloc(i64) -> !llvm.ptr
 llvm.func @calloc(i64, i64) -> !llvm.ptr
@@ -19,6 +22,11 @@ llvm.func @_mlir_ciface_report_reply(!llvm.ptr, !llvm.ptr, f64, f64, !llvm.ptr, 
 llvm.func @_mlir_ciface_query_text(!llvm.ptr, !llvm.ptr)
 llvm.func @_mlir_ciface_query_reply(!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f64)
 llvm.func @_mlir_ciface_corpus_query(!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr) -> i64
+
+!s32 = !trikeshed.series<i32>
+!s64 = !trikeshed.series<i64>
+!tp = !trikeshed.twinpacked<i32>
+!pieces = !trikeshed.series<!tp>
 
 func.func private @tw(i64, i64) -> i64
 func.func private @tw_s(i64) -> i64
@@ -535,6 +543,26 @@ llvm.func @_mlir_ciface_rq_query(!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !ll
 llvm.func @_mlir_ciface_rq_pick(!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr) -> i64
 llvm.func @_mlir_ciface_rq_hay_end(!llvm.ptr) -> i64
 llvm.func @_mlir_ciface_rq_match(!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr) -> i64
+// a memref view of n cells at p, as its descriptor struct (a value: the caller casts it where the drain writes)
+func.func private @api_mview(%p: !llvm.ptr, %n: i64) -> !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> {
+  %one = arith.constant 1 : i32
+  %d = llvm.alloca %one x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
+  func.call @view(%d, %p, %n) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+  %s = llvm.load %d : !llvm.ptr -> !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+  return %s : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+}
+
+// the first i32 cell of column fi in a buffer laid out column after column: its start is the coordinate of the column
+// in `at` (combineAll's coordinates, the running sum of the code counts before it)
+func.func private @api_col_cell(%base: !llvm.ptr, %at: !pieces, %fi: i64) -> !llvm.ptr {
+  %fx = arith.index_cast %fi : i64 to index
+  %p = trikeshed.at %at[%fx] : !pieces, index -> !tp
+  %s = trikeshed.first %p : !tp -> i32
+  %s64 = arith.extsi %s : i32 to i64
+  %q = llvm.getelementptr %base[%s64] : (!llvm.ptr, i64) -> !llvm.ptr, i32
+  return %q : !llvm.ptr
+}
+
 func.func @query_run(%bp: !llvm.ptr, %f: !llvm.ptr) {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
@@ -552,43 +580,53 @@ func.func @query_run(%bp: !llvm.ptr, %f: !llvm.ptr) {
   %c19 = arith.constant 19 : i64
   %c40 = arith.constant 40 : i64
   %m1 = arith.constant -1 : i64
+  %c4x = arith.constant 4 : index
+  %c6x = arith.constant 6 : index
   %one32 = arith.constant 1 : i32
+  %on1 = arith.constant 1 : i32
   %false = arith.constant false
   %true = arith.constant true
   %cur = func.call @cur() : () -> !llvm.ptr
   %n = func.call @geti(%cur, %c3) : (!llvm.ptr, i64) -> i64
   %text = func.call @getp(%cur, %c0) : (!llvm.ptr, i64) -> !llvm.ptr
   %n1 = arith.maxsi %n, %c1 : i64
-  // per column: the selection (every code on until a request selects some), the counts, and whether it selects; the
-  // columns' selections and counts one column after another in one buffer each (query_reply reads them so), each
-  // column's code count in kcount
-  %sels = llvm.call @calloc(%c6, %c40) : (i64, i64) -> !llvm.ptr
-  %cnts = llvm.call @calloc(%c6, %c40) : (i64, i64) -> !llvm.ptr
+  // per column: its code count (kcount; kall, their sum, is a fold of the series of the counts), whether the request
+  // selects in it (anys), and the selections and counts laid out column after column in one buffer each (query_reply
+  // reads them so).  The selections start all on (every code selected until a request selects some): a combineAll of
+  // each column's series of ones, drained once into selAll; its coordinates are the columns' offsets, the running sum
+  // of the code counts before each column.
   %anys = llvm.call @calloc(%c6, %c40) : (i64, i64) -> !llvm.ptr
   %kcount = llvm.call @calloc(%c6, %c40) : (i64, i64) -> !llvm.ptr
-  %kall = scf.for %fi = %c0 to %c6 step %c1 iter_args(%acc = %c0) -> (i64) : i64 {
-    %k = func.call @codes(%fi) : (i64) -> i64
-    func.call @st64(%kcount, %fi, %k) : (!llvm.ptr, i64, i64) -> ()
-    %next = arith.addi %acc, %k : i64
-    scf.yield %next : i64
+  %kser = trikeshed.series %c6x : !s64 {
+  ^bb0(%fi0: index):
+    %fi0_64 = arith.index_cast %fi0 : index to i64
+    %kc = func.call @codes(%fi0_64) : (i64) -> i64
+    trikeshed.yield %kc : i64
   }
+  %kall = trikeshed.fold %kser, %c0 : !s64, i64 -> i64 {
+  ^bb0(%acc: i64, %kx: i64):
+    %next = arith.addi %acc, %kx : i64
+    trikeshed.yield %next : i64
+  }
+  %kcS = func.call @api_mview(%kcount, %c6) : (!llvm.ptr, i64) -> !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+  %kcM = builtin.unrealized_conversion_cast %kcS : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> to memref<?xi64>
+  %kdone = trikeshed.drain %kser, %kcM : !s64, memref<?xi64> -> index
   %kall1 = arith.maxsi %kall, %c1 : i64
   %selAll = llvm.call @calloc(%kall1, %c4) : (i64, i64) -> !llvm.ptr
   %cntAll = llvm.call @calloc(%kall1, %c4) : (i64, i64) -> !llvm.ptr
-  %kend = scf.for %fi = %c0 to %c6 step %c1 iter_args(%at = %c0) -> (i64) : i64 {
-    %k = func.call @ld64(%kcount, %fi) : (!llvm.ptr, i64) -> i64
-    %sel = llvm.getelementptr %selAll[%at] : (!llvm.ptr, i64) -> !llvm.ptr, i32
-    scf.for %c = %c0 to %k step %c1 : i64 {
-      func.call @st32(%sel, %c, %c1) : (!llvm.ptr, i64, i64) -> ()
+  %ones, %selAt = trikeshed.combineAll %c6x : !s32, !pieces {
+  ^bb0(%fi1: index):
+    %k1_64 = trikeshed.at %kser[%fi1] : !s64, index -> i64
+    %k1 = arith.index_cast %k1_64 : i64 to index
+    %on = trikeshed.series %k1 : !s32 {
+    ^bb0(%j: index):
+      trikeshed.yield %on1 : i32
     }
-    %cnt = llvm.getelementptr %cntAll[%at] : (!llvm.ptr, i64) -> !llvm.ptr, i32
-    %ps = llvm.getelementptr %sels[%fi] : (!llvm.ptr, i64) -> !llvm.ptr, !llvm.ptr
-    llvm.store %sel, %ps : !llvm.ptr, !llvm.ptr
-    %pc = llvm.getelementptr %cnts[%fi] : (!llvm.ptr, i64) -> !llvm.ptr, !llvm.ptr
-    llvm.store %cnt, %pc : !llvm.ptr, !llvm.ptr
-    %next = arith.addi %at, %k : i64
-    scf.yield %next : i64
+    trikeshed.yield %on : !s32
   }
+  %selS = func.call @api_mview(%selAll, %kall1) : (!llvm.ptr, i64) -> !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+  %selM = builtin.unrealized_conversion_cast %selS : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> to memref<?xi32>
+  %sdone = trikeshed.drain %ones, %selM : !s32, memref<?xi32> -> index
   // the body, through its index (request.mlir's rq_query): the select's row, the text searched for, offset and limit;
   // then each column's selection (rq_pick: the select's array for the column, its elements against the codes' names)
   %i0 = arith.constant 0 : i32
@@ -617,19 +655,23 @@ func.func @query_run(%bp: !llvm.ptr, %f: !llvm.ptr) {
   %textLen = arith.addi %tlen0, %c7 : i64
   // the fixed columns' codes' names: whatif's same and changed (names 6, 7), match's no and yes (8, 9)
   %fixed = llvm.alloca %one32 x !llvm.array<4 x i64> : (i32) -> !llvm.ptr
-  scf.for %c = %c0 to %c4 step %c1 : i64 {
-    %nk = arith.addi %c6, %c : i64
-    %np = func.call @name_piece(%nk) : (i64) -> i64
-    func.call @st64(%fixed, %c, %np) : (!llvm.ptr, i64, i64) -> ()
+  %fixedS = trikeshed.series %c4x : !s64 {
+  ^bb0(%fc: index):
+    %fc64 = arith.index_cast %fc : index to i64
+    %nk = arith.addi %c6, %fc64 : i64
+    %np64 = func.call @name_piece(%nk) : (i64) -> i64
+    trikeshed.yield %np64 : i64
   }
+  %fixedS2 = func.call @api_mview(%fixed, %c4) : (!llvm.ptr, i64) -> !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+  %fixedM = builtin.unrealized_conversion_cast %fixedS2 : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> to memref<?xi64>
+  %fdone = trikeshed.drain %fixedS, %fixedM : !s64, memref<?xi64> -> index
   %dn = llvm.alloca %one32 x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
   %dv = llvm.alloca %one32 x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
   %dp = llvm.alloca %one32 x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
   %dsel = llvm.alloca %one32 x !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)> : (i32) -> !llvm.ptr
   scf.for %fi = %c0 to %c6 step %c1 : i64 {
     %k = func.call @codes(%fi) : (i64) -> i64
-    %ps = llvm.getelementptr %sels[%fi] : (!llvm.ptr, i64) -> !llvm.ptr, !llvm.ptr
-    %sel = llvm.load %ps : !llvm.ptr -> !llvm.ptr
+    %sel = func.call @api_col_cell(%selAll, %selAt, %fi) : (!llvm.ptr, !pieces, i64) -> !llvm.ptr
     %nt = func.call @name_piece(%fi) : (i64) -> i64
     %nsx = func.call @tw_s(%nt) : (i64) -> i64
     %nl = func.call @tw_n(%nt) : (i64) -> i64
@@ -682,8 +724,7 @@ func.func @query_run(%bp: !llvm.ptr, %f: !llvm.ptr) {
   %notAny = arith.cmpi eq, %anyMatch, %c0 : i64
   %force = arith.andi %someQ, %notAny : i1
   scf.if %force {
-    %ps = llvm.getelementptr %sels[5] : (!llvm.ptr) -> !llvm.ptr, !llvm.ptr
-    %sel5 = llvm.load %ps : !llvm.ptr -> !llvm.ptr
+    %sel5 = func.call @api_col_cell(%selAll, %selAt, %c5) : (!llvm.ptr, !pieces, i64) -> !llvm.ptr
     func.call @st32(%sel5, %c0, %c0) : (!llvm.ptr, i64, i64) -> ()
     func.call @st32(%sel5, %c1, %c1) : (!llvm.ptr, i64, i64) -> ()
   }
@@ -695,12 +736,10 @@ func.func @query_run(%bp: !llvm.ptr, %f: !llvm.ptr) {
     %col = func.call @getp(%cur, %colSlot) : (!llvm.ptr, i64) -> !llvm.ptr
     func.call @desc(%descs, %fi, %col, %n) : (!llvm.ptr, i64, !llvm.ptr, i64) -> ()
     %k = func.call @codes(%fi) : (i64) -> i64
-    %ps = llvm.getelementptr %sels[%fi] : (!llvm.ptr, i64) -> !llvm.ptr, !llvm.ptr
-    %sel = llvm.load %ps : !llvm.ptr -> !llvm.ptr
+    %sel = func.call @api_col_cell(%selAll, %selAt, %fi) : (!llvm.ptr, !pieces, i64) -> !llvm.ptr
     %ks = arith.addi %c6, %fi : i64
     func.call @desc(%descs, %ks, %sel, %k) : (!llvm.ptr, i64, !llvm.ptr, i64) -> ()
-    %pc = llvm.getelementptr %cnts[%fi] : (!llvm.ptr, i64) -> !llvm.ptr, !llvm.ptr
-    %cnt = llvm.load %pc : !llvm.ptr -> !llvm.ptr
+    %cnt = func.call @api_col_cell(%cntAll, %selAt, %fi) : (!llvm.ptr, !pieces, i64) -> !llvm.ptr
     %ko = arith.addi %c12, %fi : i64
     func.call @desc(%descs, %ko, %cnt, %k) : (!llvm.ptr, i64, !llvm.ptr, i64) -> ()
   }
@@ -802,8 +841,6 @@ func.func @query_run(%bp: !llvm.ptr, %f: !llvm.ptr) {
   llvm.call @free(%selAll) : (!llvm.ptr) -> ()
   llvm.call @free(%cntAll) : (!llvm.ptr) -> ()
   llvm.call @free(%kcount) : (!llvm.ptr) -> ()
-  llvm.call @free(%sels) : (!llvm.ptr) -> ()
-  llvm.call @free(%cnts) : (!llvm.ptr) -> ()
   llvm.call @free(%anys) : (!llvm.ptr) -> ()
   llvm.call @free(%rows) : (!llvm.ptr) -> ()
   llvm.call @free(%descs) : (!llvm.ptr) -> ()
