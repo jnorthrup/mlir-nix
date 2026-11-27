@@ -70,8 +70,6 @@ HashSink::HashSink(HashAlgo a) : algo(a) {
   }
 }
 
-HashSink::~HashSink() {}
-
 void HashSink::update(std::string_view data) {
   total += data.size();
   const uint8_t *p = (const uint8_t *)data.data();
