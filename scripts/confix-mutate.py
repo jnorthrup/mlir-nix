@@ -9,7 +9,9 @@ with the check, which is compiled once.
   stage 1  every mutant, run small
   stage 2  the survivors, run medium (a timeout is reported as a timeout, never counted as a kill)
 The check stops with a mismatch when a reading does not end within 10 s (the oracle ends on every text), so a mutant that loops
-is killed, not timed out.  What survives is compared with EQUIVALENT below: a mutant whose program means what the original's does,
+is killed, not timed out.  A mutant's malloc and free are a fenced allocator's (GUARD, below: 16 canary bytes either side of every
+block the module takes, looked at when it is given back), so a mutant that writes outside a buffer of its own is killed too: a
+comparison of answers does not see that.  The unmutated module is built and run the same way first, and must pass.  What survives is compared with EQUIVALENT below: a mutant whose program means what the original's does,
 with the reason.  A survivor that is not in the table is a case the check does not have, and the exit status is 1.  A constant
 moved out of its type's range (-2^63 - 1 in i64, -129 in i8) is not a program and is not made.
 
@@ -51,11 +53,10 @@ EQUIVALENT = [
     ("js_utf8", "%c0 = arith.constant 0 : i64", ["0 -> -1"], "with `shown` always taken, a NUL is shown as U+2400; a NUL is decoded only for the Nul fault's message, where shown is 1"),
     ("js_mk_double", "%z8 = arith.constant 0 : i8", ["0 -> 1", "0 -> -1"], "strtod stops at the first byte that does not continue the number, and 0x01 and 0xff do not; the span is exactly the number"),
     ("js_mk_string", "%c0 = arith.constant 0 : i64", ["0 -> 1", "0 -> -1"], "every string is decoded, which gives a string without escapes its own bytes: only the time changes"),
-    ("js_mk_object", "%to = arith.andi %sp, %mask", ["arith.andi -> arith.ori"], "in the room of the keys: the room only grows (the decode loop's own andi is killed)"),
     ("js_mk_object", "%d = arith.subi %to, %from", ["arith.subi -> arith.addi"], "the room of the keys only grows"),
     ("js_mk_object", "%d1 = arith.subi %d, %c1", ["arith.subi -> arith.addi"], "the room of the keys only grows"),
-    ("js_reify", "%c2 = arith.constant 2 : i64", ["2 -> 3", "2 -> 1"],
-     "the walk reads rowCap or n words for rows, both at least rows; a row past the last has no Value made for it and is passed over"),
+    ("js_reify", "%c0 = arith.constant 0 : i64", ["0 -> 1", "0 -> -1"],
+     "the mark of a row no Value was made for (a key's): the fill of vals and the test that reads it use the one constant, and no Value's address is 1 or -1"),
 ]
 
 TURN = {"eq": "ne", "ne": "eq", "ult": "ule", "ule": "ult", "ugt": "uge", "uge": "ugt", "slt": "sle", "sle": "slt", "sgt": "sge", "sge": "sgt"}
@@ -93,23 +94,72 @@ print("%d mutants of %s, work in %s" % (len(sites), os.path.relpath(source, ROOT
 sysroot = []
 if subprocess.run(["which", "xcrun"], capture_output=True).returncode == 0:
     sysroot = ["-isysroot", subprocess.run(["xcrun", "--show-sdk-path"], capture_output=True, text=True).stdout.strip()]
+# The module's own blocks, fenced.  A mutant's IR calls cg_malloc and cg_free for malloc and free; the check, which gives back the
+# pages of the lanes it owns, is compiled with its free going through cg_free too, which knows the module's blocks from the check's.
+GUARD = r"""
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+enum { FENCE = 16, HEAD = 16, MOST = 1 << 16 };
+static void *live[MOST]; /* the module's blocks not yet given back */
+static long nlive;
+void *cg_malloc(size_t n) {
+  unsigned char *p = malloc(HEAD + FENCE + n + FENCE);
+  if (nlive == MOST) _exit(4);
+  memcpy(p, &n, sizeof n);
+  memset(p + HEAD, 0xA5, FENCE);
+  memset(p + HEAD + FENCE + n, 0xA5, FENCE);
+  return live[nlive++] = p + HEAD + FENCE;
+}
+void cg_free(void *q) {
+  for (long i = nlive; i-- > 0;)
+    if (live[i] == q) {
+      unsigned char *p = (unsigned char *)q - FENCE - HEAD;
+      size_t n;
+      memcpy(&n, p, sizeof n);
+      live[i] = live[--nlive];
+      for (int k = 0; k < FENCE; k++)
+        if (p[HEAD + k] != 0xA5 || p[HEAD + FENCE + n + k] != 0xA5) {
+          static const char said[] = "MISMATCH: a block of the module's was written outside its room\n";
+          write(1, said, sizeof said - 1);
+          _exit(3);
+        }
+      free(p);
+      return;
+    }
+  free(q); /* the check's own */
+}
+"""
+GUARD_H = """#include <cstdlib>
+extern "C" void cg_free(void *);
+namespace std { using ::cg_free; }
+#define free cg_free
+"""
+open(os.path.join(work, "guard.c"), "w").write(GUARD)
+open(os.path.join(work, "guard.h"), "w").write(GUARD_H)
+guard_o = os.path.join(work, "guard.o")
+subprocess.run([llvm + "/clang"] + sysroot + ["-O1", "-c", os.path.join(work, "guard.c"), "-o", guard_o], check=True)
 check_o = os.path.join(work, "check.o")
-subprocess.run([cxx] + sysroot + ["-std=c++20", "-O1", "-c", checker, "-o", check_o], check=True)
+subprocess.run([cxx] + sysroot + ["-std=c++20", "-O1", "-include", os.path.join(work, "guard.h"), "-c", checker, "-o", check_o], check=True)
 
 def build(k):
-    line, new, label = sites[k]
-    d = os.path.join(work, "m%04d" % k)
+    """Mutant k (the module itself for k < 0), lowered, fenced and linked with the check: the executable, or None."""
+    d = os.path.join(work, "m%04d" % k if k >= 0 else "original")
     os.makedirs(d, exist_ok=True)
     text = list(lines)
-    text[line - 1] = new
+    if k >= 0:
+        text[sites[k][0] - 1] = sites[k][1]
     open(d + "/JsonRead.mlir", "w").write("\n".join(text))
+    def fence():
+        ir = open(d + "/m.ll").read()
+        open(d + "/m.ll", "w").write(re.sub(r"@(malloc|free)\b", r"@cg_\1", ir))
     steps = [[os.path.join(ROOT, "build/bin/mlnix-opt"), d + "/JsonRead.mlir", "--trikeshed-lower-cursors", "-o", d + "/cur.mlir"],
              [llvm + "/mlir-opt", d + "/cur.mlir"] + PIPE + ["-o", d + "/low.mlir"],
-             [llvm + "/mlir-translate", "--mlir-to-llvmir", d + "/low.mlir", "-o", d + "/m.ll"],
+             [llvm + "/mlir-translate", "--mlir-to-llvmir", d + "/low.mlir", "-o", d + "/m.ll"], fence,
              [llvm + "/clang", "-O1", "-Wno-override-module", "-c", d + "/m.ll", "-o", d + "/m.o"],
-             [cxx] + sysroot + [check_o, d + "/m.o", "-o", d + "/check"]]
+             [cxx] + sysroot + [check_o, d + "/m.o", guard_o, "-o", d + "/check"]]
     for s in steps:
-        if subprocess.run(s, capture_output=True).returncode:
+        if s() if callable(s) else subprocess.run(s, capture_output=True).returncode:
             return None
     return d + "/check"
 
@@ -119,6 +169,10 @@ def run(exe, counts, timeout):
         return "killed" if p.returncode else "survived"
     except subprocess.TimeoutExpired:
         return "timeout"
+
+original = build(-1)
+if original is None or run(original, small, 600) != "survived":
+    sys.exit("the module itself does not pass the check as the mutants are built (the lowering, the guard, or the check)")
 
 def s1(k):
     exe = build(k)

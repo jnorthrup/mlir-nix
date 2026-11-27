@@ -401,18 +401,21 @@ struct UnescapeLowering : OpConversionPattern<UnescapeOp> {
   }
 };
 
-/// confix.checked: a call of its body, JsonRead.mlir's confix_scan_checked (declared when the module does not define it).
+/// confix.checked: a call of its body, JsonRead.mlir's confix_scan_checked (declared when the module does not define it),
+/// with the record and the cells the rows' lane lowers to.
 struct CheckedLowering : OpConversionPattern<CheckedOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(CheckedOp op, OpAdaptor a, ConversionPatternRewriter &rw) const override {
+  LogicalResult matchAndRewrite(CheckedOp op, OneToNOpAdaptor a, ConversionPatternRewriter &rw) const override {
     auto module = op->getParentOfType<ModuleOp>();
-    auto type = rw.getFunctionType({a.getRec().getType()}, {rw.getI32Type()});
+    SmallVector<Value> args(a.getRec());
+    args.append(a.getRows().begin(), a.getRows().end());
     if (!module.lookupSymbol("confix_scan_checked")) {
       OpBuilder::InsertionGuard g(rw);
       rw.setInsertionPointToStart(module.getBody());
+      auto type = rw.getFunctionType(ValueRange(args).getTypes(), {rw.getI32Type()});
       func::FuncOp::create(rw, module.getLoc(), "confix_scan_checked", type).setPrivate();
     }
-    rw.replaceOpWithNewOp<func::CallOp>(op, "confix_scan_checked", TypeRange{rw.getI32Type()}, ValueRange{a.getRec()});
+    rw.replaceOpWithNewOp<func::CallOp>(op, "confix_scan_checked", TypeRange{rw.getI32Type()}, args);
     return success();
   }
 };

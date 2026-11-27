@@ -138,12 +138,11 @@ void EvalState::printValueAsJSON(JsonOut &out, Value &v, bool strict, NixStringC
 //===----------------------------------------------------------------------===//
 
 // builtins.fromJSON's reader is hollowed into lowered/nixeval/JsonRead.mlir (the confix dialect's confix.checked: the scan
-// into the rows of an index, checked as the reader before checked, the open containers a stack in the record; then the
+// into the rows of an index, a lane of that module's own, checked as the reader before checked; then the rows drained, the
 // strings decoded, the numbers read and a Value made for each row, an object's members in key order by trikeshed.sorted).
-// Here: the arena (allocValue, mkString, the BindingsBuilder); the words.  The record and its arrays are nixstore::JsonRec (Store.h).
-using nixstore::JsonRec;
+// Here: the arena (allocValue, mkString, the BindingsBuilder); the words.  The record is confix.checked's: src, n, at, end.
 extern "C" {
-int32_t nixev_json_read(JsonRec *r, EvalState *st, Value *root);
+int32_t nixev_json_read(uint64_t *rec, EvalState *st, Value *root);
 uint64_t nixev_json_decode(const char *s, uint64_t from, uint64_t to, char *into, int64_t shown);
 const char *nixev_json_what(int64_t fault, uint64_t *len);
 Value *nixev_json_value(EvalState *st) { return st->allocValue(); }
@@ -157,13 +156,11 @@ void nixev_json_attrs(EvalState *st, Value *v, const composite::Chars *keys, Val
 
 void parseJSON(EvalState &state, std::string_view json, Value &v) {
   if (json.size() >= 0xFFFFFFFFull) throw EvalError("a JSON text of 4 GiB or more is not supported");
-  JsonRec r;
-  r.w[0] = uint64_t(json.data()), r.w[1] = json.size();
-  r.size(json.size() / 8 + 16, 16);
-  int32_t fault = nixev_json_read(&r, &state, &v);
+  uint64_t r[4] = {uint64_t(json.data()), json.size()};
+  int32_t fault = nixev_json_read(r, &state, &v);
   if (!fault) return;
   // The words of the reader that took JSON before the index did; the column is where the reading had got to, plus one.
-  uint32_t at = uint32_t(r.w[14]), end = uint32_t(r.w[15]);
+  uint32_t at = uint32_t(r[2]), end = uint32_t(r[3]);
   if (fault == 14) throw EvalError(composite::cat("unsigned json number ", json.substr(at, end - at), " outside of Nix integer range"));
   if (fault == 15) {
     composite::Text shown; // a NUL shown as U+2400 SYMBOL FOR NULL
