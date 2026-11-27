@@ -139,7 +139,7 @@ function(mlnix_lower_trikeshed target mlir stem)
     COMMAND ${MLNIX_MLIR_TRANSLATE} --mlir-to-llvmir ${low} -o ${ll}
     DEPENDS ${low} COMMENT "translating ${stem} to LLVM IR")
   add_custom_command(OUTPUT ${o}
-    COMMAND ${MLNIX_LOWER_CLANG} -O2 -Wno-override-module -c ${ll} -o ${o}
+    COMMAND ${MLNIX_LOWER_CLANG} -O2 -Wno-override-module ${MLNIX_LOWER_CLANG_ARGS} -c ${ll} -o ${o}
     DEPENDS ${ll} COMMENT "compiling lowered ${stem}.o")
   add_custom_target(mlnix_lowered_${stem} DEPENDS ${o})
   add_dependencies(${target} mlnix_lowered_${stem})
@@ -251,10 +251,15 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/Patricia.mlir Patricia)
 # heap's push/climb/sift and edge pops, the pegs' argMin, the cluster's insert/min/find/drain, clusterOrder's
 # fill-then-drain and Krapivin's put/get walk are scf over the caller's arrays.  NixStore carries it (drvByContent);
 # TrikeShedRuntime (trikeshed.cluster_order's kernel, a shared library) links a position-independent copy.
-mlnix_lower_trikeshed(NixStore lowered/composite/ClusterOps.mlir ClusterOps)
+# The drains of a 16 B row are constant-length loops; LLVM's loop idiom turns each into a memcpy before the loop is
+# unrolled, which keeps the swap's temporary in memory (SROA runs before it).  With the idiom off, the 16 B swap is
+# register moves (the optimised IR has no temporary for it).  Only this module's clang step gets the flag.
+set(MLNIX_LOWER_CLANG_ARGS -mllvm -disable-loop-idiom-memcpy)
+mlnix_lower_trikeshed(NixStore lowered/composite/ClusterOps.mlir ClusterOps --inline --symbol-dce)
 add_custom_command(OUTPUT ${MLNIX_LOWERED_DIR}/ClusterOps.pic.o
-  COMMAND ${MLNIX_LOWER_CLANG} -O2 -fPIC -Wno-override-module -c ${MLNIX_LOWERED_DIR}/ClusterOps.ll -o ${MLNIX_LOWERED_DIR}/ClusterOps.pic.o
+  COMMAND ${MLNIX_LOWER_CLANG} -O2 -fPIC -Wno-override-module ${MLNIX_LOWER_CLANG_ARGS} -c ${MLNIX_LOWERED_DIR}/ClusterOps.ll -o ${MLNIX_LOWERED_DIR}/ClusterOps.pic.o
   DEPENDS ${MLNIX_LOWERED_DIR}/ClusterOps.ll COMMENT "compiling lowered ClusterOps.pic.o")
+unset(MLNIX_LOWER_CLANG_ARGS)
 set_source_files_properties(${MLNIX_LOWERED_DIR}/ClusterOps.pic.o PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
 add_dependencies(TrikeShedRuntime mlnix_lowered_ClusterOps)
 target_sources(TrikeShedRuntime PRIVATE ${MLNIX_LOWERED_DIR}/ClusterOps.pic.o)

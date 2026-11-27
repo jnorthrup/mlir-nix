@@ -76,12 +76,13 @@ The C++ left, by span (code lines): `registerBuiltins` 636 and `registerStoreBui
 `printValueAsJSON` 64.  Most are glue the recipe keeps (registration, process, I/O, MLIR's API); the composition in
 `derivationStrict`, `printStats`, `cmdStore` and `printValueAsJSON` already went to MLIR, leaving forcing and throws.
 
-The bypass, by the census's rule (a product function of 30 ops or more that loops and has under 10% dialect ops): 84
-functions, 7,946 ops.  The largest: the scanners (`confix_scan_nix` 944, `lx_default` 482, `lx_ind` 184, `lx_string`
-136, `nixev_ts_toml_scan` 204, `tm_number` 153, `tm_basic` 115, `confix_scan_checked` 125, `js_string` 104, `nx_word`
-104), mini-luci's pre-dialect server (`query_run` 246, http `main` 171, `evaluate_with` 143, `serve` 108), `xw_value`
-172, `nixfe_ts_strip` 160, `sg_xxh3` 157 and `sha512_compress` 154 (scalar cores), `mlnix_rows_sort_u32` 115 and
-`mlnix_rows_sort` 109, `nixstore_ts_drvparse` 112, `ceq_attrs_eq` 103, `nixev_ts_replace` 97, `narr_node` 94.
+The bypass, by the census's rule (a product function of 30 ops or more that loops and has under 10% dialect ops, and is
+not a scalar core: 60% or more arith ops, a digest's rounds or a hash's mixing): 60 functions, 6,204 ops; the scalar
+cores apart, 24 functions, 1,742 ops.  The largest bypass rows: the scanners (`confix_scan_nix` 944, `lx_default` 482,
+`lx_ind` 184, `lx_string` 136, `nixev_ts_toml_scan` 204, `tm_basic` 115, `confix_scan_checked` 125), mini-luci's
+pre-dialect server (`query_run` 246, http `main` 171, `evaluate_with` 143, `serve` 108), `xw_value` 172,
+`nixfe_ts_strip` 160, `mlnix_rows_sort_u32` 115 and `mlnix_rows_sort` 109, `nixstore_ts_drvparse` 112, `ceq_attrs_eq`
+103, `nixev_ts_replace` 97, `narr_node` 94.
 
 ## Scale 4: the roots
 
@@ -107,8 +108,18 @@ Each gap names what it blocks and what closes it.  A child gap closes only after
   `at`, `compare unsigned`) and by lowering `rows`; the line-ports are the oracle.
 - **G3, the trie CAS.**  (a) Patricia.mlir in dialect forms (after G2).  (b) The store's index as a HashTrie keyed by
   the path's hash part, with the referrers as sorted rows: today one text file per path, and the referrers of one path
-  cost a read of every file (after G1).  (c) The address-keyed tables as dense rows (after G1).  The name tables
-  (symbols, baseEnv) stay open addressing until a funnel measures faster: they are the evaluator's hottest lookups.
+  cost a read of every file (after G1).  Measured on synthetic stores (scratch gap/gen-store.py, store-times.sh; a
+  reference DAG of up to 4 references a path, `mlnix store` of 0db2780): `--query --referrers` 0.07 / 0.23 / 0.97 s at
+  1,000 / 5,000 / 20,000 paths (0.4 / 1.5 / 6.7 G instructions: linear in the store), `--gc --print-dead` 0.14 / 0.95 /
+  10.0 s (0.7 / 4.7 / 55 G instructions), while `--references` and `--requisites` stay at start-up cost (0.03-0.04 s).
+  The GC's cost is its algorithm, not the files: StoreGraph.mlir's nixstore_ts_gc reads each dead path's references
+  once, but each sweep asks, for every dead path still there, whether any other one still there refers to it, by
+  scanning them all (n^2 a sweep, a sweep per layer of the dead graph).  `trikeshed.adjacency` (lowered, no product
+  user) gives each path's referrer count in one counting sort; a sweep then deletes the paths whose count is 0 and
+  lowers their references' counts: the same order, linear a sweep.  The referrers query needs the index itself.
+  A NixOS store of 50,000-100,000 paths puts a dry GC in minutes.  (c) The address-keyed tables as
+  dense rows (after G1).  The name tables (symbols, baseEnv) stay open addressing until a funnel measures faster: they
+  are the evaluator's hottest lookups.
 - **G4, the heap store.**  (a) ClusterOps.mlir in dialect forms (after G2).  (b) SortedSet and SortedMap built out of
   order fill and drain once (`sortRows` + `uniqueFirst`, both lowered) instead of rotating per insert.  (c) The sealed,
   delta-compressed page: not built in mlir-nix or in TrikeShed's CursorTrie (its pages are sorted, not compressed); the
@@ -134,3 +145,34 @@ Wave 1b (same day, files no wave-1 lane touches): printValueAsJSON's composition
 structured attrs: the writer gap of lib/Eval/Formats.cpp), and G7's query path (utils/mlnixci/src/api.mlir: query_run's
 hand-spelled fills, folds and offsets, then facet, page and report).
 Wave 2, after G1: G3b with G4c (the store index as a HashTrie with sealed pages), G3c, G4b.  On the user's word: G6.
+
+## Ledger
+
+Each merge, `gap-census.py --seal` on the new master and `--diff` against the previous seal.
+
+- `0db2780` (2026-11-27, wave 1 part 1: trie, digest, ciq; C++ 22,822 -> 22,815).  Patricia.mlir 0.5% -> 17.2% dialect
+  ops, no llvm load, store or GEP left (318M sets old/new in lockstep).  MD5 and SHA-1 lowered (Md5.mlir, Sha1.mlir:
+  1.07M inputs each against CommonCrypto and llvm::); SHA-256 stays on the platform code, the MLIR form measured 10x
+  slower than CommonCrypto's SHA instructions (parked: branch digest-sha256-mlir).  query_run's counts, selections and
+  offsets in trikeshed forms (mlnixci fill-drain lines 0.3% -> 4.3%; 2,173 replies identical).  Repository: fill-drain
+  functions 64 -> 71 (15.6% -> 16.9% of the lines); bypass 60 -> 61 functions at 6,204 ops (Patricia's set left it;
+  MD5's and SHA-1's update loops came in: they could buffer as Sha512.mlir does, with slices drained).
+  Linux (mlnix-os, LLVM 22): mlir 52/0, lang 488/488 exact 231 on both schedules, prims 121, mlnixci 51 PASS, son wrong 0,
+  the Composite checks plain and sanitized.  Held: the heap lane (inode-bench +6.2%: a row swap left out of line), the
+  json lane (C++ +13, toJSON 1.18-1.43x on the microbenchmark).
+- json, parked on branch gap/json-comp (f7c4ec1 + dda82d8; 24,472 runs identical, C++ -8 for the two).  Moving the
+  JSON printer's stitching into one combineAll per set or list costs toJSON 1.2-1.9x, and moving the per-value dispatch
+  in too costs 1.25-2.5x: a combineAll runs its region twice (size, then drain), and a recursive writer of many tiny
+  pieces pays both passes at every level.  The sub-gap is G1's: a writer of that shape wants a single-pass fill (appends
+  into a lane) and one drain, not a two-pass composition.  Re-measure it on the lanes lowering.
+- wave 1 part 2 (2026-11-27, heap: 35e480c + 75a7fcb; C++ 22,815 -> 22,817, two static_asserts the trikeshed forms
+  need: the index table bounds N <= 255 and N + P <= 256; wave 1 since a8d3ae3: 22,822 -> 22,817).  ClusterOps.mlir
+  0.0% -> 6.5% dialect ops (row moves as drains, argMin and the drain's emits as folds over one index table, the
+  funnel's levels as a slice of it); lowered/composite 6.0% -> 8.8% dialect, 13.9% -> 11.2% llvm; bypass 61 -> 60
+  functions, 6,204 -> 6,173 ops.  Proof: 1.5M random sequences (1.43G comparator calls) against the a8d3ae3 object in
+  lockstep, then 500k more (477M comparator calls) on the inlined form, 0 mismatches; minmax-check and funnel-check
+  plain and sanitized on both platforms.  Time: the first form was 6.2% slower on inode-bench's cluster phase (an
+  out-of-line row swap); with `--inline --symbol-dce` in ClusterOps' mlir-opt stage and the loop-idiom memcpy pass off
+  for its clang steps, the 16-byte swap is register moves and the phase is 4.7% faster than the llvm port (min of 15
+  interleaved runs; 12.7% fewer instructions retired).  Linux (LLVM 22, 5df9b19): mlir 52/0, lang 488/488 exact 231 on
+  both schedules, prims 121, mlnixci 51 PASS, son wrong 0, the Composite checks plain and sanitized.

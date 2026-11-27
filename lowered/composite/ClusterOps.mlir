@@ -1,15 +1,47 @@
-// The btrfs ordering cluster's algorithms (include/Composite/MinMaxHeap.h, Funnel.h) hollowed into MLIR: the min-max
-// heap's push / climb / sift and its edge pops, the peg bag's argMin, the cluster's insert routing, min race, find and
+// The btrfs ordering cluster's algorithms (include/Composite/MinMaxHeap.h, Funnel.h) in trikeshed forms: the min-max
+// heap's push / climb / sift and edge pops, the peg bag's argMin, the cluster's insert routing, min race, find and
 // drain, clusterOrder's fill-then-drain, and Krapivin's funnel (the salted splitmix slot, the put/get level walk with
 // its rerouting and early exit).  The C++ headers are drop-in bridges: a row crosses as rs opaque bytes (the Inline
 // body's cells and its u32 count are the ABI), and Row's `<` / `==` cross as neutral C callbacks
 // int(const void *, const void *), so any Row with those operators works unchanged (a null `<` is clusterOrder's
-// (i64 key, u32 index) order, built in).  The walks are scf.while / scf.for
-// over the caller's arrays: nothing allocates (the heap and the pegs are inline bodies, as in the C++).  Helpers are
-// module-unique (mmx_*): the pipeline exports them.
+// (i64 key, u32 index) order, built in).  Nothing allocates: the heap and the pegs are inline bodies, as in the C++.
+//
+// The shapes:
+//   rows     a row is rs bytes at base + i*rs (mmx_row, the callbacks' C boundary).  A copy of a row is a drain of its
+//            descriptor: a series of i64 words when rs and both addresses are 8-aligned (a 16-byte row is a constant
+//            two-word drain), else a series of i8.  A swap is three drains through a stack row (two words for 16 B).
+//   indices  the walks over a bag, a cluster, a level or a fill are folds over a slice of one table of the indices
+//            0..255 (a constant, `mmx_ids`): fold(slice(ids, from, count), seed) visits them in order, so the
+//            callbacks run in the same order as the loops they replace.  N + P <= 256 and n <= 256 (the headers assert).
+//   walks    what must stop early (first equal row, the funnel's level walk) is an scf.while over the same slice;
+//            folds run every element, so a short-circuit keeps its scf.while.  The heap's climb and sift stay scf.while.
+//   choices  the min race is nested scf.if yielding the side (its argMin is computed only where the C++ computed it).
 //
 // The funnel's bucket layout crosses as byte offsets (the heap's cells at 0, its count at hnOff, the pegs' cells at
 // pOff, their count at pnOff, a bucket stride bytes); level l starts at bucket 2*(top - (top>>l)) and holds top>>l.
+
+// The index table: 0..255, the slices every fold and walk here reads.  Private: each lowered object has its own.
+memref.global "private" constant @mmx_ids : memref<256xi32> = dense<[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255]>
+
+!b = !trikeshed.series<i8>
+!h = !trikeshed.series<i64>
+!x = !trikeshed.series<i32>
+!d = !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+!mb = memref<?xi8, strided<[1], offset: ?>>
+!mh = memref<?xi64, strided<[1], offset: ?>>
+
+// The descriptor of n elements at p, any element type (the struct carries none): built inline, no allocation.
+func.func private @mmx_desc(%p: !llvm.ptr, %n: i64) -> !d {
+  %c0 = arith.constant 0 : i64
+  %c1 = arith.constant 1 : i64
+  %u = llvm.mlir.undef : !d
+  %a = llvm.insertvalue %p, %u[0] : !d
+  %b = llvm.insertvalue %p, %a[1] : !d
+  %c = llvm.insertvalue %c0, %b[2] : !d
+  %e = llvm.insertvalue %n, %c[3, 0] : !d
+  %f = llvm.insertvalue %c1, %e[4, 0] : !d
+  return %f : !d
+}
 
 // The address of row i: base + i*rs bytes.
 func.func private @mmx_row(%base: !llvm.ptr, %rs: i64, %i: i32) -> !llvm.ptr {
@@ -19,69 +51,103 @@ func.func private @mmx_row(%base: !llvm.ptr, %rs: i64, %i: i32) -> !llvm.ptr {
   return %p : !llvm.ptr
 }
 
-// Copy one row: a 16- or 8-byte row as words, any other size by memmove (a row may be copied onto itself).
+// Copy one row: a drain of the row's series into the destination's, as words when rs is a whole number of words (the
+// cluster's 16 B rows are a constant two-word drain), else bytes.  A row whole in words is 8-aligned: the C++ rows are
+// (MinMaxHeap.h asserts alignof >= 8 for them), so the word lane needs no test per copy.  A row is never copied onto
+// itself: the callers that could do so skip it (LLVM would turn the byte drain into a memcpy, undefined for overlap).
 func.func private @mmx_copy(%dst: !llvm.ptr, %src: !llvm.ptr, %rs: i64) {
-  %c8 = arith.constant 8 : i64
+  %c0 = arith.constant 0 : i64
+  %c3 = arith.constant 3 : i64
+  %c7 = arith.constant 7 : i64
   %c16 = arith.constant 16 : i64
-  %is16 = arith.cmpi eq, %rs, %c16 : i64
-  %is8 = arith.cmpi eq, %rs, %c8 : i64
-  scf.if %is16 {
-    %s1 = llvm.getelementptr %src[8] : (!llvm.ptr) -> !llvm.ptr, i8
-    %d1 = llvm.getelementptr %dst[8] : (!llvm.ptr) -> !llvm.ptr, i8
-    %w0 = llvm.load %src {alignment = 1 : i64} : !llvm.ptr -> i64
-    %w1 = llvm.load %s1 {alignment = 1 : i64} : !llvm.ptr -> i64
-    llvm.store %w0, %dst {alignment = 1 : i64} : i64, !llvm.ptr
-    llvm.store %w1, %d1 {alignment = 1 : i64} : i64, !llvm.ptr
-  } else {
-    scf.if %is8 {
-      %w = llvm.load %src {alignment = 1 : i64} : !llvm.ptr -> i64
-      llvm.store %w, %dst {alignment = 1 : i64} : i64, !llvm.ptr
+  %rm = arith.andi %rs, %c7 : i64
+  %whole = arith.cmpi eq, %rm, %c0 : i64
+  scf.if %whole {
+    // the cluster's rows are 16 B: a constant two-word drain, unrolled; other whole-word rows take their word count from rs
+    %is16 = arith.cmpi eq, %rs, %c16 : i64
+    scf.if %is16 {
+      %two = arith.constant 2 : i64
+      %sd = func.call @mmx_desc(%src, %two) : (!llvm.ptr, i64) -> !d
+      %dd = func.call @mmx_desc(%dst, %two) : (!llvm.ptr, i64) -> !d
+      %sm = builtin.unrealized_conversion_cast %sd : !d to !mh
+      %dm = builtin.unrealized_conversion_cast %dd : !d to !mh
+      %ss = builtin.unrealized_conversion_cast %sm : !mh to !h
+      %end = trikeshed.drain %ss, %dm : !h, !mh -> index
     } else {
-      "llvm.intr.memmove"(%dst, %src, %rs) <{isVolatile = false}> : (!llvm.ptr, !llvm.ptr, i64) -> ()
+      %nw = arith.shrui %rs, %c3 : i64
+      %sd = func.call @mmx_desc(%src, %nw) : (!llvm.ptr, i64) -> !d
+      %dd = func.call @mmx_desc(%dst, %nw) : (!llvm.ptr, i64) -> !d
+      %sm = builtin.unrealized_conversion_cast %sd : !d to !mh
+      %dm = builtin.unrealized_conversion_cast %dd : !d to !mh
+      %ss = builtin.unrealized_conversion_cast %sm : !mh to !h
+      %end = trikeshed.drain %ss, %dm : !h, !mh -> index
     }
+  } else {
+    %sd = func.call @mmx_desc(%src, %rs) : (!llvm.ptr, i64) -> !d
+    %dd = func.call @mmx_desc(%dst, %rs) : (!llvm.ptr, i64) -> !d
+    %sm = builtin.unrealized_conversion_cast %sd : !d to !mb
+    %dm = builtin.unrealized_conversion_cast %dd : !d to !mb
+    %ss = builtin.unrealized_conversion_cast %sm : !mb to !b
+    %end = trikeshed.drain %ss, %dm : !b, !mb -> index
   }
   return
 }
 
-// Swap rows x and y (x != y): word-wise for 16/8-byte rows, else a byte at a time.
+// Swap rows x and y (distinct: every caller swaps a row with its parent, child or grandchild).  A 16-byte row swaps
+// through a two-word stack temporary of constant size: three two-word drains.  Other rows go through mmx_swap_rows.
 func.func private @mmx_swap(%base: !llvm.ptr, %rs: i64, %x: i32, %y: i32) {
-  %c8 = arith.constant 8 : i64
+  %c2 = arith.constant 2 : i64
   %c16 = arith.constant 16 : i64
   %xp = func.call @mmx_row(%base, %rs, %x) : (!llvm.ptr, i64, i32) -> !llvm.ptr
   %yp = func.call @mmx_row(%base, %rs, %y) : (!llvm.ptr, i64, i32) -> !llvm.ptr
   %is16 = arith.cmpi eq, %rs, %c16 : i64
-  %is8 = arith.cmpi eq, %rs, %c8 : i64
   scf.if %is16 {
-    %x1 = llvm.getelementptr %xp[8] : (!llvm.ptr) -> !llvm.ptr, i8
-    %y1 = llvm.getelementptr %yp[8] : (!llvm.ptr) -> !llvm.ptr, i8
-    %a0 = llvm.load %xp {alignment = 1 : i64} : !llvm.ptr -> i64
-    %a1 = llvm.load %x1 {alignment = 1 : i64} : !llvm.ptr -> i64
-    %b0 = llvm.load %yp {alignment = 1 : i64} : !llvm.ptr -> i64
-    %b1 = llvm.load %y1 {alignment = 1 : i64} : !llvm.ptr -> i64
-    llvm.store %b0, %xp {alignment = 1 : i64} : i64, !llvm.ptr
-    llvm.store %b1, %x1 {alignment = 1 : i64} : i64, !llvm.ptr
-    llvm.store %a0, %yp {alignment = 1 : i64} : i64, !llvm.ptr
-    llvm.store %a1, %y1 {alignment = 1 : i64} : i64, !llvm.ptr
+    %tmp = llvm.alloca %c2 x i64 {alignment = 8 : i64} : (i64) -> !llvm.ptr
+    %xd = func.call @mmx_desc(%xp, %c2) : (!llvm.ptr, i64) -> !d
+    %yd = func.call @mmx_desc(%yp, %c2) : (!llvm.ptr, i64) -> !d
+    %td = func.call @mmx_desc(%tmp, %c2) : (!llvm.ptr, i64) -> !d
+    %xm = builtin.unrealized_conversion_cast %xd : !d to !mh
+    %ym = builtin.unrealized_conversion_cast %yd : !d to !mh
+    %tm = builtin.unrealized_conversion_cast %td : !d to !mh
+    %xs = builtin.unrealized_conversion_cast %xm : !mh to !h
+    %ys = builtin.unrealized_conversion_cast %ym : !mh to !h
+    %ts = builtin.unrealized_conversion_cast %tm : !mh to !h
+    %e1 = trikeshed.drain %xs, %tm : !h, !mh -> index
+    %e2 = trikeshed.drain %ys, %xm : !h, !mh -> index
+    %e3 = trikeshed.drain %ts, %ym : !h, !mh -> index
   } else {
-    scf.if %is8 {
-      %a = llvm.load %xp {alignment = 1 : i64} : !llvm.ptr -> i64
-      %b = llvm.load %yp {alignment = 1 : i64} : !llvm.ptr -> i64
-      llvm.store %b, %xp {alignment = 1 : i64} : i64, !llvm.ptr
-      llvm.store %a, %yp {alignment = 1 : i64} : i64, !llvm.ptr
-    } else {
-      %z = arith.constant 0 : index
-      %one = arith.constant 1 : index
-      %n = arith.index_cast %rs : i64 to index
-      scf.for %k = %z to %n step %one {
-        %k64 = arith.index_cast %k : index to i64
-        %xk = llvm.getelementptr %xp[%k64] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-        %yk = llvm.getelementptr %yp[%k64] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-        %bx = llvm.load %xk : !llvm.ptr -> i8
-        %by = llvm.load %yk : !llvm.ptr -> i8
-        llvm.store %by, %xk : i8, !llvm.ptr
-        llvm.store %bx, %yk : i8, !llvm.ptr
-      }
-    }
+    func.call @mmx_swap_rows(%xp, %yp, %rs) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+  }
+  return
+}
+
+// The other rows' swap, a chunk at a time through one 256-byte stack temporary (a static alloca: a dynamic one in a helper
+// that is inlined into a loop would grow the stack on every iteration).  Each chunk is three drains of slices of the rows.
+func.func private @mmx_swap_rows(%xp: !llvm.ptr, %yp: !llvm.ptr, %rs: i64) {
+  %z = arith.constant 0 : index
+  %c256 = arith.constant 256 : index
+  %c256_64 = arith.constant 256 : i64
+  %tmp = llvm.alloca %c256_64 x i8 {alignment = 8 : i64} : (i64) -> !llvm.ptr
+  %n = arith.index_cast %rs : i64 to index
+  scf.for %c = %z to %n step %c256 {
+    %left = arith.subi %n, %c : index
+    %cnt = arith.minui %left, %c256 : index
+    %c64 = arith.index_cast %c : index to i64
+    %cnt64 = arith.index_cast %cnt : index to i64
+    %xc = llvm.getelementptr %xp[%c64] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+    %yc = llvm.getelementptr %yp[%c64] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+    %xd = func.call @mmx_desc(%xc, %cnt64) : (!llvm.ptr, i64) -> !d
+    %yd = func.call @mmx_desc(%yc, %cnt64) : (!llvm.ptr, i64) -> !d
+    %td = func.call @mmx_desc(%tmp, %cnt64) : (!llvm.ptr, i64) -> !d
+    %xm = builtin.unrealized_conversion_cast %xd : !d to !mb
+    %ym = builtin.unrealized_conversion_cast %yd : !d to !mb
+    %tm = builtin.unrealized_conversion_cast %td : !d to !mb
+    %xs = builtin.unrealized_conversion_cast %xm : !mb to !b
+    %ys = builtin.unrealized_conversion_cast %ym : !mb to !b
+    %ts = builtin.unrealized_conversion_cast %tm : !mb to !b
+    %e1 = trikeshed.drain %xs, %tm : !b, !mb -> index
+    %e2 = trikeshed.drain %ys, %xm : !b, !mb -> index
+    %e3 = trikeshed.drain %ts, %ym : !b, !mb -> index
   }
   return
 }
@@ -156,12 +222,14 @@ func.func private @mmx_climb(%base: !llvm.ptr, %rs: i64, %less: !llvm.ptr, %mf: 
 func.func private @mmx_sift(%base: !llvm.ptr, %n: i32, %rs: i64, %less: !llvm.ptr, %mf: i1, %from: i32) {
   %t = arith.constant 1 : i1
   %f = arith.constant 0 : i1
+  %c0 = arith.constant 0 : i32
   %c1 = arith.constant 1 : i32
   %c2 = arith.constant 2 : i32
   %c3 = arith.constant 3 : i32
   %c4 = arith.constant 4 : i32
   %c7 = arith.constant 7 : i32
-  %step = arith.constant 1 : index
+  %ids = memref.get_global @mmx_ids : memref<256xi32>
+  %idsS = trikeshed.text %ids : memref<256xi32> -> !x
   %w:2 = scf.while (%i = %from, %live = %t) : (i32, i1) -> (i32, i1) {
     %l0 = arith.muli %i, %c2 : i32
     %l = arith.addi %l0, %c1 : i32
@@ -185,13 +253,19 @@ func.func private @mmx_sift(%base: !llvm.ptr, %n: i32, %rs: i64, %less: !llvm.pt
     %gs = arith.addi %g4, %c3 : i32
     %g7 = arith.addi %g4, %c7 : i32
     %ge = arith.minui %g7, %n : i32
-    %gsI = arith.index_cast %gs : i32 to index
-    %geI = arith.index_cast %ge : i32 to index
-    %m = scf.for %gi = %gsI to %geI step %step iter_args(%best = %m0) -> (i32) {
-      %g = arith.index_cast %gi : index to i32
+    // the grandchildren gs ..< ge: a slice of the index table, none when gs >= ge, folded in index order
+    %has4 = arith.cmpi ult, %gs, %ge : i32
+    %cnt32 = arith.subi %ge, %gs : i32
+    %cnt0 = arith.select %has4, %cnt32, %c0 : i32
+    %off0 = arith.select %has4, %gs, %c0 : i32
+    %cnt = arith.index_cast %cnt0 : i32 to index
+    %off = arith.index_cast %off0 : i32 to index
+    %grand = trikeshed.slice %idsS[%off, %cnt] : !x -> !x
+    %m = trikeshed.fold %grand, %m0 : !x, i32 -> i32 {
+    ^bb0(%best: i32, %g: i32):
       %bg = func.call @mmx_before(%base, %rs, %less, %mf, %g, %best) : (!llvm.ptr, i64, !llvm.ptr, i1, i32, i32) -> i1
       %nb = arith.select %bg, %g, %best : i32
-      scf.yield %nb : i32
+      trikeshed.yield %nb : i32
     }
     %bm = func.call @mmx_before(%base, %rs, %less, %mf, %m, %j) : (!llvm.ptr, i64, !llvm.ptr, i1, i32, i32) -> i1
     %ri, %rl = scf.if %bm -> (i32, i1) {
@@ -285,7 +359,10 @@ func.func @mmx_heap_pop_min(%base: !llvm.ptr, %np: !llvm.ptr, %rs: i64, %less: !
   func.call @mmx_copy(%out, %base, %rs) : (!llvm.ptr, !llvm.ptr, i64) -> ()
   %nm1 = arith.subi %n, %c1 : i32
   %last = func.call @mmx_row(%base, %rs, %nm1) : (!llvm.ptr, i64, i32) -> !llvm.ptr
-  func.call @mmx_copy(%base, %last, %rs) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+  %moved = arith.cmpi ne, %nm1, %c0 : i32
+  scf.if %moved {
+    func.call @mmx_copy(%base, %last, %rs) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+  }
   llvm.store %nm1, %np : i32, !llvm.ptr
   %gt1 = arith.cmpi ugt, %nm1, %c1 : i32
   scf.if %gt1 {
@@ -308,7 +385,10 @@ func.func @mmx_heap_pop_max(%base: !llvm.ptr, %np: !llvm.ptr, %rs: i64, %less: !
     func.call @mmx_copy(%out, %mp, %rs) : (!llvm.ptr, !llvm.ptr, i64) -> ()
     %nm1 = arith.subi %n, %c1 : i32
     %last = func.call @mmx_row(%base, %rs, %nm1) : (!llvm.ptr, i64, i32) -> !llvm.ptr
-    func.call @mmx_copy(%mp, %last, %rs) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+    %moved = arith.cmpi ne, %m, %nm1 : i32
+    scf.if %moved {
+      func.call @mmx_copy(%mp, %last, %rs) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+    }
     llvm.store %nm1, %np : i32, !llvm.ptr
     %below = arith.cmpi ult, %m, %nm1 : i32
     scf.if %below {
@@ -318,20 +398,26 @@ func.func @mmx_heap_pop_max(%base: !llvm.ptr, %np: !llvm.ptr, %rs: i64, %less: !
   return
 }
 
-// The peg bag's least: argMin, a fold over the indices 1..n-1 seeded with 0, the first of equals kept (0 when empty).
-// An scf.for, not a trikeshed.fold over an index series: the series lowering materializes the indices in a malloc'd
-// buffer, and nothing in the cluster allocates.
+// The peg bag's least: argMin, a fold over the indices 1..n-1 of the index table seeded with 0, the first of equals kept
+// (0 when empty).  The fold runs every element in order, so the comparator sees the pairs the scf.for did.
 func.func @mmx_arg_min(%base: !llvm.ptr, %n: i32, %rs: i64, %less: !llvm.ptr) -> i32 {
   %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
   %one = arith.constant 1 : index
-  %nI = arith.index_cast %n : i32 to index
-  %m = scf.for %k = %one to %nI step %one iter_args(%best = %c0) -> (i32) {
-    %k32 = arith.index_cast %k : index to i32
+  %more = arith.cmpi ugt, %n, %c1 : i32
+  %nm1 = arith.subi %n, %c1 : i32
+  %cnt0 = arith.select %more, %nm1, %c0 : i32
+  %cnt = arith.index_cast %cnt0 : i32 to index
+  %ids = memref.get_global @mmx_ids : memref<256xi32>
+  %idsS = trikeshed.text %ids : memref<256xi32> -> !x
+  %rest = trikeshed.slice %idsS[%one, %cnt] : !x -> !x
+  %m = trikeshed.fold %rest, %c0 : !x, i32 -> i32 {
+  ^bb0(%best: i32, %k: i32):
     %bp = func.call @mmx_row(%base, %rs, %best) : (!llvm.ptr, i64, i32) -> !llvm.ptr
-    %kp = func.call @mmx_row(%base, %rs, %k32) : (!llvm.ptr, i64, i32) -> !llvm.ptr
+    %kp = func.call @mmx_row(%base, %rs, %k) : (!llvm.ptr, i64, i32) -> !llvm.ptr
     %lt = func.call @mmx_cmp(%less, %kp, %bp) : (!llvm.ptr, !llvm.ptr, !llvm.ptr) -> i1
-    %r = arith.select %lt, %k32, %best : i32
-    scf.yield %r : i32
+    %r = arith.select %lt, %k, %best : i32
+    trikeshed.yield %r : i32
   }
   return %m : i32
 }
@@ -344,8 +430,11 @@ func.func @mmx_peg_pop(%pb: !llvm.ptr, %pnp: !llvm.ptr, %rs: i64, %less: !llvm.p
   %mp = func.call @mmx_row(%pb, %rs, %m) : (!llvm.ptr, i64, i32) -> !llvm.ptr
   func.call @mmx_copy(%out, %mp, %rs) : (!llvm.ptr, !llvm.ptr, i64) -> ()
   %nm1 = arith.subi %pn, %c1 : i32
-  %last = func.call @mmx_row(%pb, %rs, %nm1) : (!llvm.ptr, i64, i32) -> !llvm.ptr
-  func.call @mmx_copy(%mp, %last, %rs) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+  %lastRow = func.call @mmx_row(%pb, %rs, %nm1) : (!llvm.ptr, i64, i32) -> !llvm.ptr
+  %moved = arith.cmpi ne, %m, %nm1 : i32
+  scf.if %moved {
+    func.call @mmx_copy(%mp, %lastRow, %rs) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+  }
   llvm.store %nm1, %pnp : i32, !llvm.ptr
   return
 }
@@ -440,8 +529,9 @@ func.func @mmx_cluster_pop_min(%hb: !llvm.ptr, %hnp: !llvm.ptr, %pb: !llvm.ptr, 
   return
 }
 
-// firstWhere(rows, == r) over n rows: the first equal row, or null.
-func.func private @mmx_first_eq(%base: !llvm.ptr, %n: i32, %rs: i64, %eq: !llvm.ptr, %r: !llvm.ptr) -> !llvm.ptr {
+// firstWhere(rows, == r) over n rows: the first equal row, or null.  A short-circuit: the rows after a match are never
+// compared, so this is an scf.while over the positions, not a fold.
+func.func @mmx_first_eq(%base: !llvm.ptr, %n: i32, %rs: i64, %eq: !llvm.ptr, %r: !llvm.ptr) -> !llvm.ptr {
   %c0 = arith.constant 0 : i32
   %c1 = arith.constant 1 : i32
   %null = llvm.mlir.zero : !llvm.ptr
@@ -502,34 +592,45 @@ func.func @mmx_cluster_find(%hb: !llvm.ptr, %hn: i32, %pb: !llvm.ptr, %pn: i32, 
 }
 
 // drain: one popMin a row, the min edges racing until the cluster is empty; each row emitted, in key order, to
-// emit(ctx, row).
+// emit(ctx, row).  The emits are a fold over the first hn+pn indices of the table.
 func.func @mmx_cluster_drain(%hb: !llvm.ptr, %hnp: !llvm.ptr, %pb: !llvm.ptr, %pnp: !llvm.ptr, %rs: i64,
     %less: !llvm.ptr, %ctx: !llvm.ptr, %emit: !llvm.ptr) {
   %z = arith.constant 0 : index
-  %one = arith.constant 1 : index
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
   %hn = llvm.load %hnp : !llvm.ptr -> i32
   %pn = llvm.load %pnp : !llvm.ptr -> i32
   %total = arith.addi %hn, %pn : i32
   %totalI = arith.index_cast %total : i32 to index
   %tmp = llvm.alloca %rs x i8 {alignment = 16 : i64} : (i64) -> !llvm.ptr
-  scf.for %k = %z to %totalI step %one {
+  %ids = memref.get_global @mmx_ids : memref<256xi32>
+  %idsS = trikeshed.text %ids : memref<256xi32> -> !x
+  %all = trikeshed.slice %idsS[%z, %totalI] : !x -> !x
+  %emitted = trikeshed.fold %all, %c0 : !x, i32 -> i32 {
+  ^bb0(%acc: i32, %k: i32):
     func.call @mmx_cluster_pop_min(%hb, %hnp, %pb, %pnp, %rs, %less, %tmp) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, !llvm.ptr) -> ()
     llvm.call %emit(%ctx, %tmp) : !llvm.ptr, (!llvm.ptr, !llvm.ptr) -> ()
+    %a1 = arith.addi %acc, %c1 : i32
+    trikeshed.yield %a1 : i32
   }
   return
 }
 
 // clusterOrder's fill-then-drain: every one of the n rows inserted (the caller keeps n within the cluster), then the
-// cluster drained to emit.
+// cluster drained to emit.  The fill is a fold over the first n indices.
 func.func @mmx_order(%hb: !llvm.ptr, %hnp: !llvm.ptr, %capN: i32, %pb: !llvm.ptr, %pnp: !llvm.ptr, %capP: i32,
     %rs: i64, %less: !llvm.ptr, %rows: !llvm.ptr, %n: i32, %ctx: !llvm.ptr, %emit: !llvm.ptr) {
   %z = arith.constant 0 : index
-  %one = arith.constant 1 : index
+  %c0 = arith.constant 0 : i32
   %nI = arith.index_cast %n : i32 to index
-  scf.for %k = %z to %nI step %one {
-    %k32 = arith.index_cast %k : index to i32
-    %rp = func.call @mmx_row(%rows, %rs, %k32) : (!llvm.ptr, i64, i32) -> !llvm.ptr
+  %ids = memref.get_global @mmx_ids : memref<256xi32>
+  %idsS = trikeshed.text %ids : memref<256xi32> -> !x
+  %all = trikeshed.slice %idsS[%z, %nI] : !x -> !x
+  %filled = trikeshed.fold %all, %c0 : !x, i32 -> i32 {
+  ^bb0(%acc: i32, %k: i32):
+    %rp = func.call @mmx_row(%rows, %rs, %k) : (!llvm.ptr, i64, i32) -> !llvm.ptr
     %st = func.call @mmx_cluster_insert(%hb, %hnp, %capN, %pb, %pnp, %capP, %rs, %less, %rp) : (!llvm.ptr, !llvm.ptr, i32, !llvm.ptr, !llvm.ptr, i32, i64, !llvm.ptr, !llvm.ptr) -> i32
+    trikeshed.yield %acc : i32
   }
   func.call @mmx_cluster_drain(%hb, %hnp, %pb, %pnp, %rs, %less, %ctx, %emit) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, !llvm.ptr, !llvm.ptr) -> ()
   return
@@ -570,25 +671,32 @@ func.func private @mmx_bucket(%cells: !llvm.ptr, %top: i32, %l: i32, %h: i64, %s
   return %b : !llvm.ptr
 }
 
-// put: walk the levels, the row's bucket at each; a stored key refuses (0xFF), a bucket with room takes the row and
-// its level is the answer (the row count bumped), a full bucket reroutes one level down.  Every level full: 0xFE.
+// put: walk the levels (a slice of the index table: level l at position l), the row's bucket at each; a stored key
+// refuses (0xFF), a bucket with room takes the row and its level is the answer (the row count bumped), a full bucket
+// reroutes one level down.  Every level full: 0xFE.
 func.func @mmx_funnel_put(%cells: !llvm.ptr, %top: i32, %levels: i32, %rowsp: !llvm.ptr, %rs: i64, %capN: i32,
     %capP: i32, %hnOff: i64, %pOff: i64, %pnOff: i64, %stride: i64, %less: !llvm.ptr, %eq: !llvm.ptr,
     %r: !llvm.ptr, %h: i64) -> i32 {
   %undecided = arith.constant -1 : i32
-  %c0 = arith.constant 0 : i32
+  %c0 = arith.constant 0 : index
+  %one = arith.constant 1 : index
   %c1 = arith.constant 1 : i32
   %c2 = arith.constant 2 : i32
   %cff = arith.constant 255 : i32
   %cfe = arith.constant 254 : i32
   %null = llvm.mlir.zero : !llvm.ptr
-  %w:2 = scf.while (%l = %c0, %ret = %undecided) : (i32, i32) -> (i32, i32) {
-    %lt = arith.cmpi ult, %l, %levels : i32
+  %levelsI = arith.index_cast %levels : i32 to index
+  %ids = memref.get_global @mmx_ids : memref<256xi32>
+  %idsS = trikeshed.text %ids : memref<256xi32> -> !x
+  %lvls = trikeshed.slice %idsS[%c0, %levelsI] : !x -> !x
+  %w:2 = scf.while (%p = %c0, %ret = %undecided) : (index, i32) -> (index, i32) {
+    %lt = arith.cmpi ult, %p, %levelsI : index
     %und = arith.cmpi eq, %ret, %undecided : i32
     %go = arith.andi %lt, %und : i1
-    scf.condition(%go) %l, %ret : i32, i32
+    scf.condition(%go) %p, %ret : index, i32
   } do {
-  ^bb0(%lv: i32, %rv: i32):
+  ^bb0(%pp: index, %rv: i32):
+    %lv = trikeshed.at %lvls[%pp] : !x, index -> i32
     %b = func.call @mmx_bucket(%cells, %top, %lv, %h, %stride) : (!llvm.ptr, i32, i32, i64, i64) -> !llvm.ptr
     %hnp = llvm.getelementptr %b[%hnOff] : (!llvm.ptr, i64) -> !llvm.ptr, i8
     %pb = llvm.getelementptr %b[%pOff] : (!llvm.ptr, i64) -> !llvm.ptr, i8
@@ -612,8 +720,8 @@ func.func @mmx_funnel_put(%cells: !llvm.ptr, %top: i32, %levels: i32, %rowsp: !l
       }
       scf.yield %r2 : i32
     }
-    %l1 = arith.addi %lv, %c1 : i32
-    scf.yield %l1, %r1 : i32, i32
+    %p1 = arith.addi %pp, %one : index
+    scf.yield %p1, %r1 : index, i32
   }
   %still = arith.cmpi eq, %w#1, %undecided : i32
   %res = arith.select %still, %cfe, %w#1 : i32
@@ -625,21 +733,27 @@ func.func @mmx_funnel_put(%cells: !llvm.ptr, %top: i32, %levels: i32, %rowsp: !l
 func.func @mmx_funnel_get(%cells: !llvm.ptr, %top: i32, %levels: i32, %rs: i64, %capN: i32, %capP: i32,
     %hnOff: i64, %pOff: i64, %pnOff: i64, %stride: i64, %less: !llvm.ptr, %eq: !llvm.ptr, %r: !llvm.ptr,
     %h: i64, %probesp: !llvm.ptr) -> !llvm.ptr {
-  %c0 = arith.constant 0 : i32
+  %c0i = arith.constant 0 : index
+  %one = arith.constant 1 : index
   %c1 = arith.constant 1 : i32
   %t = arith.constant 1 : i1
   %f = arith.constant 0 : i1
   %null = llvm.mlir.zero : !llvm.ptr
   %counting = llvm.icmp "ne" %probesp, %null : !llvm.ptr
-  %w:3 = scf.while (%l = %c0, %fr = %null, %stop = %f) : (i32, !llvm.ptr, i1) -> (i32, !llvm.ptr, i1) {
-    %lt = arith.cmpi ult, %l, %levels : i32
+  %levelsI = arith.index_cast %levels : i32 to index
+  %ids = memref.get_global @mmx_ids : memref<256xi32>
+  %idsS = trikeshed.text %ids : memref<256xi32> -> !x
+  %lvls = trikeshed.slice %idsS[%c0i, %levelsI] : !x -> !x
+  %w:3 = scf.while (%p = %c0i, %fr = %null, %stop = %f) : (index, !llvm.ptr, i1) -> (index, !llvm.ptr, i1) {
+    %lt = arith.cmpi ult, %p, %levelsI : index
     %none = llvm.icmp "eq" %fr, %null : !llvm.ptr
     %more = arith.xori %stop, %t : i1
     %a1 = arith.andi %lt, %none : i1
     %go = arith.andi %a1, %more : i1
-    scf.condition(%go) %l, %fr, %stop : i32, !llvm.ptr, i1
+    scf.condition(%go) %p, %fr, %stop : index, !llvm.ptr, i1
   } do {
-  ^bb0(%lv: i32, %fv: !llvm.ptr, %sv: i1):
+  ^bb0(%pp: index, %fv: !llvm.ptr, %sv: i1):
+    %lv = trikeshed.at %lvls[%pp] : !x, index -> i32
     %b = func.call @mmx_bucket(%cells, %top, %lv, %h, %stride) : (!llvm.ptr, i32, i32, i64, i64) -> !llvm.ptr
     %hnp = llvm.getelementptr %b[%hnOff] : (!llvm.ptr, i64) -> !llvm.ptr, i8
     %pb = llvm.getelementptr %b[%pOff] : (!llvm.ptr, i64) -> !llvm.ptr, i8
@@ -656,8 +770,8 @@ func.func @mmx_funnel_get(%cells: !llvm.ptr, %top: i32, %levels: i32, %rs: i64, 
     %pf = arith.cmpi eq, %pn, %capP : i32
     %full = arith.andi %hf, %pf : i1
     %room = arith.xori %full, %t : i1
-    %l1 = arith.addi %lv, %c1 : i32
-    scf.yield %l1, %ff, %room : i32, !llvm.ptr, i1
+    %p1 = arith.addi %pp, %one : index
+    scf.yield %p1, %ff, %room : index, !llvm.ptr, i1
   }
   return %w#1 : !llvm.ptr
 }
