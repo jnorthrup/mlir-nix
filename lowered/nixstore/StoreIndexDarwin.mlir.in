@@ -1,0 +1,122 @@
+// The system's words for lowered/nixstore/StoreIndex.mlir, on macOS: what the C library does not give under one name
+// and one layout everywhere.  Each word is held against the system's headers by the index's harness (StoreIndex.mlir).
+//   nixsi_os_name      where a directory entry's name begins (struct dirent's d_name; its type is the byte before)
+//   nixsi_os_atime     where a file's times begin in what stat fills (st_atimespec; the modification time is 16 bytes
+//                      on, the change time 32); the file's number is the second word on every system
+//   nixsi_os_anon      mmap's flags for memory of the process's own: MAP_PRIVATE | MAP_ANON | MAP_NORESERVE
+//   nixsi_os_open      a file opened, never kept across an exec (O_CLOEXEC): how 0 to read, 1 to read and write, 2 the
+//                      same and made when it is not there, 3 written anew (made or cut); a file made is rw-r--r--
+//   nixsi_os_fstat, nixsi_os_lstat, nixsi_os_opendir, nixsi_os_readdir   the calls whose records have these layouts:
+//                      on an Intel Mac their names end in $INODE64 (lib/CMakeLists.txt puts the ending in)
+//   nixsi_os_local     what the file system of an open directory is trusted with: 2 (a file's number is given to no
+//                      later file) on a local APFS or HFS+ volume, 0 anywhere else (no index is kept beside it)
+//   nixsi_os_boot      this boot's name (kern.bootsessionuuid) into the cap bytes at buf: its bytes, 0 when there is none
+module {
+  llvm.func @open(!llvm.ptr, i32, ...) -> i32
+  llvm.func @"fstat@NIXSI_INODE64@"(i32, !llvm.ptr) -> i32
+  llvm.func @"lstat@NIXSI_INODE64@"(!llvm.ptr, !llvm.ptr) -> i32
+  llvm.func @"opendir@NIXSI_INODE64@"(!llvm.ptr) -> !llvm.ptr
+  llvm.func @"readdir@NIXSI_INODE64@"(!llvm.ptr) -> !llvm.ptr
+  llvm.func @"fstatfs@NIXSI_INODE64@"(i32, !llvm.ptr) -> i32
+  llvm.func @sysctlbyname(!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> i32
+  llvm.mlir.global internal constant @nixsi_os_bootname("kern.bootsessionuuid\00") : !llvm.array<21 x i8>
+
+  llvm.func @nixsi_os_name() -> i64 {
+    %c = llvm.mlir.constant(21 : i64) : i64
+    llvm.return %c : i64
+  }
+  llvm.func @nixsi_os_atime() -> i64 {
+    %c = llvm.mlir.constant(32 : i64) : i64
+    llvm.return %c : i64
+  }
+  llvm.func @nixsi_os_anon() -> i64 {
+    %c = llvm.mlir.constant(4162 : i64) : i64
+    llvm.return %c : i64
+  }
+  llvm.func @nixsi_os_open(%path: !llvm.ptr, %how: i64) -> i32 {
+    %c1 = llvm.mlir.constant(1 : i64) : i64
+    %c2 = llvm.mlir.constant(2 : i64) : i64
+    %c3 = llvm.mlir.constant(3 : i64) : i64
+    // O_CLOEXEC 0x1000000 with: O_RDONLY 0; O_RDWR 2; O_RDWR | O_CREAT 0x202; O_WRONLY | O_CREAT | O_TRUNC 0x601
+    %f0 = llvm.mlir.constant(16777216 : i32) : i32
+    %f1 = llvm.mlir.constant(16777218 : i32) : i32
+    %f2 = llvm.mlir.constant(16777730 : i32) : i32
+    %f3 = llvm.mlir.constant(16778753 : i32) : i32
+    %mode = llvm.mlir.constant(420 : i32) : i32
+    %is1 = llvm.icmp "eq" %how, %c1 : i64
+    %is2 = llvm.icmp "eq" %how, %c2 : i64
+    %is3 = llvm.icmp "eq" %how, %c3 : i64
+    %a = llvm.select %is1, %f1, %f0 : i1, i32
+    %b = llvm.select %is2, %f2, %a : i1, i32
+    %c = llvm.select %is3, %f3, %b : i1, i32
+    %fd = llvm.call @open(%path, %c, %mode) vararg(!llvm.func<i32 (ptr, i32, ...)>) : (!llvm.ptr, i32, i32) -> i32
+    llvm.return %fd : i32
+  }
+  llvm.func @nixsi_os_fstat(%fd: i32, %buf: !llvm.ptr) -> i32 {
+    %r = llvm.call @"fstat@NIXSI_INODE64@"(%fd, %buf) : (i32, !llvm.ptr) -> i32
+    llvm.return %r : i32
+  }
+  llvm.func @nixsi_os_lstat(%path: !llvm.ptr, %buf: !llvm.ptr) -> i32 {
+    %r = llvm.call @"lstat@NIXSI_INODE64@"(%path, %buf) : (!llvm.ptr, !llvm.ptr) -> i32
+    llvm.return %r : i32
+  }
+  llvm.func @nixsi_os_opendir(%path: !llvm.ptr) -> !llvm.ptr {
+    %r = llvm.call @"opendir@NIXSI_INODE64@"(%path) : (!llvm.ptr) -> !llvm.ptr
+    llvm.return %r : !llvm.ptr
+  }
+  llvm.func @nixsi_os_readdir(%dir: !llvm.ptr) -> !llvm.ptr {
+    %r = llvm.call @"readdir@NIXSI_INODE64@"(%dir) : (!llvm.ptr) -> !llvm.ptr
+    llvm.return %r : !llvm.ptr
+  }
+  // struct statfs is 2,168 bytes: f_flags a word of 32 bits at 64 (MNT_LOCAL 0x1000), f_fstypename at 72
+  llvm.func @nixsi_os_local(%fd: i32) -> i64 {
+    %n = llvm.mlir.constant(272 : i64) : i64
+    %c0 = llvm.mlir.constant(0 : i64) : i64
+    %c2 = llvm.mlir.constant(2 : i64) : i64
+    %c64 = llvm.mlir.constant(64 : i64) : i64
+    %c72 = llvm.mlir.constant(72 : i64) : i64
+    %c76 = llvm.mlir.constant(76 : i64) : i64
+    %z32 = llvm.mlir.constant(0 : i32) : i32
+    %z8 = llvm.mlir.constant(0 : i8) : i8
+    %local = llvm.mlir.constant(4096 : i32) : i32
+    %apfs = llvm.mlir.constant(1936093281 : i32) : i32
+    %hfs = llvm.mlir.constant(7562856 : i32) : i32
+    %buf = llvm.alloca %n x i64 : (i64) -> !llvm.ptr
+    %rc = llvm.call @"fstatfs@NIXSI_INODE64@"(%fd, %buf) : (i32, !llvm.ptr) -> i32
+    %ok = llvm.icmp "eq" %rc, %z32 : i32
+    llvm.cond_br %ok, ^read, ^none
+  ^read:
+    %fp = llvm.getelementptr %buf[%c64] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+    %tp = llvm.getelementptr %buf[%c72] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+    %ep = llvm.getelementptr %buf[%c76] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+    %flags = llvm.load %fp : !llvm.ptr -> i32
+    %type = llvm.load %tp : !llvm.ptr -> i32
+    %end = llvm.load %ep : !llvm.ptr -> i8
+    %lf = llvm.and %flags, %local : i32
+    %islocal = llvm.icmp "ne" %lf, %z32 : i32
+    %a0 = llvm.icmp "eq" %type, %apfs : i32
+    %a1 = llvm.icmp "eq" %end, %z8 : i8
+    %isapfs = llvm.and %a0, %a1 : i1
+    %ishfs = llvm.icmp "eq" %type, %hfs : i32
+    %known = llvm.or %isapfs, %ishfs : i1
+    %trusted = llvm.and %islocal, %known : i1
+    %r = llvm.select %trusted, %c2, %c0 : i1, i64
+    llvm.return %r : i64
+  ^none:
+    llvm.return %c0 : i64
+  }
+  llvm.func @nixsi_os_boot(%buf: !llvm.ptr, %cap: i64) -> i64 {
+    %c0 = llvm.mlir.constant(0 : i64) : i64
+    %c1 = llvm.mlir.constant(1 : i64) : i64
+    %z32 = llvm.mlir.constant(0 : i32) : i32
+    %null = llvm.mlir.zero : !llvm.ptr
+    %len = llvm.alloca %c1 x i64 : (i64) -> !llvm.ptr
+    llvm.store %cap, %len : i64, !llvm.ptr
+    %name = llvm.mlir.addressof @nixsi_os_bootname : !llvm.ptr
+    %rc = llvm.call @sysctlbyname(%name, %buf, %len, %null, %c0) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> i32
+    %ok = llvm.icmp "eq" %rc, %z32 : i32
+    %got = llvm.load %len : !llvm.ptr -> i64
+    %r = llvm.select %ok, %got, %c0 : i1, i64
+    llvm.return %r : i64
+  }
+}
