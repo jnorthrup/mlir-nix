@@ -245,7 +245,7 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/DrvParse.mlir DrvParse)
 # (combineAll over Nix's JSON escape table) and list combineAlls, drained once into a pre-sized buffer (fill-drain).
 mlnix_lower_trikeshed(NixStore lowered/nixstore/DrvJson.mlir DrvJson)
 # structuredAttrsFiles whole (.attrs.json and .attrs.sh; StructuredAttrs.cpp's DOM, parser and shell writer are gone, the
-# bridge keeps the record's arrays and the rooms) and nixstore::jsonEscape.  __json is read by confix.checked (JsonRead.mlir's
+# bridge keeps the record's arrays and the rooms).  __json is read by confix.checked (JsonRead.mlir's
 # scan, linked into NixEval), each object's members put in key order by trikeshed.sorted, the placeholders rewritten by a
 # combineAll of gaps and paths per pass; each file is ONE combineAll drained once (events / lines of slices and escapes).
 mlnix_lower_trikeshed(NixStore lowered/nixstore/StructuredAttrsOps.mlir StructuredAttrsOps)

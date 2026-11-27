@@ -126,18 +126,6 @@ composite::Text dirOf(std::string_view p) {
   return t;
 }
 
-// The escape is lowered/nixstore/StructuredAttrsOps.mlir (the same table the .attrs.json composition uses):
-// one combineAll of table slices drained into the Text's own buffer (resize before, truncate after, the PathOps way).
-extern "C" size_t nixstore_ts_escape(const char *p, size_t n, char *into, size_t cap);
-
-composite::Text jsonEscape(std::string_view s) {
-  size_t room = 2 + 6 * s.size();
-  composite::Text o;
-  o.resize(room);
-  o.truncate(nixstore_ts_escape(s.data(), s.size(), o.begin(), room));
-  return o;
-}
-
 // jsonFloat is lowered/nixstore/JsonFloat.mlir (the shortest round-tripping digits, format_buffer's layout, one combine
 // drained once); the snprintf, a variadic call, is this callback.
 extern "C" int64_t nixstore_jf_sci(double d, int64_t prec, char *buf) { return snprintf(buf, 64, "%.*e", int(prec - 1), d); }
