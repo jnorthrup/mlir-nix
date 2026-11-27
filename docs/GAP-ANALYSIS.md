@@ -108,8 +108,18 @@ Each gap names what it blocks and what closes it.  A child gap closes only after
   `at`, `compare unsigned`) and by lowering `rows`; the line-ports are the oracle.
 - **G3, the trie CAS.**  (a) Patricia.mlir in dialect forms (after G2).  (b) The store's index as a HashTrie keyed by
   the path's hash part, with the referrers as sorted rows: today one text file per path, and the referrers of one path
-  cost a read of every file (after G1).  (c) The address-keyed tables as dense rows (after G1).  The name tables
-  (symbols, baseEnv) stay open addressing until a funnel measures faster: they are the evaluator's hottest lookups.
+  cost a read of every file (after G1).  Measured on synthetic stores (scratch gap/gen-store.py, store-times.sh; a
+  reference DAG of up to 4 references a path, `mlnix store` of 0db2780): `--query --referrers` 0.07 / 0.23 / 0.97 s at
+  1,000 / 5,000 / 20,000 paths (0.4 / 1.5 / 6.7 G instructions: linear in the store), `--gc --print-dead` 0.14 / 0.95 /
+  10.0 s (0.7 / 4.7 / 55 G instructions), while `--references` and `--requisites` stay at start-up cost (0.03-0.04 s).
+  The GC's cost is its algorithm, not the files: StoreGraph.mlir's nixstore_ts_gc reads each dead path's references
+  once, but each sweep asks, for every dead path still there, whether any other one still there refers to it, by
+  scanning them all (n^2 a sweep, a sweep per layer of the dead graph).  `trikeshed.adjacency` (lowered, no product
+  user) gives each path's referrer count in one counting sort; a sweep then deletes the paths whose count is 0 and
+  lowers their references' counts: the same order, linear a sweep.  The referrers query needs the index itself.
+  A NixOS store of 50,000-100,000 paths puts a dry GC in minutes.  (c) The address-keyed tables as
+  dense rows (after G1).  The name tables (symbols, baseEnv) stay open addressing until a funnel measures faster: they
+  are the evaluator's hottest lookups.
 - **G4, the heap store.**  (a) ClusterOps.mlir in dialect forms (after G2).  (b) SortedSet and SortedMap built out of
   order fill and drain once (`sortRows` + `uniqueFirst`, both lowered) instead of rotating per insert.  (c) The sealed,
   delta-compressed page: not built in mlir-nix or in TrikeShed's CursorTrie (its pages are sorted, not compressed); the
@@ -155,3 +165,14 @@ Each merge, `gap-census.py --seal` on the new master and `--diff` against the pr
   in too costs 1.25-2.5x: a combineAll runs its region twice (size, then drain), and a recursive writer of many tiny
   pieces pays both passes at every level.  The sub-gap is G1's: a writer of that shape wants a single-pass fill (appends
   into a lane) and one drain, not a two-pass composition.  Re-measure it on the lanes lowering.
+- wave 1 part 2 (2026-11-27, heap: 35e480c + 75a7fcb; C++ 22,815 -> 22,817, two static_asserts the trikeshed forms
+  need: the index table bounds N <= 255 and N + P <= 256; wave 1 since a8d3ae3: 22,822 -> 22,817).  ClusterOps.mlir
+  0.0% -> 6.5% dialect ops (row moves as drains, argMin and the drain's emits as folds over one index table, the
+  funnel's levels as a slice of it); lowered/composite 6.0% -> 8.8% dialect, 13.9% -> 11.2% llvm; bypass 61 -> 60
+  functions, 6,204 -> 6,173 ops.  Proof: 1.5M random sequences (1.43G comparator calls) against the a8d3ae3 object in
+  lockstep, then 500k more (477M comparator calls) on the inlined form, 0 mismatches; minmax-check and funnel-check
+  plain and sanitized on both platforms.  Time: the first form was 6.2% slower on inode-bench's cluster phase (an
+  out-of-line row swap); with `--inline --symbol-dce` in ClusterOps' mlir-opt stage and the loop-idiom memcpy pass off
+  for its clang steps, the 16-byte swap is register moves and the phase is 4.7% faster than the llvm port (min of 15
+  interleaved runs; 12.7% fewer instructions retired).  Linux (LLVM 22, 5df9b19): mlir 52/0, lang 488/488 exact 231 on
+  both schedules, prims 121, mlnixci 51 PASS, son wrong 0, the Composite checks plain and sanitized.
