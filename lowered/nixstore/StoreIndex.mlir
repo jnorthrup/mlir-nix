@@ -803,6 +803,13 @@ func.func @nixsi_page_find(%page: !llvm.ptr, %avail: i64, %key: i64, %out: !llvm
 //                         index lasts as long as the process and follows the directory's token as the file would
 //   the directory's time  set one nanosecond back before a pass (a time no later change gives it); where it cannot
 //                         be set the token is held only once the directory is three seconds old
+//   what it is not told   an info file written over in place, under its name, by something that is not mlnix (every
+//                         mlnix writes the file elsewhere and renames it in, or unlinks it: the directory tells
+//                         both).  The directory tells nothing of it, and the index goes on answering with the text it
+//                         read: until a list next reads the directory, where an entry's identity has its file's time
+//                         (Linux); until the system next starts, where it has not (macOS).  And a process that holds
+//                         the file when another removes it keeps the file it holds, which is still an index of the
+//                         directory, until it ends; whoever comes next makes the file anew
 
 // the handle of this process: 0 the image, 1 its kind (0 none, 1 the file, 2 the file read-only, 3 this process's own),
 // 2 the file, 3 the info directory, 4 the file's bytes, 5 the directory path's bytes, 6 a directory is in hand, 7 the
@@ -813,6 +820,8 @@ func.func @nixsi_page_find(%page: !llvm.ptr, %avail: i64, %key: i64, %out: !llvm
 // and bytes (two words a room).  The handle is the store's thread's alone, as the store is.
 memref.global "private" @nxsi_h : memref<40xi64> = dense<0>
 memref.global "private" constant @nxsi_zero : memref<32xi64> = dense<0>
+// the addresses asked for an index of the process's own: the first of these the system gives
+memref.global "private" constant @nxsi_sizes : memref<4xi64> = dense<[68719476736, 8589934592, 1073741824, 134217728]>
 // the code of a byte in a key: its place in nix32's alphabet, the low 5 bits of any other byte
 memref.global "private" constant @nxsi_code : memref<256xi8> = dense<"0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f000102030405060708090a0b0c0d0e0f000102030405060708091a1b1c1d1e1f000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f000a0b0c0d050e0f101112131415160f1718191a14151b1c1d1e1f1b1c1d1e1f000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f">
 // ".tmp" NUL, ".trie" NUL, three bytes not used, "/"
@@ -2424,7 +2433,7 @@ func.func private @nxsi_is_live(%x: i64) -> i64 {
   return %r : i64
 }
 
-// The row of the record at x struck out: a row of its name's key whose value is x | 1.  1, 0 or -1 as si_put.
+// The row of the record at x struck out: a row of its name's key whose value is x | 1.  1, 0 or -1 as nxsi_put.
 func.func private @nxsi_strike(%x: i64) -> i64 {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
@@ -2623,7 +2632,8 @@ func.func private @nxsi_ident(%buf: !llvm.ptr) -> i64 {
   %bs = builtin.unrealized_conversion_cast %bm : !m64 to !s64
   %ino = trikeshed.at %bs[%i1] : !s64, index -> i64
   %pol = func.call @nxsi_hg(%c11) : (i64) -> i64
-  %timed = arith.cmpi ne, %pol, %c2 : i64
+  %c1 = arith.constant 1 : i64
+  %timed = arith.cmpi eq, %pol, %c1 : i64
   %r = scf.if %timed -> (i64) {
     %ab = func.call @nixsi_os_atime() : () -> i64
     %aw = arith.shrui %ab, %c3 : i64
@@ -2827,17 +2837,15 @@ func.func private @nxsi_openfile(%create: i64) {
 }
 
 // An index of this process's own, empty: where the file cannot be written (or made, or read as it is), a query still
-// answers from the directory's files, as it did before there was an index.  Kind 0 when the memory cannot be had.
-// The file, when one was in hand, is closed and its image given back.
+// answers from the directory's files, as it did before there was an index.  The file, when one was in hand, is closed
+// and its image given back.  The memory is only reserved (64 GiB of addresses, or 8, 1, or an eighth where the
+// process may not have so many: the first of nxsi_sizes that the system gives); kind 0 when it gives none.
 func.func private @nxsi_anon() {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
-  %c2 = arith.constant 2 : i64
   %c3 = arith.constant 3 : i64
   %c4 = arith.constant 4 : i64
-  %c7 = arith.constant 7 : i64
   %m1 = arith.constant -1 : i64
-  %reserve = arith.constant 68719476736 : i64
   %prw = arith.constant 3 : i32
   %nofd = arith.constant -1 : i32
   %kind = func.call @nxsi_hg(%c1) : (i64) -> i64
@@ -2847,13 +2855,29 @@ func.func private @nxsi_anon() {
     %fl64 = func.call @nixsi_os_anon() : () -> i64
     %fl = arith.trunci %fl64 : i64 to i32
     %null = llvm.inttoptr %c0 : i64 to !llvm.ptr
-    %p = func.call @mmap(%null, %reserve, %prw, %fl, %nofd, %c0) : (!llvm.ptr, i64, i32, i32, i32, i64) -> !llvm.ptr
-    %bits = llvm.ptrtoint %p : !llvm.ptr to i64
-    %ok = arith.cmpi ne, %bits, %m1 : i64
-    scf.if %ok {
-      func.call @nxsi_hs(%c0, %bits) : (i64, i64) -> ()
+    %sg = memref.get_global @nxsi_sizes : memref<4xi64>
+    %sizes = trikeshed.text %sg : memref<4xi64> -> !s64
+    %got = trikeshed.fold %sizes, %c0 : !s64, i64 -> i64 {
+    ^bb0(%acc: i64, %size: i64):
+      %open = arith.cmpi eq, %acc, %c0 : i64
+      %next = scf.if %open -> (i64) {
+        %p = func.call @mmap(%null, %size, %prw, %fl, %nofd, %c0) : (!llvm.ptr, i64, i32, i32, i32, i64) -> !llvm.ptr
+        %bits = llvm.ptrtoint %p : !llvm.ptr to i64
+        %ok = arith.cmpi ne, %bits, %m1 : i64
+        scf.if %ok {
+          func.call @nxsi_hs(%c4, %size) : (i64, i64) -> ()
+        }
+        %b = arith.select %ok, %bits, %c0 : i64
+        scf.yield %b : i64
+      } else {
+        scf.yield %acc : i64
+      }
+      trikeshed.yield %next : i64
+    }
+    %have = arith.cmpi ne, %got, %c0 : i64
+    scf.if %have {
+      func.call @nxsi_hs(%c0, %got) : (i64, i64) -> ()
       func.call @nxsi_hs(%c1, %c3) : (i64, i64) -> ()
-      func.call @nxsi_hs(%c4, %reserve) : (i64, i64) -> ()
       %made = func.call @nxsi_init() : () -> i1
     }
   }
@@ -2865,6 +2889,7 @@ func.func private @nxsi_drop() {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
   %c2 = arith.constant 2 : i64
+  %c3 = arith.constant 3 : i64
   %c4 = arith.constant 4 : i64
   %c7 = arith.constant 7 : i64
   %c9 = arith.constant 9 : i64
@@ -2873,15 +2898,19 @@ func.func private @nxsi_drop() {
   %kind = func.call @nxsi_hg(%c1) : (i64) -> i64
   %img = func.call @nxsi_hg(%c0) : (i64) -> i64
   %fd64 = func.call @nxsi_hg(%c2) : (i64) -> i64
+  %mine = func.call @nxsi_hg(%c4) : (i64) -> i64
   %k1 = arith.cmpi eq, %kind, %c1 : i64
   %k2 = arith.cmpi eq, %kind, %c2 : i64
+  %k3 = arith.cmpi eq, %kind, %c3 : i64
   %file = arith.ori %k1, %k2 : i1
   %mapped0 = arith.cmpi ne, %kind, %c0 : i64
   %mapped1 = arith.cmpi ne, %img, %c0 : i64
   %mapped = arith.andi %mapped0, %mapped1 : i1
   scf.if %mapped {
+    // a file's image is the 64 GiB it was mapped with; the process's own is what was reserved for it
+    %len = arith.select %k3, %mine, %reserve : i64
     %ip = llvm.inttoptr %img : i64 to !llvm.ptr
-    %ru = func.call @munmap(%ip, %reserve) : (!llvm.ptr, i64) -> i32
+    %ru = func.call @munmap(%ip, %len) : (!llvm.ptr, i64) -> i32
   }
   scf.if %file {
     %fd = arith.trunci %fd64 : i64 to i32
@@ -3321,7 +3350,8 @@ func.func private @nxsi_whose(%np: !llvm.ptr, %nn: i64, %dino: i64) -> i64 {
   %z32 = arith.constant 0 : i32
   %sbuf = llvm.alloca %c32 x i64 : (i64) -> !llvm.ptr
   %pol = func.call @nxsi_hg(%c11) : (i64) -> i64
-  %timed = arith.cmpi ne, %pol, %c2 : i64
+  %c1 = arith.constant 1 : i64
+  %timed = arith.cmpi eq, %pol, %c1 : i64
   %ident = scf.if %timed -> (i64) {
     %pp = func.call @nxsi_path(%np, %nn) : (!llvm.ptr, i64) -> !llvm.ptr
     %rc = func.call @nixsi_os_lstat(%pp, %sbuf) : (!llvm.ptr, !llvm.ptr) -> i32
@@ -3522,14 +3552,16 @@ func.func private @nxsi_pass(%look: i64) -> i64 {
         %h1 = arith.addi %ha, %eh : i64
         %c1x = arith.addi %ca, %c1 : i64
         %k = scf.if %looks -> (i64) {
-          // the entry's type, the byte before its name: 8 a regular file
+          // the entry's type, the byte before its name: 8 a regular file (look 2: no file is read, whatever it is)
           %tp0 = arith.subi %noff, %c1 : i64
           %tpp = llvm.getelementptr %ep[%tp0] : (!llvm.ptr, i64) -> !llvm.ptr, i8
           %tyd = func.call @nxsi_d(%tpp, %c1) : (!llvm.ptr, i64) -> !d
           %tym = builtin.unrealized_conversion_cast %tyd : !d to !m
           %tys = builtin.unrealized_conversion_cast %tym : !m to !s
           %ty8 = trikeshed.at %tys[%z] : !s, index -> i8
-          %ty = arith.extui %ty8 : i8 to i64
+          %ty0 = arith.extui %ty8 : i8 to i64
+          %notexts = arith.cmpi eq, %look, %c2 : i64
+          %ty = arith.select %notexts, %c0, %ty0 : i64
           %kk = func.call @nxsi_entry(%np, %nn, %ident, %ty) : (!llvm.ptr, i64, i64, i64) -> i64
           scf.yield %kk : i64
         } else {
@@ -3590,7 +3622,8 @@ func.func private @nxsi_pass(%look: i64) -> i64 {
 }
 
 // The index made to hold the directory as it is.  Nothing to do when its token is the directory's (unless `force`: a
-// query of every path reads the directory whatever the token says, as allValidPaths always did).  Else: the directory
+// query of every path reads the directory whatever the token says, as allValidPaths always did; force 2: and no file
+// is read for it, the entries indexed by name alone, for an index that is not kept).  Else: the directory
 // stamped, a pass, and the token again; a directory that changed under the pass is passed again (three times at most).
 // Then the token written, when it is one to hold.  When the rows struck out are thousands more than the live ones the
 // index is begun again first.  1 answered, 0 no room, -1 not sound.
@@ -3634,16 +3667,43 @@ func.func private @nxsi_sync(%force: i64) -> i64 {
         func.call @nxsi_hs(%c12, %c1) : (i64, i64) -> ()
         scf.yield %t0 : i64
       } else {
-        %ts = func.call @nxsi_stamp() : () -> i64
+        // where no index file is kept the directory is left as it is: no token is held for it
+        %c11 = arith.constant 11 : i64
+        %pol = func.call @nxsi_hg(%c11) : (i64) -> i64
+        %trusted = arith.cmpi ne, %pol, %c0 : i64
+        %ts = scf.if %trusted -> (i64) {
+          %stamped = func.call @nxsi_stamp() : () -> i64
+          scf.yield %stamped : i64
+        } else {
+          func.call @nxsi_hs(%c12, %c0) : (i64, i64) -> ()
+          %asitis = func.call @nxsi_token() : () -> i64
+          scf.yield %asitis : i64
+        }
         scf.yield %ts : i64
       }
-      // a glance first: the directory's entries counted and summed; a pass only when they are not the index's
-      %g = func.call @nxsi_pass(%c0) : (i64) -> i64
+      // a glance first, when the index holds a path: the directory's entries counted and summed; a pass only when
+      // they are not the index's, and the token cleared before the pass changes anything (a pass that dies leaves an
+      // index that knows it has not read the directory)
+      %held = func.call @nxsi_w(%c40) : (i64) -> i64
+      %some = arith.cmpi ne, %held, %c0 : i64
+      %g = scf.if %some -> (i64) {
+        %gl = func.call @nxsi_pass(%c0) : (i64) -> i64
+        scf.yield %gl : i64
+      } else {
+        scf.yield %c2 : i64
+      }
       %asis = arith.cmpi eq, %g, %c1 : i64
       %p = scf.if %asis -> (i64) {
         scf.yield %c1 : i64
       } else {
-        %pp = func.call @nxsi_pass(%c1) : (i64) -> i64
+        %tokw = func.call @nxsi_w(%c16) : (i64) -> i64
+        %tokthere = arith.cmpi ne, %tokw, %c0 : i64
+        scf.if %tokthere {
+          func.call @nxsi_hw(%c16, %c0) : (i64, i64) -> ()
+        }
+        %notexts = arith.cmpi eq, %force, %c2 : i64
+        %look = arith.select %notexts, %c2, %c1 : i64
+        %pp = func.call @nxsi_pass(%look) : (i64) -> i64
         scf.yield %pp : i64
       }
       %t2 = func.call @nxsi_token() : () -> i64
@@ -4135,7 +4195,6 @@ func.func @nixsi_names(%f: !llvm.ptr, %referring: i64, %ctx: !llvm.ptr, %ctx2: !
   %np = llvm.getelementptr %f[%start] : (!llvm.ptr, i64) -> !llvm.ptr, i8
   %nn = arith.subi %n, %start : i64
   %lazy = arith.cmpi ne, %referring, %c0 : i64
-  %force = arith.select %lazy, %c0, %c1 : i64
   %kind0 = func.call @nxsi_hg(%c1) : (i64) -> i64
   // a file that can only be read is used as it is when it holds the directory and the query is not of every path
   %isro = arith.cmpi eq, %kind0, %c2 : i64
@@ -4174,6 +4233,9 @@ func.func @nixsi_names(%f: !llvm.ptr, %referring: i64, %ctx: !llvm.ptr, %ctx2: !
   scf.if %anew {
     %made = func.call @nxsi_init() : () -> i1
   }
+  // every path: the directory is read whatever the token says; for an index that is not kept, no file is read for it
+  %full = arith.select %anew, %c2, %c1 : i64
+  %force = arith.select %lazy, %c0, %full : i64
   %te, %me = scf.while (%try = %c0, %m = %m1) : (i64, i64) -> (i64, i64) {
     %open = arith.cmpi eq, %m, %m1 : i64
     %left = arith.cmpi slt, %try, %c3 : i64
@@ -4251,24 +4313,28 @@ func.func @nixsi_names(%f: !llvm.ptr, %referring: i64, %ctx: !llvm.ptr, %ctx2: !
 }
 
 // What the index has done in this process, for its checks (scripts/store-index-check.sh): the times an index was begun
-// again (i 14) and the info files read (i 15).
+// again (i 14), the info files read (i 15), and the kind of the index in hand (i 1: 0 none, 1 the file, 2 the file
+// read-only, 3 this process's own).
 func.func @nixsi_count(%i: i64) -> i64 {
+  %c1 = arith.constant 1 : i64
   %c14 = arith.constant 14 : i64
   %c15 = arith.constant 15 : i64
   %reads = arith.cmpi eq, %i, %c15 : i64
-  %w = arith.select %reads, %c15, %c14 : i64
+  %kind = arith.cmpi eq, %i, %c1 : i64
+  %w0 = arith.select %reads, %c15, %c14 : i64
+  %w = arith.select %kind, %c1, %w0 : i64
   %v = func.call @nxsi_hg(%w) : (i64) -> i64
   return %v : i64
 }
 
 // The index told of a change this process made to the directory, when it held the directory as it was before (keep):
 // the record of the name struck out if there was one, and, when there are bytes (tn at least 0), the entry indexed from
-// them under the identity given; then the token cleared.  The directory may have been changed by another at the same
-// moment, by one that takes no lock: only a pass says, and the next query makes one, reading no file it has read.
+// them under the identity given.  The token stays cleared (nxsi_keep): the directory may have been changed by another
+// at the same moment, by one that takes no lock; only a reading of the directory says, and the next query makes one
+// (its entries counted and summed are the index's when nobody else changed it: no row looked up, no file read).
 func.func private @nxsi_told(%np: !llvm.ptr, %nn: i64, %ident: i64, %tp: !llvm.ptr, %tn: i64) {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
-  %c16 = arith.constant 16 : i64
   %cmax = arith.constant 1048576 : i64
   %m1 = arith.constant -1 : i64
   %x = func.call @nxsi_live(%np, %nn) : (!llvm.ptr, i64) -> i64
@@ -4289,15 +4355,17 @@ func.func private @nxsi_told(%np: !llvm.ptr, %nn: i64, %ident: i64, %tp: !llvm.p
     %tlen = arith.select %small, %tn, %m1 : i64
     %xn = func.call @nxsi_index(%np, %nn, %ident, %tp, %tlen) : (!llvm.ptr, i64, i64, !llvm.ptr, i64) -> i64
   }
-  func.call @nxsi_hw(%c16, %c0) : (i64, i64) -> ()
   return
 }
 
 // The file's lock taken alone for a change of the directory, when there is a file to write: whether the index holds the
-// directory as it is (and is to be told of the change).
+// directory as it is (and is to be told of the change).  Its token is cleared here, before the directory or the index
+// changes: a process that dies in the middle leaves an index that knows it has not read the directory.
 func.func private @nxsi_keep() -> i1 {
+  %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
   %c2 = arith.constant 2 : i64
+  %c16 = arith.constant 16 : i64
   %kind = func.call @nxsi_hg(%c1) : (i64) -> i64
   %isfile = arith.cmpi eq, %kind, %c1 : i64
   %keep = scf.if %isfile -> (i1) {
@@ -4307,6 +4375,9 @@ func.func private @nxsi_keep() -> i1 {
       scf.yield %fr : i1
     } else {
       scf.yield %locked : i1
+    }
+    scf.if %fresh {
+      func.call @nxsi_hw(%c16, %c0) : (i64, i64) -> ()
     }
     scf.yield %fresh : i1
   } else {
