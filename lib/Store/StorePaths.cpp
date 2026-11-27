@@ -16,10 +16,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
 #include <unistd.h>
-
-extern char **environ;
 
 namespace nixstore {
 
@@ -137,60 +134,6 @@ composite::Text jsonFloat(double d) {
   out.resize(32);
   out.truncate(size_t(nixstore_ts_jsonfloat(d, out.begin(), buf)));
   return out;
-}
-
-// runProgram's argv pointer fill is lowered/nixstore/StorePathOps.mlir (allocation-free, it runs in the fork child):
-// into[0]=prog, into[k+1]=args[k].c_str() (the Text row's NUL-terminated data ptr), into[n+1]=null.
-extern "C" int64_t nixstore_ts_argv(const char *, const void *, int64_t, char **);
-
-int runProgram(std::string_view prog, const composite::MutableSeries<composite::Text> &args, composite::Text *out,
-               const composite::Text *input, std::string_view cwd) {
-  int outPipe[2], inPipe[2];
-  if (pipe(outPipe) != 0) throw Error("pipe failed");
-  if (input && pipe(inPipe) != 0) throw Error("pipe failed");
-  nixsys::CStr progC(prog), cwdC(cwd); // made before the fork, where an allocation is safe: the child only reads them
-  pid_t pid = fork();
-  if (pid < 0) throw Error("fork failed");
-  if (pid == 0) {
-    if (!cwd.empty() && chdir(cwdC) != 0) _exit(127);
-    dup2(outPipe[1], 1);
-    close(outPipe[0]);
-    close(outPipe[1]);
-    if (input) {
-      dup2(inPipe[0], 0);
-      close(inPipe[0]);
-      close(inPipe[1]);
-    } else {
-      int nul = open("/dev/null", O_RDONLY);
-      dup2(nul, 0);
-    }
-    composite::MutableSeries<char *> argv(args.size() + 2);
-    nixstore_ts_argv(progC.c_str(), args.data(), int64_t(args.size()), argv.data());
-    execvp(progC, argv.data());
-    _exit(127);
-  }
-  close(outPipe[1]);
-  if (input) {
-    close(inPipe[0]);
-    size_t off = 0;
-    while (off < input->size()) {
-      ssize_t n = write(inPipe[1], input->data() + off, input->size() - off);
-      if (n <= 0) break;
-      off += n;
-    }
-    close(inPipe[1]);
-  }
-  char buf[65536];
-  while (true) {
-    ssize_t n = read(outPipe[0], buf, sizeof buf);
-    if (n <= 0) break;
-    if (out) out->put(buf, size_t(n));
-  }
-  close(outPipe[0]);
-  int status;
-  waitpid(pid, &status, 0);
-  if (WIFEXITED(status)) return WEXITSTATUS(status);
-  return 128 + (WIFSIGNALED(status) ? WTERMSIG(status) : 0);
 }
 
 //===----------------------------------------------------------------------===//

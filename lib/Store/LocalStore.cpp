@@ -20,11 +20,7 @@
 #include "Nix/Store.h"
 #include <errno.h>
 #include <string.h>
-#include <dirent.h>
-#include <fcntl.h>
 #include <sys/stat.h>
-#include <sys/time.h>
-#include <sys/wait.h>
 #include <exception>
 #include <unistd.h>
 
@@ -153,18 +149,30 @@ namespace {
 struct Sb {
   Store *st = nullptr;
   const PathFilter *filter = nullptr;
+  composite::Text block[2];            // the rooms of a builder's environment and arguments (BuilderOps.mlir's cstrs)
+  SortedMap<composite::Text> rewrites; // the outputs' placeholders and the paths they stand for
+  composite::MutableSeries<composite::Text> texts; // what a callback made and the entry still reads
+  composite::Text file;                // the file read last
   std::exception_ptr err;
-  composite::Text file; // the file a walk read last
+  explicit Sb(Store *s = nullptr) : st(s) {}
   template <class F> int64_t guard(F f) { try { f(); return 0; } catch (...) { err = std::current_exception(); return 1; } }
   void done(int64_t failed) { if (failed) std::rethrow_exception(err); }
 };
 } // namespace
-static_assert(offsetof(StoreSettings, realRoot) == 16 && offsetof(StoreSettings, stateDir) == 32, "the settings a lowered entry reads");
+static_assert(offsetof(Sb, block) == 16 && offsetof(Store, settings) == 16 && offsetof(StoreSettings, realRoot) == 16 && offsetof(StoreSettings, stateDir) == 32 &&
+                  offsetof(StoreSettings, cores) == 52 && offsetof(StoreSettings, keepFailed) == 56 && sizeof(composite::MutableSeries<composite::Text>) == 16 &&
+                  sizeof(SortedMap<composite::Text>::Row) == 32 && offsetof(Derivation, outputs) == 16 && sizeof(SortedMap<DerivationOutput>::Row) == 120 &&
+                  offsetof(DerivationOutput, kind) == 0 && offsetof(Derivation, builder) == 80 && offsetof(Derivation, args) == 96 && offsetof(Derivation, env) == 112 &&
+                  offsetof(Derivation, structuredAttrs) == 128 && offsetof(composite::Maybe<composite::Text>, v) == 8,
+              "the places a lowered entry reads");
 extern "C" {
 int64_t nixsb_canon(Sb *c, const char *p, int64_t n);
 int64_t nixsb_copy(Sb *c, const char *from, int64_t fn, const char *to, int64_t tn, int64_t filtered);
 int64_t nixsb_refs(Sb *c, const char *p, int64_t n, const composite::Text *candidates, int64_t nc, SortedSet *refs);
 void nixsb_roots(const StoreSettings *s, SortedSet *roots);
+int64_t nixsb_run(Sb *c, const char *prog, int64_t pn, const composite::Text *args, int64_t na, composite::Text *out, const composite::Text *input, const char *cwd, int64_t cn);
+int64_t nixsb_build(Sb *c, const char *drvPath, int64_t dn, const Derivation *drv, const SortedMap<composite::Text> *outputs);
+int64_t nixsb_fetch(Sb *c, const Derivation *drv, const SortedMap<composite::Text> *outputs);
 void nixsb_fail(Sb *c, int64_t kind, const char *m, int64_t n) { // kind 1: SortedMap::at's
   composite::Text t(m, size_t(n));
   c->err = kind ? std::make_exception_ptr(std::out_of_range(t.c_str())) : std::make_exception_ptr(Error(t));
@@ -184,6 +192,40 @@ const char *nixsb_read(Sb *c, const char *p, int64_t n, int64_t *len) {
 }
 void nixsb_ref(SortedSet *s, const char *p, int64_t n) { s->insert(std::string_view(p, size_t(n))); }
 int64_t nixsb_exists(const char *p, int64_t n) { return pathExists(std::string_view(p, size_t(n))); }
+void nixsb_put(composite::Text *t, const char *p, int64_t n) { t->put(p, size_t(n)); }
+void nixsb_placeholder(Sb *c, const char *o, int64_t on, const char *p, int64_t pn) {
+  c->rewrites[hashPlaceholder(std::string_view(o, size_t(on)))] = composite::Text(p, size_t(pn));
+}
+const char *nixsb_rewrite(Sb *c, const char *p, int64_t n, int64_t *len) { // kept as long as the call
+  composite::Text &t = c->texts[c->texts.append(rewritePlaceholders(std::string_view(p, size_t(n)), c->rewrites))];
+  *len = t.size();
+  return t.data();
+}
+int64_t nixsb_sattrs(Sb *c, const char *j, int64_t jn, const SortedMap<composite::Text> *outputs, int64_t *w) { // .attrs.json, .attrs.sh: bytes and count each
+  return c->guard([&] {
+    auto [json, sh] = structuredAttrsFiles(std::string_view(j, size_t(jn)), *outputs, c->rewrites);
+    for (composite::Text *t : {&json, &sh}) {
+      composite::Text &k = c->texts[c->texts.append(composite::mv(*t))];
+      *w++ = int64_t(intptr_t(k.data())), *w++ = k.size();
+    }
+  });
+}
+int64_t nixsb_write(Sb *c, const char *p, int64_t n, const char *d, int64_t dn, int64_t mode) {
+  return c->guard([&] { writeFile(std::string_view(p, size_t(n)), std::string_view(d, size_t(dn)), mode_t(mode)); });
+}
+int64_t nixsb_delete(Sb *c, const char *p, int64_t n) { return c->guard([&] { deletePathRecursive(std::string_view(p, size_t(n))); }); }
+int64_t nixsb_mkdirs(Sb *c, const char *p, int64_t n) { return c->guard([&] { createDirs(std::string_view(p, size_t(n))); }); }
+int64_t nixsb_restore(Sb *c, const char *p, int64_t n, const char *nar, int64_t nn) {
+  return c->guard([&] { restorePath(std::string_view(p, size_t(n)), std::string_view(nar, size_t(nn))); });
+}
+}
+
+int runProgram(std::string_view prog, const composite::MutableSeries<composite::Text> &args, composite::Text *out, const composite::Text *input,
+               std::string_view cwd) {
+  Sb c;
+  int64_t rc = nixsb_run(&c, prog.data(), prog.size(), args.data(), args.size(), out, input, cwd.data(), cwd.size());
+  c.done(rc < 0);
+  return int(rc);
 }
 
 /// Make a freshly created store object read-only with mtime 1, as Nix does.
@@ -638,127 +680,17 @@ SortedMap<composite::Text> Store::realise(std::string_view drvPath,
 }
 
 
-extern "C" int64_t nixstore_ts_cstrs(composite::Text *t, const void *rows, int64_t n, int64_t pairs, char **ptrs);
-void Store::runBuilder(std::string_view drvPath, const Derivation &drv,
-                       const SortedMap<composite::Text> &outputs) {
-  const char *tmp = getenv("TMPDIR");
-  composite::Text tmpBase = tmp && *tmp ? tmp : "/tmp";
-  composite::Text tmpl = tmpBase + "/nix-build-" + drv.name + "-XXXXXX";
-  composite::MutableSeries<char> buf;
-  for (char ch : tmpl) buf.append(ch);
-  buf.append('\0');
-  if (!mkdtemp(buf.data())) throw Error(composite::cat("creating build directory: ", strerror(errno)));
-  composite::Text top = buf.data();
-
-  SortedMap<composite::Text> env;
-  env["PATH"] = "/path-not-set";
-  env["HOME"] = "/homeless-shelter";
-  env["NIX_STORE"] = settings.storeDir.clone();
-  env["NIX_BUILD_CORES"] = composite::str(settings.cores);
-  env["NIX_BUILD_TOP"] = top.clone();
-  env["TMPDIR"] = top.clone();
-  env["TEMPDIR"] = top.clone();
-  env["TMP"] = top.clone();
-  env["TEMP"] = top.clone();
-  env["PWD"] = top.clone();
-  env["NIX_LOG_FD"] = "2";
-  env["TERM"] = "xterm-256color";
-  // In a chroot on a Mac with SIP on, dyld has no shared cache in the shared region (the kernel maps only SIP-protected
-  // cache files, and a chroot's is a copy), so each process maps the copy itself, which DYLD_SHARED_REGION=private asks
-  // for (utils/mlnixos-darwin/mlnixos-chroot.c).  A builder without it could not load libSystem.
-  if (const char *dsr = getenv("DYLD_SHARED_REGION")) env["DYLD_SHARED_REGION"] = dsr;
-  bool fixed = drv.isFixed();
-  if (fixed) {
-    auto it = drv.env.find("impureEnvVars");
-    if (it != drv.env.end()) {
-      composite::eachWord(it->second.data(), uint32_t(it->second.size()), [&](const char *p, uint32_t n) {
-        composite::Text v(p, n);
-        if (const char *val = getenv(v.c_str())) env[v] = val;
-      });
-    }
-  }
-  // Output placeholders (builtins.placeholder) are rewritten to the real
-  // output paths in the environment, arguments and structured attributes.
-  SortedMap<composite::Text> rewrites;
-  for (auto &[n, p] : outputs) rewrites[hashPlaceholder(n)] = p.clone();
-  for (auto &[k, v] : drv.env) env[k] = rewritePlaceholders(v, rewrites);
-  if (drv.structuredAttrs) {
-    auto [json, sh] = structuredAttrsFiles(*drv.structuredAttrs, outputs, rewrites);
-    writeFile(top + "/.attrs.json", json);
-    writeFile(top + "/.attrs.sh", sh);
-    env["NIX_ATTRS_JSON_FILE"] = top + "/.attrs.json";
-    env["NIX_ATTRS_SH_FILE"] = top + "/.attrs.sh";
-  }
-
-  composite::MutableSeries<composite::Text> args; // argv: the builder's base name, then the arguments, rewritten
-  args.append(baseNameOf(drv.builder));
-  for (auto &a : drv.args) args.append(rewritePlaceholders(a, rewrites));
-  composite::Text envBlock, argBlock; // the strings, `k=v` and the arguments, each NUL-ended in one room (BuilderOps.mlir)
-  composite::MutableSeries<char *> envp(env.size() + 1), argv(args.size() + 1);
-  nixstore_ts_cstrs(&envBlock, env.rows.data(), env.size(), 1, envp.data());
-  nixstore_ts_cstrs(&argBlock, args.data(), args.size(), 0, argv.data());
-
-  pid_t pid = fork();
-  if (pid < 0) throw Error("fork failed");
-  if (pid == 0) {
-    if (chdir(top.c_str()) != 0) _exit(127);
-    int nul = open("/dev/null", O_RDONLY);
-    dup2(nul, 0);
-    dup2(2, 1);
-    setsid();
-    execve(drv.builder.c_str(), argv.data(), envp.data());
-    fprintf(stderr, "error: executing '%s': %s\n", drv.builder.c_str(), strerror(errno));
-    _exit(127);
-  }
-  int status;
-  while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
-  }
-  bool ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
-  if (!ok) {
-    for (auto &[n, p] : outputs)
-      if (pathExists(toReal(p))) deletePathRecursive(toReal(p));
-    composite::Text why = WIFEXITED(status) ? composite::cat("failed with exit code ", WEXITSTATUS(status))
-                                            : composite::cat("was killed by signal ", WTERMSIG(status));
-    if (settings.keepFailed) log(composite::cat("note: keeping build directory '", top, "'"));
-    else deletePathRecursive(top);
-    throw Error(composite::cat("builder for '", drvPath, "' ", why));
-  }
-  deletePathRecursive(top);
+// runBuilder and builtin:fetchurl are lowered/nixstore/StoreRun.mlir's nixsb_build and nixsb_fetch: the builder's environment a fill of
+// (name, value) rows drained once in name order, its process the C library's fork, execve and waitpid.
+void Store::runBuilder(std::string_view drvPath, const Derivation &drv, const SortedMap<composite::Text> &outputs) {
+  Sb c(this);
+  c.done(nixsb_build(&c, drvPath.data(), drvPath.size(), &drv, &outputs));
 }
 
 void Store::builtinFetchurl(const Derivation &drv, const SortedMap<composite::Text> &outputs) {
-  auto get = [&](std::string_view k) {
-    auto it = drv.env.find(k);
-    return it == drv.env.end() ? std::string_view() : std::string_view(it->second);
-  };
-  composite::Text url(get("url"));
-  if (url.empty()) {
-    std::string_view urls = get("urls");
-    composite::eachWord(urls.data(), uint32_t(urls.size()), [&](const char *p, uint32_t n) { // the first
-      if (url.empty()) url.assign(p, n);
-    });
-  }
-  if (url.empty()) throw Error("builtin:fetchurl: no URL specified");
-  const composite::Text &out = outputs.at("out");
-  composite::Text real = toReal(out);
-  createDirs(toReal(settings.storeDir));
-  composite::Text tmp = real + ".tmp";
-  composite::Text curlOut;
-  int rc = runProgram("curl", {"-fsSL", "--retry", "3", "-o", tmp.clone(), url.clone()}, &curlOut);
-  if (rc != 0) {
-    unlink(tmp.c_str());
-    throw Error(composite::cat("unable to download '", url, "': curl exited with code ", rc));
-  }
-  if (get("unpack") == "1") {
-    composite::Text nar = readFile(tmp);
-    unlink(tmp.c_str());
-    restorePath(real, nar);
-  } else {
-    rename(tmp.c_str(), real.c_str());
-    if (get("executable") == "1") chmod(real.c_str(), 0755);
-  }
+  Sb c(this);
+  c.done(nixsb_fetch(&c, &drv, &outputs));
 }
-
 void Store::addPermRoot(std::string_view storePath, std::string_view link) {
   nixsys::CStr linkC(link);
   unlink(linkC);

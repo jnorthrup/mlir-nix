@@ -291,6 +291,10 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/BuilderOps.mlir BuilderOps)
 # an Intel Mac's calls end in $INODE64, and st_mode lies where the machine's Linux puts it.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/StoreWords.mlir StoreWords)
 mlnix_lower_trikeshed(NixStore lowered/nixstore/StoreWalks.mlir StoreWalks)
+# StoreRun.mlir: the processes (runProgram; runBuilder, whose environment is a fill of (name, value) rows drained once in
+# name order with the last of equal names kept: sorted, where, one combineAll; builtin:fetchurl), through the C library's
+# pipe, fork, execve and waitpid.
+mlnix_lower_trikeshed(NixStore lowered/nixstore/StoreRun.mlir StoreRun)
 if(APPLE)
   configure_file(${PROJECT_SOURCE_DIR}/lowered/nixstore/StoreBuildDarwin.mlir.in ${MLNIX_LOWERED_DIR}/StoreBuildOs.mlir @ONLY)
 else()
