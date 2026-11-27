@@ -366,7 +366,8 @@ struct Store {
   composite::Maybe<PathInfo> queryPathInfo(std::string_view path);
   void registerValidPath(const PathInfo &info);
   SortedSet queryReferrers(std::string_view path);
-  composite::MutableSeries<composite::Text> allValidPaths();
+  /// Every valid path, in byte order; or, given a path, only those whose info may refer to it (the index's answer: queryReferrers reads each).
+  composite::MutableSeries<composite::Text> allValidPaths(std::string_view referringTo = {});
 
   /// Copy a file system object into the store (content-addressed).
   composite::Text addToStore(std::string_view name, std::string_view srcPath,

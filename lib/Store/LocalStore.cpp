@@ -32,7 +32,7 @@ namespace nixstore {
 
 // The store's graph and content algorithms are lowered/nixstore/StoreGraph.mlir (built into NixStore by lib/CMakeLists.txt): the set
 // algebra, computeFSClosure's worklist, collectGarbage's rounds, contentFingerprint (xxh3 too) and sameContent, and
-// queryPathInfo's lines; the builder's are BuilderOps.mlir, allValidPaths' order SortedRows.mlir.  What stays here hands the sorted sets over as windows and answers the callbacks, which read and write the store.
+// queryPathInfo's lines; the builder's are BuilderOps.mlir, the index of the info files StoreIndex.mlir.  What stays here hands the sorted sets over as windows and answers the callbacks, which read and write the store.
 namespace {
 struct GWin { const char *p; int64_t n; };
 template <class C> composite::MutableSeries<GWin> wins(const C &texts) {
@@ -86,16 +86,29 @@ bool Store::isValidPath(std::string_view path) {
   return pathExists(infoFile(path)) && pathExists(toReal(path));
 }
 
+// The store's index is lowered/nixstore/StoreIndex.mlir: `<stateDir>/info.trie`, the info directory's entries as a trie keyed by the hash
+// part (and the references as a second relation, by the reference), derived from the info files, which stay as they are and are what an
+// older mlnix reads and writes.  Its calls take a path's info file; it answers only for the directory as it is when asked.
 extern "C" int64_t nixstore_ts_infolines(const char *p, int64_t n, int64_t *recs); // {key 0-4, value offset, value length}, in line order
+extern "C" int64_t nixsi_info(const char *infoFile, const char **text); // the path's info text as the index holds it, or -1: the file is read
+extern "C" int64_t nixsi_register(const char *infoFile, const char *text, int64_t n); // the file written through `infoFile.tmp`: 0, 1 not made, 2 not written
+extern "C" void nixsi_unlink(const char *infoFile);
+/// Every entry's name in byte order, or (referring) those whose info may refer to the path, each given to nixsi_name.
+extern "C" void nixsi_names(const char *infoFile, int64_t referring, Store *st, composite::MutableSeries<composite::Text> *res);
+extern "C" void nixsi_name(Store *st, composite::MutableSeries<composite::Text> *res, const char *p, int64_t n) { // a valid path when its store object is there
+  if (composite::Text path = st->settings.storeDir + "/" + std::string_view(p, size_t(n)); pathExists(st->toReal(path))) res->append(composite::mv(path));
+}
 composite::Maybe<PathInfo> Store::queryPathInfo(std::string_view path) {
-  composite::Text f = infoFile(path);
-  if (!pathExists(f) || !pathExists(toReal(path))) return nullptr;
+  composite::Text f = infoFile(path), text;
+  const char *tp = nullptr;
+  int64_t tn = nixsi_info(f.c_str(), &tp);
+  if ((tn < 0 && !pathExists(f)) || !pathExists(toReal(path))) return nullptr;
+  if (tn < 0) text = readFile(f), tp = text.data(), tn = text.size();
   PathInfo info;
   info.path = composite::Text(path);
-  composite::Text text = readFile(f);
-  composite::MutableSeries<int64_t> r(3 * (text.size() / 2 + 2));
-  for (uint32_t i = 0, k = uint32_t(nixstore_ts_infolines(text.data(), text.size(), r.data())); i < k; i++) {
-    std::string_view v(text.data() + r[3 * i + 1], size_t(r[3 * i + 2]));
+  composite::MutableSeries<int64_t> r(3 * (size_t(tn) / 2 + 2));
+  for (uint32_t i = 0, k = uint32_t(nixstore_ts_infolines(tp, tn, r.data())); i < k; i++) {
+    std::string_view v(tp + r[3 * i + 1], size_t(r[3 * i + 2]));
     if (r[3 * i] == 0) info.narHash = parseHash(v, nullptr);
     else if (r[3 * i] == 1) info.narSize = nixsys::stoValue("stoull", nixsys::readUnsigned(v));
     else if (r[3 * i] == 2) info.references.insert(v);
@@ -114,30 +127,20 @@ void Store::registerValidPath(const PathInfo &info) {
   composite::Text s, h = info.narHash.to_string(HashFormat::Nix32, true);
   nixstore_ts_infotext(&s, info.path.data(), info.path.size(), h.data(), h.size(), info.narSize, info.references.begin(),
                        info.references.size(), info.deriver.data(), info.deriver.size(), info.ca.data(), info.ca.size());
-  composite::Text tmp = infoFile(info.path) + ".tmp";
-  writeFile(tmp, s);
-  rename(tmp.c_str(), infoFile(info.path).c_str());
+  composite::Text f = infoFile(info.path); // written through `f.tmp` and renamed, and the index told (StoreIndex.mlir)
+  if (int64_t rc = nixsi_register(f.c_str(), s.data(), s.size()))
+    throw Error(composite::cat(rc == 1 ? "creating" : "writing", " file '", f, ".tmp': ", strerror(errno)));
 }
 
-extern "C" void nixstore_ts_rowsort(void *rows, int64_t n, int64_t stride);
-composite::MutableSeries<composite::Text> Store::allValidPaths() {
+composite::MutableSeries<composite::Text> Store::allValidPaths(std::string_view referringTo) {
   composite::MutableSeries<composite::Text> res;
-  DIR *d = opendir((settings.stateDir + "/info").c_str());
-  if (!d) return res;
-  while (auto *e = readdir(d)) {
-    std::string_view n = e->d_name;
-    if (n == "." || n == ".." || n.size() < 34 || n.find(".tmp") != std::string_view::npos) continue;
-    composite::Text p = settings.storeDir + "/" + n;
-    if (pathExists(toReal(p))) res.append(composite::mv(p));
-  }
-  closedir(d);
-  nixstore_ts_rowsort(res.data(), res.size(), sizeof(composite::Text)); // byte order, each path moved once (SortedRows.mlir)
+  nixsi_names(infoFile(referringTo).c_str(), !referringTo.empty(), this, &res);
   return res;
 }
 
 SortedSet Store::queryReferrers(std::string_view path) {
   SortedSet res;
-  for (auto &p : allValidPaths())
+  for (auto &p : allValidPaths(path))
     if (auto info = queryPathInfo(p))
       if (info->references.count(path)) res.insert(p);
   return res;
@@ -811,7 +814,7 @@ void Store::addPermRoot(std::string_view storePath, std::string_view link) {
 bool Store::deletePath(std::string_view path) {
   if (!queryReferrers(path).empty()) return false;
   deletePathRecursive(toReal(path));
-  unlink(infoFile(path).c_str());
+  nixsi_unlink(infoFile(path).c_str());
   return true;
 }
 
@@ -847,8 +850,8 @@ bool Store::collectGarbage(bool dryRun, composite::MutableSeries<composite::Text
     }
   };
   scanRoots(scanRoots, settings.stateDir + "/gcroots");
+  composite::MutableSeries<composite::Text> valid = allValidPaths(); // before the closure: the list makes the index hold the directory, and the closure's infos are read from it
   SortedSet live = computeFSClosure(roots, true);
-  composite::MutableSeries<composite::Text> valid = allValidPaths();
   Walk g{this, {}, {}, {}, dryRun, &deleted};
   nixstore_ts_gc(&g, wins(valid).data(), valid.size(), wins(live).data(), live.size());
   return true;
