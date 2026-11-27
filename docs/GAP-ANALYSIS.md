@@ -1,0 +1,136 @@
+# Gap analysis: the C++ relegated to MLIR
+
+Asked for as: "continuous recursive gap analysis on the c++ relegation to mlir source code replacements in this project
+following PRELOAD.md trikeshed ethos and fill-drain metaphors, using TRIES for cas and the btrfs-compressed heap stores"
+(2026-11-27).  The census is `scripts/gap-census.py`; the numbers below are its run at `a8d3ae3`, sealed as that
+revision's snapshot.  After every merge: `scripts/gap-census.py --seal`, then `--diff <the previous seal>` shows what
+moved, scale by scale.  A gap closes when its row moves; a conversion that moves no row has not closed one.
+
+## The yardstick
+
+1. TrikeShed's PRELOAD.md: Join, Series and Cursor are the algebra; lazy views first, materialisation later; projection
+   over mutation; side effects at the boundary.  In MLIR that means trikeshed/confix/kursive ops, not llvm loops over a
+   record's fields (the bypass).
+2. Fill-drain: a lazy composition (`combine`, `combineAll`, `series`, `slice`) drained once into cells sized ahead.  The
+   drain is where a composition stops and cells begin.  A MutableSeries fills by append and drains once.
+3. The trie CAS (TrikeShed `cas/CursorTrie.kt`): `HashTrie` keys rows by a digest's leading 8 bytes, one byte of fan-out a
+   level, an open leaf filled by append and sealed, sorted by the digest's tail, as one immutable 16 KiB page; `LaneTrie`
+   keeps a relation's fixed-width rows in 16 KiB segments with one appender and a published count, so a row never moves
+   and a reader takes no lock.  Byte strings with shared prefixes (paths) keep the crit-bit trie (`Composite/Patricia.h`).
+4. The heap store (docs/BTRFS-COMPRESSOR.md): clusters (a min-max heap and its pegs) fill and drain in key order, a
+   drained block is sorted and emits as deltas into a sealed, compressed page (`BtrfsMetadataCompression`'s envelope);
+   the funnel table answers point lookups past a dense window; inside the window a cell is computed, never probed.
+   "Anything keyed by a sorted fixed-width tuple (an LSM run, a Nix store index, a CAS page) takes the same layer."
+
+## Scale 0: the repository (`a8d3ae3`)
+
+| measure | value |
+|---|---:|
+| C++ code lines (`scripts/cxx-lines.py`) | 22,822 |
+| product MLIR (lowered/, utils/mlnixci/src): modules, lines, ops | 75, 36,796, 26,511 |
+| ops in trikeshed/confix/kursive | 12.8% |
+| ops in llvm | 12.8% (the rest: arith, scf, cf, memref, func) |
+| functions that drain a composition | 64, 15.6% of the lines |
+| GitHub linguist, C++ / MLIR bytes | 1,326,787 (25.6%) / 2,244,918 (43.3%) |
+
+The census counts ops, not types (`!llvm.ptr` is not an llvm op), and a fill-drain function as one holding both a drain
+and a combine or combineAll; the skill's ts-census.py and filldrain-census.py count more widely (11.0% with types; 80
+functions with returned views).  Compare a census only with itself.
+
+## Scale 1: subsystems
+
+| C++ | code lines | | MLIR | lines | dialect ops | llvm ops | fill-drain lines |
+|---|---:|---|---|---:|---:|---:|---:|
+| lib/Eval | 4,691 | | lowered/nixeval | 14,510 | 12.3% | 14.6% | 30.0% |
+| lib/Store | 1,941 | | lowered/nixstore | 9,139 | 14.5% | 9.3% | 9.0% |
+| lib/Frontend | 2,102 | | lowered/nixfrontend | 3,260 | 0.0% | 8.6% | 0.0% |
+| | | | lowered/nixfe | 1,037 | 6.8% | 4.2% | 33.0% |
+| include/Composite, lib/Composite | 1,926 + 1,502 | | lowered/composite | 1,346 | 6.0% | 13.9% | 0.0% |
+| tools | 1,280 | | lowered/tools | 464 | 19.6% | 2.8% | 44.4% |
+| (mini-luci's server) | 0 | | utils/mlnixci/src | 6,929 | 18.7% | 17.8% | 0.3% |
+| lib/Dialect | 4,998 | | lowered/kursive | 111 | 100% | 0 | 0 |
+| include/Nix | 1,851 | | | | | | |
+| scripts (*.cc checks) | 2,303 | | | | | | |
+
+The writers are where fill-drain lives (nixeval 30%, nixfe 33%, tools 44%).  The readers (nixfrontend's scanners), the
+store's kernels and the Composite ports are not: lowered/composite has no drain at all and 6% dialect ops.
+
+## Scale 2: the store shapes
+
+Every keyed or ordered store of the C++, the shape the yardstick gives it, and where its algorithm lives.
+
+| shape now | C++ sites | users | algorithm | dialect ops | TrikeShed's shape | gap |
+|---|---:|---|---|---:|---|---|
+| crit-bit trie (`Patricia<V>`) | 16 | srcToStore, fileEvalCache, autoArgs (Eval.h); the store's `drvs` and `answers` (LocalStore); `prehashes`, filterSource's kept/given (StorePaths); Prefetch's seen lines | lowered/nixstore/Patricia.mlir, 351 lines | 0.5% | crit-bit over lane rows (paths); nodes and rows as series read with `at`, keys compared `unsigned`, the set's plan one drain | the right shape, written as an llvm line-port |
+| funnel of clusters (`GrowFunnel`, `MinMaxHeap`, `Pegs`) | 18 | `drvByContent` (Store.h: a derivation's first record by content fingerprint, the one product client); `trikeshed.cluster_order` (no product user) | lowered/composite/ClusterOps.mlir, 663 lines | 0.0% | the heap store: fold/argMin over a cluster's rows, the level walk a lazy series of buckets | the right shape, written as an llvm line-port; no sealed page and no delta emit anywhere |
+| open addressing (`WordTable`, `TextTable`) | 45 | symbols and baseEnv by name; opIdx, attrPositionBases, dynamicPositions, primForOp, attrSymbols, OpCounts by an address; the printers' seen sets; KifTptp; fromTOML's tables | include/Composite/Table.h, 205 C++ lines | C++ | by name: TrikeShed interns through the funnel (AtomLexicon over FunnelHashMap); by an address: a dense row, minted when the op is (append's row, anchor's mint) | C++; the address-keyed tables wait on G1 |
+| sorted rows (`SortedSet`, `SortedMap`, `sortRows`) | 139 | a derivation's inputs, outputs and env; references and closures; the attrs rows | SortedRows.mlir (168 lines, 20.4%), Rows.mlir (683 lines, 11.0%) | 11-20% | fill, then one sorted drain: `sorted` + `bisect` + `zipnext` over split rows | an insert out of order rotates the rows (O(n) each); rows are bytes at a stride, not a dialect type |
+| files at the boundary | 20 | the store's index: `<stateDir>/info/<hash>-<name>`, one text file per valid path; the prefetch replay list (~/.cache/mlnix) | LocalStore.cpp, Prefetch.cpp | C++ | HashTrie by the path's hash part (log, sealed sorted pages, directory); referrers as sorted (ref, referrer) rows | `allValidPaths` is a readdir and a sort, `queryReferrers` reads every info file, `deletePath` asks it before each deletion |
+
+## Scale 3: functions
+
+The C++ left, by span (code lines): `registerBuiltins` 636 and `registerStoreBuiltins` 203 (the primop tables),
+`mlnix-parse` main 209, `derivationStrict` 202, `printStats` 163, `cmdStore` 144, `runEvalCommandIn` 128, mlnix-kif main
+118, `registerBoundary` 103, `Indexer::index` 96, `callFunction` 86, `parseCommon` 82, `fetchGit` 81, `createBaseEnv` 79,
+`Store::realise` 79, `runBuilder` 78, `fetchImpl` 76, `marshalDrv` 72, `loadPrimDialects` 70, `splitSeries` 67,
+`printValueAsJSON` 64.  Most are glue the recipe keeps (registration, process, I/O, MLIR's API); the composition in
+`derivationStrict`, `printStats`, `cmdStore` and `printValueAsJSON` already went to MLIR, leaving forcing and throws.
+
+The bypass, by the census's rule (a product function of 30 ops or more that loops and has under 10% dialect ops): 84
+functions, 7,946 ops.  The largest: the scanners (`confix_scan_nix` 944, `lx_default` 482, `lx_ind` 184, `lx_string`
+136, `nixev_ts_toml_scan` 204, `tm_number` 153, `tm_basic` 115, `confix_scan_checked` 125, `js_string` 104, `nx_word`
+104), mini-luci's pre-dialect server (`query_run` 246, http `main` 171, `evaluate_with` 143, `serve` 108), `xw_value`
+172, `nixfe_ts_strip` 160, `sg_xxh3` 157 and `sha512_compress` 154 (scalar cores), `mlnix_rows_sort_u32` 115 and
+`mlnix_rows_sort` 109, `nixstore_ts_drvparse` 112, `ceq_attrs_eq` 103, `nixev_ts_replace` 97, `narr_node` 94.
+
+## Scale 4: the roots
+
+Declared with no lowering: `trikeshed.append`, `anchor`, `cell`, `resolve`, `reversed`, `contains`, `rows`,
+`cursorSelect`, `cursorCombine`, `cursorJoins`, `pivot`, `tensor`.  Lowered but in no product module: `reify`, `take`,
+`splitSelect`, `row`, `joins`, `select`, `domain`, `facet`, `adjacency`, `closure`, `cluster_order`, `eitherLeft`,
+`eitherRight`; `confix.scan/size/row/kid/bands`; `kursive.pattern/rejected/bol/eol/empty`.
+
+## The gap tree
+
+Each gap names what it blocks and what closes it.  A child gap closes only after its root.
+
+- **G1, MutableSeries is not in the dialect** (root).  `append` and `anchor` have no lowering, and `append` has no count
+  operand, so a growable series cannot be lowered without changing every cursor's ABI (the append lane, 2026-11-25).
+  TrikeShed's answer is LaneTrie's: rows in fixed pages, a published count, a row that never moves; the fill is appends,
+  the drain copies the pages into one buffer of the known count, and every series op reads the drained buffer.
+  Blocks: the hand-spelled appends and anchors (43 and 10 in the 2026-11-22 audit), every grow callback a bridge keeps
+  (JsonRead's stack, the room protocols), the LaneTrie and HashTrie leaves (G3), son's pool rows, and dense rows for the
+  address-keyed tables.
+- **G2, fixed-width rows have no dialect form in use** (root).  `reify`, `take`, `splitSelect` and `row` lower but no
+  product module uses them, and `rows`/`cursorSelect` do not lower.  So Patricia's nodes, a cluster's rows, the Attr rows
+  and the store's sorted rows are byte offsets in llvm.  Closes by reading such rows as series (`text` over the buffer,
+  `at`, `compare unsigned`) and by lowering `rows`; the line-ports are the oracle.
+- **G3, the trie CAS.**  (a) Patricia.mlir in dialect forms (after G2).  (b) The store's index as a HashTrie keyed by
+  the path's hash part, with the referrers as sorted rows: today one text file per path, and the referrers of one path
+  cost a read of every file (after G1).  (c) The address-keyed tables as dense rows (after G1).  The name tables
+  (symbols, baseEnv) stay open addressing until a funnel measures faster: they are the evaluator's hottest lookups.
+- **G4, the heap store.**  (a) ClusterOps.mlir in dialect forms (after G2).  (b) SortedSet and SortedMap built out of
+  order fill and drain once (`sortRows` + `uniqueFirst`, both lowered) instead of rotating per insert.  (c) The sealed,
+  delta-compressed page: not built in mlir-nix or in TrikeShed's CursorTrie (its pages are sorted, not compressed); the
+  store index (G3b) is its first client.
+- **G5, the CAS digests.**  SHA-512 is MLIR (Sha512.mlir); SHA-256 goes to CommonCrypto, OpenSSL or llvm::SHA256, SHA-1
+  and MD5 to llvm::.  Closes by the same recipe as Sha512.mlir, if the time holds: SHA-256 is hot (drvByContent exists
+  to skip it), and CommonCrypto may use the SHA instructions.
+- **G6, the scanners** (ConfixScan, LexScan, TomlScan, JsonRead: 0-1% dialect ops, the four largest bypass rows).  The
+  ruling: regex only as kursive combinators; another scanner already merged as a cf machine is redone only on the
+  user's word.  kursive2's lexer as a kursive walk cut 152 C++ lines and cost 5-9% (held back, `2fffc12`).
+- **G7, mini-luci's pre-dialect modules** (api, http, eval, corpus, confix, series: about 3,500 lines of llvm).
+- **G8, the eval core** (Eval.cpp 2,459 lines: dispatch, forcing, calls).  Either is lowered now (`eitherLeft/Right/Fold`,
+  CmpOps' error channel), so a module can return its error and the bridge throw once; the dispatch itself waits on son
+  ops the evaluator runs.
+- **What stays C++ by the recipe**: MLIR's API (dialects, passes, the lowering itself: lib/Dialect, CursorLowering.cpp),
+  the KIF tools (on the user's scope decision), registration tables, process and file I/O, Nix's error wording.
+
+## The queue
+
+Wave 1 (2026-11-27): G1 (lanes: append and anchor lowered with LaneTrie's shape, then their consumers), G3a (Patricia
+in dialect forms), G4a (the clusters and the funnel in dialect forms), G5 (SHA-256, SHA-1, MD5 in MLIR, gated on time).
+Wave 1b (same day, files no wave-1 lane touches): printValueAsJSON's composition as fill-drain (toJSON, `eval --json`,
+structured attrs: the writer gap of lib/Eval/Formats.cpp), and G7's query path (utils/mlnixci/src/api.mlir: query_run's
+hand-spelled fills, folds and offsets, then facet, page and report).
+Wave 2, after G1: G3b with G4c (the store index as a HashTrie with sealed pages), G3c, G4b.  On the user's word: G6.
