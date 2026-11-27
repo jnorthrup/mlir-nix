@@ -140,7 +140,12 @@ Each gap names what it blocks and what closes it.  A child gap closes only after
   dense rows (after G1).  The name tables (symbols, baseEnv) stay open addressing until a funnel measures faster: they
   are the evaluator's hottest lookups.
 - **G4, the heap store.**  (a) ClusterOps.mlir in dialect forms (after G2).  (b) SortedSet and SortedMap built out of
-  order fill and drain once (`sortRows` + `uniqueFirst`, both lowered) instead of rotating per insert.  (c) The sealed,
+  order fill and drain once (`sortRows` + `uniqueFirst`, both lowered) instead of rotating per insert.  Measured at
+  eae7ad5 and closed as not worth a change (scratch gap/rowstats-instrument.patch counts every insert by kind and site):
+  SortedSet never rotates on the bench workloads (51,935 and 95,918 inserts, all appends); SortedMap rotates 22,406 of
+  199,212 inserts on nixos-toplevel and 42,694 of 375,168 on nixpkgs-73, moving 5.4 MB and 12.4 MB a run, maxima of 109
+  and 339 rows: derivationStrict's inputDrvs (keyed by .drv path, filled from the context, which sorts by its encoded
+  elements) and env["out"] after the attributes.  That is about 0.1% of a run's 16-20 G instructions.  (c) The sealed,
   delta-compressed page: not built in mlir-nix or in TrikeShed's CursorTrie (its pages are sorted, not compressed); the
   store index (G3b) is its first client.
 - **G5, the CAS digests.**  SHA-512 is MLIR (Sha512.mlir); SHA-256 goes to CommonCrypto, OpenSSL or llvm::SHA256, SHA-1
@@ -247,8 +252,9 @@ scope, so none is taken without the user's word.
 
 1. **G1, MutableSeries in the dialect (lane `lanes`).**  `!trikeshed.lane` with append/anchor/size/at/take/drain lowered
    in LaneTrie's shape, and fromJSON's index on a lane (nixev_json_grow and JsonRec deleted), proven (3.6M old/new
-   cases, the gates on both platforms at 2ed7fa0, deep recursion to 20,000 identical).  Cost: C++ +224 (the lowering is
-   C++ on MLIR's API), against a wave that has cut 1.  It is the root of G3c and the single-pass writers (the parked
+   cases, the gates on both platforms at 2ed7fa0, deep recursion to 20,000 identical).  Cost: C++ +224 at 2ed7fa0, +174
+   at 803609f after the lane removed duplication with the series patterns (the lowering is C++ on MLIR's API), against
+   a wave that has cut 1.  It is the root of G3c and the single-pass writers (the parked
    JSON printer).  The lane is assessing a runtime written in MLIR with thin C++ rewrites (cluster_order's pattern).
 2. **The scanners (G6).**  ConfixScan, LexScan, TomlScan and the readers are the largest bypass rows (confix_scan_nix
    944 non-dialect ops, lx_default 482, the TOML scan 204 + 115 + 74).  The standing rule: a scanner already merged is
