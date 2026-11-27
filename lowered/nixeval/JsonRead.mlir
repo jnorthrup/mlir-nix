@@ -487,8 +487,9 @@ func.func private @js_lit(%src: !llvm.ptr, %n: i64, %p: i64) -> i32 {
 
 // confix.checked: the scan, the fill of the index.  The states are blocks: ^value (a value is expected), ^key (a key
 // after `{` or `,`), ^after (an element ended: `,` or the closer of the container on top, or the end of the document).
-// Each carries the row of the container on top, -1 outside any.  A row is appended when its element is read: a
-// container's when it opens (its close 0: not minted yet), a scalar's when it ends.
+// Each carries the row of the container on top, -1 outside any (a row is 32 bits unsigned: a text under 4 GiB has
+// fewer rows than that, whatever it holds).  A row is appended when its element is read: a container's when it opens
+// (its close 0: not minted yet), a scalar's when it ends.
 func.func @confix_scan_checked(%rec: !llvm.ptr, %rows: !rows) -> i32 {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
@@ -613,11 +614,12 @@ func.func @confix_scan_checked(%rec: !llvm.ptr, %rows: !rows) -> i32 {
   %kq4 = arith.addi %kq3, %c1 : i64
   cf.cond_br %kiscol, ^value(%kq4, %ktop : i64, i32), ^fail(%f4, %kq3 : i32, i64)
 ^after(%ap: i64, %atop: i32):
-  %aempty = arith.cmpi slt, %atop, %z32 : i32
+  %aempty = arith.cmpi eq, %atop, %none : i32
   cf.cond_br %aempty, ^done(%ap : i64), ^amore
 ^amore:
   %aq = func.call @js_ws(%src, %n, %ap) : (!llvm.ptr, i64, i64) -> i64
-  %atag = trikeshed.at %tags[%atop] : !l8, i32 -> i8
+  %arow = arith.index_castui %atop : i32 to index
+  %atag = trikeshed.at %tags[%arow] : !l8, index -> i8
   %aobj = arith.cmpi eq, %atag, %t5 : i8
   %ac = func.call @js_at(%src, %n, %aq) : (!llvm.ptr, i64, i64) -> i32
   %acomma = arith.cmpi eq, %ac, %qcomma : i32
@@ -632,12 +634,12 @@ func.func @confix_scan_checked(%rec: !llvm.ptr, %rows: !rows) -> i32 {
   cf.cond_br %ais, ^shut(%aq, %atop : i64, i32), ^fail(%af, %aq : i32, i64)
 ^shut(%sat: i64, %stop: i32):
   // the container on top closes at sat: its close is minted, and the container it is in is on top again
-  %srow = arith.index_cast %stop : i32 to index
+  %srow = arith.index_castui %stop : i32 to index
   %sclose = arith.trunci %sat : i64 to i32
   %sminted = trikeshed.anchor %closes[%srow] : !l32 -> i32 {
     trikeshed.yield %sclose : i32
   }
-  %sup = trikeshed.at %ups[%stop] : !l32, i32 -> i32
+  %sup = trikeshed.at %ups[%srow] : !l32, index -> i32
   %sq1 = arith.addi %sat, %c1 : i64
   cf.br ^after(%sq1, %sup : i64, i32)
 ^done(%dp: i64):
