@@ -50,11 +50,12 @@ set_target_properties(TrikeShedRuntime PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${PRO
 
 add_library(NixStore STATIC Store/Hash.cpp Store/StorePaths.cpp Store/LocalStore.cpp Store/StructuredAttrs.cpp Store/Prefetch.cpp Store/Ed25519.cpp)
 target_link_libraries(NixStore PUBLIC LLVMSupport)
-# SHA-256: CommonCrypto on macOS; elsewhere libcrypto when there is one (it picks the CPU's SHA extensions or AVX2, the code Nix hashes
-# with), else LLVM's portable C, which costs 8-12% of a run on a machine whose hashing it slows (77de09c:docs/PERFORMANCE.md).  libcrypto.a is
-# preferred: loading libcrypto.so is 0.6 ms of the 10 ms an `eval -E 1` takes, the static one 0.15 ms.
-set(MLNIX_SHA256 "auto" CACHE STRING "SHA-256 code: auto (CommonCrypto on macOS, else OpenSSL if found, else LLVM's), openssl or llvm")
-if(MLNIX_SHA256 STREQUAL "openssl" OR (MLNIX_SHA256 STREQUAL "auto" AND NOT APPLE))
+# SHA-256 is lowered/nixstore/Sha256.mlir (below, with the other lowered modules): its rounds are the CPU's SHA-2 instructions
+# where the processor has them, else portable.  On x86_64 a CPU without SHA-NI runs the portable rounds, which libcrypto's
+# AVX2 code beats, so there libcrypto is linked when there is one (libcrypto.a preferred: loading libcrypto.so is 0.6 ms of
+# the 10 ms an `eval -E 1` takes, the static one 0.15 ms).
+set(MLNIX_SHA256 "auto" CACHE STRING "SHA-256 code: auto (the MLIR module; on x86_64 OpenSSL if found), mlir or openssl")
+if(MLNIX_SHA256 STREQUAL "openssl" OR (MLNIX_SHA256 STREQUAL "auto" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$"))
   set(OPENSSL_USE_STATIC_LIBS ON)
   find_package(OpenSSL QUIET)
   if(NOT OPENSSL_FOUND)
@@ -67,8 +68,6 @@ if(MLNIX_SHA256 STREQUAL "openssl" OR (MLNIX_SHA256 STREQUAL "auto" AND NOT APPL
   elseif(MLNIX_SHA256 STREQUAL "openssl")
     message(FATAL_ERROR "MLNIX_SHA256=openssl, but OpenSSL was not found")
   endif()
-elseif(MLNIX_SHA256 STREQUAL "llvm")
-  target_compile_definitions(NixStore PRIVATE MLNIX_SHA256_LLVM=1)
 endif()
 # io_uring replay of recorded file accesses (Linux, liburing); elsewhere Prefetch.cpp only records.
 find_path(URING_INCLUDE_DIR liburing.h)
@@ -161,6 +160,27 @@ mlnix_lower_interface(NixStore lowered/nixstore/IsInStore.mlir IsInStore)
 # each block's 8-byte slices plus scf.for rounds; the padding a combine of a pad slice and a length series, drained; the
 # field/point/scalar arithmetic is scf/arith over i64 limb memrefs with trikeshed.fold/compare for the S < L and R checks.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/Sha512.mlir Sha512)
+# SHA-256 (lib/Store/Hash.cpp's CommonCrypto and llvm::SHA256 contexts are gone; HashSink calls these entries).  Sha256.mlir
+# is the Sha512.mlir pattern (update's slices drained into the context, final's padding one combine drained, the digest a
+# combineAll) around rounds chosen once a process: the CPU's SHA-2 instructions, llvm-dialect functions carrying the target
+# feature (Sha256Arm64.mlir: sha256h/h2/su0/su1; Sha256X86.mlir: SHA-NI behind cpuid), or the portable rounds, scf loops that
+# clang unrolls whole at the threshold below (K folds into the code and the schedule into registers).  The probe is the
+# platform's: getauxval on Linux arm64, nothing to ask on macOS arm64, cpuid on x86_64.
+set(MLNIX_LOWER_CLANG_ARGS -mllvm -unroll-threshold=4000)
+mlnix_lower_trikeshed(NixStore lowered/nixstore/Sha256.mlir Sha256)
+unset(MLNIX_LOWER_CLANG_ARGS)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+  mlnix_lower_interface(NixStore lowered/nixstore/Sha256Arm64.mlir Sha256Arm64)
+  if(APPLE)
+    mlnix_lower_interface(NixStore lowered/nixstore/Sha256Apple.mlir Sha256Apple)
+  else()
+    mlnix_lower_interface(NixStore lowered/nixstore/Sha256Auxv.mlir Sha256Auxv)
+  endif()
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+  mlnix_lower_interface(NixStore lowered/nixstore/Sha256X86.mlir Sha256X86)
+else()
+  mlnix_lower_interface(NixStore lowered/nixstore/Sha256NoHw.mlir Sha256NoHw)
+endif()
 # MD5 and SHA-1 (lib/Store/Hash.cpp's llvm::MD5 / llvm::SHA1 contexts are gone; HashSink calls these entries on the same
 # 112-byte context shape as SHA-512's).  Each is the Sha512.mlir pattern: block words by trikeshed.fold over 4-byte slices,
 # the rounds as scf loops, the padding one combine drained into the context's buffer.
