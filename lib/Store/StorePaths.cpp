@@ -44,38 +44,18 @@ bool pathExists(std::string_view path) { return nixstore_fs_exists(nixsys::CStr(
 void createDirs(std::string_view path) { composite::Text e; if (nixstore_fs_mkdirs(nixsys::CStr(path), path.size(), &e)) throw Error(e); }
 void deletePathRecursive(std::string_view path) { composite::Text e; if (nixstore_fs_delete(nixsys::CStr(path), path.size(), &e)) throw Error(e); }
 
-// nixstore::baseNameOf and dirOf are hollowed out to MLIR: lowered/nixstore/PathOps.mlir (trikeshed.at / slice / text /
-// drain over the byte series), built into NixStore by lib/CMakeLists.txt.  The bridges size the Text and adopt the
-// drained bytes; the slash algebra is gone from here.
-extern "C" size_t nixstore_ts_basename(const char *p, size_t n, char *out);
-extern "C" size_t nixstore_ts_dirname(const char *p, size_t n, char *out);
-
-composite::Text baseNameOf(std::string_view p) {
-  composite::Text t;
-  t.resize(p.size());
-  t.truncate(nixstore_ts_basename(p.data(), p.size(), t.begin()));
-  return t;
+// baseNameOf and dirOf are lowered/nixstore/PathOps.mlir (the slash algebra) and jsonFloat is JsonFloat.mlir (the
+// shortest round-tripping digits, format_buffer's layout, one combine drained once); StorePathMake.mlir's nixstore_tx_*
+// size the Text to the entry's bound and cut it to what was written.  The snprintf, a variadic call, is this callback.
+extern "C" {
+int64_t nixstore_jf_sci(double d, int64_t prec, char *buf) { return snprintf(buf, 64, "%.*e", int(prec - 1), d); }
+void nixstore_tx_basename(const char *p, int64_t n, composite::Text *out);
+void nixstore_tx_dirname(const char *p, int64_t n, composite::Text *out);
+void nixstore_tx_jsonfloat(double d, composite::Text *out);
 }
-
-composite::Text dirOf(std::string_view p) {
-  composite::Text t;
-  t.resize(p.size() + 1); // "." when there is no slash
-  t.truncate(nixstore_ts_dirname(p.data(), p.size(), t.begin()));
-  return t;
-}
-
-// jsonFloat is lowered/nixstore/JsonFloat.mlir (the shortest round-tripping digits, format_buffer's layout, one combine
-// drained once); the snprintf, a variadic call, is this callback.
-extern "C" int64_t nixstore_jf_sci(double d, int64_t prec, char *buf) { return snprintf(buf, 64, "%.*e", int(prec - 1), d); }
-extern "C" int64_t nixstore_ts_jsonfloat(double, char *, char *);
-
-composite::Text jsonFloat(double d) {
-  char buf[64];
-  composite::Text out;
-  out.resize(32);
-  out.truncate(size_t(nixstore_ts_jsonfloat(d, out.begin(), buf)));
-  return out;
-}
+composite::Text baseNameOf(std::string_view p) { composite::Text t; nixstore_tx_basename(p.data(), p.size(), &t); return t; }
+composite::Text dirOf(std::string_view p) { composite::Text t; nixstore_tx_dirname(p.data(), p.size(), &t); return t; }
+composite::Text jsonFloat(double d) { composite::Text t; nixstore_tx_jsonfloat(d, &t); return t; }
 
 // runProgram's argv pointer fill is lowered/nixstore/StorePathOps.mlir (allocation-free, it runs in the fork child):
 // into[0]=prog, into[k+1]=args[k].c_str() (the Text row's NUL-terminated data ptr), into[n+1]=null.
@@ -392,38 +372,46 @@ void restorePath(std::string_view path, std::string_view nar) {
 // Store paths
 //===----------------------------------------------------------------------===//
 
-// nixstore::checkName / outputPathName / isStorePath / storePathName / storePathHashPart are hollowed out to MLIR:
-// lowered/nixstore/StoreName.mlir (trikeshed.at / slice / text / compare / combine / drain over the byte series), built
-// into NixStore by lib/CMakeLists.txt.  checkName's scan answers a code and the first illegal index; the error wording
-// stays here.  The other bridges size the Text and adopt the drained bytes; the naming algebra is gone from here.
-extern "C" int nixstore_ts_checkname(const char *p, size_t n, size_t *bad);
-extern "C" size_t nixstore_ts_outputname(const char *d, size_t dn, const char *o, size_t on, char *out);
-extern "C" bool nixstore_ts_isstorepath(const char *sd, size_t ss, const char *pd, size_t ps);
-extern "C" size_t nixstore_ts_storename(const char *p, size_t n, char *out);
-extern "C" size_t nixstore_ts_storehash(const char *p, size_t n, char *out);
-
-void checkName(std::string_view name) {
-  size_t bad = 0;
-  int r = nixstore_ts_checkname(name.data(), name.size(), &bad);
-  if (r == 0) return;
-  auto q = [&](std::string_view n) { return composite::cat("'", n, "'"); };
-  if (r == 1) throw Error("name must not be empty");
-  if (r == 2) throw Error(composite::cat("name ", q(name), " must be no longer than 211 characters"));
-  if (r == 3 || r == 5) throw Error(composite::cat("name ", q(name), " is not valid"));
-  if (r == 4) throw Error(composite::cat("name ", q(name), " is not valid: first dash-separated component must not be '.'"));
-  if (r == 6) throw Error(composite::cat("name ", q(name), " is not valid: first dash-separated component must not be '..'"));
-  throw Error(composite::cat("name ", q(name), " contains illegal character '", name[bad], "'"));
+// The store's path names are lowered/nixstore/StorePathMake.mlir: checkName's wording over StoreName.mlir's scan; a
+// path made of its fingerprint `type:algo:hex:storeDir:name` (StorePathOps.mlir), that fingerprint's SHA-256 folded to 20
+// bytes, and `storeDir/nix32-name`; the types `text[:ref]*`, `source[:ref]*`, `output:<output>`; the placeholder; a
+// path cut to its store path.  An entry that can fail leaves its message in the Text, which the forward throws.
+// nixstore::isInStore is IsInStore.mlir under its own name.
+extern "C" {
+int64_t nixstore_ts_namecheck(const char *p, int64_t n, composite::Text *err);
+int64_t nixstore_ts_makestorepath(const char *sd, int64_t sdn, const char *type, int64_t tn, const Hash *h, const char *name, int64_t nn, composite::Text *out);
+int64_t nixstore_ts_textpath(const char *sd, int64_t sdn, const char *name, int64_t nn, const Hash *h, const void *refs, int64_t nrefs, composite::Text *out);
+int64_t nixstore_ts_fixedpath(const char *sd, int64_t sdn, const char *name, int64_t nn, int64_t method, const Hash *h, const void *refs, int64_t nrefs, composite::Text *out);
+int64_t nixstore_ts_outputpath(const char *sd, int64_t sdn, const char *output, int64_t on, const Hash *h, const char *drvName, int64_t dn, composite::Text *out);
+void nixstore_ts_placeholder(const char *output, int64_t on, composite::Text *out);
+int64_t nixstore_ts_tostorepath(const char *sd, int64_t sdn, const char *p, int64_t n, composite::Text *out);
+bool nixstore_ts_isstorepath(const char *sd, size_t ss, const char *pd, size_t ps);
+void nixstore_tx_outputname(const char *d, int64_t dn, const char *o, int64_t on, composite::Text *out);
+void nixstore_tx_storename(const char *p, int64_t n, composite::Text *out);
+void nixstore_tx_storehash(const char *p, int64_t n, composite::Text *out);
 }
+static_assert(sizeof(composite::Text) == 16 && offsetof(composite::Growable<char>, n) == 8, "a set's rows as StorePathOps.mlir reads them");
 
-// The store-path name algebra is lowered/nixstore/StorePathOps.mlir (one lazy combine of the pieces drained once,
-// fill-drain): the fingerprint `type:algo:hex:storeDir:name`, the path `storeDir/nix32-name`, makeType's
-// `type[:ref]*[:self]`.  The hex/nix32 digits are composed in the entry; checkName/compressHash/hashString and the
-// error wording stay here.  The store path hashes stay byte-identical (the fingerprint is what is hashed).
-extern "C" int64_t nixstore_ts_pathfp(const char *, int64_t, const char *, int64_t, const char *, int64_t,
-                                           const char *, int64_t, const char *, int64_t, char *, int64_t);
-extern "C" int64_t nixstore_ts_storepath(const char *, int64_t, const char *, int64_t, const char *, int64_t, char *, int64_t);
-extern "C" int64_t nixstore_ts_maketype(const char *, int64_t, const void *, int64_t, int64_t, char *, int64_t);
-static_assert(sizeof(composite::Text) == 16 && offsetof(composite::Growable<char>, n) == 8, "Text row layout the entry reads");
+void checkName(std::string_view name) { composite::Text e; if (nixstore_ts_namecheck(name.data(), name.size(), &e)) throw Error(e); }
+composite::Text makeStorePath(std::string_view storeDir, std::string_view type, const Hash &hash, std::string_view name) {
+  composite::Text s; if (nixstore_ts_makestorepath(storeDir.data(), storeDir.size(), type.data(), type.size(), &hash, name.data(), name.size(), &s)) throw Error(s); return s;
+}
+composite::Text makeTextPath(std::string_view storeDir, std::string_view name, const Hash &hash, const SortedSet &refs) {
+  composite::Text s; if (nixstore_ts_textpath(storeDir.data(), storeDir.size(), name.data(), name.size(), &hash, refs.rows.data(), int64_t(refs.size()), &s)) throw Error(s); return s;
+}
+composite::Text makeFixedOutputPath(std::string_view storeDir, std::string_view name, FileIngestionMethod method, const Hash &hash, const SortedSet &refs) {
+  composite::Text s; if (nixstore_ts_fixedpath(storeDir.data(), storeDir.size(), name.data(), name.size(), int64_t(method), &hash, refs.rows.data(), int64_t(refs.size()), &s)) throw Error(s); return s;
+}
+composite::Text outputPathName(std::string_view drvName, std::string_view output) { composite::Text t; nixstore_tx_outputname(drvName.data(), drvName.size(), output.data(), output.size(), &t); return t; }
+composite::Text makeOutputPath(std::string_view storeDir, std::string_view output, const Hash &drvHash, std::string_view drvName) {
+  composite::Text s; if (nixstore_ts_outputpath(storeDir.data(), storeDir.size(), output.data(), output.size(), &drvHash, drvName.data(), drvName.size(), &s)) throw Error(s); return s;
+}
+composite::Text hashPlaceholder(std::string_view output) { composite::Text t; nixstore_ts_placeholder(output.data(), output.size(), &t); return t; }
+composite::Text toStorePath(std::string_view storeDir, std::string_view path) { composite::Text t; if (nixstore_ts_tostorepath(storeDir.data(), storeDir.size(), path.data(), path.size(), &t)) throw Error(t); return t; }
+bool isStorePath(std::string_view storeDir, std::string_view path) { return nixstore_ts_isstorepath(storeDir.data(), storeDir.size(), path.data(), path.size()); }
+composite::Text storePathName(std::string_view storePath) { composite::Text t; nixstore_tx_storename(storePath.data(), storePath.size(), &t); return t; }
+composite::Text storePathHashPart(std::string_view storePath) { composite::Text t; nixstore_tx_storehash(storePath.data(), storePath.size(), &t); return t; }
+
 namespace {
 // A Text drained by an entry that answers the bytes written, or -needed when the room (bound) is short.
 template <class F> composite::Text drained(size_t bound, F call) {
@@ -435,94 +423,6 @@ template <class F> composite::Text drained(size_t bound, F call) {
   return s;
 }
 } // namespace
-
-composite::Text makeStorePath(std::string_view storeDir, std::string_view type, const Hash &hash,
-                              std::string_view name) {
-  checkName(name);
-  std::string_view algo = algoName(hash.algo);
-  size_t hn = hash.size();
-  composite::Text s;
-  s.resize(type.size() + algo.size() + 2 * hn + storeDir.size() + name.size() + 4);
-  s.truncate(size_t(nixstore_ts_pathfp(type.data(), type.size(), algo.data(), algo.size(),
-      reinterpret_cast<const char *>(hash.bytes), int64_t(hn), storeDir.data(), storeDir.size(), name.data(),
-      name.size(), s.begin(), s.size())));
-  Hash h = compressHash(hashString(HashAlgo::SHA256, s), 20);
-  composite::Text path;
-  path.resize(storeDir.size() + 34 + name.size());
-  path.truncate(size_t(nixstore_ts_storepath(storeDir.data(), storeDir.size(),
-      reinterpret_cast<const char *>(h.bytes), 20, name.data(), name.size(), path.begin(), path.size())));
-  return path;
-}
-
-composite::Text makeType(std::string_view storeDir, std::string_view type, const SortedSet &refs,
-                         bool hasSelfRef) {
-  return drained(type.size() + 5, [&](char *into, int64_t cap) {
-    return nixstore_ts_maketype(type.data(), type.size(), refs.rows.data(), int64_t(refs.size()), hasSelfRef, into, cap);
-  });
-}
-
-composite::Text makeTextPath(std::string_view storeDir, std::string_view name, const Hash &hash,
-                             const SortedSet &refs) {
-  return makeStorePath(storeDir, makeType(storeDir, "text", refs, false), hash, name);
-}
-
-composite::Text makeFixedOutputPath(std::string_view storeDir, std::string_view name,
-                                    FileIngestionMethod method, const Hash &hash,
-                                    const SortedSet &refs) {
-  if (method == FileIngestionMethod::Text) return makeTextPath(storeDir, name, hash, refs);
-  if (method == FileIngestionMethod::NixArchive && hash.algo == HashAlgo::SHA256)
-    return makeStorePath(storeDir, makeType(storeDir, "source", refs, false), hash, name);
-  if (!refs.empty())
-    throw Error(composite::cat("fixed output derivation '", name,
-                               "' is not allowed to refer to other store paths."));
-  composite::Text payload = composite::cat("fixed:out:", method == FileIngestionMethod::NixArchive ? "r:" : "",
-                                           hash.to_string(HashFormat::Base16, true), ":");
-  return makeStorePath(storeDir, "output:out", hashString(HashAlgo::SHA256, payload), name);
-}
-
-composite::Text outputPathName(std::string_view drvName, std::string_view output) {
-  composite::Text t;
-  t.resize(drvName.size() + 1 + output.size());
-  t.truncate(nixstore_ts_outputname(drvName.data(), drvName.size(), output.data(), output.size(), t.begin()));
-  return t;
-}
-
-composite::Text makeOutputPath(std::string_view storeDir, std::string_view output, const Hash &drvHash,
-                               std::string_view drvName) {
-  return makeStorePath(storeDir, composite::cat("output:", output), drvHash,
-                       outputPathName(drvName, output));
-}
-
-composite::Text hashPlaceholder(std::string_view output) {
-  Hash h = hashString(HashAlgo::SHA256, composite::cat("nix-output:", output));
-  return composite::cat("/", h.to_string(HashFormat::Nix32, false));
-}
-
-// nixstore::isInStore is hollowed out to MLIR: lowered/nixstore/IsInStore.mlir, built into NixStore by lib/CMakeLists.txt.
-
-composite::Text toStorePath(std::string_view storeDir, std::string_view path) {
-  if (!isInStore(storeDir, path)) throw Error(composite::cat("path '", path, "' is not in the Nix store"));
-  auto slash = path.find('/', storeDir.size() + 1);
-  return composite::Text(slash == std::string_view::npos ? path : path.substr(0, slash));
-}
-
-bool isStorePath(std::string_view storeDir, std::string_view path) {
-  return nixstore_ts_isstorepath(storeDir.data(), storeDir.size(), path.data(), path.size());
-}
-
-composite::Text storePathName(std::string_view storePath) {
-  composite::Text t;
-  t.resize(storePath.size());
-  t.truncate(nixstore_ts_storename(storePath.data(), storePath.size(), t.begin()));
-  return t;
-}
-
-composite::Text storePathHashPart(std::string_view storePath) {
-  composite::Text t;
-  t.resize(32);
-  t.truncate(nixstore_ts_storehash(storePath.data(), storePath.size(), t.begin()));
-  return t;
-}
 
 //===----------------------------------------------------------------------===//
 // Derivations

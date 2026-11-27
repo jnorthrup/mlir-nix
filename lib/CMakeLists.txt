@@ -206,8 +206,8 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/Ed25519.mlir Ed25519)
 # The byte encoders (base 16, Nix's base 32, base 64) that HashOps.mlir and the store-path modules call with a room sized
 # for the digits.  The encoding algebra is trikeshed.series / at / alpha / drain over the byte series.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/Encoders.mlir Encoders)
-# The pure path algebra of nixstore::baseNameOf / dirOf (StorePaths.cpp's bodies are gone; the bridges size the Text and
-# call these entries).  The slash algebra is trikeshed.at / slice / text / drain over the byte series.
+# The pure path algebra of nixstore::baseNameOf / dirOf (StorePaths.cpp's bodies are gone; StorePathMake.mlir sizes the
+# Text and calls these entries).  The slash algebra is trikeshed.at / slice / text / drain over the byte series.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/PathOps.mlir PathOps)
 # The store's files (StorePaths.cpp's readFile, writeFile, pathExists, createDirs and deletePathRecursive are forwards):
 # FileOps.mlir makes the system calls through the C library, sizes a file's Text once to what the file says it holds,
@@ -232,8 +232,8 @@ else()
 endif()
 mlnix_lower_interface(NixStore ${MLNIX_LOWERED_DIR}/FileOs.mlir FileOs)
 # The pure store-path naming algebra of nixstore::checkName / outputPathName / isStorePath / storePathName /
-# storePathHashPart (StorePaths.cpp's bodies are gone; checkName's bridge keeps the error wording, the others size the
-# Text and call these entries).  The naming rules are trikeshed.at / slice / text / compare / combine / drain over the
+# storePathHashPart (StorePaths.cpp's bodies are gone; StorePathMake.mlir words checkName's refusals and sizes the
+# Texts).  The naming rules are trikeshed.at / slice / text / compare / combine / drain over the
 # byte series; isStorePath calls the IsInStore entry beside it.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/StoreName.mlir StoreName)
 # The prefetch list's row and order algebra (Prefetch.cpp's list reading, mints table, entry order, ring slot driver, line
@@ -254,16 +254,23 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/NarFraming.mlir NarFraming)
 # The hash-name parser (parseHash with parseRest's prefixes, type checks, length dispatch and digests) and compressHash
 # (the XOR fold): lowered/nixstore/HashParse.mlir.  Its nix32 and base64 digests call Decoders.mlir's entries by symbol.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/HashParse.mlir HashParse)
-# nixstore::jsonFloat (StorePaths.cpp's body is gone; the bridge keeps the snprintf callback and sizes the Text): the
+# nixstore::jsonFloat (StorePaths.cpp's body is gone; it keeps the snprintf callback, StorePathMake.mlir sizes the Text): the
 # shortest round-tripping "%.*e" digits (strtod called here) cut by where/alpha/fold, nlohmann's format_buffer cases as
 # the extents of one combine of slices (sign, literals, zeros, digits, the exponent's digits) drained once.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/JsonFloat.mlir JsonFloat)
 # The store-path name algebra of StorePaths.cpp (makeStorePath's fingerprint `type:algo:hex:storeDir:name` and path
-# `storeDir/nix32-name`, makeType's `type[:ref]*[:self]`, runProgram's argv pointer fill are gone; the bridges keep
-# checkName/compressHash/hashString and the Text sizing).  Each is ONE lazy combine of the pieces drained once into a
-# pre-sized buffer (fill-drain); the hex/nix32 digits are the Encoders algebra inlined as a piece.  Store hashes stay
-# byte-identical.  The argv fill reads the Text rows' data pointers, allocation-free (it runs in the fork child).
+# `storeDir/nix32-name`, a type `type[:ref]*[:self]`, runProgram's argv pointer fill).  Each is ONE lazy combine of the
+# pieces drained once into a pre-sized buffer (fill-drain); the hex/nix32 digits are the Encoders algebra inlined as a
+# piece.  Store hashes stay byte-identical.  The argv fill reads the Text rows' data pointers, allocation-free (it runs
+# in the fork child).
 mlnix_lower_trikeshed(NixStore lowered/nixstore/StorePathOps.mlir StorePathOps)
+# The store's path names composed (StorePaths.cpp keeps a forward each): checkName's wording over StoreName.mlir's scan
+# (the words by its code from a table of spans, one combine drained into the Text thrown); makeStorePath (the
+# fingerprint drained into room on the stack, its SHA-256 folded to 20 bytes, the path drained into the Text sized once);
+# makeTextPath, makeFixedOutputPath and makeOutputPath (the type and the hashed payload each a combine drained);
+# hashPlaceholder; toStorePath (the slash after the store name found by one fold); and the Texts of baseNameOf, dirOf,
+# outputPathName, storePathName, storePathHashPart and jsonFloat, sized to the entry's bound and cut to what it wrote.
+mlnix_lower_trikeshed(NixStore lowered/nixstore/StorePathMake.mlir StorePathMake)
 # The derivation ATerm writer nixstore::unparseTo (StorePaths.cpp's composition loop, TextOut/HashOut and the
 # escapeInto/appendEscaped helpers are gone; the bridges marshal the Derivation into record arrays, apply maskOutputs
 # and slot __json, size the Text and call this entry).  The whole ATerm composition is trikeshed.combineAll / combine /

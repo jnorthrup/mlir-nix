@@ -213,8 +213,6 @@ enum class FileIngestionMethod { Flat, NixArchive, Text };
 void checkName(std::string_view name);
 composite::Text makeStorePath(std::string_view storeDir, std::string_view type,
                               const Hash &hash, std::string_view name);
-composite::Text makeType(std::string_view storeDir, std::string_view type,
-                         const SortedSet &refs, bool hasSelfRef);
 composite::Text makeTextPath(std::string_view storeDir, std::string_view name,
                              const Hash &hash, const SortedSet &refs);
 composite::Text makeFixedOutputPath(std::string_view storeDir, std::string_view name,
