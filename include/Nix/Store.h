@@ -150,7 +150,6 @@ struct Hash {
   size_t size() const { return hashSize(algo); }
   composite::Text to_string(HashFormat f, bool includeAlgo) const;
   bool operator==(const Hash &o) const;
-  bool operator<(const Hash &o) const;
 };
 
 struct HashSink {
@@ -162,7 +161,7 @@ struct HashSink {
   uint64_t bytes() const { return total; }
 
   HashAlgo algo;
-  alignas(16) unsigned char impl[320]; // the algorithm's context, made in place: a sink allocates nothing (Hash.cpp checks each fits)
+  alignas(16) unsigned char impl[320]; // the algorithm's context, made in place: a sink allocates nothing (the largest, SHA-512's, is 208 bytes)
   uint64_t total = 0;
 };
 
@@ -176,15 +175,6 @@ Hash parseHash(std::string_view s, composite::Maybe<HashAlgo> algo);
 Hash parseHashAllowEmpty(std::string_view s, composite::Maybe<HashAlgo> algo,
                          composite::Text *warning);
 Hash compressHash(const Hash &h, size_t newSize);
-
-/// Base 16 and Nix's base 32 of n bytes, appended to `out` where it is built: a path or a fingerprint is one string, not a
-/// string per piece.
-void appendBase16(composite::Text &out, const uint8_t *d, size_t n);
-void appendNix32(composite::Text &out, const uint8_t *d, size_t n);
-composite::Text base64Encode(std::string_view s);
-composite::Maybe<composite::Text> base64Decode(std::string_view s);
-composite::Maybe<composite::Text> nix32Decode(std::string_view s, size_t size);
-extern const char nix32Chars[33];
 
 //===----------------------------------------------------------------------===//
 // NAR

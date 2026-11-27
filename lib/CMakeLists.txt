@@ -55,8 +55,10 @@ target_link_libraries(NixStore PUBLIC LLVMSupport)
 # within 5% of each from 1 KiB to 16 MiB, faster on shorter inputs), so neither is linked.  On x86_64 a CPU without SHA-NI
 # runs the portable rounds, at about half the rate of libcrypto's AVX2 code (230 against 485 MB/s on a Skylake), so there
 # libcrypto is linked when there is one (libcrypto.a preferred: loading libcrypto.so is 0.6 ms of the 10 ms an `eval -E 1`
-# takes, the static one 0.15 ms).
+# takes, the static one 0.15 ms).  Which one a HashSink calls is a module of three forwards, linked below:
+# lowered/nixstore/Sha256Own.mlir or Sha256OpenSsl.mlir.
 set(MLNIX_SHA256 "auto" CACHE STRING "SHA-256 code: auto (the MLIR module; on x86_64 OpenSSL if found), mlir or openssl")
+set(MLNIX_SHA256_SINK Own)
 if(MLNIX_SHA256 STREQUAL "openssl" OR (MLNIX_SHA256 STREQUAL "auto" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$"))
   set(OPENSSL_USE_STATIC_LIBS ON)
   find_package(OpenSSL QUIET)
@@ -65,7 +67,7 @@ if(MLNIX_SHA256 STREQUAL "openssl" OR (MLNIX_SHA256 STREQUAL "auto" AND CMAKE_SY
     find_package(OpenSSL)
   endif()
   if(OPENSSL_FOUND)
-    target_compile_definitions(NixStore PRIVATE MLNIX_SHA256_OPENSSL=1)
+    set(MLNIX_SHA256_SINK OpenSsl)
     target_link_libraries(NixStore PUBLIC OpenSSL::Crypto)
   elseif(MLNIX_SHA256 STREQUAL "openssl")
     message(FATAL_ERROR "MLNIX_SHA256=openssl, but OpenSSL was not found")
@@ -188,14 +190,21 @@ endif()
 foreach(part ${MLNIX_SHA256_HW})
   mlnix_lower_interface(NixStore lowered/nixstore/Sha256${part}.mlir Sha256${part})
 endforeach()
+mlnix_lower_interface(NixStore lowered/nixstore/Sha256${MLNIX_SHA256_SINK}.mlir Sha256Sink)
+# lib/Store/Hash.cpp's bodies (Hash.cpp keeps a forward each where a C++ type crosses; nixstore::hashSize is defined here
+# under its own name): a HashSink's dispatch to the digests' modules, hashString, hashFile (the file read 64 KiB at a
+# time through the C library), Hash::to_string (the Text sized once; the prefix one combine drained, the digits
+# Encoders.mlir's), parseHashAlgo (trikeshed.compare against the names), and parseHash's and parseHashAllowEmpty's wording
+# over HashParse.mlir's parser (the words by its code from a table of spans, one combine drained into the Text thrown).
+mlnix_lower_trikeshed(NixStore lowered/nixstore/HashOps.mlir HashOps)
 # MD5 and SHA-1 (lib/Store/Hash.cpp's llvm::MD5 / llvm::SHA1 contexts are gone; HashSink calls these entries on the same
 # 112-byte context shape as SHA-512's).  Each is the Sha512.mlir pattern: block words by trikeshed.fold over 4-byte slices,
 # the rounds as scf loops, the padding one combine drained into the context's buffer.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/Md5.mlir Md5)
 mlnix_lower_trikeshed(NixStore lowered/nixstore/Sha1.mlir Sha1)
 mlnix_lower_trikeshed(NixStore lowered/nixstore/Ed25519.mlir Ed25519)
-# The byte encoders appendBase16, appendNix32, base64Encode (lib/Store/Hash.cpp's bodies are gone; the bridges size the
-# Text and call these entries).  The encoding algebra is trikeshed.series / at / alpha / drain over the byte series.
+# The byte encoders (base 16, Nix's base 32, base 64) that HashOps.mlir and the store-path modules call with a room sized
+# for the digits.  The encoding algebra is trikeshed.series / at / alpha / drain over the byte series.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/Encoders.mlir Encoders)
 # The pure path algebra of nixstore::baseNameOf / dirOf (StorePaths.cpp's bodies are gone; the bridges size the Text and
 # call these entries).  The slash algebra is trikeshed.at / slice / text / drain over the byte series.
