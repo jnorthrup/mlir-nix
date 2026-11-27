@@ -32,11 +32,13 @@
 // CSE-NOT: trikeshed.size
 // CSE: return
 
-// The count and a box a column, in the frame; a column's pages by its own width; the pages given back by hand.
+// The count and a box a column, in the frame, with a first directory and the first page; a column's pages by its own
+// width; the pages after the first allocated and given back by hand.
 // LOWERED-LABEL: func.func private @lane_bytes(
 // LOWERED: memref.alloca() : memref<1xindex>
 // LOWERED: memref.alloca() : memref<1xmemref<?xmemref<4096xi8>>>
 // LOWERED: memref.alloca() : memref<4xmemref<4096xi8>>
+// LOWERED: memref.alloca() : memref<4096xi8>
 // LOWERED: memref.alloc() {bufferization.manual_deallocation} : memref<4096xi8>
 // LOWERED: memref.dealloc %{{.*}} {bufferization.manual_deallocation} : memref<4096xi8>
 // LOWERED-LABEL: func.func private @lane_mixed(

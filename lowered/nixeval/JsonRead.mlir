@@ -13,10 +13,10 @@
 //     64 bits is a Long, any other a Double.  The state machine is cf blocks (Value, Key, After), lifted to scf at
 //     build time.
 //
-//   nixev_json_read(rec, st, root) -> fault   the fill, then the drain: the lane made here, confix.checked, and (when
-//     the text is one) each column drained into one series of exactly the rows; a row's children are
-//     trikeshed.adjacency of `up` (each row an edge from the row it is in: the counting sort gives every row its
-//     (first, count) into the children, in the order of the text).  Then the values of the index made now: a Value
+//   nixev_json_read(rec, st, root) -> fault   the lane made here and filled by confix.checked; then (when the text is
+//     one) `up` drained into one series for trikeshed.adjacency, which gives a row's children (each row an edge from
+//     the row it is in: the counting sort gives every row its (first, count) into the children, in the order of the
+//     text); open, close and tag are read where the fill left them.  Then the values of the index: a Value
 //     for each row, a container's filled from the Values of its children, which are made before they are visited
 //     because a child's row comes after its parent's.  An object's members are sorted by their keys' bytes
 //     (trikeshed.sorted, stable: of equal keys the last in the text is the last in the order, and it is the one kept,
@@ -963,8 +963,8 @@ func.func private @js_mk_array(%st: !llvm.ptr, %v: !llvm.ptr, %vals: memref<?xi6
 }
 // an Object: each member's key decoded into one buffer and a fresh Value for its value, in the order they came; the
 // members sorted by their keys' bytes (stable); of equal keys the last is kept; the rows handed to the attrs builder
-func.func private @js_mk_object(%src: !llvm.ptr, %st: !llvm.ptr, %v: !llvm.ptr, %vals: memref<?xi64>, %opens: !s32,
-                                %closes: !s32, %kid: !s32, %first: index, %count: index) {
+func.func private @js_mk_object(%src: !llvm.ptr, %st: !llvm.ptr, %v: !llvm.ptr, %vals: memref<?xi64>, %opens: !l32,
+                                %closes: !l32, %kid: !s32, %first: index, %count: index) {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
   %zero = arith.constant 0 : index
@@ -976,8 +976,8 @@ func.func private @js_mk_object(%src: !llvm.ptr, %st: !llvm.ptr, %v: !llvm.ptr, 
     %k2 = arith.muli %k, %c2i : index
     %at = arith.addi %first, %k2 : index
     %row = trikeshed.at %kid[%at] : !s32, index -> i32
-    %from32 = trikeshed.at %opens[%row] : !s32, i32 -> i32
-    %to32 = trikeshed.at %closes[%row] : !s32, i32 -> i32
+    %from32 = trikeshed.at %opens[%row] : !l32, i32 -> i32
+    %to32 = trikeshed.at %closes[%row] : !l32, i32 -> i32
     %from = arith.extui %from32 : i32 to i64
     %to = arith.extui %to32 : i32 to i64
     %d = arith.subi %to, %from : i64
@@ -996,8 +996,8 @@ func.func private @js_mk_object(%src: !llvm.ptr, %st: !llvm.ptr, %v: !llvm.ptr, 
     %k2 = arith.muli %k, %c2i : index
     %at = arith.addi %first, %k2 : index
     %row = trikeshed.at %kid[%at] : !s32, index -> i32
-    %from32 = trikeshed.at %opens[%row] : !s32, i32 -> i32
-    %to32 = trikeshed.at %closes[%row] : !s32, i32 -> i32
+    %from32 = trikeshed.at %opens[%row] : !l32, i32 -> i32
+    %to32 = trikeshed.at %closes[%row] : !l32, i32 -> i32
     %from = arith.extui %from32 : i32 to i64
     %to = arith.extui %to32 : i32 to i64
     %into = llvm.getelementptr %kbase[%off] : (!llvm.ptr, i64) -> !llvm.ptr, i8
@@ -1089,11 +1089,11 @@ func.func private @js_mk_object(%src: !llvm.ptr, %st: !llvm.ptr, %v: !llvm.ptr, 
   return
 }
 
-// the values of the drained index, made now, the first row's into root
-func.func private @js_reify(%src: !llvm.ptr, %st: !llvm.ptr, %root: !llvm.ptr, %opens: !s32, %closes: !s32, %tags: !s8,
+// the values of the index, made now from its rows where they lie, the first row's into root
+func.func private @js_reify(%src: !llvm.ptr, %st: !llvm.ptr, %root: !llvm.ptr, %opens: !l32, %closes: !l32, %tags: !l8,
                             %kids: !kids, %kid: !s32) {
   %c0 = arith.constant 0 : i64
-  %ri = trikeshed.size %tags : !s8
+  %ri = trikeshed.size %tags : !l8
   %vals = memref.alloc(%ri) : memref<?xi64>
   %zero = arith.constant 0 : index
   %one = arith.constant 1 : index
@@ -1107,11 +1107,11 @@ func.func private @js_reify(%src: !llvm.ptr, %st: !llvm.ptr, %root: !llvm.ptr, %
     %made = arith.cmpi ne, %vb, %c0 : i64
     scf.if %made {
       %v = llvm.inttoptr %vb : i64 to !llvm.ptr
-      %from32 = trikeshed.at %opens[%i] : !s32, index -> i32
-      %to32 = trikeshed.at %closes[%i] : !s32, index -> i32
+      %from32 = trikeshed.at %opens[%i] : !l32, index -> i32
+      %to32 = trikeshed.at %closes[%i] : !l32, index -> i32
       %from = arith.extui %from32 : i32 to i64
       %to = arith.extui %to32 : i32 to i64
-      %tag = trikeshed.at %tags[%i] : !s8, index -> i8
+      %tag = trikeshed.at %tags[%i] : !l8, index -> i8
       %t1 = arith.constant 1 : i8
       %t2 = arith.constant 2 : i8
       %t3 = arith.constant 3 : i8
@@ -1160,7 +1160,7 @@ func.func private @js_reify(%src: !llvm.ptr, %st: !llvm.ptr, %root: !llvm.ptr, %
             %isobject = arith.cmpi eq, %tag, %t5 : i8
             scf.if %isobject {
               func.call @js_mk_object(%src, %st, %v, %vals, %opens, %closes, %kid, %first, %count)
-                : (!llvm.ptr, !llvm.ptr, !llvm.ptr, memref<?xi64>, !s32, !s32, !s32, index, index) -> ()
+                : (!llvm.ptr, !llvm.ptr, !llvm.ptr, memref<?xi64>, !l32, !l32, !s32, index, index) -> ()
             } else {
               func.call @js_mk_array(%st, %v, %vals, %kid, %first, %count) : (!llvm.ptr, !llvm.ptr, memref<?xi64>, !s32, index, index) -> ()
             }
@@ -1202,8 +1202,9 @@ func.func private @js_long(%src: !llvm.ptr, %from: i64, %to: i64) -> i64 {
   return %r : i64
 }
 
-// builtins.fromJSON's reader, a fill and a drain: the index's lane, confix.checked filling it, and, when the text is one,
-// each column drained and the children counted out of `up` (trikeshed.adjacency), then its values.  The fault, 0 for none.
+// builtins.fromJSON's reader: the index's lane made here and filled by confix.checked (the fill); when the text is one,
+// `up` drained for trikeshed.adjacency, which counts each row's children out of it, and the values made from the rows
+// where they lie: a lane's rows are read in place (trikeshed.at), so the index is never held twice.  The fault, 0 for none.
 func.func @nixev_json_read(%rec: !llvm.ptr, %st: !llvm.ptr, %root: !llvm.ptr) -> i32 {
   %rows = trikeshed.lane : !rows
   %f = confix.checked %rec, %rows : !llvm.ptr, !rows
@@ -1216,15 +1217,12 @@ func.func @nixev_json_read(%rec: !llvm.ptr, %st: !llvm.ptr, %root: !llvm.ptr) ->
     %i2 = arith.constant 2 : index
     %i3 = arith.constant 3 : index
     %src = func.call @js_rp(%rec, %c0) : (!llvm.ptr, i64) -> !llvm.ptr
-    %lopens = trikeshed.take %rows[%i0] : !rows -> !l32
-    %lcloses = trikeshed.take %rows[%i1] : !rows -> !l32
-    %ltags = trikeshed.take %rows[%i2] : !rows -> !l8
+    %opens = trikeshed.take %rows[%i0] : !rows -> !l32
+    %closes = trikeshed.take %rows[%i1] : !rows -> !l32
+    %tags = trikeshed.take %rows[%i2] : !rows -> !l8
     %lups = trikeshed.take %rows[%i3] : !rows -> !l32
-    %opens = trikeshed.drain %lopens : !l32 -> !s32
-    %closes = trikeshed.drain %lcloses : !l32 -> !s32
-    %tags = trikeshed.drain %ltags : !l8 -> !s8
     %ups = trikeshed.drain %lups : !l32 -> !s32
-    %n = trikeshed.size %tags : !s8
+    %n = trikeshed.size %ups : !s32
     %ids = trikeshed.series %n : !s32 {
     ^bb0(%i: index):
       %r = arith.index_cast %i : index to i32
@@ -1232,7 +1230,7 @@ func.func @nixev_json_read(%rec: !llvm.ptr, %st: !llvm.ptr, %root: !llvm.ptr) ->
     }
     %kids, %kid = trikeshed.adjacency %ups, %ids over %n : !s32, !s32 -> !kids, !s32
     func.call @js_reify(%src, %st, %root, %opens, %closes, %tags, %kids, %kid)
-      : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !s32, !s32, !s8, !kids, !s32) -> ()
+      : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !l32, !l32, !l8, !kids, !s32) -> ()
   }
   return %f : i32
 }

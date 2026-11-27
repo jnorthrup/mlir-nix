@@ -1156,11 +1156,14 @@ void populateEitherLowering(CursorTypes &types, RewritePatternSet &patterns, Con
 //   the count               memref<1xindex>
 //   column c's box          memref<1 x memref<?x memref<2^s x Tc>>>: the one cell that holds the directory in force, whose
 //                           slots are the pages
-// trikeshed.lane makes them in its function's frame (allocas, a first directory of kLaneFrame slots beside each box), so an
-// empty lane allocates nothing.  Pages, and the directories past the frame's, are allocated with
+// trikeshed.lane makes them in its function's frame (allocas: beside each box a first directory of kLaneFrame slots and
+// the column's first page in its first slot), so a fill of up to a page allocates nothing, and a lane costs its maker's
+// frame a page a column.  The pages after the first, and the directories past the frame's, are allocated with
 // bufferization.manual_deallocation (the deallocation pass cannot see a page through its directory, and leaves them
 // alone) and go back before each return of the function that made the lane.  A callee is handed these cells.  A lane over
-// cells another owner made (the count 0, a directory of no slots: all zero) is filled the same way and never closed here.
+// cells another owner made (the count 0, a directory of no slots: all zero) is filled the same way, its first page
+// allocated too, and never closed here: its owner gives back the pages its count needed and a directory past
+// kLaneFrame slots.
 //   append(l, x ..)     row n = the count: in each column a page opened where n is the first row of it (the pages open are
 //                       the ones the count needs: a lane only grows), x stored at n; then the count is n + 1; n
 //   size(l), at(l, i)   the count; the row at page i >> s, place i & (2^s - 1), through the directory in force
@@ -1213,6 +1216,7 @@ struct LaneColumn {
   }
 
   /// Before row n is appended: a page opened if n is the first row of one, in a directory twice as long if this one is full.
+  /// A directory that has slots has its first page already (the frame's, or its owner's): row 0 opens one only in none.
   void open(OpBuilder &b, Location loc, Value n) const {
     Value zero = cIndex(b, loc, 0), one = cIndex(b, loc, 1);
     auto first = scf::IfOp::create(b, loc, arith::CmpIOp::create(b, loc, arith::CmpIPredicate::eq, placeOf(b, loc, n), zero), /*withElseRegion=*/false);
@@ -1220,6 +1224,9 @@ struct LaneColumn {
     b.setInsertionPoint(first.thenBlock()->getTerminator());
     Value old = directory(b, loc), slots = length(b, loc, old);
     Value at = arith::ShRUIOp::create(b, loc, n, cIndex(b, loc, llvm::Log2_64(page.getDimSize(0))));
+    Value later = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::ne, n, zero), none = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::eq, slots, zero);
+    auto missing = scf::IfOp::create(b, loc, arith::OrIOp::create(b, loc, later, none), /*withElseRegion=*/false);
+    b.setInsertionPoint(missing.thenBlock()->getTerminator());
     auto full = scf::IfOp::create(b, loc, arith::CmpIOp::create(b, loc, arith::CmpIPredicate::eq, at, slots), /*withElseRegion=*/false);
     b.setInsertionPoint(full.thenBlock()->getTerminator());
     Value twice = arith::MaxUIOp::create(b, loc, arith::MulIOp::create(b, loc, slots, cIndex(b, loc, 2)), cIndex(b, loc, 2 * kLaneFrame));
@@ -1235,18 +1242,18 @@ struct LaneColumn {
     store(b, loc, fresh, directory(b, loc), at);
   }
 
-  /// The pages of the n rows, in order: step(the page, the first row in it).
-  void pages(OpBuilder &b, Location loc, Value n, function_ref<void(Value, Value)> step) const {
+  /// The pages of the rows from ..< n (from, a page's first row), in order: step(the page, the first row in it).
+  void pages(OpBuilder &b, Location loc, Value from, Value n, function_ref<void(Value, Value)> step) const {
     Value dir = directory(b, loc);
-    auto each = scf::ForOp::create(b, loc, cIndex(b, loc, 0), n, rows(b, loc));
+    auto each = scf::ForOp::create(b, loc, from, n, rows(b, loc));
     OpBuilder::InsertionGuard guard(b);
     b.setInsertionPoint(each.getBody()->getTerminator());
     step(pageOf(b, loc, dir, each.getInductionVar()), each.getInductionVar());
   }
 };
 
-/// trikeshed.lane: the count and each column's box in the frame, its first directory beside it; before each return of
-/// the function the pages the count needed go back, and a directory that is the heap's.
+/// trikeshed.lane: the count and each column's box in the frame, its first directory and its first page beside it;
+/// before each return of the function the pages the count needed past the first go back, and a directory that is the heap's.
 struct LaneLowering : Lowering<LaneOp> {
   using Lowering::Lowering;
   LogicalResult matchAndRewrite(LaneOp op, OpAdaptor, ConversionPatternRewriter &rw) const override {
@@ -1267,13 +1274,14 @@ struct LaneLowering : Lowering<LaneOp> {
     store(rw, loc, zero, lane[0], zero);
     for (LaneColumn c : ArrayRef<Value>(lane).drop_front()) {
       Value first = memref::AllocaOp::create(rw, loc, MemRefType::get({kLaneFrame}, c.page));
+      store(rw, loc, memref::AllocaOp::create(rw, loc, c.page), first, zero);
       store(rw, loc, memref::CastOp::create(rw, loc, c.dir, first), c.box, zero);
     }
     for (Operation *r : returns) {
       rw.setInsertionPoint(r);
       Value n = load(rw, loc, lane[0], zero);
       for (LaneColumn c : ArrayRef<Value>(lane).drop_front()) {
-        c.pages(rw, loc, n, [&](Value page, Value) { manual(memref::DeallocOp::create(rw, loc, page)); });
+        c.pages(rw, loc, c.rows(rw, loc), n, [&](Value page, Value) { manual(memref::DeallocOp::create(rw, loc, page)); });
         c.drop(rw, loc, c.directory(rw, loc));
       }
     }
@@ -1381,7 +1389,7 @@ struct LaneDrainLowering : Lowering<DrainOp> {
     LaneColumn c(lane[1]);
     Value n = load(rw, loc, lane[0], cIndex(rw, loc, 0));
     Value into = op.getInto() ? a.getInto()[0] : newSeriesBuffer(rw, loc, c.page.getElementType(), n);
-    c.pages(rw, loc, n, [&](Value page, Value first) {
+    c.pages(rw, loc, cIndex(rw, loc, 0), n, [&](Value page, Value first) {
       Value count = arith::MinUIOp::create(rw, loc, c.rows(rw, loc), arith::SubIOp::create(rw, loc, n, first));
       auto row = scf::ForOp::create(rw, loc, cIndex(rw, loc, 0), count, cIndex(rw, loc, 1));
       rw.setInsertionPoint(row.getBody()->getTerminator());
@@ -1398,7 +1406,7 @@ struct LaneFillLowering : Lowering<DrainOp> {
   using Lowering::Lowering;
   LogicalResult matchAndRewrite(DrainOp op, OneToNOpAdaptor a, ConversionPatternRewriter &rw) const override {
     Location loc = op.getLoc();
-    if (!op.getInto() || !isa<LaneType>(op.getInto().getType())) return failure();
+    if (!op.getInto() || !isa<LaneType>(op.getInto().getType()) || isa<LaneType>(op.getSeries().getType())) return failure(); // (of a lane: above)
     ValueRange lane = a.getInto(), xs = a.getSeries();
     auto rows = xs.size() == 1 ? dyn_cast<MemRefType>(xs[0].getType()) : MemRefType();
     if (lane.size() != 2 || !rows || rows.getElementType() != LaneColumn(lane[1]).page.getElementType())

@@ -2,10 +2,10 @@
 // derivation's builder reads, as upstream's ParsedDerivation / writeStructuredAttrsShell writes it, from __json.  The C++
 // keeps the rooms the bytes land in and the words of the two errors; nothing of the reading or the writing.  In order:
 //
-//   the reading   a fill and a drain: confix.checked over __json fills the index's lane (a row is open, close, tag and
-//                 the row it is in), checked as builtins.fromJSON's reader checks JSON (the record's `end` set: an
-//                 integer past 2^63 and a \u0000 are values here, as nlohmann reads them); the columns are then
-//                 drained, and a row's children are trikeshed.adjacency of the rows they are in.
+//   the reading   confix.checked over __json fills the index's lane (a row is open, close, tag and the row it is in),
+//                 checked as builtins.fromJSON's reader checks JSON (the record's `end` set: an integer past 2^63
+//                 and a \u0000 are values here, as nlohmann reads them); the rows are read where the fill left them,
+//                 and a row's children are trikeshed.adjacency of the rows they are in, drained for it.
 //                 No DOM: a node is a row, its text a window -- a number its span of the source, a string its bytes
 //                 decoded by JsonRead.mlir's nixev_json_decode into one room of n bytes.
 //   the members   each object's members in key order (trikeshed.sorted over row indices, a region comparing two slices
@@ -143,7 +143,7 @@ func.func @nixstore_ts_escape(%p: !llvm.ptr, %n: i64, %into: !llvm.ptr, %cap: i6
 // ---- the nodes: a kind and a window for every row.  Kinds: 0 null, 1 false, 2 true, 3 number, 4 string, 5 array,
 // 6 object.  A string's window is its decoded bytes (one room of n bytes: no string decodes longer than its text), any
 // other row's its span of the source.
-func.func private @nx_sa_nodes(%rec: !llvm.ptr, %ctx: !llvm.ptr, %opens: !s32, %closes: !s32, %tags: !s8,
+func.func private @nx_sa_nodes(%rec: !llvm.ptr, %ctx: !llvm.ptr, %opens: !l32, %closes: !l32, %tags: !l8,
                                %nkind: memref<?xi64>, %nptr: memref<?xi64>, %nlen: memref<?xi64>) {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
@@ -159,13 +159,13 @@ func.func private @nx_sa_nodes(%rec: !llvm.ptr, %ctx: !llvm.ptr, %opens: !s32, %
   %n = func.call @nx_sa_w(%rec, %c1) : (!llvm.ptr, i64) -> i64
   %dbuf = func.call @nixsa_room(%ctx, %n) : (!llvm.ptr, i64) -> !llvm.ptr
   %dbw = llvm.ptrtoint %dbuf : !llvm.ptr to i64
-  %ri = trikeshed.size %tags : !s8
+  %ri = trikeshed.size %tags : !l8
   %used = scf.for %r = %z to %ri step %one iter_args(%off = %c0) -> (i64) {
-    %from32 = trikeshed.at %opens[%r] : !s32, index -> i32
-    %to32 = trikeshed.at %closes[%r] : !s32, index -> i32
+    %from32 = trikeshed.at %opens[%r] : !l32, index -> i32
+    %to32 = trikeshed.at %closes[%r] : !l32, index -> i32
     %from = arith.extui %from32 : i32 to i64
     %to = arith.extui %to32 : i32 to i64
-    %tg8 = trikeshed.at %tags[%r] : !s8, index -> i8
+    %tg8 = trikeshed.at %tags[%r] : !l8, index -> i8
     %tg = arith.extui %tg8 : i8 to i64
     %isstr = arith.cmpi eq, %tg, %c4 : i64
     %off2 = scf.if %isstr -> (i64) {
@@ -1130,7 +1130,7 @@ func.func private @nx_sa_sh(%ctx: !llvm.ptr, %nkind: memref<?xi64>, %nptr: memre
 // ---- the entry: 0 the two files written (through nixsa_out), 1 __json is not JSON, 2 it is not an object.
 // rec is confix.checked's record (`end` set: the store's reading); outs the outputs' SortedMap rows (name, path),
 // rws the rewrites' (placeholder, path), both read in place (nx_sa_row).  The index is this function's lane: filled by
-// confix.checked, drained here, gone when it returns.
+// confix.checked, read here, gone when it returns.
 func.func @nixstore_ts_sattrs(%ctx: !llvm.ptr, %rec: !llvm.ptr, %outs: !llvm.ptr, %nout: i64, %rws: !llvm.ptr,
                               %nrw: i64) -> i32 {
   %index = trikeshed.lane : !rows
@@ -1154,15 +1154,13 @@ func.func @nixstore_ts_sattrs(%ctx: !llvm.ptr, %rec: !llvm.ptr, %outs: !llvm.ptr
     %t0 = trikeshed.at %ltags[%z] : !l8, index -> i8
     %isobj = arith.cmpi eq, %t0, %t5 : i8
     %r2 = scf.if %isobj -> (i32) {
-      // the drain: each column one series of exactly the rows, and each row's children out of the rows they are in
-      %lopens = trikeshed.take %index[%z] : !rows -> !l32
-      %lcloses = trikeshed.take %index[%i1] : !rows -> !l32
+      // open, close and tag are read where the fill left them; `up` is drained into one series, for each row's
+      // children out of the rows they are in
+      %opens = trikeshed.take %index[%z] : !rows -> !l32
+      %closes = trikeshed.take %index[%i1] : !rows -> !l32
       %lups = trikeshed.take %index[%i3] : !rows -> !l32
-      %opens = trikeshed.drain %lopens : !l32 -> !s32
-      %closes = trikeshed.drain %lcloses : !l32 -> !s32
-      %tags = trikeshed.drain %ltags : !l8 -> !s8
       %ups = trikeshed.drain %lups : !l32 -> !s32
-      %nrows = trikeshed.size %tags : !s8
+      %nrows = trikeshed.size %ups : !s32
       %ids = trikeshed.series %nrows : !s32 {
       ^bb0(%i: index):
         %id = arith.index_cast %i : index to i32
@@ -1191,8 +1189,8 @@ func.func @nixstore_ts_sattrs(%ctx: !llvm.ptr, %rec: !llvm.ptr, %outs: !llvm.ptr
       %decn = arith.muli %rows, %c11 : i64
       %deci = arith.index_cast %decn : i64 to index
       %dec = memref.alloc(%deci) : memref<?xi8>
-      func.call @nx_sa_nodes(%rec, %ctx, %opens, %closes, %tags, %nkind, %nptr, %nlen)
-        : (!llvm.ptr, !llvm.ptr, !s32, !s32, !s8, memref<?xi64>, memref<?xi64>, memref<?xi64>) -> ()
+      func.call @nx_sa_nodes(%rec, %ctx, %opens, %closes, %ltags, %nkind, %nptr, %nlen)
+        : (!llvm.ptr, !llvm.ptr, !l32, !l32, !l8, memref<?xi64>, memref<?xi64>, memref<?xi64>) -> ()
       func.call @nx_sa_members(%kids, %kid, %outs, %nout, %nkind, %nptr, %nlen, %nfirst, %ncnt, %mkp, %mkl, %mval)
         : (!pieces, !s32, !llvm.ptr, i64, memref<?xi64>, memref<?xi64>, memref<?xi64>, memref<?xi64>, memref<?xi64>,
            memref<?xi64>, memref<?xi64>, memref<?xi64>) -> ()

@@ -192,8 +192,10 @@ def TS_LaneType : TS_Type<"Lane", "lane"> {
     for each column the directory of its pages.  A page holds at most 16 KiB (LaneTrie's TRIE_PAGE) and at most 4096
     rows, a power of two of them, so that a row's page and its place there are a shift and a mask: 4096 rows of one to
     four bytes, 2048 of eight (a lane of a few bytes does not take 16 KiB for them).  The lane lives in the frame of the
-    function that makes it, and its pages go back when that function returns: it is handed down to the functions that
-    fill and read it, and never returned.  size and at read what an append or an anchor changes: two of them either
+    function that makes it, its count, its first directories and the first page of each column there (so a fill of up
+    to a page allocates nothing, and a lane costs its maker's frame a page a column: it is made where a fill begins,
+    not in a function that recurses), and its other pages go back when that function returns: it is handed down to
+    the functions that fill and read it, and never returned.  size and at read what an append or an anchor changes: two of them either
     side of one are two reads (their memory effect says so; of a series they have none).
   }];
 }
@@ -717,8 +719,8 @@ def TS_LaneOp : TS_Op<"lane"> {
   let results = (outs TS_LaneType:$lane);
   let assemblyFormat = "attr-dict `:` type($lane)";
   let description = [{
-    MutableSeries.kt's `mutableSeriesOf()` with LaneTrie's storage (`!trikeshed.lane`): no row, no page.  It stands in
-    the entry block of its function: the lane lives until that function returns, when its pages go back (Kotlin's
+    MutableSeries.kt's `mutableSeriesOf()` with LaneTrie's storage (`!trikeshed.lane`): no row.  It stands in the
+    entry block of its function: the lane lives until that function returns, when the pages it took go back (Kotlin's
     `use { }` over the appender).  Law: size(lane) = 0.
   }];
 }
