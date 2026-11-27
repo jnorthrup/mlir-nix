@@ -285,6 +285,8 @@ the form timed out, so all five stand open.
    block freed once, LLVM 22's lane tests and 210,000 old/new cases, 3,657 fromJSON probes, 73 other modules lowered to
    the same bytes; 697 mutants, 667 killed, 11 not built, 19 survivors (18 equivalent and tabled, one an out-of-bounds
    write no answer showed, now killed by fencing each allocation); timing 0.94-0.98x of a8d3ae3 on five JSON workloads.
+   Asked again with these numbers at 13:05 (one question); unanswered within the form's minute, so G1 stays parked on
+   gap/lanes, the rule's default, until the user's word or cuts in its wave.
 2. **The scanners (G6).**  ConfixScan, LexScan, TomlScan and the readers are the largest bypass rows (confix_scan_nix
    944 non-dialect ops, lx_default 482, the TOML scan 204 + 115 + 74).  The standing rule: a scanner already merged is
    redone only on the user's word; regex goes only to combinators.  kursive2's lexer as a kursive grammar is proven
