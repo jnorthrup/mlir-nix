@@ -76,12 +76,13 @@ The C++ left, by span (code lines): `registerBuiltins` 636 and `registerStoreBui
 `printValueAsJSON` 64.  Most are glue the recipe keeps (registration, process, I/O, MLIR's API); the composition in
 `derivationStrict`, `printStats`, `cmdStore` and `printValueAsJSON` already went to MLIR, leaving forcing and throws.
 
-The bypass, by the census's rule (a product function of 30 ops or more that loops and has under 10% dialect ops): 84
-functions, 7,946 ops.  The largest: the scanners (`confix_scan_nix` 944, `lx_default` 482, `lx_ind` 184, `lx_string`
-136, `nixev_ts_toml_scan` 204, `tm_number` 153, `tm_basic` 115, `confix_scan_checked` 125, `js_string` 104, `nx_word`
-104), mini-luci's pre-dialect server (`query_run` 246, http `main` 171, `evaluate_with` 143, `serve` 108), `xw_value`
-172, `nixfe_ts_strip` 160, `sg_xxh3` 157 and `sha512_compress` 154 (scalar cores), `mlnix_rows_sort_u32` 115 and
-`mlnix_rows_sort` 109, `nixstore_ts_drvparse` 112, `ceq_attrs_eq` 103, `nixev_ts_replace` 97, `narr_node` 94.
+The bypass, by the census's rule (a product function of 30 ops or more that loops and has under 10% dialect ops, and is
+not a scalar core: 60% or more arith ops, a digest's rounds or a hash's mixing): 60 functions, 6,204 ops; the scalar
+cores apart, 24 functions, 1,742 ops.  The largest bypass rows: the scanners (`confix_scan_nix` 944, `lx_default` 482,
+`lx_ind` 184, `lx_string` 136, `nixev_ts_toml_scan` 204, `tm_basic` 115, `confix_scan_checked` 125), mini-luci's
+pre-dialect server (`query_run` 246, http `main` 171, `evaluate_with` 143, `serve` 108), `xw_value` 172,
+`nixfe_ts_strip` 160, `mlnix_rows_sort_u32` 115 and `mlnix_rows_sort` 109, `nixstore_ts_drvparse` 112, `ceq_attrs_eq`
+103, `nixev_ts_replace` 97, `narr_node` 94.
 
 ## Scale 4: the roots
 
@@ -134,3 +135,18 @@ Wave 1b (same day, files no wave-1 lane touches): printValueAsJSON's composition
 structured attrs: the writer gap of lib/Eval/Formats.cpp), and G7's query path (utils/mlnixci/src/api.mlir: query_run's
 hand-spelled fills, folds and offsets, then facet, page and report).
 Wave 2, after G1: G3b with G4c (the store index as a HashTrie with sealed pages), G3c, G4b.  On the user's word: G6.
+
+## Ledger
+
+Each merge, `gap-census.py --seal` on the new master and `--diff` against the previous seal.
+
+- `0db2780` (2026-11-27, wave 1 part 1: trie, digest, ciq; C++ 22,822 -> 22,815).  Patricia.mlir 0.5% -> 17.2% dialect
+  ops, no llvm load, store or GEP left (318M sets old/new in lockstep).  MD5 and SHA-1 lowered (Md5.mlir, Sha1.mlir:
+  1.07M inputs each against CommonCrypto and llvm::); SHA-256 stays on the platform code, the MLIR form measured 10x
+  slower than CommonCrypto's SHA instructions (parked: branch digest-sha256-mlir).  query_run's counts, selections and
+  offsets in trikeshed forms (mlnixci fill-drain lines 0.3% -> 4.3%; 2,173 replies identical).  Repository: fill-drain
+  functions 64 -> 71 (15.6% -> 16.9% of the lines); bypass 60 -> 61 functions at 6,204 ops (Patricia's set left it;
+  MD5's and SHA-1's update loops came in: they could buffer as Sha512.mlir does, with slices drained).
+  Linux (mlnix-os, LLVM 22): mlir 52/0, lang 488/488 exact 231 on both schedules, prims 121, mlnixci 51 PASS, son wrong 0,
+  the Composite checks plain and sanitized.  Held: the heap lane (inode-bench +6.2%: a row swap left out of line), the
+  json lane (C++ +13, toJSON 1.18-1.43x on the microbenchmark).
