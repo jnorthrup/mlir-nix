@@ -15,7 +15,8 @@ rows) and the heap store (clusters fill, drain sorted, seal compressed).  The sc
   0  the repository: C++ code lines, the product MLIR's op mix, its fill-drain share
   1  each subsystem: the C++ left beside the MLIR that replaced it, and what that MLIR is written in
   2  the store shapes: every keyed or ordered store of the C++, the shape TrikeShed gives it, where its algorithm lives
-  3  functions: the C++ spans that remain, and the product MLIR functions that loop in llvm/arith (the bypass)
+  3  functions: the C++ spans that remain, and the product MLIR functions that loop in llvm/arith: the bypass, and
+     apart from it the scalar cores (60% or more arith ops: a digest's rounds, a hash's mixing)
   4  the roots: declared ops with no lowering, declared ops no product module uses
 A file's measures are kept by its blob id, so a run reads only what changed: .git/gap-cas holds 256 leaves by the id's
 first byte, each an append log replayed at start (HashTrie's open leaf); a leaf past 4,096 rows seals, sorted by the
@@ -25,7 +26,7 @@ compressed, under .git/gap-cas/snap/<commit>.z.
 import argparse, collections, importlib.util, json, os, re, subprocess, sys, zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-VERSION = "gap-census 2"
+VERSION = "gap-census 3"
 CXX = (".cpp", ".h", ".hpp", ".cc")
 PRODUCT_MLIR = ("lowered/", "utils/mlnixci/src/")
 SHAPE = collections.OrderedDict([  # kind -> (pattern in C++, TrikeShed's shape, where the algorithm lives)
@@ -125,7 +126,7 @@ def measure_mlir(text):
         line = strip_mlir(raw)
         m = FN_MLIR.match(line)
         if m and cur is None and "{" in line:
-            cur, depth = {"name": m.group(1), "line": n, "ops": 0, "ts": 0, "llvm": 0, "loops": 0, "drains": 0, "comp": 0}, 0
+            cur, depth = {"name": m.group(1), "line": n, "ops": 0, "ts": 0, "llvm": 0, "arith": 0, "loops": 0, "drains": 0, "comp": 0}, 0
         found = OPRE.findall(line)
         for op in found:
             if op.startswith(("func.func", "llvm.func")): continue
@@ -135,6 +136,7 @@ def measure_mlir(text):
                 d = op.split(".", 1)[0]
                 cur["ts"] += d in DIALECTS
                 cur["llvm"] += d == "llvm"
+                cur["arith"] += d == "arith"
                 cur["loops"] += op in LOOPS
                 cur["drains"] += op == "trikeshed.drain"
                 cur["comp"] += op in ("trikeshed.combine", "trikeshed.combineAll")
@@ -249,10 +251,16 @@ def rows_of(c, top, rev):
     spans = sorted(((f["code"], p, f) for p, m in cxx.items() if not p.startswith("scripts/") for f in m["fns"]), key=lambda x: -x[0])
     for code, p, f in spans[:top * 3]:
         rows.append((3, f"cxx {p}:{f['line']} {f['name']}", "code lines", code))
-    bypass = sorted(((f["ops"] - f["ts"], p, f) for p, m in mlir.items() for f in m["fns"]
-                     if f["ops"] >= 30 and f["loops"] and f["ts"] * 10 < f["ops"]), key=lambda x: -x[0])
+    # A loop of mostly arith ops (rounds of a digest, a hash's mixing) is a scalar core: the dialects have no op for it, and
+    # llvm/arith is accepted there.  The bypass is the rest: loops that walk records outside the dialects.
+    looping = [(f["ops"] - f["ts"], p, f) for p, m in mlir.items() for f in m["fns"]
+               if f["ops"] >= 30 and f["loops"] and f["ts"] * 10 < f["ops"]]
+    cores = [x for x in looping if x[2]["arith"] * 10 >= x[2]["ops"] * 6]
+    bypass = sorted((x for x in looping if x not in cores), key=lambda x: -x[0])
     rows.append((3, "mlir bypass", "functions", len(bypass)))
     rows.append((3, "mlir bypass", "ops", sum(b[0] for b in bypass)))
+    rows.append((3, "mlir scalar cores", "functions", len(cores)))
+    rows.append((3, "mlir scalar cores", "ops", sum(b[0] for b in cores)))
     for n, p, f in bypass[:top * 2]:
         rows.append((3, f"mlir {p}:{f['line']} @{f['name']}", "non-dialect ops", n))
     # scale 4: the roots
