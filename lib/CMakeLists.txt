@@ -51,10 +51,11 @@ set_target_properties(TrikeShedRuntime PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${PRO
 add_library(NixStore STATIC Store/Hash.cpp Store/StorePaths.cpp Store/LocalStore.cpp Store/StructuredAttrs.cpp Store/Prefetch.cpp Store/Ed25519.cpp)
 target_link_libraries(NixStore PUBLIC LLVMSupport)
 # SHA-256 is lowered/nixstore/Sha256.mlir (below, with the other lowered modules): its rounds are the CPU's SHA-2 instructions
-# where the processor has them, else portable.  On arm64 that is the rate of CommonCrypto and of libcrypto (within 1%, and
-# faster on short inputs), so neither is linked.  On x86_64 a CPU without SHA-NI runs the portable rounds, at under half the
-# rate of libcrypto's AVX2 code (230 against 485 MB/s on a Skylake), so there libcrypto is linked when there is one
-# (libcrypto.a preferred: loading libcrypto.so is 0.6 ms of the 10 ms an `eval -E 1` takes, the static one 0.15 ms).
+# where the processor has them, else portable.  On arm64 that is the rate of CommonCrypto and of libcrypto (measured
+# within 5% of each from 1 KiB to 16 MiB, faster on shorter inputs), so neither is linked.  On x86_64 a CPU without SHA-NI
+# runs the portable rounds, at about half the rate of libcrypto's AVX2 code (230 against 485 MB/s on a Skylake), so there
+# libcrypto is linked when there is one (libcrypto.a preferred: loading libcrypto.so is 0.6 ms of the 10 ms an `eval -E 1`
+# takes, the static one 0.15 ms).
 set(MLNIX_SHA256 "auto" CACHE STRING "SHA-256 code: auto (the MLIR module; on x86_64 OpenSSL if found), mlir or openssl")
 if(MLNIX_SHA256 STREQUAL "openssl" OR (MLNIX_SHA256 STREQUAL "auto" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$"))
   set(OPENSSL_USE_STATIC_LIBS ON)
@@ -166,8 +167,9 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/Sha512.mlir Sha512)
 # combineAll) around the rounds of a block, chosen once a process: the CPU's SHA-2 instructions, an llvm-dialect function
 # carrying the target feature (Sha256Arm64.mlir: sha256h/h2/su0/su1; Sha256X86.mlir: SHA-NI), the state passed through it
 # as two vectors by the loop over the blocks; or the portable rounds, scf loops that clang unrolls whole at the threshold
-# below (K folds into the code and the schedule into registers).  The probe is the platform's: getauxval on Linux arm64
-# (Sha256Auxv.mlir), nothing to ask on macOS arm64 (Sha256Apple.mlir), cpuid on x86_64; elsewhere the rounds are portable.
+# below (K folds into the code as immediates, the schedule into registers and stack slots).  The probe is the platform's:
+# getauxval on Linux arm64 (Sha256Auxv.mlir), nothing to ask on macOS arm64 (Sha256Apple.mlir), cpuid on x86_64; elsewhere
+# the rounds are portable.
 set(MLNIX_LOWER_CLANG_ARGS -mllvm -unroll-threshold=4000)
 mlnix_lower_trikeshed(NixStore lowered/nixstore/Sha256.mlir Sha256)
 unset(MLNIX_LOWER_CLANG_ARGS)
