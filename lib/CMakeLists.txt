@@ -380,9 +380,14 @@ mlnix_lower_trikeshed(NixEval lowered/nixeval/VersionOps.mlir VersionOps)
 # __sort (the cmp lambda and the sortRows call are gone).  The sort is trikeshed.sorted, stable; each comparison calls
 # back into the evaluator (the comparator is a Nix function).
 mlnix_lower_trikeshed(NixEval lowered/nixeval/SortOps.mlir SortOps)
-# The JSON byte emission: JsonOut::putInt and JsonOut::putString (lib/Eval/Formats.cpp's bodies are gone; the bridges
-# reserve room and adopt the drained bytes).  The digits and the escaping are trikeshed.fold / series / combineAll / drain.
+# A string's JSON escaping for a key written apart from its value: JsonOut::putString (lib/Eval/Formats.cpp: the bridge
+# reserves room and adopts the drained bytes): trikeshed.combineAll / slice / drain.
 mlnix_lower_trikeshed(NixEval lowered/nixeval/PrintOps.mlir PrintOps)
+# builtins.toJSON's writer (Formats.cpp's printValueAsJSON, whole): the walk of the value, a set's members in the byte order
+# of their names (trikeshed.sorted, taken once a layout and kept behind a trikeshed.anchor), the escapes and the digits, the
+# text filled a piece at a time into a lane (!trikeshed.lane: a MutableSeries) and drained once into room of its exact size.
+# The evaluator (forcing, contexts, the store, the errors' words) stays Formats.cpp's callbacks.
+mlnix_lower_trikeshed(NixEval lowered/nixeval/JsonWrite.mlir JsonWrite)
 # builtins.fromJSON's reader (include/Composite/Confix.h and Formats.cpp's reifyJSON are gone; parseJSON owns the
 # record's arrays and calls this entry, the arena and the error wording stay C++ callbacks).  The checked scan is the
 # confix dialect's confix.checked (its body a cf state machine, the open containers a stack in the record); the strings'
