@@ -282,6 +282,26 @@ endif()
 # bisected into it); registerValidPath's info file as one combine drained once.  runBuilder's placeholders are
 # StructuredAttrsOps' rewrite (nixstore_ts_rewrite, through rewritePlaceholders).
 mlnix_lower_trikeshed(NixStore lowered/nixstore/BuilderOps.mlir BuilderOps)
+# The store's build and add path (LocalStore.cpp's bodies are gone; what calls them names the entries and keeps the
+# error an entry returns with).  StoreWords.mlir: every message of the path as data, one combineAll over a message's
+# bytes drained once.  StoreWalks.mlir: the trees read and made through the C library (canonicalisePathMetaData,
+# copyRecursive, scanForReferences' walk, collectGarbage's roots): a path composed in place (one combine an entry), a
+# directory's names a fill read back in order.  What the C library does not give under one name and one layout
+# everywhere is the system's module (lstat's answer, errno, the times, waitpid's status, PATH_MAX), made for the machine:
+# an Intel Mac's calls end in $INODE64, and st_mode lies where the machine's Linux puts it.
+mlnix_lower_trikeshed(NixStore lowered/nixstore/StoreWords.mlir StoreWords)
+mlnix_lower_trikeshed(NixStore lowered/nixstore/StoreWalks.mlir StoreWalks)
+if(APPLE)
+  configure_file(${PROJECT_SOURCE_DIR}/lowered/nixstore/StoreBuildDarwin.mlir.in ${MLNIX_LOWERED_DIR}/StoreBuildOs.mlir @ONLY)
+else()
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+    set(NIXSB_ST_MODE 24)
+  else()
+    set(NIXSB_ST_MODE 16)
+  endif()
+  configure_file(${PROJECT_SOURCE_DIR}/lowered/nixstore/StoreBuildLinux.mlir.in ${MLNIX_LOWERED_DIR}/StoreBuildOs.mlir @ONLY)
+endif()
+mlnix_lower_interface(NixStore ${MLNIX_LOWERED_DIR}/StoreBuildOs.mlir StoreBuildOs)
 # Store.h's sorted rows (SortedSet, SortedMap<V>; the template keeps the storage, the append and the pop): the key's row
 # (the halving, trikeshed.compare unsigned on the keys) and the moves of an insert or an erase (a turn of rows [a, b): one
 # combine of two slices of the rows' bytes, drained through a room and back).  (allValidPaths' order is the index's.)

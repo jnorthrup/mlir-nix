@@ -1,0 +1,142 @@
+// The system's words for the store's build and add path (lowered/nixstore/StoreWords.mlir, StoreWalks.mlir and the
+// modules beside them), on Linux (glibc and musl alike): what the C library does not give under one name and one layout
+// everywhere.  Each word is held against the system's headers by a check kept outside this repository
+// (store-build-os.c).
+//   nixsb_os_lstat, nixsb_os_stat   what a path is (lstat) or leads to (stat): -1 when the call fails (errno says why),
+//                      else its kind (1 a regular file, 2 a directory, 3 a symbolic link, 4 anything else) in the bits
+//                      from 16 up and its permission bits (07777) below; its size in bytes goes to the word at `size`.
+//                      st_mode is where the machine's kernel puts it: byte 24 on x86_64, byte 16 on aarch64 and the
+//                      other asm-generic machines (lib/CMakeLists.txt puts the number in)
+//   nixsb_os_errno     errno, as the last call that failed left it
+//   nixsb_os_mtime1    a path's times set to 1 s after the epoch, the path itself when it is a link (lutimes)
+//   nixsb_os_devnull   /dev/null opened to read, kept across an exec (a builder's standard input)
+//   nixsb_os_wait      what waitpid said of a child: its exit code (0 to 255) when it exited; else 256 + the signal
+//                      (WTERMSIG), and 65536 more when a signal ended it (WIFSIGNALED)
+//   nixsb_os_pathmax   PATH_MAX: the bytes of a link's target that are read
+//   nixsb_os_grow, nixsb_os_free   the C library's realloc and free, under names the buffer lowering of a module (which
+//                      makes its own malloc and free) does not take
+module {
+  llvm.func @lstat(!llvm.ptr, !llvm.ptr) -> i32
+  llvm.func @stat(!llvm.ptr, !llvm.ptr) -> i32
+  llvm.func @__errno_location() -> !llvm.ptr
+  llvm.func @lutimes(!llvm.ptr, !llvm.ptr) -> i32
+  llvm.func @open(!llvm.ptr, i32, ...) -> i32
+  llvm.func @realloc(!llvm.ptr, i64) -> !llvm.ptr
+  llvm.func @free(!llvm.ptr)
+  llvm.mlir.global internal constant @nixsb_os_null("/dev/null\00") : !llvm.array<10 x i8>
+
+  llvm.func @nixsb_os_grow(%p: !llvm.ptr, %n: i64) -> !llvm.ptr {
+    %r = llvm.call @realloc(%p, %n) : (!llvm.ptr, i64) -> !llvm.ptr
+    llvm.return %r : !llvm.ptr
+  }
+  llvm.func @nixsb_os_free(%p: !llvm.ptr) {
+    llvm.call @free(%p) : (!llvm.ptr) -> ()
+    llvm.return
+  }
+
+  // struct stat is 144 bytes (x86_64) or 128: st_mode 32 bits (S_IFMT 0170000: S_IFREG 0100000, S_IFDIR 0040000,
+  // S_IFLNK 0120000), st_size a word at 48
+  llvm.func @nixsb_os_mode(%buf: !llvm.ptr, %rc: i32, %size: !llvm.ptr) -> i64 {
+    %cm = llvm.mlir.constant(@NIXSB_ST_MODE@ : i64) : i64
+    %c48 = llvm.mlir.constant(48 : i64) : i64
+    %c1 = llvm.mlir.constant(1 : i64) : i64
+    %c2 = llvm.mlir.constant(2 : i64) : i64
+    %c3 = llvm.mlir.constant(3 : i64) : i64
+    %c16 = llvm.mlir.constant(16 : i64) : i64
+    %m1 = llvm.mlir.constant(-1 : i64) : i64
+    %z32 = llvm.mlir.constant(0 : i32) : i32
+    %fmt = llvm.mlir.constant(61440 : i64) : i64
+    %reg = llvm.mlir.constant(32768 : i64) : i64
+    %dir = llvm.mlir.constant(16384 : i64) : i64
+    %lnk = llvm.mlir.constant(40960 : i64) : i64
+    %perm = llvm.mlir.constant(4095 : i64) : i64
+    %mp = llvm.getelementptr %buf[%cm] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+    %sp = llvm.getelementptr %buf[%c48] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+    %m32 = llvm.load %mp : !llvm.ptr -> i32
+    %sz = llvm.load %sp : !llvm.ptr -> i64
+    llvm.store %sz, %size : i64, !llvm.ptr
+    %mode = llvm.zext %m32 : i32 to i64
+    %f = llvm.and %mode, %fmt : i64
+    %isreg = llvm.icmp "eq" %f, %reg : i64
+    %isdir = llvm.icmp "eq" %f, %dir : i64
+    %islnk = llvm.icmp "eq" %f, %lnk : i64
+    %c4k = llvm.mlir.constant(4 : i64) : i64
+    %k0 = llvm.select %islnk, %c3, %c4k : i1, i64
+    %k1 = llvm.select %isdir, %c2, %k0 : i1, i64
+    %kind = llvm.select %isreg, %c1, %k1 : i1, i64
+    %ks = llvm.shl %kind, %c16 : i64
+    %p = llvm.and %mode, %perm : i64
+    %res = llvm.or %ks, %p : i64
+    %ok = llvm.icmp "eq" %rc, %z32 : i32
+    %r = llvm.select %ok, %res, %m1 : i1, i64
+    llvm.return %r : i64
+  }
+  llvm.func @nixsb_os_lstat(%path: !llvm.ptr, %size: !llvm.ptr) -> i64 {
+    %n = llvm.mlir.constant(32 : i64) : i64
+    %buf = llvm.alloca %n x i64 : (i64) -> !llvm.ptr
+    %rc = llvm.call @lstat(%path, %buf) : (!llvm.ptr, !llvm.ptr) -> i32
+    %r = llvm.call @nixsb_os_mode(%buf, %rc, %size) : (!llvm.ptr, i32, !llvm.ptr) -> i64
+    llvm.return %r : i64
+  }
+  llvm.func @nixsb_os_stat(%path: !llvm.ptr, %size: !llvm.ptr) -> i64 {
+    %n = llvm.mlir.constant(32 : i64) : i64
+    %buf = llvm.alloca %n x i64 : (i64) -> !llvm.ptr
+    %rc = llvm.call @stat(%path, %buf) : (!llvm.ptr, !llvm.ptr) -> i32
+    %r = llvm.call @nixsb_os_mode(%buf, %rc, %size) : (!llvm.ptr, i32, !llvm.ptr) -> i64
+    llvm.return %r : i64
+  }
+  llvm.func @nixsb_os_errno() -> i64 {
+    %p = llvm.call @__errno_location() : () -> !llvm.ptr
+    %e = llvm.load %p : !llvm.ptr -> i32
+    %r = llvm.sext %e : i32 to i64
+    llvm.return %r : i64
+  }
+  // two struct timeval, {1, 0} each: seconds a word, microseconds a word
+  llvm.func @nixsb_os_mtime1(%path: !llvm.ptr) -> i64 {
+    %n = llvm.mlir.constant(4 : i64) : i64
+    %c0 = llvm.mlir.constant(0 : i64) : i64
+    %c1 = llvm.mlir.constant(1 : i64) : i64
+    %c2 = llvm.mlir.constant(2 : i64) : i64
+    %c3 = llvm.mlir.constant(3 : i64) : i64
+    %t = llvm.alloca %n x i64 : (i64) -> !llvm.ptr
+    %t1 = llvm.getelementptr %t[%c1] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+    %t2 = llvm.getelementptr %t[%c2] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+    %t3 = llvm.getelementptr %t[%c3] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+    llvm.store %c1, %t : i64, !llvm.ptr
+    llvm.store %c0, %t1 : i64, !llvm.ptr
+    llvm.store %c1, %t2 : i64, !llvm.ptr
+    llvm.store %c0, %t3 : i64, !llvm.ptr
+    %rc = llvm.call @lutimes(%path, %t) : (!llvm.ptr, !llvm.ptr) -> i32
+    %r = llvm.sext %rc : i32 to i64
+    llvm.return %r : i64
+  }
+  llvm.func @nixsb_os_devnull() -> i32 {
+    %flags = llvm.mlir.constant(0 : i32) : i32
+    %name = llvm.mlir.addressof @nixsb_os_null : !llvm.ptr
+    %fd = llvm.call @open(%name, %flags) vararg(!llvm.func<i32 (ptr, i32, ...)>) : (!llvm.ptr, i32) -> i32
+    llvm.return %fd : i32
+  }
+  // WTERMSIG is the low 7 bits (0 exited, 0177 stopped, else the signal); the exit code is the next 8
+  llvm.func @nixsb_os_wait(%status: i64) -> i64 {
+    %c0 = llvm.mlir.constant(0 : i64) : i64
+    %c8 = llvm.mlir.constant(8 : i64) : i64
+    %c127 = llvm.mlir.constant(127 : i64) : i64
+    %c255 = llvm.mlir.constant(255 : i64) : i64
+    %c256 = llvm.mlir.constant(256 : i64) : i64
+    %c65536 = llvm.mlir.constant(65536 : i64) : i64
+    %low = llvm.and %status, %c127 : i64
+    %hi = llvm.lshr %status, %c8 : i64
+    %code = llvm.and %hi, %c255 : i64
+    %exited = llvm.icmp "eq" %low, %c0 : i64
+    %stopped = llvm.icmp "eq" %low, %c127 : i64
+    %sig = llvm.or %low, %c256 : i64
+    %sigd = llvm.or %sig, %c65536 : i64
+    %ended = llvm.select %stopped, %sig, %sigd : i1, i64
+    %r = llvm.select %exited, %code, %ended : i1, i64
+    llvm.return %r : i64
+  }
+  llvm.func @nixsb_os_pathmax() -> i64 {
+    %c = llvm.mlir.constant(4096 : i64) : i64
+    llvm.return %c : i64
+  }
+}

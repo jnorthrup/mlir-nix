@@ -146,61 +146,56 @@ SortedSet Store::queryReferrers(std::string_view path) {
   return res;
 }
 
-/// Make a freshly created store object read-only with mtime 1, as Nix does.
-static void canonicalisePathMetaData(const composite::Text &path) {
-  struct stat st;
-  if (lstat(path.c_str(), &st) != 0) throw Error(composite::cat("getting attributes of '", path, "'"));
-  if (S_ISDIR(st.st_mode)) {
-    DIR *d = opendir(path.c_str());
-    if (d) {
-      composite::MutableSeries<composite::Text> names;
-      while (auto *e = readdir(d)) {
-        std::string_view n = e->d_name;
-        if (n != "." && n != "..") names.append(composite::Text(n));
-      }
-      closedir(d);
-      for (auto &n : names) canonicalisePathMetaData(path + "/" + n);
-    }
-  }
-  if (!S_ISLNK(st.st_mode)) {
-    mode_t mode = (st.st_mode & S_IXUSR) || S_ISDIR(st.st_mode) ? 0555 : 0444;
-    chmod(path.c_str(), mode);
-  }
-  struct timeval times[2] = {{1, 0}, {1, 0}};
-  lutimes(path.c_str(), times);
+// The build and add path is lowered/nixstore/StoreWalks.mlir and the modules beside it (their messages StoreWords.mlir, the system's words
+// StoreBuildDarwin.mlir.in / StoreBuildLinux.mlir.in).  A lowered entry returns 1 with its error kept here, and what calls it throws it,
+// once: no exception crosses the entry's frames, which hold rooms of their own, so the store's callbacks keep what they catch too.
+namespace {
+struct Sb {
+  Store *st = nullptr;
+  const PathFilter *filter = nullptr;
+  std::exception_ptr err;
+  composite::Text file; // the file a walk read last
+  template <class F> int64_t guard(F f) { try { f(); return 0; } catch (...) { err = std::current_exception(); return 1; } }
+  void done(int64_t failed) { if (failed) std::rethrow_exception(err); }
+};
+} // namespace
+static_assert(offsetof(StoreSettings, realRoot) == 16 && offsetof(StoreSettings, stateDir) == 32, "the settings a lowered entry reads");
+extern "C" {
+int64_t nixsb_canon(Sb *c, const char *p, int64_t n);
+int64_t nixsb_copy(Sb *c, const char *from, int64_t fn, const char *to, int64_t tn, int64_t filtered);
+int64_t nixsb_refs(Sb *c, const char *p, int64_t n, const composite::Text *candidates, int64_t nc, SortedSet *refs);
+void nixsb_roots(const StoreSettings *s, SortedSet *roots);
+void nixsb_fail(Sb *c, int64_t kind, const char *m, int64_t n) { // kind 1: SortedMap::at's
+  composite::Text t(m, size_t(n));
+  c->err = kind ? std::make_exception_ptr(std::out_of_range(t.c_str())) : std::make_exception_ptr(Error(t));
+}
+void nixsb_log(Sb *c, const char *m, int64_t n) { c->st->log(std::string_view(m, size_t(n))); }
+int64_t nixsb_copyfile(Sb *c, const char *f, int64_t fn, const char *t, int64_t tn, int64_t mode) {
+  return c->guard([&] { writeFile(std::string_view(t, size_t(tn)), readFile(std::string_view(f, size_t(fn))), mode_t(mode)); });
+}
+int64_t nixsb_keep(Sb *c, const char *p, int64_t n) { // 1 kept, 0 not, -1 the filter threw
+  int64_t k = -1;
+  c->guard([&] { k = (*c->filter)(std::string_view(p, size_t(n)), {}); });
+  return k;
+}
+const char *nixsb_read(Sb *c, const char *p, int64_t n, int64_t *len) {
+  *len = c->guard([&] { c->file = readFile(std::string_view(p, size_t(n))); }) ? -1 : int64_t(c->file.size());
+  return c->file.data();
+}
+void nixsb_ref(SortedSet *s, const char *p, int64_t n) { s->insert(std::string_view(p, size_t(n))); }
+int64_t nixsb_exists(const char *p, int64_t n) { return pathExists(std::string_view(p, size_t(n))); }
 }
 
-static void copyRecursive(const composite::Text &from, const composite::Text &to, const PathFilter &filter,
-                          bool top = true) {
-  struct stat st;
-  if (lstat(from.c_str(), &st) != 0) throw Error(composite::cat("getting status of '", from, "': ", strerror(errno)));
-  if (S_ISREG(st.st_mode)) {
-    writeFile(to, readFile(from), (st.st_mode & S_IXUSR) ? 0755 : 0644);
-  } else if (S_ISDIR(st.st_mode)) {
-    if (mkdir(to.c_str(), 0755) != 0) throw Error(composite::cat("creating directory '", to, "': ", strerror(errno)));
-    DIR *d = opendir(from.c_str());
-    if (!d) throw Error(composite::cat("opening directory '", from, "'"));
-    composite::MutableSeries<composite::Text> names;
-    while (auto *e = readdir(d)) {
-      std::string_view n = e->d_name;
-      if (n != "." && n != "..") names.append(composite::Text(n));
-    }
-    closedir(d);
-    for (auto &n : names) {
-      composite::Text c = from + "/" + n;
-      if (filter && !filter(c, {})) continue;
-      copyRecursive(c, to + "/" + n, filter, false);
-    }
-  } else if (S_ISLNK(st.st_mode)) {
-    char buf[PATH_MAX + 1];
-    ssize_t n = readlink(from.c_str(), buf, PATH_MAX);
-    if (n < 0) throw Error(composite::cat("reading symlink '", from, "'"));
-    if (symlink(composite::Text(buf, size_t(n)).c_str(), to.c_str()) != 0)
-      throw Error(composite::cat("creating symlink '", to, "': ", strerror(errno)));
-  } else {
-    throw Error(composite::cat("file '", from, "' has an unsupported type"));
-  }
-  (void)top;
+/// Make a freshly created store object read-only with mtime 1, as Nix does.
+static void canonicalisePathMetaData(const composite::Text &path) {
+  Sb c;
+  c.done(nixsb_canon(&c, path.data(), path.size()));
+}
+
+static void copyRecursive(const composite::Text &from, const composite::Text &to, const PathFilter &filter) {
+  Sb c;
+  c.filter = &filter;
+  c.done(nixsb_copy(&c, from.data(), from.size(), to.data(), to.size(), bool(filter)));
 }
 
 
@@ -540,44 +535,12 @@ SortedSet Store::computeFSClosure(const SortedSet &paths, bool includeOutputs) {
 // Building
 //===----------------------------------------------------------------------===//
 
-// The scan of an output's bytes for its references is BuilderOps.mlir's: the candidates' hash parts sorted once (refindex),
-// then each file's 32-digit nix32 windows bisected into them (refscan).  The walk and the reads stay here.
-extern "C" int64_t nixstore_ts_refindex(const GWin *w, int64_t n, int64_t *order);
-extern "C" int64_t nixstore_ts_refscan(const char *p, int64_t n, const GWin *w, const int64_t *order, int64_t nu, uint8_t *found);
+// The scan of an output's bytes for its references is StoreWalks.mlir's nixsb_refs: the candidates' hash parts sorted once (BuilderOps.mlir's
+// refindex), the tree walked, each file's 32-digit nix32 windows bisected into them (refscan), the candidates found put in their order.
 static SortedSet scanForReferences(const composite::Text &path, const SortedSet &candidates) {
-  composite::MutableSeries<composite::Text> hashes; // each candidate's hash part, in the candidates' order
-  for (auto &c : candidates) hashes.append(storePathHashPart(c));
-  composite::MutableSeries<GWin> w = wins(hashes);
-  composite::MutableSeries<int64_t> order(w.size());
-  composite::MutableSeries<uint8_t> found(w.size(), 0);
-  int64_t nu = nixstore_ts_refindex(w.data(), w.size(), order.data());
-  auto scan = [&](auto &self, const composite::Text &p) -> void { // a walk that calls itself: no std::function to hold it
-    struct stat st;
-    if (lstat(p.c_str(), &st) != 0) return;
-    composite::Text data;
-    if (S_ISREG(st.st_mode)) data = readFile(p);
-    else if (S_ISLNK(st.st_mode)) {
-      char buf[PATH_MAX + 1];
-      ssize_t n = readlink(p.c_str(), buf, PATH_MAX);
-      if (n > 0) data.assign(buf, n);
-    } else if (S_ISDIR(st.st_mode)) {
-      DIR *d = opendir(p.c_str());
-      if (!d) return;
-      composite::MutableSeries<composite::Text> names;
-      while (auto *e = readdir(d)) {
-        std::string_view n = e->d_name;
-        if (n != "." && n != "..") names.append(composite::Text(n));
-      }
-      closedir(d);
-      for (auto &n : names) self(self, p + "/" + n);
-      return;
-    }
-    nixstore_ts_refscan(data.data(), data.size(), w.data(), order.data(), nu, found.data());
-  };
-  scan(scan, path);
-  SortedSet refs; // the candidates are sorted, so the found ones are appended in order
-  for (uint32_t i = 0; i < found.size(); i++)
-    if (found[i]) refs.rows.append(candidates.rows[i].clone());
+  Sb c;
+  SortedSet refs;
+  c.done(nixsb_refs(&c, path.data(), path.size(), candidates.rows.data(), candidates.size(), &refs));
   return refs;
 }
 
@@ -819,37 +782,8 @@ bool Store::deletePath(std::string_view path) {
 }
 
 bool Store::collectGarbage(bool dryRun, composite::MutableSeries<composite::Text> &deleted) {
-  SortedSet roots;
-  auto scanRoots = [&](auto &self, const composite::Text &dir) -> void {
-    DIR *d = opendir(dir.c_str());
-    if (!d) return;
-    composite::MutableSeries<composite::Text> names;
-    while (auto *e = readdir(d)) {
-      std::string_view n = e->d_name;
-      if (n != "." && n != "..") names.append(composite::Text(n));
-    }
-    closedir(d);
-    for (auto &n : names) {
-      composite::Text p = dir + "/" + n;
-      struct stat st;
-      if (lstat(p.c_str(), &st) != 0) continue;
-      if (S_ISDIR(st.st_mode)) { self(self, p); continue; }
-      if (!S_ISLNK(st.st_mode)) continue;
-      char buf[PATH_MAX + 1];
-      ssize_t len = readlink(p.c_str(), buf, PATH_MAX);
-      if (len <= 0) continue;
-      composite::Text target(buf, size_t(len));
-      // Indirect root: a symlink to a symlink into the store.
-      char buf2[PATH_MAX + 1];
-      ssize_t len2 = readlink(target.c_str(), buf2, PATH_MAX);
-      if (len2 > 0) target.assign(buf2, len2);
-      const composite::Text &real = settings.realRoot;
-      if (!real.empty() && target.rfind(real, 0) == 0) target = composite::Text(target.substr(real.size()));
-      if (isInStore(settings.storeDir, target)) roots.insert(toStorePath(settings.storeDir, target));
-      else if (len2 <= 0 && !pathExists(target)) unlink(p.c_str());
-    }
-  };
-  scanRoots(scanRoots, settings.stateDir + "/gcroots");
+  SortedSet roots; // the store paths the links under <stateDir>/gcroots lead to (StoreWalks.mlir)
+  nixsb_roots(&settings, &roots);
   composite::MutableSeries<composite::Text> valid = allValidPaths(); // before the closure: the list makes the index hold the directory, and the closure's infos are read from it
   SortedSet live = computeFSClosure(roots, true);
   Walk g{this, {}, {}, {}, dryRun, &deleted};
