@@ -295,6 +295,10 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/StoreWalks.mlir StoreWalks)
 # name order with the last of equal names kept: sorted, where, one combineAll; builtin:fetchurl), through the C library's
 # pipe, fork, execve and waitpid.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/StoreRun.mlir StoreRun)
+# StoreAdd.mlir: what the store gains: addToStore and addTextToStore (a hash, the path it names, the object written,
+# made canonical and registered), addPermRoot's links, and realise (a chain of steps, the walks over a derivation's
+# outputs, inputs and sources folds with the status carried).
+mlnix_lower_trikeshed(NixStore lowered/nixstore/StoreAdd.mlir StoreAdd)
 if(APPLE)
   configure_file(${PROJECT_SOURCE_DIR}/lowered/nixstore/StoreBuildDarwin.mlir.in ${MLNIX_LOWERED_DIR}/StoreBuildOs.mlir @ONLY)
 else()

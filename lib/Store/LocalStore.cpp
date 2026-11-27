@@ -142,37 +142,47 @@ SortedSet Store::queryReferrers(std::string_view path) {
   return res;
 }
 
-// The build and add path is lowered/nixstore/StoreWalks.mlir and the modules beside it (their messages StoreWords.mlir, the system's words
-// StoreBuildDarwin.mlir.in / StoreBuildLinux.mlir.in).  A lowered entry returns 1 with its error kept here, and what calls it throws it,
-// once: no exception crosses the entry's frames, which hold rooms of their own, so the store's callbacks keep what they catch too.
+// The build and add path is lowered/nixstore (StoreAdd.mlir: the paths added and the derivations realised; StoreRun.mlir: the builders;
+// StoreWalks.mlir: the trees; their messages StoreWords.mlir, the system's words StoreBuildDarwin.mlir.in / StoreBuildLinux.mlir.in).  A
+// lowered entry returns 1 with its error kept here, and what calls it throws it, once: no exception crosses the entry's frames, which hold
+// rooms of their own, so the store's callbacks keep what they catch too.
 namespace {
 struct Sb {
   Store *st = nullptr;
   const PathFilter *filter = nullptr;
   composite::Text block[2];            // the rooms of a builder's environment and arguments (BuilderOps.mlir's cstrs)
+  SortedSet set[3];                    // realise's inputs, their closure with the outputs, an output's references
   SortedMap<composite::Text> rewrites; // the outputs' placeholders and the paths they stand for
   composite::MutableSeries<composite::Text> texts; // what a callback made and the entry still reads
+  composite::MutableSeries<SortedMap<composite::Text>> maps; // the outputs of the input derivations realised
   composite::Text file;                // the file read last
   std::exception_ptr err;
-  explicit Sb(Store *s = nullptr) : st(s) {}
+  explicit Sb(Store *s = nullptr, const PathFilter *f = nullptr) : st(s), filter(f) {}
   template <class F> int64_t guard(F f) { try { f(); return 0; } catch (...) { err = std::current_exception(); return 1; } }
   void done(int64_t failed) { if (failed) std::rethrow_exception(err); }
+  const char *keep(composite::Text t, int64_t *len) { // kept as long as the call
+    composite::Text &k = texts[texts.append(composite::mv(t))];
+    *len = k.size();
+    return k.data();
+  }
 };
 } // namespace
-static_assert(offsetof(Sb, block) == 16 && offsetof(Store, settings) == 16 && offsetof(StoreSettings, realRoot) == 16 && offsetof(StoreSettings, stateDir) == 32 &&
-                  offsetof(StoreSettings, cores) == 52 && offsetof(StoreSettings, keepFailed) == 56 && sizeof(composite::MutableSeries<composite::Text>) == 16 &&
-                  sizeof(SortedMap<composite::Text>::Row) == 32 && offsetof(Derivation, outputs) == 16 && sizeof(SortedMap<DerivationOutput>::Row) == 120 &&
-                  offsetof(DerivationOutput, kind) == 0 && offsetof(Derivation, builder) == 80 && offsetof(Derivation, args) == 96 && offsetof(Derivation, env) == 112 &&
-                  offsetof(Derivation, structuredAttrs) == 128 && offsetof(composite::Maybe<composite::Text>, v) == 8,
+static_assert(offsetof(Sb, block) == 16 && offsetof(Sb, set) == 48 && sizeof(SortedSet) == 16 && offsetof(Store, settings) == 16 && offsetof(StoreSettings, realRoot) == 16 &&
+                  offsetof(StoreSettings, stateDir) == 32 && offsetof(StoreSettings, readOnly) == 48 && offsetof(StoreSettings, cores) == 52 &&
+                  offsetof(StoreSettings, keepFailed) == 56 && sizeof(composite::MutableSeries<composite::Text>) == 16 && sizeof(SortedMap<composite::Text>::Row) == 32 &&
+                  offsetof(Derivation, outputs) == 16 && offsetof(Derivation, inputDrvs) == 32 && offsetof(Derivation, inputSrcs) == 48 && sizeof(DrvInputs::Row) == 32 &&
+                  sizeof(SortedMap<DerivationOutput>::Row) == 120 && offsetof(DerivationOutput, kind) == 0 && offsetof(DerivationOutput, path) == 8 &&
+                  offsetof(DerivationOutput, method) == 24 && offsetof(DerivationOutput, hash) == 32 && sizeof(Hash) <= 72 && offsetof(Derivation, builder) == 80 &&
+                  offsetof(Derivation, args) == 96 && offsetof(Derivation, env) == 112 && offsetof(Derivation, structuredAttrs) == 128 &&
+                  offsetof(composite::Maybe<composite::Text>, v) == 8,
               "the places a lowered entry reads");
 extern "C" {
-int64_t nixsb_canon(Sb *c, const char *p, int64_t n);
-int64_t nixsb_copy(Sb *c, const char *from, int64_t fn, const char *to, int64_t tn, int64_t filtered);
-int64_t nixsb_refs(Sb *c, const char *p, int64_t n, const composite::Text *candidates, int64_t nc, SortedSet *refs);
+int64_t nixsb_add(Sb *c, const char *name, int64_t nn, const char *src, int64_t sn, int64_t method, int64_t algo, int64_t filtered, const SortedSet *refs, const Hash *expected,
+                  composite::Text *dst);
+int64_t nixsb_root(Sb *c, const char *storePath, int64_t sn, const char *link, int64_t ln);
+int64_t nixsb_realise(Sb *c, const char *drvPath, int64_t dn, SortedSet *visiting, SortedMap<composite::Text> *outputs);
 void nixsb_roots(const StoreSettings *s, SortedSet *roots);
 int64_t nixsb_run(Sb *c, const char *prog, int64_t pn, const composite::Text *args, int64_t na, composite::Text *out, const composite::Text *input, const char *cwd, int64_t cn);
-int64_t nixsb_build(Sb *c, const char *drvPath, int64_t dn, const Derivation *drv, const SortedMap<composite::Text> *outputs);
-int64_t nixsb_fetch(Sb *c, const Derivation *drv, const SortedMap<composite::Text> *outputs);
 void nixsb_fail(Sb *c, int64_t kind, const char *m, int64_t n) { // kind 1: SortedMap::at's
   composite::Text t(m, size_t(n));
   c->err = kind ? std::make_exception_ptr(std::out_of_range(t.c_str())) : std::make_exception_ptr(Error(t));
@@ -190,24 +200,22 @@ const char *nixsb_read(Sb *c, const char *p, int64_t n, int64_t *len) {
   *len = c->guard([&] { c->file = readFile(std::string_view(p, size_t(n))); }) ? -1 : int64_t(c->file.size());
   return c->file.data();
 }
-void nixsb_ref(SortedSet *s, const char *p, int64_t n) { s->insert(std::string_view(p, size_t(n))); }
+int64_t nixsb_set(SortedSet *s, int64_t op, const char *p, int64_t n) { // 0 put in: whether it was new; 3 put in; 1 taken out; 2 emptied
+  std::string_view k(p, size_t(n));
+  if (op == 2) return s->rows.clear(), 0;
+  if (op == 1) return s->erase(k);
+  return s->insert(k) && op == 0;
+}
 int64_t nixsb_exists(const char *p, int64_t n) { return pathExists(std::string_view(p, size_t(n))); }
 void nixsb_put(composite::Text *t, const char *p, int64_t n) { t->put(p, size_t(n)); }
 void nixsb_placeholder(Sb *c, const char *o, int64_t on, const char *p, int64_t pn) {
   c->rewrites[hashPlaceholder(std::string_view(o, size_t(on)))] = composite::Text(p, size_t(pn));
 }
-const char *nixsb_rewrite(Sb *c, const char *p, int64_t n, int64_t *len) { // kept as long as the call
-  composite::Text &t = c->texts[c->texts.append(rewritePlaceholders(std::string_view(p, size_t(n)), c->rewrites))];
-  *len = t.size();
-  return t.data();
-}
+const char *nixsb_rewrite(Sb *c, const char *p, int64_t n, int64_t *len) { return c->keep(rewritePlaceholders(std::string_view(p, size_t(n)), c->rewrites), len); }
 int64_t nixsb_sattrs(Sb *c, const char *j, int64_t jn, const SortedMap<composite::Text> *outputs, int64_t *w) { // .attrs.json, .attrs.sh: bytes and count each
   return c->guard([&] {
     auto [json, sh] = structuredAttrsFiles(std::string_view(j, size_t(jn)), *outputs, c->rewrites);
-    for (composite::Text *t : {&json, &sh}) {
-      composite::Text &k = c->texts[c->texts.append(composite::mv(*t))];
-      *w++ = int64_t(intptr_t(k.data())), *w++ = k.size();
-    }
+    w[0] = int64_t(intptr_t(c->keep(composite::mv(json), w + 1))), w[2] = int64_t(intptr_t(c->keep(composite::mv(sh), w + 3)));
   });
 }
 int64_t nixsb_write(Sb *c, const char *p, int64_t n, const char *d, int64_t dn, int64_t mode) {
@@ -218,6 +226,51 @@ int64_t nixsb_mkdirs(Sb *c, const char *p, int64_t n) { return c->guard([&] { cr
 int64_t nixsb_restore(Sb *c, const char *p, int64_t n, const char *nar, int64_t nn) {
   return c->guard([&] { restorePath(std::string_view(p, size_t(n)), std::string_view(nar, size_t(nn))); });
 }
+/// how 0: a file's hash; 1: a tree's NAR's, under the call's filter; 2: a file's bytes', as text (SHA-256); 3: these bytes'; 4: a tree's NAR's.
+int64_t nixsb_hash(Sb *c, int64_t how, int64_t algo, const char *p, int64_t n, Hash *h, uint64_t *size) {
+  return c->guard([&] {
+    std::string_view v(p, size_t(n));
+    if (how == 0) *h = hashFile(HashAlgo(algo), v);
+    else if (how == 2) *h = hashString(HashAlgo::SHA256, readFile(v));
+    else if (how == 3) *h = hashString(HashAlgo(algo), v);
+    else {
+      auto r = how == 1 ? hashPath(v, *c->filter, HashAlgo(algo)) : hashPath(v, nullptr, HashAlgo(algo));
+      *h = r.a, *size = r.b;
+    }
+  });
+}
+const char *nixsb_hashtext(Sb *c, const Hash *h, int64_t format, int64_t withAlgo, int64_t *len) { return c->keep(h->to_string(HashFormat(format), withAlgo), len); }
+const char *nixsb_fixedpath(Sb *c, const char *name, int64_t nn, int64_t method, const Hash *h, const SortedSet *refs, int64_t *len) { // no bytes and -1: the error is kept
+  const char *p = nullptr;
+  *len = -1;
+  c->guard([&] {
+    p = c->keep(makeFixedOutputPath(c->st->settings.storeDir, std::string_view(name, size_t(nn)), FileIngestionMethod(method), *h, refs ? *refs : SortedSet()), len);
+  });
+  return p;
+}
+int64_t nixsb_valid(Sb *c, const char *p, int64_t n) { return c->st->isValidPath(std::string_view(p, size_t(n))); }
+int64_t nixsb_register(Sb *c, const char *p, int64_t pn, const Hash *narHash, uint64_t narSize, const SortedSet *refs, const char *d, int64_t dn, const char *ca, int64_t cn) {
+  return c->guard([&] {
+    PathInfo info;
+    info.path = composite::Text(p, size_t(pn)), info.narHash = *narHash, info.narSize = narSize;
+    if (refs) info.references = *refs;
+    info.deriver = composite::Text(d, size_t(dn)), info.ca = composite::Text(ca, size_t(cn));
+    c->st->registerValidPath(info);
+  });
+}
+const Derivation *nixsb_drv(Sb *c, const char *p, int64_t n) { // null: the error is kept
+  const Derivation *d = nullptr;
+  c->guard([&] { d = &c->st->readDerivation(std::string_view(p, size_t(n))); });
+  return d;
+}
+void nixsb_setout(SortedMap<composite::Text> *m, const char *k, int64_t kn, const char *v, int64_t vn) { (*m)[std::string_view(k, size_t(kn))] = composite::Text(v, size_t(vn)); }
+const SortedMap<composite::Text> *nixsb_input(Sb *c, const char *p, int64_t n, SortedSet *visiting) { // an input's outputs, read before the next is realised
+  const SortedMap<composite::Text> *r = nullptr;
+  c->guard([&] { r = &c->maps[c->maps.append(c->st->realise(std::string_view(p, size_t(n)), *visiting))]; });
+  return r;
+}
+int64_t nixsb_ensure(Sb *c, const char *p, int64_t n) { return c->guard([&] { c->st->ensurePath(std::string_view(p, size_t(n))); }); }
+int64_t nixsb_closure(Sb *c, const SortedSet *in, SortedSet *out) { return c->guard([&] { *out = c->st->computeFSClosure(*in); }); }
 }
 
 int runProgram(std::string_view prog, const composite::MutableSeries<composite::Text> &args, composite::Text *out, const composite::Text *input,
@@ -228,75 +281,20 @@ int runProgram(std::string_view prog, const composite::MutableSeries<composite::
   return int(rc);
 }
 
-/// Make a freshly created store object read-only with mtime 1, as Nix does.
-static void canonicalisePathMetaData(const composite::Text &path) {
-  Sb c;
-  c.done(nixsb_canon(&c, path.data(), path.size()));
-}
-
-static void copyRecursive(const composite::Text &from, const composite::Text &to, const PathFilter &filter) {
-  Sb c;
-  c.filter = &filter;
-  c.done(nixsb_copy(&c, from.data(), from.size(), to.data(), to.size(), bool(filter)));
-}
-
-
-composite::Text Store::addToStore(std::string_view name, std::string_view srcPath, FileIngestionMethod method,
-                                 HashAlgo algo, const PathFilter &filter,
-                                 const SortedSet &refs, composite::Maybe<Hash> expected) {
-  Hash h;
-  if (method == FileIngestionMethod::NixArchive) h = hashPath(srcPath, filter, algo).a;
-  else if (method == FileIngestionMethod::Text) h = hashString(HashAlgo::SHA256, readFile(srcPath));
-  else h = hashFile(algo, srcPath);
-  if (expected && !(*expected == h))
-    throw Error(composite::cat("hash mismatch importing path '", srcPath, "';\n  specified: ",
-                               expected->to_string(HashFormat::SRI, true), "\n  got:       ",
-                               h.to_string(HashFormat::SRI, true)));
-  composite::Text dst = makeFixedOutputPath(settings.storeDir, name, method, h, refs);
-  if (settings.readOnly || isValidPath(dst)) return dst;
-  composite::Text real = toReal(dst);
-  createDirs(toReal(settings.storeDir));
-  if (pathExists(real)) deletePathRecursive(real);
-  if (method == FileIngestionMethod::NixArchive) copyRecursive(composite::Text(srcPath), real, filter);
-  else {
-    struct stat st;
-    stat(nixsys::CStr(srcPath), &st);
-    writeFile(real, readFile(srcPath), (st.st_mode & S_IXUSR) ? 0755 : 0644);
-  }
-  canonicalisePathMetaData(real);
-  PathInfo info;
-  info.path = dst.clone();
-  auto [nh, ns] = hashPath(real);
-  info.narHash = nh;
-  info.narSize = ns;
-  info.references = refs;
-  info.ca = composite::cat(method == FileIngestionMethod::NixArchive ? "fixed:r:" : method == FileIngestionMethod::Text ? "text:" : "fixed:",
-                           h.to_string(HashFormat::Nix32, true));
-  registerValidPath(info);
+composite::Text Store::addToStore(std::string_view name, std::string_view srcPath, FileIngestionMethod method, HashAlgo algo, const PathFilter &filter,
+                                  const SortedSet &refs, composite::Maybe<Hash> expected) {
+  Sb c(this, &filter);
+  composite::Text dst;
+  c.done(nixsb_add(&c, name.data(), name.size(), srcPath.data(), srcPath.size(), int64_t(method), int64_t(algo), bool(filter), &refs, expected ? &*expected : nullptr, &dst));
   return dst;
 }
 
-composite::Text Store::addTextToStore(std::string_view name, std::string_view text,
-                                      const SortedSet &refs) {
-  Hash h = hashString(HashAlgo::SHA256, text);
-  composite::Text dst = makeTextPath(settings.storeDir, name, h, refs);
-  if (settings.readOnly || isValidPath(dst)) return dst;
-  createDirs(toReal(settings.storeDir));
-  composite::Text real = toReal(dst);
-  if (pathExists(real)) deletePathRecursive(real);
-  writeFile(real, text, 0644);
-  canonicalisePathMetaData(real);
-  PathInfo info;
-  info.path = dst.clone();
-  auto [nh, ns] = hashPath(real);
-  info.narHash = nh;
-  info.narSize = ns;
-  info.references = refs;
-  info.ca = composite::cat("text:", h.to_string(HashFormat::Nix32, true));
-  registerValidPath(info);
+composite::Text Store::addTextToStore(std::string_view name, std::string_view text, const SortedSet &refs) {
+  Sb c(this);
+  composite::Text dst;
+  c.done(nixsb_add(&c, name.data(), name.size(), text.data(), text.size(), 3, 0, 0, &refs, nullptr, &dst)); // 3: the text itself
   return dst;
 }
-
 //===----------------------------------------------------------------------===//
 // Derivations in the store
 //===----------------------------------------------------------------------===//
@@ -577,14 +575,6 @@ SortedSet Store::computeFSClosure(const SortedSet &paths, bool includeOutputs) {
 // Building
 //===----------------------------------------------------------------------===//
 
-// The scan of an output's bytes for its references is StoreWalks.mlir's nixsb_refs: the candidates' hash parts sorted once (BuilderOps.mlir's
-// refindex), the tree walked, each file's 32-digit nix32 windows bisected into them (refscan), the candidates found put in their order.
-static SortedSet scanForReferences(const composite::Text &path, const SortedSet &candidates) {
-  Sb c;
-  SortedSet refs;
-  c.done(nixsb_refs(&c, path.data(), path.size(), candidates.rows.data(), candidates.size(), &refs));
-  return refs;
-}
 
 void Store::ensurePath(std::string_view path) {
   if (isValidPath(path)) return;
@@ -596,116 +586,18 @@ SortedMap<composite::Text> Store::buildDerivation(std::string_view drvPath) {
   return realise(drvPath, visiting);
 }
 
-SortedMap<composite::Text> Store::realise(std::string_view drvPath,
-                                          SortedSet &visiting) {
-  if (!visiting.insert(drvPath)) throw Error(composite::cat("cycle in derivation graph at '", drvPath, "'"));
-  Derivation drv = readDerivation(drvPath);
+// realise is lowered/nixstore/StoreAdd.mlir's nixsb_realise; an input derivation is realised through this name (nixsb_input).
+SortedMap<composite::Text> Store::realise(std::string_view drvPath, SortedSet &visiting) {
+  Sb c(this);
   SortedMap<composite::Text> outputs;
-  for (auto &[name, o] : drv.outputs) {
-    if (o.kind == DerivationOutput::InputAddressed || o.kind == DerivationOutput::CAFixed)
-      outputs[name] = o.kind == DerivationOutput::CAFixed && o.path.empty()
-                          ? o.fixedPath(settings.storeDir, drv.name, name) : o.path.clone();
-    else
-      throw Error(composite::cat("cannot build derivation '", drvPath, "': content-addressed/impure outputs are not supported"));
-  }
-  bool allValid = true;
-  for (auto &[n, p] : outputs) allValid &= isValidPath(p);
-  if (allValid) {
-    visiting.erase(drvPath);
-    return outputs;
-  }
-  if (settings.readOnly) throw Error(composite::cat("cannot build '", drvPath, "' in read-only mode"));
-  if (!settings.realRoot.empty())
-    throw Error(composite::cat("cannot build '", drvPath, "': the store directory '", settings.storeDir,
-                               "' is not physically accessible (chroot store at '", settings.realRoot,
-                               "'); use --store-dir with a writable directory to build"));
-  for (auto &[inDrv, outs] : drv.inputDrvs) {
-    auto res = realise(inDrv, visiting);
-    for (auto &o : outs)
-      if (!res.count(o)) throw Error(composite::cat("derivation '", inDrv, "' does not have output '", o, "'"));
-  }
-  for (auto &src : drv.inputSrcs) ensurePath(src);
-
-  log(composite::cat("building '", drvPath, "'..."));
-  if (drv.builder == "builtin:fetchurl") builtinFetchurl(drv, outputs);
-  else runBuilder(drvPath, drv, outputs);
-
-  // Post-process outputs.
-  SortedSet candidates;
-  {
-    SortedSet inputs(drv.inputSrcs.begin(), drv.inputSrcs.end());
-    for (auto &[inDrv, outs] : drv.inputDrvs) {
-      Derivation d = readDerivation(inDrv);
-      for (auto &o : outs) {
-        auto &out = d.outputs.at(o);
-        inputs.insert(out.kind == DerivationOutput::CAFixed && out.path.empty()
-                          ? out.fixedPath(settings.storeDir, d.name, o) : out.path.clone());
-      }
-    }
-    candidates = computeFSClosure(inputs);
-    for (auto &[n, p] : outputs) candidates.insert(p);
-  }
-  for (auto &[name, path] : outputs) {
-    composite::Text real = toReal(path);
-    if (!pathExists(real))
-      throw Error(composite::cat("builder for '", drvPath, "' failed to produce output path for output '", name,
-                                 "' at '", path, "'"));
-    canonicalisePathMetaData(real);
-    auto &o = drv.outputs.at(name);
-    if (o.kind == DerivationOutput::CAFixed) {
-      Hash got = o.method == FileIngestionMethod::NixArchive ? hashPath(real, nullptr, o.hash.algo).a
-                                                             : hashFile(o.hash.algo, real);
-      if (!(got == o.hash)) {
-        deletePathRecursive(real);
-        throw Error(composite::cat("hash mismatch in fixed-output derivation '", drvPath, "':\n         specified: ",
-                                   o.hash.to_string(HashFormat::SRI, true), "\n            got:    ",
-                                   got.to_string(HashFormat::SRI, true)));
-      }
-    }
-    PathInfo info;
-    info.path = path.clone();
-    auto [nh, ns] = hashPath(real);
-    info.narHash = nh;
-    info.narSize = ns;
-    info.references = o.kind == DerivationOutput::CAFixed ? SortedSet{}
-                                                         : scanForReferences(real, candidates);
-    info.deriver = composite::Text(drvPath);
-    if (o.kind == DerivationOutput::CAFixed)
-      info.ca = composite::cat(o.method == FileIngestionMethod::NixArchive ? "fixed:r:" : "fixed:",
-                               o.hash.to_string(HashFormat::Nix32, true));
-    registerValidPath(info);
-  }
-  visiting.erase(drvPath);
+  c.done(nixsb_realise(&c, drvPath.data(), drvPath.size(), &visiting, &outputs));
   return outputs;
 }
 
-
-// runBuilder and builtin:fetchurl are lowered/nixstore/StoreRun.mlir's nixsb_build and nixsb_fetch: the builder's environment a fill of
-// (name, value) rows drained once in name order, its process the C library's fork, execve and waitpid.
-void Store::runBuilder(std::string_view drvPath, const Derivation &drv, const SortedMap<composite::Text> &outputs) {
-  Sb c(this);
-  c.done(nixsb_build(&c, drvPath.data(), drvPath.size(), &drv, &outputs));
-}
-
-void Store::builtinFetchurl(const Derivation &drv, const SortedMap<composite::Text> &outputs) {
-  Sb c(this);
-  c.done(nixsb_fetch(&c, &drv, &outputs));
-}
 void Store::addPermRoot(std::string_view storePath, std::string_view link) {
-  nixsys::CStr linkC(link);
-  unlink(linkC);
-  if (symlink(toReal(storePath).c_str(), linkC) != 0)
-    throw Error(composite::cat("creating symlink '", link, "': ", strerror(errno)));
-  composite::Text rootDir = settings.stateDir + "/gcroots/auto";
-  createDirs(rootDir);
-  char absBuf[PATH_MAX];
-  composite::Text abs(link);
-  if (!link.starts_with('/') && getcwd(absBuf, sizeof absBuf)) abs = composite::cat(absBuf, "/", link);
-  composite::Text rootLink = rootDir + "/" + hashString(HashAlgo::SHA256, abs).to_string(HashFormat::Nix32, false).substr(0, 32);
-  unlink(rootLink.c_str());
-  symlink(abs.c_str(), rootLink.c_str());
+  Sb c(this);
+  c.done(nixsb_root(&c, storePath.data(), storePath.size(), link.data(), link.size()));
 }
-
 bool Store::deletePath(std::string_view path) {
   if (!queryReferrers(path).empty()) return false;
   deletePathRecursive(toReal(path));

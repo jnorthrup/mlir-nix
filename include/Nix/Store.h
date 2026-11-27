@@ -454,9 +454,6 @@ struct Store {
   composite::Text infoFile(std::string_view path) const;
   SortedMap<composite::Text> realise(std::string_view drvPath,
                                              SortedSet &visiting);
-  void runBuilder(std::string_view drvPath, const Derivation &drv,
-                  const SortedMap<composite::Text> &outputs);
-  void builtinFetchurl(const Derivation &drv, const SortedMap<composite::Text> &outputs);
 };
 
 /// confix.checked's record (Confix.td): src, n, rows, rowCap, span, tag, kids, kid, nkid, stack, sp, stackCap, pend, npend, at, end; its

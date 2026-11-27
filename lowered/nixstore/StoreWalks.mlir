@@ -61,11 +61,11 @@ func.func private @nixsb_os_free(!llvm.ptr)
 func.func private @nixsb_say(!llvm.ptr, i64, i64, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64) -> i64
 // the store's (lib/Store/LocalStore.cpp), none of which throws: a file copied by readFile and writeFile (1 when that
 // failed); the filter asked of a path (1 kept, 0 not, -1 it failed); a file read (its bytes, their count at the last
-// argument, -1 when that failed); a path put into a set; whether a path is there (pathExists)
+// argument, -1 when that failed); a path put into a set (nixsb_set's 3); whether a path is there (pathExists)
 func.func private @nixsb_copyfile(!llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, i64) -> i64
 func.func private @nixsb_keep(!llvm.ptr, !llvm.ptr, i64) -> i64
 func.func private @nixsb_read(!llvm.ptr, !llvm.ptr, i64, !llvm.ptr) -> !llvm.ptr
-func.func private @nixsb_ref(!llvm.ptr, !llvm.ptr, i64)
+func.func private @nixsb_set(!llvm.ptr, i64, !llvm.ptr, i64) -> i64
 func.func private @nixsb_exists(!llvm.ptr, i64) -> i64
 // a store path's hash part (StoreName.mlir), the references' table and scan (BuilderOps.mlir), isInStore (IsInStore.mlir)
 func.func private @nixstore_ts_storehash(!llvm.ptr, i64, !llvm.ptr) -> i64
@@ -682,7 +682,7 @@ func.func private @sbw_scan(%h: !llvm.ptr, %len: i64) -> i64 {
 }
 
 // cands: the nc candidates (Text rows, sorted).  Room 1 holds, for the walk: each candidate's hash part (32 bytes of
-// room each), the hash parts' windows, the table's order and the marks.  refs gets each candidate found (nixsb_ref), in
+// room each), the hash parts' windows, the table's order and the marks.  refs gets each candidate found (nixsb_set), in
 // the candidates' order.  0, or 1 when a file could not be read (the store keeps why).
 func.func @nixsb_refs(%ctx: !llvm.ptr, %p: !llvm.ptr, %n: i64, %cands: !llvm.ptr, %nc: i64, %refs: !llvm.ptr) -> i64 {
   %c0 = arith.constant 0 : i64
@@ -779,7 +779,8 @@ func.func @nixsb_refs(%ctx: !llvm.ptr, %p: !llvm.ptr, %n: i64, %cands: !llvm.ptr
       %cnw = trikeshed.at %crows[%r1] : !s64, index -> i64
       %cn = arith.andi %cnw, %low32 : i64
       %cp = llvm.inttoptr %cpb : i64 to !llvm.ptr
-      func.call @nixsb_ref(%refs, %cp, %cn) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+      %put3 = arith.constant 3 : i64
+      %isput = func.call @nixsb_set(%refs, %put3, %cp, %cn) : (!llvm.ptr, i64, !llvm.ptr, i64) -> i64
     }
   }
   func.call @sbw_close(%h) : (!llvm.ptr) -> ()
@@ -864,7 +865,8 @@ func.func private @sbw_root_link(%h: !llvm.ptr) {
       %fl = arith.extui %fl32 : i32 to i64
       %cut = arith.addi %from, %fl : i64
       %set = func.call @sbw_p(%h, %c8) : (!llvm.ptr, i64) -> !llvm.ptr
-      func.call @nixsb_ref(%set, %lp, %cut) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+      %put3 = arith.constant 3 : i64
+      %isput = func.call @nixsb_set(%set, %put3, %lp, %cut) : (!llvm.ptr, i64, !llvm.ptr, i64) -> i64
     } else {
       scf.if %indirect {
       } else {
@@ -923,7 +925,7 @@ func.func private @sbw_roots(%h: !llvm.ptr, %len: i64) {
 }
 
 // settings: the store's (StoreSettings begins with three Texts, a pointer and 32 bits of length each: the store
-// directory, the store's physical root, the state directory); set: where the roots go (nixsb_ref).  The roots'
+// directory, the store's physical root, the state directory); set: where the roots go (nixsb_set).  The roots'
 // directory is the state directory's "gcroots": one combine drained once into room 0.
 func.func @nixsb_roots(%settings: !llvm.ptr, %set: !llvm.ptr) {
   %c0 = arith.constant 0 : i64
