@@ -51,27 +51,19 @@ func.func private @mmx_row(%base: !llvm.ptr, %rs: i64, %i: i32) -> !llvm.ptr {
   return %p : !llvm.ptr
 }
 
-// Copy one row: a drain of the source row's series into the destination's.  Words when the row is whole words and both
-// addresses are 8-aligned (the cluster's rows: 16 B), else bytes.  A row copied onto itself is left as it is (the
-// drains never see two equal, overlapping ranges: LLVM would turn their loop into a memcpy).
+// Copy one row: a drain of the row's series into the destination's, as words when rs is a whole number of words (the
+// cluster's 16 B rows are a constant two-word drain), else bytes.  A row whole in words is 8-aligned: the C++ rows are
+// (MinMaxHeap.h asserts alignof >= 8 for them), so the word lane needs no test per copy.  A row is never copied onto
+// itself: the callers that could do so skip it (LLVM would turn the byte drain into a memcpy, undefined for overlap).
 func.func private @mmx_copy(%dst: !llvm.ptr, %src: !llvm.ptr, %rs: i64) {
   %c0 = arith.constant 0 : i64
   %c3 = arith.constant 3 : i64
   %c7 = arith.constant 7 : i64
   %c16 = arith.constant 16 : i64
-  %sa = llvm.ptrtoint %src : !llvm.ptr to i64
-  %da = llvm.ptrtoint %dst : !llvm.ptr to i64
-  %ad = arith.ori %sa, %da : i64
-  %al = arith.andi %ad, %c7 : i64
   %rm = arith.andi %rs, %c7 : i64
-  %aligned = arith.cmpi eq, %al, %c0 : i64
   %whole = arith.cmpi eq, %rm, %c0 : i64
-  %lane = arith.andi %aligned, %whole : i1
-  %apart = arith.cmpi ne, %sa, %da : i64
-  scf.if %apart {
-  scf.if %lane {
-    // the cluster's rows are 16 B (and 8): a constant two-word (one-word) drain, unrolled; other whole-word rows take
-    // their word count from rs
+  scf.if %whole {
+    // the cluster's rows are 16 B: a constant two-word drain, unrolled; other whole-word rows take their word count from rs
     %is16 = arith.cmpi eq, %rs, %c16 : i64
     scf.if %is16 {
       %two = arith.constant 2 : i64
@@ -98,28 +90,18 @@ func.func private @mmx_copy(%dst: !llvm.ptr, %src: !llvm.ptr, %rs: i64) {
     %ss = builtin.unrealized_conversion_cast %sm : !mb to !b
     %end = trikeshed.drain %ss, %dm : !b, !mb -> index
   }
-  }
   return
 }
 
-// Swap rows x and y (distinct: every caller swaps a row with its parent, child or grandchild).  A 16-byte row (the
-// cluster's) swaps through a two-word stack temporary of constant size, three two-word drains; other rows through an
-// rs-byte temporary and three copies.
+// Swap rows x and y (distinct: every caller swaps a row with its parent, child or grandchild).  A 16-byte row swaps
+// through a two-word stack temporary of constant size: three two-word drains.  Other rows go through mmx_swap_rows.
 func.func private @mmx_swap(%base: !llvm.ptr, %rs: i64, %x: i32, %y: i32) {
-  %c0 = arith.constant 0 : i64
   %c2 = arith.constant 2 : i64
-  %c7 = arith.constant 7 : i64
   %c16 = arith.constant 16 : i64
   %xp = func.call @mmx_row(%base, %rs, %x) : (!llvm.ptr, i64, i32) -> !llvm.ptr
   %yp = func.call @mmx_row(%base, %rs, %y) : (!llvm.ptr, i64, i32) -> !llvm.ptr
-  %xa = llvm.ptrtoint %xp : !llvm.ptr to i64
-  %ya = llvm.ptrtoint %yp : !llvm.ptr to i64
-  %ao = arith.ori %xa, %ya : i64
-  %al = arith.andi %ao, %c7 : i64
-  %aligned = arith.cmpi eq, %al, %c0 : i64
   %is16 = arith.cmpi eq, %rs, %c16 : i64
-  %pair = arith.andi %aligned, %is16 : i1
-  scf.if %pair {
+  scf.if %is16 {
     %tmp = llvm.alloca %c2 x i64 {alignment = 8 : i64} : (i64) -> !llvm.ptr
     %xd = func.call @mmx_desc(%xp, %c2) : (!llvm.ptr, i64) -> !d
     %yd = func.call @mmx_desc(%yp, %c2) : (!llvm.ptr, i64) -> !d
@@ -139,12 +121,34 @@ func.func private @mmx_swap(%base: !llvm.ptr, %rs: i64, %x: i32, %y: i32) {
   return
 }
 
-// The other rows' swap: an rs-byte stack temporary and three copies (kept out of mmx_swap so that the 16-byte lane inlines).
+// The other rows' swap, a chunk at a time through one 256-byte stack temporary (a static alloca: a dynamic one in a helper
+// that is inlined into a loop would grow the stack on every iteration).  Each chunk is three drains of slices of the rows.
 func.func private @mmx_swap_rows(%xp: !llvm.ptr, %yp: !llvm.ptr, %rs: i64) {
-  %tmp = llvm.alloca %rs x i8 {alignment = 8 : i64} : (i64) -> !llvm.ptr
-  func.call @mmx_copy(%tmp, %xp, %rs) : (!llvm.ptr, !llvm.ptr, i64) -> ()
-  func.call @mmx_copy(%xp, %yp, %rs) : (!llvm.ptr, !llvm.ptr, i64) -> ()
-  func.call @mmx_copy(%yp, %tmp, %rs) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+  %z = arith.constant 0 : index
+  %c256 = arith.constant 256 : index
+  %c256_64 = arith.constant 256 : i64
+  %tmp = llvm.alloca %c256_64 x i8 {alignment = 8 : i64} : (i64) -> !llvm.ptr
+  %n = arith.index_cast %rs : i64 to index
+  scf.for %c = %z to %n step %c256 {
+    %left = arith.subi %n, %c : index
+    %cnt = arith.minui %left, %c256 : index
+    %c64 = arith.index_cast %c : index to i64
+    %cnt64 = arith.index_cast %cnt : index to i64
+    %xc = llvm.getelementptr %xp[%c64] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+    %yc = llvm.getelementptr %yp[%c64] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+    %xd = func.call @mmx_desc(%xc, %cnt64) : (!llvm.ptr, i64) -> !d
+    %yd = func.call @mmx_desc(%yc, %cnt64) : (!llvm.ptr, i64) -> !d
+    %td = func.call @mmx_desc(%tmp, %cnt64) : (!llvm.ptr, i64) -> !d
+    %xm = builtin.unrealized_conversion_cast %xd : !d to !mb
+    %ym = builtin.unrealized_conversion_cast %yd : !d to !mb
+    %tm = builtin.unrealized_conversion_cast %td : !d to !mb
+    %xs = builtin.unrealized_conversion_cast %xm : !mb to !b
+    %ys = builtin.unrealized_conversion_cast %ym : !mb to !b
+    %ts = builtin.unrealized_conversion_cast %tm : !mb to !b
+    %e1 = trikeshed.drain %xs, %tm : !b, !mb -> index
+    %e2 = trikeshed.drain %ys, %xm : !b, !mb -> index
+    %e3 = trikeshed.drain %ts, %ym : !b, !mb -> index
+  }
   return
 }
 
@@ -355,7 +359,10 @@ func.func @mmx_heap_pop_min(%base: !llvm.ptr, %np: !llvm.ptr, %rs: i64, %less: !
   func.call @mmx_copy(%out, %base, %rs) : (!llvm.ptr, !llvm.ptr, i64) -> ()
   %nm1 = arith.subi %n, %c1 : i32
   %last = func.call @mmx_row(%base, %rs, %nm1) : (!llvm.ptr, i64, i32) -> !llvm.ptr
-  func.call @mmx_copy(%base, %last, %rs) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+  %moved = arith.cmpi ne, %nm1, %c0 : i32
+  scf.if %moved {
+    func.call @mmx_copy(%base, %last, %rs) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+  }
   llvm.store %nm1, %np : i32, !llvm.ptr
   %gt1 = arith.cmpi ugt, %nm1, %c1 : i32
   scf.if %gt1 {
@@ -378,7 +385,10 @@ func.func @mmx_heap_pop_max(%base: !llvm.ptr, %np: !llvm.ptr, %rs: i64, %less: !
     func.call @mmx_copy(%out, %mp, %rs) : (!llvm.ptr, !llvm.ptr, i64) -> ()
     %nm1 = arith.subi %n, %c1 : i32
     %last = func.call @mmx_row(%base, %rs, %nm1) : (!llvm.ptr, i64, i32) -> !llvm.ptr
-    func.call @mmx_copy(%mp, %last, %rs) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+    %moved = arith.cmpi ne, %m, %nm1 : i32
+    scf.if %moved {
+      func.call @mmx_copy(%mp, %last, %rs) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+    }
     llvm.store %nm1, %np : i32, !llvm.ptr
     %below = arith.cmpi ult, %m, %nm1 : i32
     scf.if %below {
@@ -420,8 +430,11 @@ func.func @mmx_peg_pop(%pb: !llvm.ptr, %pnp: !llvm.ptr, %rs: i64, %less: !llvm.p
   %mp = func.call @mmx_row(%pb, %rs, %m) : (!llvm.ptr, i64, i32) -> !llvm.ptr
   func.call @mmx_copy(%out, %mp, %rs) : (!llvm.ptr, !llvm.ptr, i64) -> ()
   %nm1 = arith.subi %pn, %c1 : i32
-  %last = func.call @mmx_row(%pb, %rs, %nm1) : (!llvm.ptr, i64, i32) -> !llvm.ptr
-  func.call @mmx_copy(%mp, %last, %rs) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+  %lastRow = func.call @mmx_row(%pb, %rs, %nm1) : (!llvm.ptr, i64, i32) -> !llvm.ptr
+  %moved = arith.cmpi ne, %m, %nm1 : i32
+  scf.if %moved {
+    func.call @mmx_copy(%mp, %lastRow, %rs) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+  }
   llvm.store %nm1, %pnp : i32, !llvm.ptr
   return
 }

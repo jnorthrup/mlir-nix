@@ -81,7 +81,8 @@ template <class Row, class F> void mmxEmit(void *ctx, const void *row) { (*stati
 template <class Row, unsigned N>
 struct MinMaxHeap {
   static_assert((N & (N + 1)) == 0 && N <= 256, "N is one less than a power of two, at most 255 (the sift walks the index table of 256)");
-  static_assert(plainData<Row>, "a row crosses into ClusterOps.mlir as its bytes");
+  static_assert(plainData<Row> && (sizeof(Row) % 8 != 0 || alignof(Row) >= 8),
+                "a row crosses into ClusterOps.mlir as its bytes, 8-aligned when it is whole words (the word lane)");
   MutableSeries<Row, Inline<Row, N>> a;  // the rows in heap order: an inline body, no heap
 
   constexpr uint32_t size() const { return a.size(); }
