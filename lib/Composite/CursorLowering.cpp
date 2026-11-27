@@ -895,6 +895,7 @@ Value drainAt(OpBuilder &b, Location loc, Value xs, Value into, Value at) {
   }
   if (auto all = dyn_cast_or_null<CombineAllOp>(def); all && xs == all.getResult())
     return overParts(b, loc, all, at, [&](Value part, Value from, Value) { return drainAt(b, loc, part, into, from); });
+  if (isa<LaneType>(into.getType())) return DrainOp::create(b, loc, b.getIndexType(), xs, into); // a lane's cells are its next rows
   // a series of the cells' type: each element stored where it goes, never a buffer of its own
   if (auto s = dyn_cast_or_null<SeriesOp>(def); s && s.getType().getElement() == cast<MemRefType>(into.getType()).getElementType()) {
     auto loop = scf::ForOp::create(b, loc, cIndex(b, loc, 0), s.getSize(), cIndex(b, loc, 1));
@@ -952,13 +953,15 @@ void rewriteViews(func::FuncOp f, const TypeConverter &types) {
   for (;;) {
     SmallVector<Operation *> reads, views;
     f.walk([&](Operation *op) {
-      if (isa<SizeOp>(op) || (isa<DrainOp>(op) && op->getNumOperands() == 2 && isa<MemRefType>(op->getOperand(1).getType())))
+      if (isa<SizeOp>(op) || (isa<DrainOp>(op) && op->getNumOperands() == 2 && isa<MemRefType, LaneType>(op->getOperand(1).getType())))
         if (isView(op->getOperand(0))) reads.push_back(op);
     });
     for (Operation *op : reads) {
       OpBuilder b(op);
       Location loc = op->getLoc();
-      Value end = isa<SizeOp>(op) ? sizeOf(b, loc, op->getOperand(0)) : drainAt(b, loc, op->getOperand(0), op->getOperand(1), cIndex(b, loc, 0));
+      // where the drain begins: cell 0, or a lane's next row
+      auto from = [&](Value into) { return isa<LaneType>(into.getType()) ? SizeOp::create(b, loc, b.getIndexType(), into).getResult() : cIndex(b, loc, 0); };
+      Value end = isa<SizeOp>(op) ? sizeOf(b, loc, op->getOperand(0)) : drainAt(b, loc, op->getOperand(0), op->getOperand(1), from(op->getOperand(1)));
       if (end.getType() != op->getResult(0).getType()) end = arith::IndexCastOp::create(b, loc, op->getResult(0).getType(), end);
       op->replaceAllUsesWith(ValueRange{end});
       op->erase();
@@ -1164,6 +1167,9 @@ void populateEitherLowering(CursorTypes &types, RewritePatternSet &patterns, Con
 //   take(l, c)          the count and column c's box: a lane of one column over the same rows
 //   anchor(l, i) {m}    the cell if it is not 0, else what m yields, stored at i (found again: m may have appended)
 //   drain(l [, into])   the rows below the count, page by page, into `into` or into a fresh buffer of exactly the count
+//   drain(xs, l)        xs's rows as the lane's next (Mutable.h appendAll): copied a page's run at a time, a page opened
+//                       where a run begins one, the count published once after them; a combine or a combineAll into a
+//                       lane is its parts in turn (rewriteViews), its region run once: nothing is sized ahead
 
 /// A directory of up to this many slots is not the heap's: it is the frame's of the lane's maker, or its owner's.
 constexpr int64_t kLaneFrame = 4;
@@ -1370,7 +1376,7 @@ struct LaneDrainLowering : Lowering<DrainOp> {
     Location loc = op.getLoc();
     ValueRange lane = a.getSeries();
     if (!isa<LaneType>(op.getSeries().getType())) return failure();
-    if (lane.size() != 2 || (op.getInto() && !isa<MemRefType>(a.getInto()[0].getType())))
+    if (lane.size() != 2 || (op.getInto() && !isa<MemRefType>(op.getInto().getType())))
       return op.emitOpError("drains a lane of one column, into a memref or into a buffer of its own");
     LaneColumn c(lane[1]);
     Value n = load(rw, loc, lane[0], cIndex(rw, loc, 0));
@@ -1383,6 +1389,40 @@ struct LaneDrainLowering : Lowering<DrainOp> {
     });
     Type end = op.getEnd().getType();
     rw.replaceOp(op, !op.getInto() ? into : end.isIndex() ? n : arith::IndexCastOp::create(rw, loc, end, n).getResult());
+    return success();
+  }
+};
+
+/// drain(xs, l) into a lane of one column: xs's rows are the lane's next, a page's run at a time; the count after them.
+struct LaneFillLowering : Lowering<DrainOp> {
+  using Lowering::Lowering;
+  LogicalResult matchAndRewrite(DrainOp op, OneToNOpAdaptor a, ConversionPatternRewriter &rw) const override {
+    Location loc = op.getLoc();
+    if (!op.getInto() || !isa<LaneType>(op.getInto().getType())) return failure();
+    ValueRange lane = a.getInto(), xs = a.getSeries();
+    auto rows = xs.size() == 1 ? dyn_cast<MemRefType>(xs[0].getType()) : MemRefType();
+    if (lane.size() != 2 || !rows || rows.getElementType() != LaneColumn(lane[1]).page.getElementType())
+      return op.emitOpError("drains a series into a lane of one column of its element");
+    LaneColumn c(lane[1]);
+    Value zero = cIndex(rw, loc, 0), n = load(rw, loc, lane[0], zero), end = arith::AddIOp::create(rw, loc, n, length(rw, loc, xs[0]));
+    // the pages rows n ..< end lie in, from the first row of n's own
+    auto each = scf::ForOp::create(rw, loc, arith::SubIOp::create(rw, loc, n, c.placeOf(rw, loc, n)), end, c.rows(rw, loc));
+    {
+      OpBuilder::InsertionGuard guard(rw);
+      rw.setInsertionPoint(each.getBody()->getTerminator());
+      Value start = each.getInductionVar();
+      Value from = arith::MaxUIOp::create(rw, loc, start, n);
+      Value to = arith::MinUIOp::create(rw, loc, arith::AddIOp::create(rw, loc, start, c.rows(rw, loc)), end);
+      c.open(rw, loc, from); // a page's first row, unless it is n inside the page already open
+      Value page = c.pageOf(rw, loc, c.directory(rw, loc), start);
+      auto row = scf::ForOp::create(rw, loc, from, to, cIndex(rw, loc, 1));
+      rw.setInsertionPoint(row.getBody()->getTerminator());
+      Value r = row.getInductionVar();
+      store(rw, loc, load(rw, loc, xs[0], arith::SubIOp::create(rw, loc, r, n)), page, arith::SubIOp::create(rw, loc, r, start));
+    }
+    store(rw, loc, end, lane[0], zero);
+    Type t = op.getEnd().getType();
+    rw.replaceOp(op, t.isIndex() ? end : arith::IndexCastOp::create(rw, loc, t, end).getResult());
     return success();
   }
 };
@@ -1400,8 +1440,8 @@ void populateLaneLowering(CursorTypes &types, RewritePatternSet &patterns) {
     out.append(cells);
     return success();
   });
-  patterns.add<LaneLowering, AppendLowering, LaneSizeLowering, LaneAtLowering, LaneTakeLowering, AnchorLowering, LaneDrainLowering>(
-      types, patterns.getContext());
+  patterns.add<LaneLowering, AppendLowering, LaneSizeLowering, LaneAtLowering, LaneTakeLowering, AnchorLowering, LaneDrainLowering,
+               LaneFillLowering>(types, patterns.getContext());
 }
 
 struct DrainLowering : Lowering<DrainOp> {

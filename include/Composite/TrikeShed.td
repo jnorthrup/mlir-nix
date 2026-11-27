@@ -183,8 +183,9 @@ def TS_LaneType : TS_Type<"Lane", "lane"> {
     `Cursor::append`).  Mutable.h's `Chunked` body is the same shape in C++.
 
     The lane is the fill: `trikeshed.lane` makes an empty one, `trikeshed.append` adds a row and gives its index,
-    `trikeshed.size` and `trikeshed.at` read it as it is now, `trikeshed.take` is one column of it (a lane over the same
-    count), `trikeshed.anchor` mints a cell once.  `trikeshed.drain` is where the fill stops: the pages copied into one
+    `trikeshed.drain` of a series into it adds the series' rows a page's run at a time, `trikeshed.size` and
+    `trikeshed.at` read it as it is now, `trikeshed.take` is one column of it (a lane over the same count),
+    `trikeshed.anchor` mints a cell once.  `trikeshed.drain` of it is where the fill stops: the pages copied into one
     buffer of exactly the count, a `!trikeshed.series` that every other op reads unchanged.
 
     Lowered (trikeshed-lower-cursors) a lane is cells of its own, never a series' or a cursor's buffers: the count, and
@@ -442,6 +443,14 @@ def TS_DrainOp : TS_Op<"drain"> {
     them: one buffer of exactly size(lane) rows, and the result is the `!trikeshed.series` over it (MutableSeries.kt's
     `snapshot()`: an append after it does not reach it).  That is the end of a fill: sorted, bisect, where, fold,
     slice and combine read the drained series as they read any other.
+
+    The cells may be a lane's: `drain %xs, %lane` (a lane of one column of xs's element) makes xs's rows the lane's
+    next rows, in order, and gives the lane's size after them (Mutable.h `appendAll`: text written in pieces).  The
+    rows are copied a page's run at a time, a page opened where a run begins one, and the count is published once,
+    after them all.  A combine or a combineAll drains into a lane as into cells, its parts in turn, and its region
+    runs once: a lane is not sized ahead, so nothing is added up first.
+    Laws: drain(xs, l) = size(l) before it + size(xs); at(l, n + i) = at(xs, i) for the n it was before;
+    drain(combine(a, b), l) = drain(a, l) then drain(b, l).
   }];
 }
 
