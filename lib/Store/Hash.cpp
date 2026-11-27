@@ -5,15 +5,9 @@
 #include "Nix/Store.h"
 
 #include "llvm/ADT/ArrayRef.h"
-// SHA-256 is where the hashing of a run goes (53 MB of a run of nixos-toplevel), so it is not LLVM's portable C: libcrypto where there
-// is one (it picks the SHA extensions or the AVX2 code of the CPU; it is what Nix hashes with), CommonCrypto on macOS.  lib/CMakeLists.txt.
 #if defined(MLNIX_SHA256_OPENSSL)
 #define OPENSSL_SUPPRESS_DEPRECATED // the low-level SHA256_* calls: no provider lookup per hash
 #include <openssl/sha.h>
-#elif defined(__APPLE__) && !defined(MLNIX_SHA256_LLVM)
-#include <CommonCrypto/CommonDigest.h>
-#else
-#include "llvm/Support/SHA256.h"
 #endif
 
 #include <string.h>
@@ -52,11 +46,12 @@ composite::Maybe<HashAlgo> parseHashAlgo(std::string_view s) {
   return nullptr;
 }
 
-// SHA-512 is hollowed out to MLIR: lowered/nixstore/Sha512.mlir (the compression, update's buffering, final's padding),
-// built into NixStore by lib/CMakeLists.txt.  Its context is plain state in HashSink::impl: h[8], buf[128], bufLen, totalLen.
-// MD5 and SHA-1 are MLIR too (lowered/nixstore/Md5.mlir, Sha1.mlir, the same pattern: 112-byte contexts, h words @0,
-// buf[64] @32, bufLen @96, totalLen @104).  SHA-256 stays on the platform code below: the MLIR form measured ~10x slower
-// than CommonCrypto's (the CPU's SHA-2 instructions).
+// The digests are hollowed out to MLIR, built into NixStore by lib/CMakeLists.txt; a context is plain state in HashSink::impl.
+// SHA-512: lowered/nixstore/Sha512.mlir (the compression, update's buffering, final's padding; h[8], buf[128], bufLen,
+// totalLen).  MD5 and SHA-1: Md5.mlir, Sha1.mlir (the same pattern: 112-byte contexts, h words @0, buf[64] @32, bufLen @96,
+// totalLen @104).  SHA-256, where the hashing of a run goes (store paths, derivations, NARs): Sha256.mlir, the rounds of a
+// block the CPU's SHA-2 instructions where it has them (Sha256Arm64.mlir, Sha256X86.mlir), else portable; 176 bytes,
+// 16-aligned, h[8] @0, bufLen @32, totalLen @40, buf[128] @48.
 extern "C" {
 void mlnix_md5_init(void *ctx);
 void mlnix_md5_update(void *ctx, const uint8_t *p, size_t n);
@@ -69,57 +64,37 @@ void mlnix_sha512_update(void *ctx, const uint8_t *p, size_t n);
 void mlnix_sha512_final(void *ctx, uint8_t *out);
 }
 constexpr size_t md5CtxSize = 112, sha1CtxSize = 112, sha512CtxSize = 208;
-
-namespace {
 #if defined(MLNIX_SHA256_OPENSSL)
-struct Sha256Ctx {
-  SHA256_CTX c;
-  Sha256Ctx() { SHA256_Init(&c); }
-  void update(const uint8_t *p, size_t n) { SHA256_Update(&c, p, n); }
-  void final(uint8_t *out) { SHA256_Final(out, &c); }
-};
-#elif defined(__APPLE__) && !defined(MLNIX_SHA256_LLVM)
-struct Sha256Ctx {
-  CC_SHA256_CTX c;
-  Sha256Ctx() { CC_SHA256_Init(&c); }
-  void update(const uint8_t *p, size_t n) {
-    for (size_t off = 0; off < n; off += 1u << 30)
-      CC_SHA256_Update(&c, p + off, (CC_LONG)composite::min<size_t>(1u << 30, n - off));
-  }
-  void final(uint8_t *out) { CC_SHA256_Final(out, &c); }
-};
+// x86_64 with libcrypto (lib/CMakeLists.txt): a CPU without SHA-NI runs the portable rounds, at about half the rate of
+// OpenSSL's AVX2 code (230 against 485 MB/s on a Skylake), so there the library stays.
+static void mlnix_sha256_init(void *c) { SHA256_Init((SHA256_CTX *)c); }
+static void mlnix_sha256_update(void *c, const uint8_t *p, size_t n) { SHA256_Update((SHA256_CTX *)c, p, n); }
+static void mlnix_sha256_final(void *c, uint8_t *out) { SHA256_Final(out, (SHA256_CTX *)c); }
+constexpr size_t sha256CtxSize = sizeof(SHA256_CTX);
 #else
-struct Sha256Ctx {
-  llvm::SHA256 c;
-  void update(const uint8_t *p, size_t n) { c.update(llvm::ArrayRef<uint8_t>(p, n)); }
-  void final(uint8_t *out) {
-    auto r = c.final();
-    memcpy(out, r.data(), 32);
-  }
-};
+extern "C" {
+void mlnix_sha256_init(void *ctx);
+void mlnix_sha256_update(void *ctx, const uint8_t *p, size_t n);
+void mlnix_sha256_final(void *ctx, uint8_t *out);
+}
+constexpr size_t sha256CtxSize = 176;
 #endif
-} // namespace
 
 static_assert(md5CtxSize <= sizeof(HashSink::impl) && sha1CtxSize <= sizeof(HashSink::impl) &&
-                  sizeof(Sha256Ctx) <= sizeof(HashSink::impl) && sha512CtxSize <= sizeof(HashSink::impl),
+                  sha256CtxSize <= sizeof(HashSink::impl) && sha512CtxSize <= sizeof(HashSink::impl),
               "a hash context fits in its sink");
-static_assert(alignof(Sha256Ctx) <= 16);
+static_assert(alignof(HashSink) >= 16 && offsetof(HashSink, impl) % 16 == 0, "Sha256.mlir reads the state as two aligned vectors");
 
 HashSink::HashSink(HashAlgo a) : algo(a) {
   switch (a) {
   case HashAlgo::MD5: mlnix_md5_init(impl); break;
   case HashAlgo::SHA1: mlnix_sha1_init(impl); break;
-  case HashAlgo::SHA256: ::new (static_cast<void *>(impl)) Sha256Ctx(); break;
+  case HashAlgo::SHA256: mlnix_sha256_init(impl); break;
   case HashAlgo::SHA512: mlnix_sha512_init(impl); break;
   }
 }
 
-HashSink::~HashSink() {
-  switch (algo) {
-  case HashAlgo::MD5: case HashAlgo::SHA1: case HashAlgo::SHA512: break;
-  case HashAlgo::SHA256: reinterpret_cast<Sha256Ctx *>(impl)->~Sha256Ctx(); break;
-  }
-}
+HashSink::~HashSink() = default;
 
 void HashSink::update(std::string_view data) {
   total += data.size();
@@ -127,7 +102,7 @@ void HashSink::update(std::string_view data) {
   switch (algo) {
   case HashAlgo::MD5: mlnix_md5_update(impl, a.data(), a.size()); break;
   case HashAlgo::SHA1: mlnix_sha1_update(impl, a.data(), a.size()); break;
-  case HashAlgo::SHA256: reinterpret_cast<Sha256Ctx *>(impl)->update(a.data(), a.size()); break;
+  case HashAlgo::SHA256: mlnix_sha256_update(impl, a.data(), a.size()); break;
   case HashAlgo::SHA512: mlnix_sha512_update(impl, a.data(), a.size()); break;
   }
 }
@@ -138,7 +113,7 @@ Hash HashSink::finish() {
   switch (algo) {
   case HashAlgo::MD5: mlnix_md5_final(impl, h.bytes); break;
   case HashAlgo::SHA1: mlnix_sha1_final(impl, h.bytes); break;
-  case HashAlgo::SHA256: reinterpret_cast<Sha256Ctx *>(impl)->final(h.bytes); break;
+  case HashAlgo::SHA256: mlnix_sha256_final(impl, h.bytes); break;
   case HashAlgo::SHA512: mlnix_sha512_final(impl, h.bytes); break;
   }
   return h;

@@ -16,21 +16,20 @@ constexpr const char sample[] = "  hello, world  ";
 static_assert(CharSeries(sample, 16)[join::TwInt(2, 14)][join::TwInt(0, 5)].data() == sample + 2, "a window of a window is a window of the same bytes");
 static_assert(sizeof(Chars) == 16 && sizeof(CharSeries) == 32, "the window weighs a string_view; the cursor is the rest");
 // CharSeries isa Series<char>: the cast down is the whole window; the characters between pos and limit are window() (or slice())
-static_assert(composite::view(Chars(CharSeries(sample, 16).trim())) == "  hello, world  " && composite::view(CharSeries(sample, 16).trim().window()) == "hello, world");
+static_assert(composite::view(Chars(CharSeries(sample, 16).lim(14).at(2))) == "  hello, world  " && composite::view(CharSeries(sample, 16).lim(14).at(2).window()) == "hello, world");
 static_assert(composite::view(CharSeries(sample, 16)[join::TwInt(2, 14)][join::TwInt(0, 5)]) == "hello");
-static_assert(composite::view(CharSeries(sample, 16).trim().window()) == "hello, world", "skipWs and rtrim");
+static_assert(composite::view(CharSeries(sample, 16).skipWs().window()) == "hello, world  ", "skipWs");
 static_assert(cs(("a,b,,c")).size() == 6);
 constexpr bool cursor() {
   CharSeries s = cs(("key=value;rest"));
-  if (!s.seekTo('=')) return false;
+  s.at(4);
   CharSeries v = s; v.lim(v.pos + 5);
   if (composite::view(v.slice()) != "value") return false;
   s.mk(); s.get(); s.get(); s.res();              // reset to the mark
   if (s.get() != 'v') return false;
-  CharSeries q = cs((R"(a\"b"c)"));
-  return q.seekTo('"', '\\') && composite::view(q.slice()) == "c";
+  return true;
 }
-static_assert(cursor(), "get, mk, res, lim, slice, seekTo with an escape");
+static_assert(cursor(), "get, mk, res, lim, at, slice");
 // equality is the characters, not the cursor or the root
 constexpr bool equality() {
   CharSeries a = cs(("xxabc")), b = cs(("abcyy"));
@@ -54,15 +53,12 @@ int main() {
     CharSeries c = cs(s);
     uint32_t a = rng() % (s.size() + 1), b = a + rng() % (s.size() - a + 1);
     require(composite::view(c[join::TwInt(a, b)]) == std::string_view(s).substr(a, b - a), "window");
-    CharSeries t = c; t.trim();
-    size_t f = s.find_first_not_of(" \t"), l = s.find_last_not_of(" \t");
-    require(composite::view(t.window()) == (f == std::string::npos ? std::string_view() : std::string_view(s).substr(f, l - f + 1)), "trim");
     auto ps = split(c, ',');
     std::string joined; for (uint32_t k = 0; k < ps.size(); k++) { if (k) joined += ','; joined += composite::view(ps[k]); }
     require(joined == s, "split then join is the identity");
   }
   integerFacetsAgreeWithLibc();
-  std::puts("PASS charseries: flattened windows, cursor verbs, content equality, no hash, split; 20,000 random windows, trims and splits");
+  std::puts("PASS charseries: flattened windows, cursor verbs, content equality, no hash, split; 20,000 random windows and splits");
 }
 
 // ── facets ──

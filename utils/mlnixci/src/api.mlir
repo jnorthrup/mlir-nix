@@ -30,7 +30,6 @@ llvm.func @_mlir_ciface_corpus_query(!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
 
 func.func private @tw(i64, i64) -> i64
 func.func private @tw_s(i64) -> i64
-func.func private @tw_e(i64) -> i64
 func.func private @tw_n(i64) -> i64
 func.func private @off(!llvm.ptr, i64) -> !llvm.ptr
 func.func private @is(!llvm.ptr, i64, !llvm.ptr, i64) -> i1
@@ -41,10 +40,8 @@ func.func private @ob_bytes(!llvm.ptr, i64)
 func.func private @cx_scan(!llvm.ptr, i64) -> !llvm.ptr
 func.func private @cx_free(!llvm.ptr)
 func.func private @cx_tag(!llvm.ptr, i64) -> i64
-func.func private @cx_open(!llvm.ptr, i64) -> i64
 func.func private @cx_close(!llvm.ptr, i64) -> i64
 func.func private @cx_nkids(!llvm.ptr, i64) -> i64
-func.func private @cx_kid(!llvm.ptr, i64, i64) -> i64
 func.func private @cx_d(!llvm.ptr, i32) -> !llvm.ptr
 func.func private @cx_text(!llvm.ptr) -> !llvm.ptr
 func.func private @view(!llvm.ptr, !llvm.ptr, i64)

@@ -487,8 +487,6 @@ void createDirs(std::string_view path);
 void deletePathRecursive(std::string_view path);
 composite::Text baseNameOf(std::string_view p);
 composite::Text dirOf(std::string_view p);
-/// JSON string escaping as done by nlohmann::json::dump().
-composite::Text jsonEscape(std::string_view s);
 /// Number formatting as done by nlohmann::json for doubles.
 composite::Text jsonFloat(double d);
 /// Run a program, capturing stdout. Returns exit status.

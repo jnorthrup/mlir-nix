@@ -24,7 +24,6 @@
 //                 an object of them (trikeshed.where over the members), then ONE combineAll of their lines: `declare K=V`,
 //                 `declare -a K=(V V )`, `declare -A K=(['k']=V ['k']=V )`, every piece a slice of one word blob, a
 //                 window or a combineAll of shell-escape table slices (' as '\''), drained once.
-// nixstore_ts_escape is nixstore::jsonEscape's (StorePaths.cpp), with the same table.
 // Lowered by --trikeshed-lower-cursors and the stock buffer pipeline (lib/CMakeLists.txt mlnix_lower_trikeshed).
 !text = !trikeshed.series<i8>
 !s8 = !trikeshed.series<i8>
@@ -100,41 +99,6 @@ func.func private @nx_sa_row(%rows: !llvm.ptr, %j: i64) -> (i64, i64, i64, i64) 
   %tl32 = llvm.load %tlp : !llvm.ptr -> i32
   %tl = arith.extui %tl32 : i32 to i64
   return %fp, %fl, %tp, %tl : i64, i64, i64, i64
-}
-
-// s (n bytes at p) as a JSON string: the opening quote, each byte's escape (a slice of one constant table, its
-// length in a second), the closing quote -- one combineAll and two combines, drained into `into` (room 2 + 6 n).
-func.func @nixstore_ts_escape(%p: !llvm.ptr, %n: i64, %into: !llvm.ptr, %cap: i64) -> i64 {
-  %c0i = arith.constant 0 : index
-  %c1i = arith.constant 1 : index
-  %six = arith.constant 6 : index
-  %ds = func.call @nx_sa_desc8(%p, %n) : (!llvm.ptr, i64) -> !d
-  %ms = builtin.unrealized_conversion_cast %ds : !d to !m8
-  %xs = builtin.unrealized_conversion_cast %ms : !m8 to !text
-  %ni = arith.index_cast %n : i64 to index
-  %eg = memref.get_global @sa_esc : memref<1536xi8>
-  %table = trikeshed.text %eg : memref<1536xi8> -> !text
-  %lg = memref.get_global @sa_esc_len : memref<256xi8>
-  %lengths = trikeshed.text %lg : memref<256xi8> -> !text
-  %escaped, %where = trikeshed.combineAll %ni : !text, !pieces {
-  ^bb0(%k: index):
-    %b = trikeshed.at %xs[%k] : !text, index -> i8
-    %bi = arith.index_castui %b : i8 to index
-    %l = trikeshed.at %lengths[%bi] : !text, index -> i8
-    %li = arith.index_castui %l : i8 to index
-    %at = arith.muli %bi, %six : index
-    %part = trikeshed.slice %table[%at, %li] : !text -> !text
-    trikeshed.yield %part : !text
-  }
-  %qg = memref.get_global @sa_quote : memref<1xi8>
-  %quote = trikeshed.text %qg : memref<1xi8> -> !text
-  %open = trikeshed.combine %quote, %escaped : !text, !text -> !text
-  %all = trikeshed.combine %open, %quote : !text, !text -> !text
-  %di = func.call @nx_sa_desc8(%into, %cap) : (!llvm.ptr, i64) -> !d
-  %mi = builtin.unrealized_conversion_cast %di : !d to !m8
-  %end = trikeshed.drain %all, %mi : !text, !m8 -> index
-  %r = arith.index_cast %end : index to i64
-  return %r : i64
 }
 
 // ---- the nodes: a kind and a window for every row.  Kinds: 0 null, 1 false, 2 true, 3 number, 4 string, 5 array,

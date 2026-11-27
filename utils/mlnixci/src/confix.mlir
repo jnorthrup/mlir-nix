@@ -29,17 +29,11 @@ llvm.func @_mlir_ciface_ix_str(!llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> i64
 // index.mlir's readers (trikeshed ops over the cursor's columns)
 func.func private @ix_rows(!ix) -> i64
 func.func private @ix_tag(!ix, i64) -> i64
-func.func private @ix_open(!ix, i64) -> i64
 func.func private @ix_close(!ix, i64) -> i64
 func.func private @ix_nkids(!ix, i64) -> i64
-func.func private @ix_kid(!ix, !s32, i64, i64) -> i64
-func.func private @ix_find(!ix, !s32, !text, i64, !text) -> i64
 func.func private @ix_member(!ix, !s32, !text, i64, !text) -> i64
 func.func private @ix_unterminated(!ix, !text) -> i64
 
-func.func private @tw_s(i64) -> i64
-func.func private @tw_n(i64) -> i64
-func.func private @off(!llvm.ptr, i64) -> !llvm.ptr
 func.func private @view(!llvm.ptr, !llvm.ptr, i64)
 
 // the tags (Confix.td TagKind)
@@ -154,17 +148,6 @@ func.func @cx_tag(%h: !llvm.ptr, %r: i64) -> i64 {
   return %v : i64
 }
 
-// [open, close] as the text has them: the first and the last byte
-func.func @cx_open(%h: !llvm.ptr, %r: i64) -> i64 {
-  %d0, %d1, %d2, %d3 = func.call @cx_descs(%h) : (!llvm.ptr) -> (!d, !d, !d, !d)
-  %m0 = builtin.unrealized_conversion_cast %d0 : !d to memref<?xi64>
-  %m1 = builtin.unrealized_conversion_cast %d1 : !d to memref<?xi8>
-  %m2 = builtin.unrealized_conversion_cast %d2 : !d to memref<?xi64>
-  %rows = builtin.unrealized_conversion_cast %m0, %m1, %m2 : memref<?xi64>, memref<?xi8>, memref<?xi64> to !ix
-  %v = func.call @ix_open(%rows, %r) : (!ix, i64) -> i64
-  return %v : i64
-}
-
 func.func @cx_close(%h: !llvm.ptr, %r: i64) -> i64 {
   %d0, %d1, %d2, %d3 = func.call @cx_descs(%h) : (!llvm.ptr) -> (!d, !d, !d, !d)
   %m0 = builtin.unrealized_conversion_cast %d0 : !d to memref<?xi64>
@@ -211,42 +194,6 @@ func.func @cx_nkids(%h: !llvm.ptr, %r: i64) -> i64 {
   return %v : i64
 }
 
-// the i-th child of the element r (its kids are the kid series' slice from its first)
-func.func @cx_kid(%h: !llvm.ptr, %r: i64, %i: i64) -> i64 {
-  %d0, %d1, %d2, %d3 = func.call @cx_descs(%h) : (!llvm.ptr) -> (!d, !d, !d, !d)
-  %m0 = builtin.unrealized_conversion_cast %d0 : !d to memref<?xi64>
-  %m1 = builtin.unrealized_conversion_cast %d1 : !d to memref<?xi8>
-  %m2 = builtin.unrealized_conversion_cast %d2 : !d to memref<?xi64>
-  %rows = builtin.unrealized_conversion_cast %m0, %m1, %m2 : memref<?xi64>, memref<?xi8>, memref<?xi64> to !ix
-  %m3 = builtin.unrealized_conversion_cast %d3 : !d to memref<?xi32>
-  %kids = trikeshed.text %m3 : memref<?xi32> -> !s32
-  %v = func.call @ix_kid(%rows, %kids, %r, %i) : (!ix, !s32, i64, i64) -> i64
-  return %v : i64
-}
-
-// The place among the object's children of the key written as the n bytes at key, or -1: the key is child i, its value
-// child i + 1.  The first of equal keys is the one found (index.mlir's ix_find: KeyToChild).
-func.func @cx_find(%text: !llvm.ptr, %h: !llvm.ptr, %obj: i64, %key: !llvm.ptr, %n: i64) -> i64 {
-  %own = func.call @cx_text(%h) : (!llvm.ptr) -> !llvm.ptr
-  %pn = llvm.getelementptr %own[0, 3, 0] : (!llvm.ptr) -> !llvm.ptr, !d
-  %tn = llvm.load %pn : !llvm.ptr -> i64
-  %td = func.call @cx_mview(%text, %tn) : (!llvm.ptr, i64) -> !d
-  %tm = builtin.unrealized_conversion_cast %td : !d to memref<?xi8>
-  %t = trikeshed.text %tm : memref<?xi8> -> !text
-  %kd = func.call @cx_mview(%key, %n) : (!llvm.ptr, i64) -> !d
-  %km = builtin.unrealized_conversion_cast %kd : !d to memref<?xi8>
-  %k = trikeshed.text %km : memref<?xi8> -> !text
-  %d0, %d1, %d2, %d3 = func.call @cx_descs(%h) : (!llvm.ptr) -> (!d, !d, !d, !d)
-  %m0 = builtin.unrealized_conversion_cast %d0 : !d to memref<?xi64>
-  %m1 = builtin.unrealized_conversion_cast %d1 : !d to memref<?xi8>
-  %m2 = builtin.unrealized_conversion_cast %d2 : !d to memref<?xi64>
-  %rows = builtin.unrealized_conversion_cast %m0, %m1, %m2 : memref<?xi64>, memref<?xi8>, memref<?xi64> to !ix
-  %m3 = builtin.unrealized_conversion_cast %d3 : !d to memref<?xi32>
-  %kids = trikeshed.text %m3 : memref<?xi32> -> !s32
-  %v = func.call @ix_find(%rows, %kids, %t, %obj, %k) : (!ix, !s32, !text, i64, !text) -> i64
-  return %v : i64
-}
-
 // the value row of the key, or -1 (index.mlir's ix_member: KeyToChild, then the value after the key)
 func.func @cx_member(%text: !llvm.ptr, %h: !llvm.ptr, %obj: i64, %key: !llvm.ptr, %n: i64) -> i64 {
   %own = func.call @cx_text(%h) : (!llvm.ptr) -> !llvm.ptr
@@ -267,23 +214,6 @@ func.func @cx_member(%text: !llvm.ptr, %h: !llvm.ptr, %obj: i64, %key: !llvm.ptr
   %kids = trikeshed.text %m3 : memref<?xi32> -> !s32
   %v = func.call @ix_member(%rows, %kids, %t, %obj, %k) : (!ix, !s32, !text, i64, !text) -> i64
   return %v : i64
-}
-
-// the same, with the key a piece of another text
-func.func @cx_member_at(%text: !llvm.ptr, %h: !llvm.ptr, %obj: i64, %kbase: !llvm.ptr, %kt: i64) -> i64 {
-  %s = func.call @tw_s(%kt) : (i64) -> i64
-  %n = func.call @tw_n(%kt) : (i64) -> i64
-  %k = func.call @off(%kbase, %s) : (!llvm.ptr, i64) -> !llvm.ptr
-  %v = func.call @cx_member(%text, %h, %obj, %k, %n) : (!llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64) -> i64
-  return %v : i64
-}
-
-func.func @cx_find_at(%text: !llvm.ptr, %h: !llvm.ptr, %obj: i64, %kbase: !llvm.ptr, %kt: i64) -> i64 {
-  %s = func.call @tw_s(%kt) : (i64) -> i64
-  %n = func.call @tw_n(%kt) : (i64) -> i64
-  %k = func.call @off(%kbase, %s) : (!llvm.ptr, i64) -> !llvm.ptr
-  %i = func.call @cx_find(%text, %h, %obj, %k, %n) : (!llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64) -> i64
-  return %i : i64
 }
 
 // the number of unterminated strings in the text (index.mlir's ix_unterminated: a text that ends in an open quote)

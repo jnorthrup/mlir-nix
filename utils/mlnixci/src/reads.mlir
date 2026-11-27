@@ -278,14 +278,6 @@ func.func @rd_number(%xs: !text) -> i64 attributes {llvm.emit_c_interface} {
   return %r : i64
 }
 
-// a and b have the same bytes
-func.func @rd_same(%a: !text, %b: !text) -> i1 attributes {llvm.emit_c_interface} {
-  %z = arith.constant 0 : i32
-  %order = trikeshed.compare %a, %b : !text, !text
-  %same = arith.cmpi eq, %order, %z : i32
-  return %same : i1
-}
-
 // the lines of e that do not begin "evaluation warning:", each followed by a '\n', then a NUL: a line is a part of e at
 // '\n' that starts before e's end (so the empty part after a last '\n' is not one)
 func.func @rd_kept(%e: !text) -> !text attributes {llvm.emit_c_interface} {

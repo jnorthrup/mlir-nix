@@ -34,16 +34,6 @@ func.func @ix_tag(%rows: !ix, %r: i64) -> i64 attributes {llvm.emit_c_interface}
   return %z : i64
 }
 
-// Spans: the first and the last byte of the element as written
-func.func @ix_open(%rows: !ix, %r: i64) -> i64 attributes {llvm.emit_c_interface} {
-  %k0 = trikeshed.key 0 : !ik
-  %spans = trikeshed.column %rows[%k0] : !ix, !ik -> !trikeshed.series<!tw>
-  %s = trikeshed.at %spans[%r] : !trikeshed.series<!tw>, i64 -> !tw
-  %o = trikeshed.first %s : !tw -> i32
-  %z = arith.extui %o : i32 to i64
-  return %z : i64
-}
-
 func.func @ix_close(%rows: !ix, %r: i64) -> i64 attributes {llvm.emit_c_interface} {
   %k0 = trikeshed.key 0 : !ik
   %spans = trikeshed.column %rows[%k0] : !ix, !ik -> !trikeshed.series<!tw>

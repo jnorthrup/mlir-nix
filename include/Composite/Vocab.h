@@ -41,7 +41,6 @@ template <class T> struct Maybe {
   constexpr const T &operator*() const { return v; }
   constexpr T *operator->() { return &v; }
   constexpr const T *operator->() const { return &v; }
-  constexpr T or_(T other) const { return has ? v : other; }
   // The words of the optional it replaces, so a caller reads the same.
   constexpr bool has_value() const { return has; }
   constexpr T &value() { return v; }

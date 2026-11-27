@@ -43,18 +43,21 @@ add_mlir_dialect_library(MLIRTrikeShed
   PARTIAL_SOURCES_INTENDED
   DEPENDS TrikeShedIncGen
   LINK_LIBS PUBLIC MLIRIR MLIRSideEffectInterfaces MLIRFuncDialect MLIRMemRefDialect MLIRPass
-                   MLIRArithDialect MLIRSCFDialect MLIRSCFTransforms MLIRFuncTransforms MLIRTransformUtils)
+                   MLIRArithDialect MLIRSCFDialect MLIRSCFTransforms MLIRFuncTransforms MLIRTransformUtils MLIRLLVMDialect)
 
 add_library(TrikeShedRuntime SHARED Composite/ClusterRuntime.cpp)
 set_target_properties(TrikeShedRuntime PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/lib)
 
 add_library(NixStore STATIC Store/Hash.cpp Store/StorePaths.cpp Store/LocalStore.cpp Store/StructuredAttrs.cpp Store/Prefetch.cpp Store/Ed25519.cpp)
 target_link_libraries(NixStore PUBLIC LLVMSupport)
-# SHA-256: CommonCrypto on macOS; elsewhere libcrypto when there is one (it picks the CPU's SHA extensions or AVX2, the code Nix hashes
-# with), else LLVM's portable C, which costs 8-12% of a run on a machine whose hashing it slows (77de09c:docs/PERFORMANCE.md).  libcrypto.a is
-# preferred: loading libcrypto.so is 0.6 ms of the 10 ms an `eval -E 1` takes, the static one 0.15 ms.
-set(MLNIX_SHA256 "auto" CACHE STRING "SHA-256 code: auto (CommonCrypto on macOS, else OpenSSL if found, else LLVM's), openssl or llvm")
-if(MLNIX_SHA256 STREQUAL "openssl" OR (MLNIX_SHA256 STREQUAL "auto" AND NOT APPLE))
+# SHA-256 is lowered/nixstore/Sha256.mlir (below, with the other lowered modules): its rounds are the CPU's SHA-2 instructions
+# where the processor has them, else portable.  On arm64 that is the rate of CommonCrypto and of libcrypto (measured
+# within 5% of each from 1 KiB to 16 MiB, faster on shorter inputs), so neither is linked.  On x86_64 a CPU without SHA-NI
+# runs the portable rounds, at about half the rate of libcrypto's AVX2 code (230 against 485 MB/s on a Skylake), so there
+# libcrypto is linked when there is one (libcrypto.a preferred: loading libcrypto.so is 0.6 ms of the 10 ms an `eval -E 1`
+# takes, the static one 0.15 ms).
+set(MLNIX_SHA256 "auto" CACHE STRING "SHA-256 code: auto (the MLIR module; on x86_64 OpenSSL if found), mlir or openssl")
+if(MLNIX_SHA256 STREQUAL "openssl" OR (MLNIX_SHA256 STREQUAL "auto" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$"))
   set(OPENSSL_USE_STATIC_LIBS ON)
   find_package(OpenSSL QUIET)
   if(NOT OPENSSL_FOUND)
@@ -67,8 +70,6 @@ if(MLNIX_SHA256 STREQUAL "openssl" OR (MLNIX_SHA256 STREQUAL "auto" AND NOT APPL
   elseif(MLNIX_SHA256 STREQUAL "openssl")
     message(FATAL_ERROR "MLNIX_SHA256=openssl, but OpenSSL was not found")
   endif()
-elseif(MLNIX_SHA256 STREQUAL "llvm")
-  target_compile_definitions(NixStore PRIVATE MLNIX_SHA256_LLVM=1)
 endif()
 # io_uring replay of recorded file accesses (Linux, liburing); elsewhere Prefetch.cpp only records.
 find_path(URING_INCLUDE_DIR liburing.h)
@@ -161,6 +162,28 @@ mlnix_lower_interface(NixStore lowered/nixstore/IsInStore.mlir IsInStore)
 # each block's 8-byte slices plus scf.for rounds; the padding a combine of a pad slice and a length series, drained; the
 # field/point/scalar arithmetic is scf/arith over i64 limb memrefs with trikeshed.fold/compare for the S < L and R checks.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/Sha512.mlir Sha512)
+# SHA-256 (lib/Store/Hash.cpp's CommonCrypto and llvm::SHA256 contexts are gone; HashSink calls these entries).  Sha256.mlir
+# is the Sha512.mlir pattern (update's slices drained into the context, final's padding one combine drained, the digest a
+# combineAll) around the rounds of a block, chosen once a process: the CPU's SHA-2 instructions, an llvm-dialect function
+# carrying the target feature (Sha256Arm64.mlir: sha256h/h2/su0/su1; Sha256X86.mlir: SHA-NI), the state passed through it
+# as two vectors by the loop over the blocks; or the portable rounds, scf loops that clang unrolls whole at the threshold
+# below (K folds into the code as immediates, the schedule into registers and stack slots).  The probe is the platform's:
+# getauxval on Linux arm64 (Sha256Auxv.mlir), nothing to ask on macOS arm64 (Sha256Apple.mlir), cpuid on x86_64; elsewhere
+# the rounds are portable.
+set(MLNIX_LOWER_CLANG_ARGS -mllvm -unroll-threshold=4000)
+mlnix_lower_trikeshed(NixStore lowered/nixstore/Sha256.mlir Sha256)
+unset(MLNIX_LOWER_CLANG_ARGS)
+set(MLNIX_SHA256_HW NoHw)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$" AND APPLE)
+  set(MLNIX_SHA256_HW Arm64 Apple)
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  set(MLNIX_SHA256_HW Arm64 Auxv)
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+  set(MLNIX_SHA256_HW X86)
+endif()
+foreach(part ${MLNIX_SHA256_HW})
+  mlnix_lower_interface(NixStore lowered/nixstore/Sha256${part}.mlir Sha256${part})
+endforeach()
 # MD5 and SHA-1 (lib/Store/Hash.cpp's llvm::MD5 / llvm::SHA1 contexts are gone; HashSink calls these entries on the same
 # 112-byte context shape as SHA-512's).  Each is the Sha512.mlir pattern: block words by trikeshed.fold over 4-byte slices,
 # the rounds as scf loops, the padding one combine drained into the context's buffer.
@@ -222,7 +245,7 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/DrvParse.mlir DrvParse)
 # (combineAll over Nix's JSON escape table) and list combineAlls, drained once into a pre-sized buffer (fill-drain).
 mlnix_lower_trikeshed(NixStore lowered/nixstore/DrvJson.mlir DrvJson)
 # structuredAttrsFiles whole (.attrs.json and .attrs.sh; StructuredAttrs.cpp's DOM, parser and shell writer are gone, the
-# bridge keeps the record's arrays and the rooms) and nixstore::jsonEscape.  __json is read by confix.checked (JsonRead.mlir's
+# bridge keeps the record's arrays and the rooms).  __json is read by confix.checked (JsonRead.mlir's
 # scan, linked into NixEval), each object's members put in key order by trikeshed.sorted, the placeholders rewritten by a
 # combineAll of gaps and paths per pass; each file is ONE combineAll drained once (events / lines of slices and escapes).
 mlnix_lower_trikeshed(NixStore lowered/nixstore/StructuredAttrsOps.mlir StructuredAttrsOps)
@@ -251,15 +274,13 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/Patricia.mlir Patricia)
 # heap's push/climb/sift and edge pops, the pegs' argMin, the cluster's insert/min/find/drain, clusterOrder's
 # fill-then-drain and Krapivin's put/get walk are scf over the caller's arrays.  NixStore carries it (drvByContent);
 # TrikeShedRuntime (trikeshed.cluster_order's kernel, a shared library) links a position-independent copy.
-# The drains of a 16 B row are constant-length loops; LLVM's loop idiom turns each into a memcpy before the loop is
-# unrolled, which keeps the swap's temporary in memory (SROA runs before it).  With the idiom off, the 16 B swap is
-# register moves (the optimised IR has no temporary for it).  Only this module's clang step gets the flag.
-set(MLNIX_LOWER_CLANG_ARGS -mllvm -disable-loop-idiom-memcpy)
+# A row's moves are drains, which lower to block moves: a 16 B row's are constant two-word moves that clang does in
+# registers once the row helpers are inlined into the walks (--inline --symbol-dce on the mlir-opt stage: without it
+# inode-bench's cluster phase retires 28% more instructions).
 mlnix_lower_trikeshed(NixStore lowered/composite/ClusterOps.mlir ClusterOps --inline --symbol-dce)
 add_custom_command(OUTPUT ${MLNIX_LOWERED_DIR}/ClusterOps.pic.o
-  COMMAND ${MLNIX_LOWER_CLANG} -O2 -fPIC -Wno-override-module ${MLNIX_LOWER_CLANG_ARGS} -c ${MLNIX_LOWERED_DIR}/ClusterOps.ll -o ${MLNIX_LOWERED_DIR}/ClusterOps.pic.o
+  COMMAND ${MLNIX_LOWER_CLANG} -O2 -fPIC -Wno-override-module -c ${MLNIX_LOWERED_DIR}/ClusterOps.ll -o ${MLNIX_LOWERED_DIR}/ClusterOps.pic.o
   DEPENDS ${MLNIX_LOWERED_DIR}/ClusterOps.ll COMMENT "compiling lowered ClusterOps.pic.o")
-unset(MLNIX_LOWER_CLANG_ARGS)
 set_source_files_properties(${MLNIX_LOWERED_DIR}/ClusterOps.pic.o PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
 add_dependencies(TrikeShedRuntime mlnix_lowered_ClusterOps)
 target_sources(TrikeShedRuntime PRIVATE ${MLNIX_LOWERED_DIR}/ClusterOps.pic.o)

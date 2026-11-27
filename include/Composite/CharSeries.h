@@ -7,8 +7,8 @@
 //   Chars            the window (Series.h): Series<char> over memory, where it starts and how long it is, 16 bytes, the weight of a
 //                    std::string_view.  Kotlin keeps a root and TwInt bounds so that a window of a window reads the same root instead of
 //                    stacking accessors (CharWindow flattening); in C++ the start is a pointer and the flattening is base + from (slice).
-//   CharSeries       a Chars and its cursor (pos/limit/mark, relative to the window): get, mk, res, flip, rew, clr, lim, slice, skipWs,
-//                    rtrim, trim, seekTo; 32 bytes.  The weight is the cursor's: where only a window is needed (the pieces of a string
+//   CharSeries       a Chars and its cursor (pos/limit/mark, relative to the window): get, mk, res, flip, lim, at, slice, skipWs;
+//                    32 bytes.  The weight is the cursor's: where only a window is needed (the pieces of a string
 //                    being built) the window is cast down to Chars, which is all of the hot set it needs.
 //   ==               the same characters between pos and limit.  The cursor's position is not identity.
 //   no hash          a cursor is not a key: there is no std::hash for it.  Reify at the gate (view()) and key on that.
@@ -47,7 +47,6 @@ struct CharSeries : Chars {
 // The cursor.
   constexpr uint32_t rem() const { return limit - pos; }
   constexpr bool hasRemaining() const { return pos < limit; }
-  constexpr bool isExhausted() const { return pos == limit; }
   /// get, the verb: the character at the position, and advance.
   constexpr char get() {
     if (!hasRemaining()) TODO("CharSeries::get past the limit");
@@ -56,8 +55,6 @@ struct CharSeries : Chars {
   constexpr CharSeries &mk() { mark = int32_t(pos); return *this; }
   constexpr CharSeries &res() { if (mark >= 0) pos = uint32_t(mark); return *this; }
   constexpr CharSeries &flip() { limit = pos; pos = 0; mark = -1; return *this; }
-  constexpr CharSeries &rew() { pos = 0; return *this; }
-  constexpr CharSeries &clr() { pos = 0; limit = size(); mark = -1; return *this; }
   constexpr CharSeries &lim(uint32_t l) { limit = l; return *this; }
   constexpr CharSeries &at(uint32_t p) { pos = p; return *this; }
 
@@ -66,37 +63,6 @@ struct CharSeries : Chars {
 
   /// Skip whitespace from the position.
   constexpr CharSeries &skipWs() { pos += firstWhere(remaining(), [](char c) { return !isWs(c); }); return *this; }
-  /// Drop whitespace before the limit.
-  constexpr CharSeries &rtrim() {
-    auto back = rem() |j| [this](uint32_t i) { return (*this)[limit - 1 - i]; };
-    limit -= firstWhere(back, [](char c) { return !isWs(c); });
-    return *this;
-  }
-  constexpr CharSeries &trim() { return skipWs().rtrim(); }
-
-  /// Move the position past the next `target` and say so; on failure the position is unchanged.
-  constexpr bool seekTo(char target) {
-    uint32_t k = firstWhere(remaining(), [target](char c) { return c == target; });
-    if (k == rem()) return false;
-    pos += k + 1;
-    return true;
-  }
-  /// The same, where `escape` hides the character after it.
-  constexpr bool seekTo(char target, char escape) {
-    struct Scan { uint32_t at; bool escaped, found; };
-    Scan s = fold(remaining(), Scan{0, false, false},
-                  [&](Scan acc, char c) {
-                    ++acc.at;
-                    if (acc.escaped) acc.escaped = false;
-                    else if (c == target) acc.found = true;
-                    else if (c == escape) acc.escaped = true;
-                    return acc;
-                  },
-                  [](const Scan &acc) { return acc.found; });
-    if (!s.found) return false;
-    pos += s.at;
-    return true;
-  }
 
   /// Equality is the same characters between pos and limit.
   friend constexpr bool operator==(const CharSeries &a, const CharSeries &b) {

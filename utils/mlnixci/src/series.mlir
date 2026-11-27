@@ -43,14 +43,6 @@ func.func @tw_s(%t: i64) -> i64 {
   return %s : i64
 }
 
-// its end
-func.func @tw_e(%t: i64) -> i64 {
-  %s = func.call @tw_s(%t) : (i64) -> i64
-  %n = func.call @tw_n(%t) : (i64) -> i64
-  %e = arith.addi %s, %n : i64
-  return %e : i64
-}
-
 // its length
 func.func @tw_n(%t: i64) -> i64 {
   %m = arith.constant 4294967295 : i64
@@ -262,14 +254,6 @@ func.func @ob_bytes(%src: !llvm.ptr, %k: i64) {
   %into = builtin.unrealized_conversion_cast %de : !d to memref<?xi8>
   %w = trikeshed.drain %xs, %into : !text, memref<?xi8> -> index
   func.call @ob_used(%k) : (i64) -> ()
-  return
-}
-
-func.func @ob_piece(%base: !llvm.ptr, %t: i64) {
-  %s = func.call @tw_s(%t) : (i64) -> i64
-  %n = func.call @tw_n(%t) : (i64) -> i64
-  %src = func.call @off(%base, %s) : (!llvm.ptr, i64) -> !llvm.ptr
-  func.call @ob_bytes(%src, %n) : (!llvm.ptr, i64) -> ()
   return
 }
 

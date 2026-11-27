@@ -1,5 +1,5 @@
 // The pure zone's vocabulary against the standard library it replaces: Fn (std::function), Maybe (std::optional), Own (std::unique_ptr), Text (std::string,
-// ostringstream, std::to_string), eachWord and eachLine (a stream's >> and getline), the Spill body (llvm::SmallVector, checked against std::vector), WordTable
+// ostringstream, std::to_string), eachWord and eachLine (a stream's >> and getline), WordTable
 // (DenseMap, checked against std::unordered_map) and TextSet (std::unordered_set<std::string>).
 //   clang++ -std=c++20 -O1 -g -fsanitize=address,undefined -I include scripts/vocab-check.cc -o /tmp/vocab-check && /tmp/vocab-check
 #include "Composite/Table.h"
@@ -37,18 +37,18 @@ int main() {
 
   // Maybe.
   Maybe<std::string> none, some(std::string("x"));
-  require(!none && some && *some == "x" && none.or_("d") == "d", "Maybe holds a value or nothing");
+  require(!none && some && *some == "x", "Maybe holds a value or nothing");
 
-  // Text: integers, hex, C strings, against snprintf.
+  // Text: integers and C strings, against snprintf.
   for (int i = 0; i < 100000; i++) {
     int64_t x = int64_t(rng());
     if (i % 3 == 0) x >>= rng() % 63;
     if (i == 0) x = INT64_MIN;
     if (i == 1) x = 0;
     char want[64];
-    std::snprintf(want, sizeof want, "%" PRId64 " %" PRIx64 " %08" PRIx64, x, uint64_t(x), uint64_t(x) & 0xffff);
+    std::snprintf(want, sizeof want, "%" PRId64, x);
     Text t;
-    t.putInt(x).put(' ').putHex(uint64_t(x)).put(' ').putHex(uint64_t(x) & 0xffff, 8);
+    t.putInt(x);
     require(std::string(t.cstr()) == want, "Text writes integers as printf does");
   }
   Text u;
@@ -158,30 +158,6 @@ int main() {
     require(got == want, "eachLine splits where getline does");
   }
 
-  // Spill: inline, then the heap; moves of an inline and of a spilled series; non-plain cells.
-  for (int round = 0; round < 2000; round++) {
-    MutableSeries<std::string, Spill<std::string, 4>> a;
-    std::vector<std::string> ref;
-    uint32_t m = uint32_t(rng() % 40);
-    for (uint32_t i = 0; i < m; i++) {
-      std::string v = std::to_string(rng()) + std::string(rng() % 30, 'x');
-      a.append(v);
-      ref.push_back(v);
-      if (rng() % 7 == 0 && !ref.empty()) { a.pop(); ref.pop_back(); }
-    }
-    MutableSeries<std::string, Spill<std::string, 4>> b(mv(a));
-    require(a.size() == 0 && b.size() == ref.size(), "a moved spill leaves the source empty");
-    for (uint32_t i = 0; i < b.size(); i++) require(b[i] == ref[i], "a moved spill keeps its cells, inline or not");
-    MutableSeries<std::string, Spill<std::string, 4>> c;
-    c.append("z");
-    c = mv(b);
-    require(c.size() == ref.size(), "move-assignment takes the cells");
-    for (uint32_t i = 0; i < c.size(); i++) require(c[i] == ref[i], "move-assignment keeps them in order");
-  }
-  MutableSeries<uint32_t, Spill<uint32_t, 8>> p;
-  for (uint32_t i = 0; i < 1000; i++) p.append(i * 3);
-  for (uint32_t i = 0; i < 1000; i++) require(p[i] == i * 3, "a plain spill grows past its inline cells");
-
   // WordTable against unordered_map: random words, repeated inserts, misses.
   WordTable<uint64_t> w;
   std::unordered_map<uint64_t, uint64_t> wr;
@@ -290,5 +266,5 @@ int main() {
     require(!ts.contains(k.data(), uint32_t(k.size())), "bytes never inserted are not members");
   }
   require(!ts.contains("", 0) && ts.insert("", 0) && ts.contains("", 0) && !ts.insert("", 0), "the empty string is a member");
-  std::printf("vocabulary: Fn, Maybe, Text (100000 numbers; 60000 random operations against std::string), eachWord and eachLine (20000 strings), Spill (2000 rounds of moves), WordTable, TextTable (%u names), TextSet (%u members) PASS; Own, Atomic\n", tt.size(), ts.size());
+  std::printf("vocabulary: Fn, Maybe, Text (100000 numbers; 60000 random operations against std::string), eachWord and eachLine (20000 strings), WordTable, TextTable (%u names), TextSet (%u members) PASS; Own, Atomic\n", tt.size(), ts.size());
 }
