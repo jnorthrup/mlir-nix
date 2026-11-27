@@ -68,6 +68,45 @@ void JsonOut::putString(std::string_view s) {
   bytes.n += uint32_t(nixev_ts_escape(s.data(), s.size(), bytes.data() + off, room));
 }
 
+// A set's or list's composition is lowered/nixeval/JsonCompOps.mlir: one combineAll of the rows (separator, escaped key,
+// ':', the value's text), drained once into `out`.  nixev_json_piece renders each piece once, in order, into the
+// composition's arena (the combineAll's region runs for its size and again for its drain); a value's bytes are appended
+// by printValueAsJSON itself.  Forcing, contexts, store copies and the error traces stay here, in the callback.
+extern "C" size_t nixev_ts_json_comp(void *ctx, int32_t kind, int64_t n, char *into, size_t cap);
+struct JsonComp {
+  EvalState *st; JsonOut arena; const composite::Frozen<const Attr *> *rows; Value *list; bool strict; NixStringContext *ctx;
+  bool copyToStore; PosPtr pos;
+  composite::MutableSeries<uint64_t, composite::Spill<uint64_t, 16>> spans; // per piece: offset << 32 | (length + 1); 0 until rendered
+};
+extern "C" void nixev_json_piece(void *p, int64_t j, void **pp, int64_t *nn) {
+  JsonComp &c = *static_cast<JsonComp *>(p);
+  if (!c.spans[uint32_t(j)]) {
+    uint32_t off = c.arena.bytes.size();
+    if (c.list) {
+      try { c.st->printValueAsJSON(c.arena, *c.list->list.elems[j], c.strict, *c.ctx, c.copyToStore, c.pos); }
+      catch (EvalError &e) { e.addTrace(c.pos, composite::cat("while evaluating list element at index ", size_t(j))); throw; }
+    } else if (j & 1) {
+      const Attr *a = (*c.rows)[uint32_t(j / 2)];
+      try { c.st->printValueAsJSON(c.arena, *a->value, c.strict, *c.ctx, c.copyToStore, c.st->positionOf(*a)); }
+      catch (EvalError &e) { e.addTrace(c.st->positionOf(*a), composite::cat("while evaluating attribute '", c.st->symbols[a->name], "'")); throw; }
+    } else c.arena.putString(c.st->symbols[(*c.rows)[uint32_t(j / 2)]->name]);
+    c.spans[uint32_t(j)] = uint64_t(off) << 32 | (uint64_t(c.arena.bytes.size() - off) + 1);
+  }
+  uint64_t s = c.spans[uint32_t(j)];
+  *pp = c.arena.bytes.data() + (s >> 32);
+  *nn = int64_t(s & 0xffffffffu) - 1;
+}
+// the size pass (cap 0) renders every piece; the drain then reserves exactly that room in `out` and writes it there
+static void jsonComp(JsonOut &out, JsonComp &c, size_t n) {
+  int32_t kind = c.list ? 1 : 0;
+  c.spans.resize(c.list ? n : 2 * n);
+  c.arena.bytes.reserve(64); // a small composition's pieces fit one buffer (the arena doubles from 4 otherwise)
+  size_t need = nixev_ts_json_comp(&c, kind, int64_t(n), nullptr, 0);
+  uint32_t off = out.bytes.size();
+  out.bytes.reserve(size_t(off) + need);
+  out.bytes.n += uint32_t(nixev_ts_json_comp(&c, kind, int64_t(n), out.bytes.data() + off, need));
+}
+
 void EvalState::printValueAsJSON(JsonOut &out, Value &v, bool strict, NixStringContext &ctx, bool copyToStore,
                                  PosPtr pos) {
   CallDepth guard(*this, pos);
@@ -94,36 +133,16 @@ void EvalState::printValueAsJSON(JsonOut &out, Value &v, bool strict, NixStringC
       printValueAsJSON(out, *o->value, strict, ctx, copyToStore, positionOf(*o));
       break;
     }
-    out.put('{');
-    bool first = true;
-    for (const Attr *a : v.attrs->lexicographicOrder(symbols)) {
-      if (!first) out.put(',');
-      first = false;
-      out.putString(symbols[a->name]);
-      out.put(':');
-      try {
-        printValueAsJSON(out, *a->value, strict, ctx, copyToStore, positionOf(*a));
-      } catch (EvalError &e) {
-        e.addTrace(positionOf(*a), composite::cat("while evaluating attribute '", symbols[a->name], "'"));
-        throw;
-      }
-    }
-    out.put('}');
+    auto rows = v.attrs->lexicographicOrder(symbols); // the sorted rows: the composition's keys and values, in that order
+    JsonComp c{this, {}, &rows, nullptr, strict, &ctx, copyToStore, pos, {}};
+    jsonComp(out, c, rows.size());
     break;
   }
-  case VType::List:
-    out.put('[');
-    for (size_t i = 0; i < v.listSize(); i++) {
-      if (i) out.put(',');
-      try {
-        printValueAsJSON(out, *v.list.elems[i], strict, ctx, copyToStore, pos);
-      } catch (EvalError &e) {
-        e.addTrace(pos, composite::cat("while evaluating list element at index ", i));
-        throw;
-      }
-    }
-    out.put(']');
+  case VType::List: {
+    JsonComp c{this, {}, nullptr, &v, strict, &ctx, copyToStore, pos, {}};
+    jsonComp(out, c, v.listSize());
     break;
+  }
   case VType::Float: out.put(nixstore::jsonFloat(v.fpoint)); break;
   case VType::Thunk: case VType::App: case VType::AttrApp: case VType::Failed: case VType::Blackhole:
     out.put("null");
