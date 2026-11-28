@@ -10,8 +10,12 @@
 //                      machines of the kernel's generic layout (lib/CMakeLists.txt puts the place in)
 //   nixfs_os_size      a stat record's st_size: a word at 48 on both
 //   nixfs_os_pathmax   PATH_MAX, the room the C++ gave getcwd: 4096
+//   nixfs_os_room      malloc, and nixfs_os_done free, under names of this module: a lowered module whose ops allocate
+//                      cannot declare the C library's two itself
 module {
   llvm.func @open(!llvm.ptr, i32, ...) -> i32
+  llvm.func @malloc(i64) -> !llvm.ptr
+  llvm.func @free(!llvm.ptr)
   llvm.func @stat(!llvm.ptr, !llvm.ptr) -> i32
   llvm.func @__errno_location() -> !llvm.ptr
 
@@ -41,6 +45,14 @@ module {
     %p = llvm.getelementptr %buf[%c48] : (!llvm.ptr, i64) -> !llvm.ptr, i8
     %r = llvm.load %p : !llvm.ptr -> i64
     llvm.return %r : i64
+  }
+  llvm.func @nixfs_os_room(%n: i64) -> !llvm.ptr {
+    %p = llvm.call @malloc(%n) : (i64) -> !llvm.ptr
+    llvm.return %p : !llvm.ptr
+  }
+  llvm.func @nixfs_os_done(%p: !llvm.ptr) {
+    llvm.call @free(%p) : (!llvm.ptr) -> ()
+    llvm.return
   }
   llvm.func @nixfs_os_pathmax() -> i64 {
     %c = llvm.mlir.constant(4096 : i64) : i64

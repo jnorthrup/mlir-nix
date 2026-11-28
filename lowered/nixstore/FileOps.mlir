@@ -2,23 +2,31 @@
 // The C++ keeps a forward each (the path made a C string, the message thrown); the system calls are made here, through
 // the C library, and the errors are worded here, Nix's wording byte for byte.
 //
-//   nixstore_fs_read(path, n, out)                 a file's bytes into the Text at out, read where they stay: the Text
-//                                                  is sized once to what the file says it holds (fstat), and again only
-//                                                  when the file holds more or less than it said
+//   nixstore_fs_read(path, n, out)                 a file's bytes into the Text at out.  The Text is given once the room
+//                                                  the file says it holds (fstat) and the reads fill it where the
+//                                                  bytes stay; what the file holds past that (it grew, or it said
+//                                                  nothing: a pipe, a device) is read into pages that are never moved
+//                                                  and drained once, one combineAll, after the Text is sized to the whole
 //   nixstore_fs_write(path, n, data, dn, mode, err)  a file made (or cut) and written
 //   nixstore_fs_exists(path)                       1 when lstat finds it (a dangling link is there)
 //   nixstore_fs_mkdirs(path, n, err)               the directory and its parents made (dirOf, PathOps.mlir), a link to a
 //                                                  directory taken for one
-//   nixstore_fs_delete(path, n, err)               the tree at path removed: a directory's names are filled first
-//                                                  (their bytes and each name's coordinates), then folded over, each
-//                                                  entry's path one combine drained once, the first failure kept
+//   nixstore_fs_delete(path, n, err)               the tree at path removed: a directory's names are filled into pages
+//                                                  first, then walked (a fold over the pages, and in each over the
+//                                                  parts between the names' NULs), each entry's path one combine
+//                                                  drained once, the first failure kept
 //   nixstore_fs_note(kind, path)                   nixprefetch::note: a file access told to the recorder, when one records
 //
 // path is a C string (n its bytes: the forward's nixsys::CStr).  An entry that can fail answers 0, or 1 with the message
 // in the Text at err (read: at out), which the forward throws; nothing made here outlives the call.  errno is read where
 // the C++ read it (after the close for a failed write, before it for a failed read).  A file read or looked at is told
-// to the recorder of file accesses when one records.  No op here allocates (the rooms are malloc's, named below: a
-// module whose ops allocate cannot declare malloc and free as functions of its own).
+// to the recorder of file accesses when one records.
+//
+// What loops here: the calls whose order is the effect, each a small scf.while of its own (fs_readinto: read; fs_readpages:
+// a page made, then filled; fs_writeall: write; fs_names: readdir).  The bytes those calls leave are views made once
+// (a page, a name, a path), read by at, compare, parts and slices, and copied by drains.  The rooms made here are
+// malloc's under the system module's names (nixfs_os_room, nixfs_os_done): a module whose ops allocate (parts does)
+// cannot declare malloc and free as functions of its own.
 //
 // The system's words (a stat record's mode and size, errno, a file made with a mode) are FileOsDarwin.mlir.in and
 // FileOsLinux.mlir.in, beside the store index's (nixsi_os_*: open, fstat, lstat, opendir, readdir, a directory entry's
@@ -29,12 +37,14 @@
 // (lib/CMakeLists.txt mlnix_lower_trikeshed).
 !s = !trikeshed.series<i8>
 !s64 = !trikeshed.series<i64>
+!tp = !trikeshed.twinpacked<i32>
+!sp = !trikeshed.series<!tp>
 !m = memref<?xi8, strided<[1], offset: ?>>
 !m64 = memref<?xi64, strided<[1], offset: ?>>
 !d = !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
 
-memref.global "private" constant @fs_words : memref<112xi8> =
-  dense<"0x6f70656e696e672066696c652027273a2072656164696e672066696c6520276372656174696e672066696c65202777726974696e672066696c65202727206973206e6f742061206469726563746f72796372656174696e67206469726563746f7279202772656d6f76696e6720272f00">
+memref.global "private" constant @fs_words : memref<115xi8> =
+  dense<"0x6f70656e696e672066696c652027273a2072656164696e672066696c6520276372656174696e672066696c65202777726974696e672066696c65202727206973206e6f742061206469726563746f72796372656174696e67206469726563746f727920272f002e2e2e72656d6f76696e672027">
 
 // the C library
 func.func private @close(i32) -> i32
@@ -47,9 +57,6 @@ func.func private @chmod(!llvm.ptr, i32) -> i32
 func.func private @closedir(!llvm.ptr) -> i32
 func.func private @strerror(i32) -> !llvm.ptr
 func.func private @strlen(!llvm.ptr) -> i64
-func.func private @malloc(i64) -> !llvm.ptr
-func.func private @realloc(!llvm.ptr, i64) -> !llvm.ptr
-func.func private @free(!llvm.ptr)
 func.func private @abort()
 // the system's words: the store index's, and this module's
 func.func private @nixsi_os_open(!llvm.ptr, i64) -> i32
@@ -63,6 +70,8 @@ func.func private @nixfs_os_create(!llvm.ptr, i32) -> i32
 func.func private @nixfs_os_stat(!llvm.ptr, !llvm.ptr) -> i32
 func.func private @nixfs_os_mode(!llvm.ptr) -> i32
 func.func private @nixfs_os_size(!llvm.ptr) -> i64
+func.func private @nixfs_os_room(i64) -> !llvm.ptr
+func.func private @nixfs_os_done(!llvm.ptr)
 // the Text at t made n bytes long (what it held is kept, a NUL follows): where its bytes are (StorePaths.cpp)
 func.func private @nixstore_text_sized(!llvm.ptr, i64) -> !llvm.ptr
 // the recorder of file accesses (Prefetch.cpp): whether it records, and a path told to it
@@ -103,8 +112,8 @@ func.func private @fs_fail(%err: !llvm.ptr, %ao: index, %an: index, %p: !llvm.pt
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
   %z32 = arith.constant 0 : i32
-  %words_g = memref.get_global @fs_words : memref<112xi8>
-  %words = trikeshed.text %words_g : memref<112xi8> -> !s
+  %words_g = memref.get_global @fs_words : memref<115xi8>
+  %words = trikeshed.text %words_g : memref<115xi8> -> !s
   %a = trikeshed.slice %words[%ao, %an] : !s -> !s
   %b = trikeshed.slice %words[%bo, %bn] : !s -> !s
   %path_d = func.call @fs_desc(%p, %n) : (!llvm.ptr, i64) -> !d
@@ -140,6 +149,81 @@ func.func private @fs_kind(%st: !llvm.ptr) -> i32 {
 }
 
 //===----------------------------------------------------------------------===//
+// Pages: a fill whose size is not known ahead
+//===----------------------------------------------------------------------===//
+// Page k of a fill holds `unit << k` bytes; it is filled before the next is made and is never moved, so nothing is
+// copied until the one drain (or walk) that follows the fill.  A fill has 48 pages at most; the caller's two tables of
+// 48 words get each page's address and how many bytes it holds.
+
+// the room of page k of `unit`-byte pages: `first` when it is page 0 and the caller has one of its own, else a room of malloc's
+func.func private @fs_page(%first: !llvm.ptr, %unit: i64, %k: i64) -> !llvm.ptr {
+  %c0 = arith.constant 0 : i64
+  %fb = llvm.ptrtoint %first : !llvm.ptr to i64
+  %has = arith.cmpi ne, %fb, %c0 : i64
+  %is0 = arith.cmpi eq, %k, %c0 : i64
+  %own = arith.andi %has, %is0 : i1
+  %p = scf.if %own -> (!llvm.ptr) {
+    scf.yield %first : !llvm.ptr
+  } else {
+    %cap = arith.shli %unit, %k : i64
+    %q = func.call @nixfs_os_room(%cap) : (i64) -> !llvm.ptr
+    %qb = llvm.ptrtoint %q : !llvm.ptr to i64
+    %gone = arith.cmpi eq, %qb, %c0 : i64
+    scf.if %gone {
+      func.call @abort() : () -> ()
+    }
+    scf.yield %q : !llvm.ptr
+  }
+  return %p : !llvm.ptr
+}
+
+// The pages' bytes one after the other: ONE combineAll (page k's filled bytes, a view of the page), drained once into
+// the `total` bytes at `into`.
+func.func private @fs_drainpages(%pages: !llvm.ptr, %fills: !llvm.ptr, %npages: i64, %into: !llvm.ptr, %total: i64) {
+  %ps_d = func.call @fs_desc(%pages, %npages) : (!llvm.ptr, i64) -> !d
+  %ps_m = builtin.unrealized_conversion_cast %ps_d : !d to !m64
+  %ps = builtin.unrealized_conversion_cast %ps_m : !m64 to !s64
+  %fs_d = func.call @fs_desc(%fills, %npages) : (!llvm.ptr, i64) -> !d
+  %fs_m = builtin.unrealized_conversion_cast %fs_d : !d to !m64
+  %fs = builtin.unrealized_conversion_cast %fs_m : !m64 to !s64
+  %ni = arith.index_cast %npages : i64 to index
+  %all, %coords = trikeshed.combineAll %ni : !s, !sp {
+  ^bb0(%k: index):
+    %p64 = trikeshed.at %ps[%k] : !s64, index -> i64
+    %n = trikeshed.at %fs[%k] : !s64, index -> i64
+    %p = llvm.inttoptr %p64 : i64 to !llvm.ptr
+    %page_d = func.call @fs_desc(%p, %n) : (!llvm.ptr, i64) -> !d
+    %page_m = builtin.unrealized_conversion_cast %page_d : !d to !m
+    %page = builtin.unrealized_conversion_cast %page_m : !m to !s
+    trikeshed.yield %page : !s
+  }
+  %room_d = func.call @fs_desc(%into, %total) : (!llvm.ptr, i64) -> !d
+  %room = builtin.unrealized_conversion_cast %room_d : !d to !m
+  %end = trikeshed.drain %all, %room : !s, !m -> index
+  return
+}
+
+// the pages from page `from` on given back: a walk over the table
+func.func private @fs_freepages(%pages: !llvm.ptr, %npages: i64, %from: i64) {
+  %c0 = arith.constant 0 : i64
+  %ps_d = func.call @fs_desc(%pages, %npages) : (!llvm.ptr, i64) -> !d
+  %ps_m = builtin.unrealized_conversion_cast %ps_d : !d to !m64
+  %ps = builtin.unrealized_conversion_cast %ps_m : !m64 to !s64
+  %fi = arith.index_cast %from : i64 to index
+  %ni = arith.index_cast %npages : i64 to index
+  %capped = arith.minui %fi, %ni : index
+  %left = arith.subi %ni, %capped : index
+  %rest = trikeshed.slice %ps[%capped, %left] : !s64 -> !s64
+  %done = trikeshed.fold %rest, %c0 : !s64, i64 -> i64 {
+  ^bb0(%acc: i64, %p64: i64):
+    %p = llvm.inttoptr %p64 : i64 to !llvm.ptr
+    func.call @nixfs_os_done(%p) : (!llvm.ptr) -> ()
+    trikeshed.yield %acc : i64
+  }
+  return
+}
+
+//===----------------------------------------------------------------------===//
 // readFile
 //===----------------------------------------------------------------------===//
 
@@ -154,14 +238,82 @@ func.func private @fs_read_notopened(%err: !llvm.ptr, %cp: !llvm.ptr, %n: i64, %
   return %f : i64
 }
 
+// The cap bytes at p filled from the file: read after read (their order is the effect, so an scf.while) until the room
+// is full, the file ends or a read fails.  The bytes read; then 0 the room is full, 1 the file ended, 2 a read failed;
+// and for a read that failed what the system said (-1 otherwise).
+func.func private @fs_readinto(%fd: i32, %p: !llvm.ptr, %cap: i64) -> (i64, i64, i32) {
+  %c0 = arith.constant 0 : i64
+  %c1 = arith.constant 1 : i64
+  %c2 = arith.constant 2 : i64
+  %m1 = arith.constant -1 : i32
+  %got, %state, %e = scf.while (%g = %c0, %s = %c0, %x = %m1) : (i64, i64, i32) -> (i64, i64, i32) {
+    %room = arith.cmpi ult, %g, %cap : i64
+    %reading = arith.cmpi eq, %s, %c0 : i64
+    %go = arith.andi %room, %reading : i1
+    scf.condition(%go) %g, %s, %x : i64, i64, i32
+  } do {
+  ^bb0(%ga: i64, %sa: i64, %xa: i32):
+    %at = llvm.getelementptr %p[%ga] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+    %left = arith.subi %cap, %ga : i64
+    %k = func.call @read(%fd, %at, %left) : (i32, !llvm.ptr, i64) -> i64
+    %neg = arith.cmpi slt, %k, %c0 : i64
+    %end = arith.cmpi eq, %k, %c0 : i64
+    %xn = scf.if %neg -> (i32) {
+      %e1 = func.call @nixfs_os_errno() : () -> i32
+      scf.yield %e1 : i32
+    } else {
+      scf.yield %xa : i32
+    }
+    %g2 = arith.addi %ga, %k : i64
+    %gn = arith.select %neg, %ga, %g2 : i64
+    %s1 = arith.select %end, %c1, %c0 : i64
+    %sn = arith.select %neg, %c2, %s1 : i64
+    scf.yield %gn, %sn, %xn : i64, i64, i32
+  }
+  return %got, %state, %e : i64, i64, i32
+}
+
+// The rest of a file read into pages of 65536 << k bytes, the first the caller's: a page is made and filled (fs_readinto)
+// while the one before it was filled to its end.  The pages made, the bytes they hold in all, and what the system said
+// of a read that failed (-1 when none did).  A page made and then the reads into it, in that order: an scf.while.
+func.func private @fs_readpages(%fd: i32, %first: !llvm.ptr, %pages: !llvm.ptr, %fills: !llvm.ptr) -> (i64, i64, i32) {
+  %c0 = arith.constant 0 : i64
+  %c1 = arith.constant 1 : i64
+  %c48 = arith.constant 48 : i64
+  %c65536 = arith.constant 65536 : i64
+  %m1 = arith.constant -1 : i32
+  %ptab_d = func.call @fs_desc(%pages, %c48) : (!llvm.ptr, i64) -> !d
+  %ptab = builtin.unrealized_conversion_cast %ptab_d : !d to !m64
+  %ftab_d = func.call @fs_desc(%fills, %c48) : (!llvm.ptr, i64) -> !d
+  %ftab = builtin.unrealized_conversion_cast %ftab_d : !d to !m64
+  %np, %total, %state, %e = scf.while (%k = %c0, %t = %c0, %s = %c0, %x = %m1) : (i64, i64, i64, i32) -> (i64, i64, i64, i32) {
+    %go = arith.cmpi eq, %s, %c0 : i64
+    scf.condition(%go) %k, %t, %s, %x : i64, i64, i64, i32
+  } do {
+  ^bb0(%ka: i64, %ta: i64, %sa: i64, %xa: i32):
+    %p = func.call @fs_page(%first, %c65536, %ka) : (!llvm.ptr, i64, i64) -> !llvm.ptr
+    %cap = arith.shli %c65536, %ka : i64
+    %got, %s2, %x2 = func.call @fs_readinto(%fd, %p, %cap) : (i32, !llvm.ptr, i64) -> (i64, i64, i32)
+    %ki = arith.index_cast %ka : i64 to index
+    %pb = llvm.ptrtoint %p : !llvm.ptr to i64
+    memref.store %pb, %ptab[%ki] : !m64
+    memref.store %got, %ftab[%ki] : !m64
+    %k2 = arith.addi %ka, %c1 : i64
+    %t2 = arith.addi %ta, %got : i64
+    scf.yield %k2, %t2, %s2, %x2 : i64, i64, i64, i32
+  }
+  return %np, %total, %e : i64, i64, i32
+}
+
 func.func @nixstore_fs_read(%cp: !llvm.ptr, %n: i64, %out: !llvm.ptr) -> i64 {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
   %c2 = arith.constant 2 : i64
   %c20 = arith.constant 20 : i64
+  %c48 = arith.constant 48 : i64
   %c65536 = arith.constant 65536 : i64
-  %most = arith.constant 4294967294 : i64
   %z32 = arith.constant 0 : i32
+  %m1 = arith.constant -1 : i32
   %kF = arith.constant 70 : i32
   %regular = arith.constant 32768 : i32
   %null = llvm.mlir.zero : !llvm.ptr
@@ -170,12 +322,14 @@ func.func @nixstore_fs_read(%cp: !llvm.ptr, %n: i64, %out: !llvm.ptr) -> i64 {
   %why_o = arith.constant 14 : index  // "': "
   %why_n = arith.constant 3 : index
   %st = llvm.alloca %c20 x i64 : (i64) -> !llvm.ptr
-  %cell = llvm.alloca %c1 x i8 : (i64) -> !llvm.ptr
+  %page = llvm.alloca %c65536 x i8 : (i64) -> !llvm.ptr
+  %pages = llvm.alloca %c48 x i64 : (i64) -> !llvm.ptr
+  %fills = llvm.alloca %c48 x i64 : (i64) -> !llvm.ptr
   func.call @nixstore_fs_note(%kF, %cp) : (i32, !llvm.ptr) -> ()
   %fd = func.call @nixsi_os_open(%cp, %c0) : (!llvm.ptr, i64) -> i32
   %opened = arith.cmpi sge, %fd, %z32 : i32
   %r = scf.if %opened -> (i64) {
-    // what a regular file says it holds: the Text is sized to it once and the bytes are read where they stay
+    // what a regular file says it holds: the Text is given that room once, and the reads fill it where the bytes stay
     %rc = func.call @nixsi_os_fstat(%fd, %st) : (i32, !llvm.ptr) -> i32
     %kind = func.call @fs_kind(%st) : (!llvm.ptr) -> i32
     %size = func.call @nixfs_os_size(%st) : (!llvm.ptr) -> i64
@@ -184,85 +338,45 @@ func.func @nixstore_fs_read(%cp: !llvm.ptr, %n: i64, %out: !llvm.ptr) -> i64 {
     %some = arith.cmpi sgt, %size, %c0 : i64
     %k0 = arith.andi %stok, %reg : i1
     %known = arith.andi %k0, %some : i1
-    %want0 = arith.select %known, %size, %c0 : i64
+    %hint = arith.select %known, %size, %c0 : i64
     %p0 = scf.if %known -> (!llvm.ptr) {
       %q = func.call @nixstore_text_sized(%out, %size) : (!llvm.ptr, i64) -> !llvm.ptr
       scf.yield %q : !llvm.ptr
     } else {
       scf.yield %null : !llvm.ptr
     }
-    %pb0 = llvm.ptrtoint %p0 : !llvm.ptr to i64
-    // state 0 reading, 1 the file's end, 2 a read failed (e what the system said)
-    %pe, %we, %te, %se, %ee = scf.while (%p = %pb0, %want = %want0, %total = %c0, %state = %c0, %e = %z32) : (i64, i64, i64, i64, i32) -> (i64, i64, i64, i64, i32) {
-      %go = arith.cmpi eq, %state, %c0 : i64
-      scf.condition(%go) %p, %want, %total, %state, %e : i64, i64, i64, i64, i32
-    } do {
-    ^bb0(%pa: i64, %wa: i64, %ta: i64, %sa: i64, %ea: i32):
-      %full = arith.cmpi eq, %ta, %wa : i64
-      %pn, %wn, %tn, %sn, %en = scf.if %full -> (i64, i64, i64, i64, i32) {
-        // the room is used up: one byte more says whether the file ends here; when it does not, the room doubles
-        // (64 KiB at least, and to a Text's most before past it)
-        %k = func.call @read(%fd, %cell, %c1) : (i32, !llvm.ptr, i64) -> i64
-        %neg = arith.cmpi slt, %k, %c0 : i64
-        %x1, %x2, %x3, %x4, %x5 = scf.if %neg -> (i64, i64, i64, i64, i32) {
-          %er = func.call @nixfs_os_errno() : () -> i32
-          scf.yield %pa, %wa, %ta, %c2, %er : i64, i64, i64, i64, i32
-        } else {
-          %end = arith.cmpi eq, %k, %c0 : i64
-          %y1, %y2, %y3, %y4 = scf.if %end -> (i64, i64, i64, i64) {
-            scf.yield %pa, %wa, %ta, %c1 : i64, i64, i64, i64
-          } else {
-            %tw = arith.muli %wa, %c2 : i64
-            %w1 = arith.maxsi %tw, %c65536 : i64
-            %over = arith.cmpi sgt, %w1, %most : i64
-            %under = arith.cmpi slt, %wa, %most : i64
-            %clamp = arith.andi %over, %under : i1
-            %w2 = arith.select %clamp, %most, %w1 : i64
-            %q2 = func.call @nixstore_text_sized(%out, %w2) : (!llvm.ptr, i64) -> !llvm.ptr
-            %at = llvm.getelementptr %q2[%ta] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-            %byte = llvm.load %cell : !llvm.ptr -> i8
-            llvm.store %byte, %at : i8, !llvm.ptr
-            %t2 = arith.addi %ta, %c1 : i64
-            %q2b = llvm.ptrtoint %q2 : !llvm.ptr to i64
-            scf.yield %q2b, %w2, %t2, %c0 : i64, i64, i64, i64
-          }
-          scf.yield %y1, %y2, %y3, %y4, %ea : i64, i64, i64, i64, i32
-        }
-        scf.yield %x1, %x2, %x3, %x4, %x5 : i64, i64, i64, i64, i32
-      } else {
-        %base = llvm.inttoptr %pa : i64 to !llvm.ptr
-        %at = llvm.getelementptr %base[%ta] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-        %left = arith.subi %wa, %ta : i64
-        %k = func.call @read(%fd, %at, %left) : (i32, !llvm.ptr, i64) -> i64
-        %neg = arith.cmpi slt, %k, %c0 : i64
-        %end = arith.cmpi eq, %k, %c0 : i64
-        %er = scf.if %neg -> (i32) {
-          %e1 = func.call @nixfs_os_errno() : () -> i32
-          scf.yield %e1 : i32
-        } else {
-          scf.yield %ea : i32
-        }
-        %t2 = arith.addi %ta, %k : i64
-        %t3 = arith.select %neg, %ta, %t2 : i64
-        %s1 = arith.select %end, %c1, %c0 : i64
-        %s2 = arith.select %neg, %c2, %s1 : i64
-        scf.yield %pa, %wa, %t3, %s2, %er : i64, i64, i64, i64, i32
-      }
-      scf.yield %pn, %wn, %tn, %sn, %en : i64, i64, i64, i64, i32
+    %got0, %s0, %e0 = func.call @fs_readinto(%fd, %p0, %hint) : (i32, !llvm.ptr, i64) -> (i64, i64, i32)
+    // what it holds past that room (all of it, when it said nothing of its size): pages, the first this stack's
+    %full = arith.cmpi eq, %s0, %c0 : i64
+    %np, %more, %e1 = scf.if %full -> (i64, i64, i32) {
+      %a, %b, %c = func.call @fs_readpages(%fd, %page, %pages, %fills) : (i32, !llvm.ptr, !llvm.ptr, !llvm.ptr) -> (i64, i64, i32)
+      scf.yield %a, %b, %c : i64, i64, i32
+    } else {
+      scf.yield %c0, %c0, %m1 : i64, i64, i32
     }
     %rcc = func.call @close(%fd) : (i32) -> i32
-    %failed = arith.cmpi eq, %se, %c2 : i64
+    %bad0 = arith.cmpi eq, %s0, %c2 : i64
+    %e = arith.select %bad0, %e0, %e1 : i32
+    %failed = arith.cmpi sge, %e, %z32 : i32
     %res = scf.if %failed -> (i64) {
-      %f = func.call @fs_fail(%out, %reading_o, %reading_n, %cp, %n, %why_o, %why_n, %ee) : (!llvm.ptr, index, index, !llvm.ptr, i64, index, index, i32) -> i64
+      %f = func.call @fs_fail(%out, %reading_o, %reading_n, %cp, %n, %why_o, %why_n, %e) : (!llvm.ptr, index, index, !llvm.ptr, i64, index, index, i32) -> i64
       scf.yield %f : i64
     } else {
-      // the Text is the bytes read: cut where the file held fewer than the room
-      %cut = arith.cmpi ne, %te, %we : i64
-      scf.if %cut {
-        %q3 = func.call @nixstore_text_sized(%out, %te) : (!llvm.ptr, i64) -> !llvm.ptr
+      // the Text is what was read: sized once more when that is not what the file said, the pages' bytes drained once
+      // after the bytes read in place
+      %total = arith.addi %got0, %more : i64
+      %same = arith.cmpi eq, %total, %hint : i64
+      %room = scf.if %same -> (!llvm.ptr) {
+        scf.yield %p0 : !llvm.ptr
+      } else {
+        %q3 = func.call @nixstore_text_sized(%out, %total) : (!llvm.ptr, i64) -> !llvm.ptr
+        scf.yield %q3 : !llvm.ptr
       }
+      %at = llvm.getelementptr %room[%got0] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+      func.call @fs_drainpages(%pages, %fills, %np, %at, %more) : (!llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64) -> ()
       scf.yield %c0 : i64
     }
+    func.call @fs_freepages(%pages, %np, %c1) : (!llvm.ptr, i64, i64) -> ()
     scf.yield %res : i64
   } else {
     %e0 = func.call @nixfs_os_errno() : () -> i32
@@ -276,9 +390,32 @@ func.func @nixstore_fs_read(%cp: !llvm.ptr, %n: i64, %out: !llvm.ptr) -> i64 {
 // writeFile
 //===----------------------------------------------------------------------===//
 
-func.func @nixstore_fs_write(%cp: !llvm.ptr, %n: i64, %data: !llvm.ptr, %dn: i64, %mode: i64, %err: !llvm.ptr) -> i64 {
+// The n bytes at p written to the file: write after write (their order is the effect, so an scf.while), each given the
+// bytes not yet written, until none is left or a write fails.  0, or 2 when a write failed.
+func.func private @fs_writeall(%fd: i32, %p: !llvm.ptr, %n: i64) -> i64 {
   %c0 = arith.constant 0 : i64
   %c2 = arith.constant 2 : i64
+  %oe, %se = scf.while (%off = %c0, %state = %c0) : (i64, i64) -> (i64, i64) {
+    %more = arith.cmpi ult, %off, %n : i64
+    %fine = arith.cmpi eq, %state, %c0 : i64
+    %go = arith.andi %more, %fine : i1
+    scf.condition(%go) %off, %state : i64, i64
+  } do {
+  ^bb0(%oa: i64, %sa: i64):
+    %at = llvm.getelementptr %p[%oa] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+    %left = arith.subi %n, %oa : i64
+    %k = func.call @write(%fd, %at, %left) : (i32, !llvm.ptr, i64) -> i64
+    %neg = arith.cmpi slt, %k, %c0 : i64
+    %o2 = arith.addi %oa, %k : i64
+    %on = arith.select %neg, %oa, %o2 : i64
+    %sn = arith.select %neg, %c2, %c0 : i64
+    scf.yield %on, %sn : i64, i64
+  }
+  return %se : i64
+}
+
+func.func @nixstore_fs_write(%cp: !llvm.ptr, %n: i64, %data: !llvm.ptr, %dn: i64, %mode: i64, %err: !llvm.ptr) -> i64 {
+  %c0 = arith.constant 0 : i64
   %z32 = arith.constant 0 : i32
   %creating_o = arith.constant 31 : index  // "creating file '"
   %creating_n = arith.constant 15 : index
@@ -290,25 +427,9 @@ func.func @nixstore_fs_write(%cp: !llvm.ptr, %n: i64, %data: !llvm.ptr, %dn: i64
   %fd = func.call @nixfs_os_create(%cp, %mode32) : (!llvm.ptr, i32) -> i32
   %made = arith.cmpi sge, %fd, %z32 : i32
   %r = scf.if %made -> (i64) {
-    // state 0 writing, 2 a write failed
-    %oe, %se = scf.while (%off = %c0, %state = %c0) : (i64, i64) -> (i64, i64) {
-      %more = arith.cmpi ult, %off, %dn : i64
-      %fine = arith.cmpi eq, %state, %c0 : i64
-      %go = arith.andi %more, %fine : i1
-      scf.condition(%go) %off, %state : i64, i64
-    } do {
-    ^bb0(%oa: i64, %sa: i64):
-      %at = llvm.getelementptr %data[%oa] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-      %left = arith.subi %dn, %oa : i64
-      %k = func.call @write(%fd, %at, %left) : (i32, !llvm.ptr, i64) -> i64
-      %neg = arith.cmpi slt, %k, %c0 : i64
-      %o2 = arith.addi %oa, %k : i64
-      %on = arith.select %neg, %oa, %o2 : i64
-      %sn = arith.select %neg, %c2, %c0 : i64
-      scf.yield %on, %sn : i64, i64
-    }
+    %state = func.call @fs_writeall(%fd, %data, %dn) : (i32, !llvm.ptr, i64) -> i64
     %rcc = func.call @close(%fd) : (i32) -> i32
-    %failed = arith.cmpi eq, %se, %c2 : i64
+    %failed = arith.cmpi ne, %state, %c0 : i64
     %res = scf.if %failed -> (i64) {
       // what the system says once the file is closed, as the C++ read it
       %e = func.call @nixfs_os_errno() : () -> i32
@@ -353,8 +474,6 @@ func.func @nixstore_fs_mkdirs(%cp: !llvm.ptr, %n: i64, %err: !llvm.ptr) -> i64 {
   %c20 = arith.constant 20 : i64
   %z32 = arith.constant 0 : i32
   %m1 = arith.constant -1 : i32
-  %z8 = arith.constant 0 : i8
-  %slash = arith.constant 47 : i8
   %false = arith.constant false
   %directory = arith.constant 16384 : i32
   %link = arith.constant 40960 : i32
@@ -368,17 +487,22 @@ func.func @nixstore_fs_mkdirs(%cp: !llvm.ptr, %n: i64, %err: !llvm.ptr) -> i64 {
   %creating_n = arith.constant 20 : index
   %why_o = arith.constant 14 : index  // "': "
   %why_n = arith.constant 3 : index
+  %words_g = memref.get_global @fs_words : memref<115xi8>
+  %words = trikeshed.text %words_g : memref<115xi8> -> !s
+  %slash_o = arith.constant 100 : index  // "/"
+  %slash_n = arith.constant 1 : index
+  %slash = trikeshed.slice %words[%slash_o, %slash_n] : !s -> !s
+  %nul_o = arith.constant 101 : index  // "\u0000"
+  %nul_n = arith.constant 1 : index
+  %nul = trikeshed.slice %words[%nul_o, %nul_n] : !s -> !s
   %st = llvm.alloca %c20 x i64 : (i64) -> !llvm.ptr
+  // nothing to make for no path and for the root
+  %path_d = func.call @fs_desc(%cp, %n) : (!llvm.ptr, i64) -> !d
+  %path_m = builtin.unrealized_conversion_cast %path_d : !d to !m
+  %path = builtin.unrealized_conversion_cast %path_m : !m to !s
+  %croot = trikeshed.compare %path, %slash unsigned : !s, !s
+  %root = arith.cmpi eq, %croot, %z32 : i32
   %empty = arith.cmpi eq, %n, %c0 : i64
-  %one = arith.cmpi eq, %n, %c1 : i64
-  %b0 = scf.if %one -> (i8) {
-    %x = llvm.load %cp : !llvm.ptr -> i8
-    scf.yield %x : i8
-  } else {
-    scf.yield %z8 : i8
-  }
-  %isslash = arith.cmpi eq, %b0, %slash : i8
-  %root = arith.andi %one, %isslash : i1
   %none = arith.ori %empty, %root : i1
   %r = scf.if %none -> (i64) {
     scf.yield %c0 : i64
@@ -409,14 +533,17 @@ func.func @nixstore_fs_mkdirs(%cp: !llvm.ptr, %n: i64, %err: !llvm.ptr) -> i64 {
       }
       scf.yield %r2 : i64
     } else {
-      // the parent first (dirOf), then this one; another's making it meanwhile is no failure
+      // the parent first (dirOf's bytes, PathOps.mlir, then a NUL drained after them: a C string), then this one;
+      // another's making it meanwhile is no failure
       %room = arith.addi %n, %c2 : i64
-      %dp = func.call @malloc(%room) : (i64) -> !llvm.ptr
+      %dp = func.call @nixfs_os_room(%room) : (i64) -> !llvm.ptr
       %dn = func.call @nixstore_ts_dirname(%cp, %n, %dp) : (!llvm.ptr, i64, !llvm.ptr) -> i64
       %dend = llvm.getelementptr %dp[%dn] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-      llvm.store %z8, %dend : i8, !llvm.ptr
+      %tail_d = func.call @fs_desc(%dend, %c1) : (!llvm.ptr, i64) -> !d
+      %tail = builtin.unrealized_conversion_cast %tail_d : !d to !m
+      %te = trikeshed.drain %nul, %tail : !s, !m -> index
       %up = func.call @nixstore_fs_mkdirs(%dp, %dn, %err) : (!llvm.ptr, i64, !llvm.ptr) -> i64
-      func.call @free(%dp) : (!llvm.ptr) -> ()
+      func.call @nixfs_os_done(%dp) : (!llvm.ptr) -> ()
       %upok = arith.cmpi eq, %up, %c0 : i64
       %r3 = scf.if %upok -> (i64) {
         %rc3 = func.call @mkdir(%cp, %all) : (!llvm.ptr, i32) -> i32
@@ -445,131 +572,114 @@ func.func @nixstore_fs_mkdirs(%cp: !llvm.ptr, %n: i64, %err: !llvm.ptr) -> i64 {
 // deletePathRecursive
 //===----------------------------------------------------------------------===//
 
-// room for `need` cells of `width` bytes at the block p (cap cells now; what it holds is kept): the block and its cells
-func.func private @fs_grow(%p: i64, %cap: i64, %need: i64, %width: i64) -> (i64, i64) {
-  %c0 = arith.constant 0 : i64
-  %c2 = arith.constant 2 : i64
-  %c64 = arith.constant 64 : i64
-  %enough = arith.cmpi sge, %cap, %need : i64
-  %rp, %rc = scf.if %enough -> (i64, i64) {
-    scf.yield %p, %cap : i64, i64
-  } else {
-    %twice = arith.muli %cap, %c2 : i64
-    %w0 = arith.maxsi %need, %twice : i64
-    %want = arith.maxsi %w0, %c64 : i64
-    %bytes = arith.muli %want, %width : i64
-    %old = llvm.inttoptr %p : i64 to !llvm.ptr
-    %new = func.call @realloc(%old, %bytes) : (!llvm.ptr, i64) -> !llvm.ptr
-    %nb = llvm.ptrtoint %new : !llvm.ptr to i64
-    %gone = arith.cmpi eq, %nb, %c0 : i64
-    scf.if %gone {
-      func.call @abort() : () -> ()
-    }
-    scf.yield %nb, %want : i64, i64
-  }
-  return %rp, %rc : i64, i64
-}
-
-// The names an open directory gives, but for "." and "..", in the order it gives them: their bytes one after another,
-// and each name's coordinates (start << 32 | length).  A fill: the two blocks grow by doubling and are the caller's to free.
-func.func private @fs_list(%dir: !llvm.ptr) -> (!llvm.ptr, !llvm.ptr, i64) {
+// The names an open directory gives, but for "." and "..", in the order it gives them (readdir after readdir: their
+// order is the effect, so an scf.while), each with its NUL, filled into pages of 4096 << k bytes: a page's first word is
+// how many bytes of names follow it; a name is whole in its page (one that does not fit opens the next; none is longer
+// than a page) and is copied there by one drain.  The caller's table gets each page's address.  The pages made.
+func.func private @fs_names(%dir: !llvm.ptr, %pages: !llvm.ptr) -> i64 {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
-  %c2 = arith.constant 2 : i64
   %c8 = arith.constant 8 : i64
-  %c32 = arith.constant 32 : i64
-  %z = arith.constant 0 : index
-  %i1 = arith.constant 1 : index
-  %dot = arith.constant 46 : i8
-  %nob = arith.constant 0 : i8
+  %c48 = arith.constant 48 : i64
+  %c4096 = arith.constant 4096 : i64
+  %z32 = arith.constant 0 : i32
+  %null = llvm.mlir.zero : !llvm.ptr
+  %words_g = memref.get_global @fs_words : memref<115xi8>
+  %words = trikeshed.text %words_g : memref<115xi8> -> !s
+  %dot_o = arith.constant 102 : index  // "."
+  %dot_n = arith.constant 1 : index
+  %dot = trikeshed.slice %words[%dot_o, %dot_n] : !s -> !s
+  %dotdot_o = arith.constant 103 : index  // ".."
+  %dotdot_n = arith.constant 2 : index
+  %dotdot = trikeshed.slice %words[%dotdot_o, %dotdot_n] : !s -> !s
+  %nul_o = arith.constant 101 : index  // "\u0000"
+  %nul_n = arith.constant 1 : index
+  %nul = trikeshed.slice %words[%nul_o, %nul_n] : !s -> !s
   %noff = func.call @nixsi_os_name() : () -> i64
+  %ptab_d = func.call @fs_desc(%pages, %c48) : (!llvm.ptr, i64) -> !d
+  %ptab = builtin.unrealized_conversion_cast %ptab_d : !d to !m64
   %e0 = func.call @nixsi_os_readdir(%dir) : (!llvm.ptr) -> !llvm.ptr
   %e0b = llvm.ptrtoint %e0 : !llvm.ptr to i64
-  %ee, %be, %bce, %ue, %ce, %cce, %ke = scf.while (%e = %e0b, %b = %c0, %bcap = %c0, %used = %c0, %c = %c0, %ccap = %c0, %k = %c0) : (i64, i64, i64, i64, i64, i64, i64) -> (i64, i64, i64, i64, i64, i64, i64) {
+  // k pages made; the last one, the bytes of names in it and the room it has left
+  %ee, %ke, %pe, %fe, %le = scf.while (%e = %e0b, %k = %c0, %page = %c0, %fill = %c0, %left = %c0) : (i64, i64, i64, i64, i64) -> (i64, i64, i64, i64, i64) {
     %more = arith.cmpi ne, %e, %c0 : i64
-    scf.condition(%more) %e, %b, %bcap, %used, %c, %ccap, %k : i64, i64, i64, i64, i64, i64, i64
+    scf.condition(%more) %e, %k, %page, %fill, %left : i64, i64, i64, i64, i64
   } do {
-  ^bb0(%ea: i64, %ba: i64, %bca: i64, %ua: i64, %ca: i64, %cca: i64, %ka: i64):
+  ^bb0(%ea: i64, %ka: i64, %pa: i64, %fa: i64, %la: i64):
     %ep = llvm.inttoptr %ea : i64 to !llvm.ptr
     %np = llvm.getelementptr %ep[%noff] : (!llvm.ptr, i64) -> !llvm.ptr, i8
     %nn = func.call @strlen(%np) : (!llvm.ptr) -> i64
     %name_d = func.call @fs_desc(%np, %nn) : (!llvm.ptr, i64) -> !d
     %name_m = builtin.unrealized_conversion_cast %name_d : !d to !m
     %name = builtin.unrealized_conversion_cast %name_m : !m to !s
-    %has1 = arith.cmpi sge, %nn, %c1 : i64
-    %b0 = scf.if %has1 -> (i8) {
-      %x0 = trikeshed.at %name[%z] : !s, index -> i8
-      scf.yield %x0 : i8
-    } else {
-      scf.yield %nob : i8
-    }
-    %has2 = arith.cmpi sge, %nn, %c2 : i64
-    %b1 = scf.if %has2 -> (i8) {
-      %x1 = trikeshed.at %name[%i1] : !s, index -> i8
-      scf.yield %x1 : i8
-    } else {
-      scf.yield %nob : i8
-    }
-    %d0 = arith.cmpi eq, %b0, %dot : i8
-    %d1 = arith.cmpi eq, %b1, %dot : i8
-    %one = arith.cmpi eq, %nn, %c1 : i64
-    %two = arith.cmpi eq, %nn, %c2 : i64
-    %self = arith.andi %one, %d0 : i1
-    %up0 = arith.andi %two, %d0 : i1
-    %up = arith.andi %up0, %d1 : i1
+    %cself = trikeshed.compare %name, %dot unsigned : !s, !s
+    %cup = trikeshed.compare %name, %dotdot unsigned : !s, !s
+    %self = arith.cmpi eq, %cself, %z32 : i32
+    %up = arith.cmpi eq, %cup, %z32 : i32
     %skip = arith.ori %self, %up : i1
-    %bn, %bcn, %un, %cn, %ccn, %kn = scf.if %skip -> (i64, i64, i64, i64, i64, i64) {
-      scf.yield %ba, %bca, %ua, %ca, %cca, %ka : i64, i64, i64, i64, i64, i64
+    %kn, %pn, %fn, %ln = scf.if %skip -> (i64, i64, i64, i64) {
+      scf.yield %ka, %pa, %fa, %la : i64, i64, i64, i64
     } else {
-      %u2 = arith.addi %ua, %nn : i64
-      %k2 = arith.addi %ka, %c1 : i64
-      %b2, %bc2 = func.call @fs_grow(%ba, %bca, %u2, %c1) : (i64, i64, i64, i64) -> (i64, i64)
-      %c2x, %cc2 = func.call @fs_grow(%ca, %cca, %k2, %c8) : (i64, i64, i64, i64) -> (i64, i64)
-      %bp = llvm.inttoptr %b2 : i64 to !llvm.ptr
-      %at = llvm.getelementptr %bp[%ua] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-      %into_d = func.call @fs_desc(%at, %nn) : (!llvm.ptr, i64) -> !d
+      // the name and its NUL: one combine, drained once where the open page's names end
+      %entry = trikeshed.combine %name, %nul : !s, !s -> !s
+      %need = trikeshed.size %entry : !s
+      %need64 = arith.index_cast %need : index to i64
+      %fits = arith.cmpi ule, %need64, %la : i64
+      %k2, %p2, %f2, %l2 = scf.if %fits -> (i64, i64, i64, i64) {
+        scf.yield %ka, %pa, %fa, %la : i64, i64, i64, i64
+      } else {
+        %q = func.call @fs_page(%null, %c4096, %ka) : (!llvm.ptr, i64, i64) -> !llvm.ptr
+        %qb = llvm.ptrtoint %q : !llvm.ptr to i64
+        %ki = arith.index_cast %ka : i64 to index
+        memref.store %qb, %ptab[%ki] : !m64
+        %cap = arith.shli %c4096, %ka : i64
+        %room = arith.subi %cap, %c8 : i64
+        %k3 = arith.addi %ka, %c1 : i64
+        scf.yield %k3, %qb, %c0, %room : i64, i64, i64, i64
+      }
+      %pp = llvm.inttoptr %p2 : i64 to !llvm.ptr
+      %from = arith.addi %f2, %c8 : i64
+      %at = llvm.getelementptr %pp[%from] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+      %into_d = func.call @fs_desc(%at, %need64) : (!llvm.ptr, i64) -> !d
       %into = builtin.unrealized_conversion_cast %into_d : !d to !m
-      %end = trikeshed.drain %name, %into : !s, !m -> index
-      %cpp = llvm.inttoptr %c2x : i64 to !llvm.ptr
-      %cells_d = func.call @fs_desc(%cpp, %k2) : (!llvm.ptr, i64) -> !d
-      %cells = builtin.unrealized_conversion_cast %cells_d : !d to !m64
-      %hi = arith.shli %ua, %c32 : i64
-      %co = arith.ori %hi, %nn : i64
-      %ki = arith.index_cast %ka : i64 to index
-      memref.store %co, %cells[%ki] : !m64
-      scf.yield %b2, %bc2, %u2, %c2x, %cc2, %k2 : i64, i64, i64, i64, i64, i64
+      %end = trikeshed.drain %entry, %into : !s, !m -> index
+      %f3 = arith.addi %f2, %need64 : i64
+      llvm.store %f3, %pp : i64, !llvm.ptr
+      %l3 = arith.subi %l2, %need64 : i64
+      scf.yield %k2, %p2, %f3, %l3 : i64, i64, i64, i64
     }
     %en = func.call @nixsi_os_readdir(%dir) : (!llvm.ptr) -> !llvm.ptr
     %enb = llvm.ptrtoint %en : !llvm.ptr to i64
-    scf.yield %enb, %bn, %bcn, %un, %cn, %ccn, %kn : i64, i64, i64, i64, i64, i64, i64
+    scf.yield %enb, %kn, %pn, %fn, %ln : i64, i64, i64, i64, i64
   }
-  %names = llvm.inttoptr %be : i64 to !llvm.ptr
-  %coords = llvm.inttoptr %ce : i64 to !llvm.ptr
-  return %names, %coords, %ke : !llvm.ptr, !llvm.ptr, i64
+  return %ke : i64
 }
 
 func.func @nixstore_fs_delete(%cp: !llvm.ptr, %n: i64, %err: !llvm.ptr) -> i64 {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
+  %c8 = arith.constant 8 : i64
   %c20 = arith.constant 20 : i64
-  %c32 = arith.constant 32 : i64
-  %low = arith.constant 4294967295 : i64
+  %c48 = arith.constant 48 : i64
+  %z = arith.constant 0 : index
   %z32 = arith.constant 0 : i32
+  %nul8 = arith.constant 0 : i8
   %directory = arith.constant 16384 : i32
   %mine = arith.constant 448 : i32
-  %removing_o = arith.constant 100 : index  // "removing '"
+  %removing_o = arith.constant 105 : index  // "removing '"
   %removing_n = arith.constant 10 : index
   %why_o = arith.constant 14 : index  // "': "
   %why_n = arith.constant 3 : index
-  %words_g = memref.get_global @fs_words : memref<112xi8>
-  %words = trikeshed.text %words_g : memref<112xi8> -> !s
-  %slash_o = arith.constant 110 : index  // "/"
+  %words_g = memref.get_global @fs_words : memref<115xi8>
+  %words = trikeshed.text %words_g : memref<115xi8> -> !s
+  %slash_o = arith.constant 100 : index  // "/"
   %slash_n = arith.constant 1 : index
   %slash = trikeshed.slice %words[%slash_o, %slash_n] : !s -> !s
-  %nul_o = arith.constant 111 : index  // "\u0000"
+  %nul_o = arith.constant 101 : index  // "\u0000"
   %nul_n = arith.constant 1 : index
   %nul = trikeshed.slice %words[%nul_o, %nul_n] : !s -> !s
   %st = llvm.alloca %c20 x i64 : (i64) -> !llvm.ptr
+  %pages = llvm.alloca %c48 x i64 : (i64) -> !llvm.ptr
   %rc = func.call @nixsi_os_lstat(%cp, %st) : (!llvm.ptr, !llvm.ptr) -> i32
   %there = arith.cmpi eq, %rc, %z32 : i32
   %r = scf.if %there -> (i64) {
@@ -585,44 +695,60 @@ func.func @nixstore_fs_delete(%cp: !llvm.ptr, %n: i64, %err: !llvm.ptr) -> i64 {
       %listed = arith.cmpi ne, %db, %c0 : i64
       %kids = scf.if %listed -> (i64) {
         // the names first, the directory closed, then each entry removed in the order the directory gave them: a fold
-        // that keeps the first failure and removes nothing after it
-        %names, %coords, %count = func.call @fs_list(%dir) : (!llvm.ptr) -> (!llvm.ptr, !llvm.ptr, i64)
+        // over the pages and in each a fold over its names (the parts between the NULs; after the last NUL there is
+        // none), which keeps the first failure and removes nothing after it
+        %np = func.call @fs_names(%dir, %pages) : (!llvm.ptr, !llvm.ptr) -> i64
         %rcd = func.call @closedir(%dir) : (!llvm.ptr) -> i32
         %path_d = func.call @fs_desc(%cp, %n) : (!llvm.ptr, i64) -> !d
         %path_m = builtin.unrealized_conversion_cast %path_d : !d to !m
         %path = builtin.unrealized_conversion_cast %path_m : !m to !s
-        %cs_d = func.call @fs_desc(%coords, %count) : (!llvm.ptr, i64) -> !d
-        %cs_m = builtin.unrealized_conversion_cast %cs_d : !d to !m64
-        %cs = builtin.unrealized_conversion_cast %cs_m : !m64 to !s64
-        %failed = trikeshed.fold %cs, %c0 : !s64, i64 -> i64 {
-        ^bb0(%acc: i64, %co: i64):
-          %clean = arith.cmpi eq, %acc, %c0 : i64
-          %res = scf.if %clean -> (i64) {
-            // the entry's path, `path/name` and a NUL: one combine drained once
-            %start = arith.shrui %co, %c32 : i64
-            %len = arith.andi %co, %low : i64
-            %np = llvm.getelementptr %names[%start] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-            %name_d = func.call @fs_desc(%np, %len) : (!llvm.ptr, i64) -> !d
-            %name_m = builtin.unrealized_conversion_cast %name_d : !d to !m
-            %name = builtin.unrealized_conversion_cast %name_m : !m to !s
-            %all = trikeshed.combine %path, %slash, %name, %nul : !s, !s, !s, !s -> !s
-            %sz = trikeshed.size %all : !s
-            %sz64 = arith.index_cast %sz : index to i64
-            %kp = func.call @malloc(%sz64) : (i64) -> !llvm.ptr
-            %into_d = func.call @fs_desc(%kp, %sz64) : (!llvm.ptr, i64) -> !d
-            %into = builtin.unrealized_conversion_cast %into_d : !d to !m
-            %end = trikeshed.drain %all, %into : !s, !m -> index
-            %kn = arith.subi %sz64, %c1 : i64
-            %x = func.call @nixstore_fs_delete(%kp, %kn, %err) : (!llvm.ptr, i64, !llvm.ptr) -> i64
-            func.call @free(%kp) : (!llvm.ptr) -> ()
-            scf.yield %x : i64
-          } else {
-            scf.yield %acc : i64
+        %ps_d = func.call @fs_desc(%pages, %np) : (!llvm.ptr, i64) -> !d
+        %ps_m = builtin.unrealized_conversion_cast %ps_d : !d to !m64
+        %ps = builtin.unrealized_conversion_cast %ps_m : !m64 to !s64
+        %failed = trikeshed.fold %ps, %c0 : !s64, i64 -> i64 {
+        ^bb0(%acc: i64, %p64: i64):
+          // a page: how many bytes of names it holds, then the names
+          %pp = llvm.inttoptr %p64 : i64 to !llvm.ptr
+          %head_d = func.call @fs_desc(%pp, %c1) : (!llvm.ptr, i64) -> !d
+          %head_m = builtin.unrealized_conversion_cast %head_d : !d to !m64
+          %head = builtin.unrealized_conversion_cast %head_m : !m64 to !s64
+          %fill = trikeshed.at %head[%z] : !s64, index -> i64
+          %first = llvm.getelementptr %pp[%c8] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+          %page_d = func.call @fs_desc(%first, %fill) : (!llvm.ptr, i64) -> !d
+          %page_m = builtin.unrealized_conversion_cast %page_d : !d to !m
+          %page = builtin.unrealized_conversion_cast %page_m : !m to !s
+          %names = trikeshed.parts %page, %nul8 : !s, i8 -> !sp
+          %f2 = trikeshed.fold %names, %acc : !sp, i64 -> i64 {
+          ^bb0(%a2: i64, %part: !tp):
+            %s32 = trikeshed.first %part : !tp -> i32
+            %l32 = trikeshed.second %part : !tp -> i32
+            %start = arith.index_castui %s32 : i32 to index
+            %len = arith.index_castui %l32 : i32 to index
+            %clean = arith.cmpi eq, %a2, %c0 : i64
+            %some = arith.cmpi ne, %l32, %z32 : i32
+            %go = arith.andi %clean, %some : i1
+            %res = scf.if %go -> (i64) {
+              // the entry's path, `path/name` and a NUL: one combine drained once
+              %name = trikeshed.slice %page[%start, %len] : !s -> !s
+              %all = trikeshed.combine %path, %slash, %name, %nul : !s, !s, !s, !s -> !s
+              %sz = trikeshed.size %all : !s
+              %sz64 = arith.index_cast %sz : index to i64
+              %kp = func.call @nixfs_os_room(%sz64) : (i64) -> !llvm.ptr
+              %into_d = func.call @fs_desc(%kp, %sz64) : (!llvm.ptr, i64) -> !d
+              %into = builtin.unrealized_conversion_cast %into_d : !d to !m
+              %end = trikeshed.drain %all, %into : !s, !m -> index
+              %kn = arith.subi %sz64, %c1 : i64
+              %x = func.call @nixstore_fs_delete(%kp, %kn, %err) : (!llvm.ptr, i64, !llvm.ptr) -> i64
+              func.call @nixfs_os_done(%kp) : (!llvm.ptr) -> ()
+              scf.yield %x : i64
+            } else {
+              scf.yield %a2 : i64
+            }
+            trikeshed.yield %res : i64
           }
-          trikeshed.yield %res : i64
+          trikeshed.yield %f2 : i64
         }
-        func.call @free(%names) : (!llvm.ptr) -> ()
-        func.call @free(%coords) : (!llvm.ptr) -> ()
+        func.call @fs_freepages(%pages, %np, %c0) : (!llvm.ptr, i64, i64) -> ()
         scf.yield %failed : i64
       } else {
         scf.yield %c0 : i64

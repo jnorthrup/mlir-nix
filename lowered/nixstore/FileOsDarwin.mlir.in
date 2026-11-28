@@ -10,8 +10,12 @@
 //   nixfs_os_mode      a stat record's st_mode: 16 bits at 4
 //   nixfs_os_size      a stat record's st_size: a word at 96
 //   nixfs_os_pathmax   PATH_MAX, the room the C++ gave getcwd: 1024
+//   nixfs_os_room      malloc, and nixfs_os_done free, under names of this module: a lowered module whose ops allocate
+//                      cannot declare the C library's two itself
 module {
   llvm.func @open(!llvm.ptr, i32, ...) -> i32
+  llvm.func @malloc(i64) -> !llvm.ptr
+  llvm.func @free(!llvm.ptr)
   llvm.func @"stat@NIXFS_INODE64@"(!llvm.ptr, !llvm.ptr) -> i32
   llvm.func @__error() -> !llvm.ptr
 
@@ -42,6 +46,14 @@ module {
     %p = llvm.getelementptr %buf[%c96] : (!llvm.ptr, i64) -> !llvm.ptr, i8
     %r = llvm.load %p : !llvm.ptr -> i64
     llvm.return %r : i64
+  }
+  llvm.func @nixfs_os_room(%n: i64) -> !llvm.ptr {
+    %p = llvm.call @malloc(%n) : (i64) -> !llvm.ptr
+    llvm.return %p : !llvm.ptr
+  }
+  llvm.func @nixfs_os_done(%p: !llvm.ptr) {
+    llvm.call @free(%p) : (!llvm.ptr) -> ()
+    llvm.return
   }
   llvm.func @nixfs_os_pathmax() -> i64 {
     %c = llvm.mlir.constant(1024 : i64) : i64
