@@ -299,6 +299,10 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/StoreRun.mlir StoreRun)
 # made canonical and registered), addPermRoot's links, and realise (a chain of steps, the walks over a derivation's
 # outputs, inputs and sources folds with the status carried).
 mlnix_lower_trikeshed(NixStore lowered/nixstore/StoreAdd.mlir StoreAdd)
+# StoreModulo.mlir: a derivation's tokens (drvTokens: the room sized ahead, each list a fold over its rows' words) and
+# its hash modulo its fixed inputs (hashDerivationModulo: a fixed-output derivation's text one combine drained once,
+# any other's input derivations a fold into the inputs its text is hashed with).
+mlnix_lower_trikeshed(NixStore lowered/nixstore/StoreModulo.mlir StoreModulo)
 if(APPLE)
   configure_file(${PROJECT_SOURCE_DIR}/lowered/nixstore/StoreBuildDarwin.mlir.in ${MLNIX_LOWERED_DIR}/StoreBuildOs.mlir @ONLY)
 else()

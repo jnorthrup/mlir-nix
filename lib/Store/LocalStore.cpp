@@ -336,22 +336,13 @@ struct GTok { int64_t tag, a, b; };
 }
 extern "C" uint64_t nixstore_ts_fingerprint(const GTok *t, int64_t n);
 extern "C" int64_t nixstore_ts_samecontent(const GTok *n, int64_t nn, const GTok *c, int64_t nc);
-static composite::MutableSeries<GTok> drvTokens(const Derivation &d) {
-  composite::MutableSeries<GTok> t;
-  auto w = [&](int64_t tag, uint64_t v) { t.append({tag, int64_t(v), 0}); };
-  auto s = [&](int64_t tag, std::string_view v) { t.append({tag, int64_t(uintptr_t(v.data())), int64_t(v.size())}); };
-  auto all = [&](const auto &xs) { w(0, xs.size()); for (const composite::Text &x : xs) s(1, x); };
-  s(1, d.name), s(1, d.platform), s(1, d.builder), all(d.args), all(d.inputSrcs), w(0, d.inputDrvs.size());
-  for (auto &[p, outs] : d.inputDrvs) s(1, p), all(outs);
-  w(7, d.outputs.size());
-  for (auto &[n, o] : d.outputs) s(1, n), w(4, o.kind), s(6, o.path), w(2, uint64_t(o.method)), w(2, uint64_t(o.hashAlgo)), w(3, uintptr_t(&o.hash));
-  w(0, d.env.size());
-  for (auto &[k, v] : d.env) s(1, k), s(5, v);
-  w(0, d.structuredAttrs.has_value());
-  if (d.structuredAttrs) s(1, *d.structuredAttrs);
+extern "C" int64_t nixsb_tokcount(const Derivation *d);
+extern "C" int64_t nixsb_tokens(const Derivation *d, GTok *room, int64_t n);
+static composite::MutableSeries<GTok> drvTokens(const Derivation &d) { // lowered/nixstore/StoreModulo.mlir: the room sized ahead, then filled once
+  composite::MutableSeries<GTok> t(size_t(nixsb_tokcount(&d)));
+  nixsb_tokens(&d, t.data(), t.size());
   return t;
 }
-
 const composite::Text *Store::sameDerivation(const Derivation &drv, uint64_t &fingerprint) const {
   composite::MutableSeries<GTok> t = drvTokens(drv);
   fingerprint = nixstore_ts_fingerprint(t.data(), t.size());
@@ -439,47 +430,51 @@ void Store::hashLater(std::string_view drvPath, DrvInputs &&inputs) {
   later->cv.notifyAll();
 }
 
-SortedMap<Hash> Store::hashDerivationModulo(const Derivation &drv, bool maskOutputs, DrvInputs *inputsOut) {
-  if (drv.isFixed()) {
-    SortedMap<Hash> res;
-    for (auto &[name, o] : drv.outputs) {
-      composite::Text p = o.fixedPath(settings.storeDir, drv.name, name);
-      res[name] = hashString(HashAlgo::SHA256, composite::cat("fixed:out:", o.methodAlgo(), ":",
-                                                              o.hash.to_string(HashFormat::Base16, false), ":", p));
-    }
-    return res;
-  }
-  for (auto &[n, o] : drv.outputs)
-    if (o.kind == DerivationOutput::CAFloating || o.kind == DerivationOutput::Impure)
-      throw Error(composite::cat("content-addressed and impure derivations are not supported (derivation '", drv.name, "')"));
-  DrvInputs inputs2;
-  for (auto &[drvPath, outs] : drv.inputDrvs) {
-    DrvRecord *rec = drvAt(drvPath);
-    if (!rec || !rec->hasModulo) { // an input's modulo hash: the hasher's, or made here; kept, with its base 16, for every later dependent
-      DrvModulo m;
-      if (!takeLater(drvPath, m.hashes)) m.hashes = hashDerivationModulo(readDerivation(drvPath), false);
+// hashDerivationModulo is lowered/nixstore/StoreModulo.mlir's nixsb_modulo: a fixed-output derivation's text composed and hashed there, any
+// other's input derivations folded into the inputs its text is hashed with.  What stays here is the records' and the maps' own.
+static_assert(offsetof(Store::DrvRecord, modulo) == 176 && offsetof(Store::DrvModulo, hex) == 16 && sizeof(SortedMap<Hash>::Row) == 88 &&
+                  offsetof(SortedMap<Hash>::Row, second) == 16 && offsetof(Hash, bytes) == 4 && sizeof(GTok) == 24 && offsetof(Derivation, platform) == 64,
+              "the places StoreModulo.mlir reads");
+extern "C" {
+int64_t nixsb_modulo(Sb *c, const Derivation *drv, int64_t mask, DrvInputs *inputs, SortedMap<Hash> *res);
+/// The record of an input derivation with its modulo hashes: the hasher's answer, or made here; kept, with the one hash's base 16, for every
+/// later dependent.  Null: the error is kept.
+Store::DrvRecord *nixsb_modrec(Sb *c, const char *p, int64_t n) {
+  Store::DrvRecord *made = nullptr;
+  c->guard([&] {
+    std::string_view drvPath(p, size_t(n));
+    Store::DrvRecord *rec = c->st->drvAt(drvPath);
+    if (!rec || !rec->hasModulo) {
+      Store::DrvModulo m;
+      if (!c->st->takeLater(drvPath, m.hashes)) m.hashes = c->st->hashDerivationModulo(c->st->readDerivation(drvPath), false);
       if (auto e = m.hashes.find(""); e != m.hashes.end()) m.hex = e->second.to_string(HashFormat::Base16, false);
-      rec = drvAt(drvPath); // the record of a derivation written here, or the one read just above
+      rec = c->st->drvAt(drvPath); // the record of a derivation written here, or the one read just above
       rec->modulo = std::move(m);
       rec->hasModulo = true;
     }
-    const DrvModulo &m = rec->modulo;
-    if (!m.hex.empty()) {
-      inputs2[m.hex].insert(outs.begin(), outs.end());
-    } else {
-      for (auto &o : outs) {
-        auto j = m.hashes.find(o);
-        if (j == m.hashes.end()) throw Error(composite::cat("no hash for output '", o, "' of derivation '", drv.name, "'"));
-        inputs2[j->second.to_string(HashFormat::Base16, false)].insert("out");
-      }
-    }
-  }
+    made = rec;
+  });
+  return made;
+}
+void nixsb_merge(DrvInputs *in, const char *hex, int64_t hn, const SortedSet *outs) { // no set: the one output "out"
+  SortedSet &s = (*in)[std::string_view(hex, size_t(hn))];
+  if (outs) s.insert(outs->begin(), outs->end());
+  else s.insert("out");
+}
+void nixsb_sethash(SortedMap<Hash> *m, const char *k, int64_t kn, const Hash *h) { (*m)[std::string_view(k, size_t(kn))] = *h; }
+int64_t nixsb_hashdrv(Sb *c, const Derivation *d, int64_t mask, const DrvInputs *in, SortedMap<Hash> *res) {
+  return c->guard([&] { (*res)[""] = d->hashUnparsed(mask, in); });
+}
+}
+SortedMap<Hash> Store::hashDerivationModulo(const Derivation &drv, bool maskOutputs, DrvInputs *inputsOut) {
+  Sb c(this);
   SortedMap<Hash> res;
-  res[""] = drv.hashUnparsed(maskOutputs, &inputs2);
-  if (inputsOut) *inputsOut = std::move(inputs2);
+  DrvInputs inputs;
+  int64_t s = nixsb_modulo(&c, &drv, maskOutputs, &inputs, &res); // 2: a fixed-output derivation, which has no inputs to give
+  c.done(s == 1);
+  if (inputsOut && s == 0) *inputsOut = std::move(inputs);
   return res;
 }
-
 /// The hasher's answer for `drvPath`, if it was asked for one: waited for when it is not made yet, and taken out (a path's hash is asked
 /// for once; drvHashes keeps it from then on).
 bool Store::takeLater(std::string_view drvPath, SortedMap<Hash> &out) {
