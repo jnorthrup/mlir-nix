@@ -216,12 +216,15 @@ func.func private @sbr_open(%h: !llvm.ptr) {
   return
 }
 func.func private @sbr_close(%h: !llvm.ptr) {
+  %c16 = arith.constant 16 : i64
   %z = arith.constant 0 : index
   %i1 = arith.constant 1 : index
   %i16 = arith.constant 16 : index
+  %hd = func.call @sbr_d(%h, %c16) : (!llvm.ptr, i64) -> !d
+  %hm = builtin.unrealized_conversion_cast %hd : !d to !m64
+  %hw = builtin.unrealized_conversion_cast %hm : !m64 to !s64
   scf.for %i = %z to %i16 step %i1 {
-    %i64 = arith.index_cast %i : index to i64
-    %pb = func.call @sbr_w(%h, %i64) : (!llvm.ptr, i64) -> i64
+    %pb = trikeshed.at %hw[%i] : !s64, index -> i64
     %p = llvm.inttoptr %pb : i64 to !llvm.ptr
     func.call @nixsb_os_free(%p) : (!llvm.ptr) -> ()
   }
@@ -234,57 +237,66 @@ func.func private @sbr_keep(%h: !llvm.ptr, %i: i64, %p: !llvm.ptr) {
   return
 }
 
-// Whether byte i of the n bytes at p is one a word ends at (' ', or \t to \r), as a stream's >> splits; none past n.
-func.func private @sbr_space(%p: !llvm.ptr, %n: i64, %i: i64) -> i1 {
+// The word of the n bytes at p that begins at or after k (a word ends at ' ' or at \t to \r, as a stream's >> splits):
+// where it begins and where it ends; it begins at n when there is none.  One fold over the text from k on: its state is
+// whether the word has begun or ended (the top two bits), where it began, and the byte it is at (31 bits each).
+func.func private @sbr_word(%p: !llvm.ptr, %n: i64, %k: i64) -> (i64, i64) {
+  %c0 = arith.constant 0 : i64
+  %c1 = arith.constant 1 : i64
+  %c2 = arith.constant 2 : i64
+  %c31 = arith.constant 31 : i64
+  %c62 = arith.constant 62 : i64
+  %low31 = arith.constant 2147483647 : i64
   %sp = arith.constant 32 : i8
   %tab = arith.constant 9 : i8
   %cr = arith.constant 13 : i8
-  %in = arith.cmpi slt, %i, %n : i64
-  %r = scf.if %in -> (i1) {
-    %t_d = func.call @sbr_d(%p, %n) : (!llvm.ptr, i64) -> !d
-    %t_m = builtin.unrealized_conversion_cast %t_d : !d to !m
-    %text = builtin.unrealized_conversion_cast %t_m : !m to !s
-    %ii = arith.index_cast %i : i64 to index
-    %ch = trikeshed.at %text[%ii] : !s, index -> i8
+  %from = arith.minsi %k, %n : i64
+  %len = arith.subi %n, %from : i64
+  %at = llvm.getelementptr %p[%from] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+  %t_d = func.call @sbr_d(%at, %len) : (!llvm.ptr, i64) -> !d
+  %t_m = builtin.unrealized_conversion_cast %t_d : !d to !m
+  %text = builtin.unrealized_conversion_cast %t_m : !m to !s
+  %end = trikeshed.fold %text, %from : !s, i64 -> i64 {
+  ^bb0(%acc: i64, %ch: i8):
+    %state = arith.shrui %acc, %c62 : i64
+    %i = arith.andi %acc, %low31 : i64
     %is = arith.cmpi eq, %ch, %sp : i8
     %ge = arith.cmpi uge, %ch, %tab : i8
     %le = arith.cmpi ule, %ch, %cr : i8
     %ctl = arith.andi %ge, %le : i1
-    %sp1 = arith.ori %is, %ctl : i1
-    scf.yield %sp1 : i1
-  } else {
-    %no = arith.constant 0 : i1
-    scf.yield %no : i1
+    %space = arith.ori %is, %ctl : i1
+    %before = arith.cmpi eq, %state, %c0 : i64
+    %within = arith.cmpi eq, %state, %c1 : i64
+    %i1 = arith.addi %i, %c1 : i64
+    %r = scf.if %before -> (i64) {
+      // a space: on; another byte: the word begins here
+      %b = arith.shli %i, %c31 : i64
+      %s1 = arith.shli %c1, %c62 : i64
+      %w0 = arith.ori %s1, %b : i64
+      %w = arith.ori %w0, %i1 : i64
+      %r0 = arith.select %space, %i1, %w : i64
+      scf.yield %r0 : i64
+    } else {
+      // within the word: a space ends it where it stands
+      %ends = arith.andi %within, %space : i1
+      %hi = arith.shli %c1, %c62 : i64
+      %done = arith.addi %acc, %hi : i64
+      %on = arith.addi %acc, %c1 : i64
+      %go = arith.select %within, %on, %acc : i64
+      %r1 = arith.select %ends, %done, %go : i64
+      scf.yield %r1 : i64
+    }
+    trikeshed.yield %r : i64
   }
-  return %r : i1
-}
-// The word of the n bytes at p that begins at or after k: where it begins and where it ends; it begins at n when there
-// is none.
-func.func private @sbr_word(%p: !llvm.ptr, %n: i64, %k: i64) -> (i64, i64) {
-  %c1 = arith.constant 1 : i64
-  %b = scf.while (%i = %k) : (i64) -> (i64) {
-    %sp = func.call @sbr_space(%p, %n, %i) : (!llvm.ptr, i64, i64) -> i1
-    scf.condition(%sp) %i : i64
-  } do {
-  ^bb0(%ia: i64):
-    %i1 = arith.addi %ia, %c1 : i64
-    scf.yield %i1 : i64
-  }
-  %e = scf.while (%j = %b) : (i64) -> (i64) {
-    %in = arith.cmpi slt, %j, %n : i64
-    %sp2 = func.call @sbr_space(%p, %n, %j) : (!llvm.ptr, i64, i64) -> i1
-    %t = arith.constant 1 : i1
-    %ns = arith.xori %sp2, %t : i1
-    %go = arith.andi %in, %ns : i1
-    scf.condition(%go) %j : i64
-  } do {
-  ^bb0(%ja: i64):
-    %j1 = arith.addi %ja, %c1 : i64
-    scf.yield %j1 : i64
-  }
+  %state = arith.shrui %end, %c62 : i64
+  %none = arith.cmpi eq, %state, %c0 : i64
+  %bw = arith.shrui %end, %c31 : i64
+  %b0 = arith.andi %bw, %low31 : i64
+  %e0 = arith.andi %end, %low31 : i64
+  %b = arith.select %none, %n, %b0 : i64
+  %e = arith.select %none, %n, %e0 : i64
   return %b, %e : i64, i64
 }
-
 // whether the n bytes at p are the constant text at off
 func.func private @sbr_is(%p: !llvm.ptr, %n: i64, %off: i64) -> i1 {
   %z32 = arith.constant 0 : i32
@@ -818,30 +830,56 @@ func.func private @sbr_env(%c: !llvm.ptr, %h: !llvm.ptr, %drv: !llvm.ptr, %outpu
     scf.yield %nb, %ne, %rin : i64, i64, i64
   }
   // the outputs' placeholders, noted with the paths they stand for
+  // (a row of a map of Texts is four words: the name's bytes and length, the value's; the rows are read through one view)
+  %x2 = arith.constant 2 : index
+  %x3 = arith.constant 3 : index
+  %x4 = arith.constant 4 : index
+  %c4 = arith.constant 4 : i64
   %prows, %pcount = func.call @sbr_text(%outputs) : (!llvm.ptr) -> (!llvm.ptr, i64)
+  %pw4 = arith.muli %pcount, %c4 : i64
+  %pd = func.call @sbr_d(%prows, %pw4) : (!llvm.ptr, i64) -> !d
+  %pm = builtin.unrealized_conversion_cast %pd : !d to !m64
+  %pws = builtin.unrealized_conversion_cast %pm : !m64 to !s64
   %pci = arith.index_cast %pcount : i64 to index
   scf.for %j = %z to %pci step %i1 {
-    %j64 = arith.index_cast %j : index to i64
-    %ro = arith.muli %j64, %c32 : i64
-    %vo = arith.addi %ro, %c16 : i64
-    %kt = llvm.getelementptr %prows[%ro] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-    %vt = llvm.getelementptr %prows[%vo] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-    %op, %onn = func.call @sbr_text(%kt) : (!llvm.ptr) -> (!llvm.ptr, i64)
-    %pp, %pn = func.call @sbr_text(%vt) : (!llvm.ptr) -> (!llvm.ptr, i64)
+    %w0 = arith.muli %j, %x4 : index
+    %w1 = arith.addi %w0, %i1 : index
+    %w2 = arith.addi %w0, %x2 : index
+    %w3 = arith.addi %w0, %x3 : index
+    %opb = trikeshed.at %pws[%w0] : !s64, index -> i64
+    %onw = trikeshed.at %pws[%w1] : !s64, index -> i64
+    %ppb = trikeshed.at %pws[%w2] : !s64, index -> i64
+    %pnw = trikeshed.at %pws[%w3] : !s64, index -> i64
+    %onn = arith.andi %onw, %low32 : i64
+    %pn = arith.andi %pnw, %low32 : i64
+    %op = llvm.inttoptr %opb : i64 to !llvm.ptr
+    %pp = llvm.inttoptr %ppb : i64 to !llvm.ptr
     func.call @nixsb_placeholder(%c, %op, %onn, %pp, %pn) : (!llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64) -> ()
   }
   // the derivation's own variables, the placeholders in their values rewritten
+  %ew4 = arith.muli %en, %c4 : i64
+  %ed = func.call @sbr_d(%erows, %ew4) : (!llvm.ptr, i64) -> !d
+  %em = builtin.unrealized_conversion_cast %ed : !d to !m64
+  %ews = builtin.unrealized_conversion_cast %em : !m64 to !s64
+  %celld = func.call @sbr_d(%cell, %c1) : (!llvm.ptr, i64) -> !d
+  %cellm = builtin.unrealized_conversion_cast %celld : !d to !m64
+  %cellw = builtin.unrealized_conversion_cast %cellm : !m64 to !s64
   %eni = arith.index_cast %en : i64 to index
   %r15 = scf.for %j = %z to %eni step %i1 iter_args(%ri = %r14) -> (i64) {
-    %j64 = arith.index_cast %j : index to i64
-    %ro = arith.muli %j64, %c32 : i64
-    %vo = arith.addi %ro, %c16 : i64
-    %kt = llvm.getelementptr %erows[%ro] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-    %vt = llvm.getelementptr %erows[%vo] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-    %kp, %kn = func.call @sbr_text(%kt) : (!llvm.ptr) -> (!llvm.ptr, i64)
-    %vp, %vn = func.call @sbr_text(%vt) : (!llvm.ptr) -> (!llvm.ptr, i64)
+    %w0 = arith.muli %j, %x4 : index
+    %w1 = arith.addi %w0, %i1 : index
+    %w2 = arith.addi %w0, %x2 : index
+    %w3 = arith.addi %w0, %x3 : index
+    %kpb = trikeshed.at %ews[%w0] : !s64, index -> i64
+    %knw = trikeshed.at %ews[%w1] : !s64, index -> i64
+    %vpb = trikeshed.at %ews[%w2] : !s64, index -> i64
+    %vnw = trikeshed.at %ews[%w3] : !s64, index -> i64
+    %kn = arith.andi %knw, %low32 : i64
+    %vn = arith.andi %vnw, %low32 : i64
+    %kp = llvm.inttoptr %kpb : i64 to !llvm.ptr
+    %vp = llvm.inttoptr %vpb : i64 to !llvm.ptr
     %wp = func.call @nixsb_rewrite(%c, %vp, %vn, %cell) : (!llvm.ptr, !llvm.ptr, i64, !llvm.ptr) -> !llvm.ptr
-    %wn = func.call @sbr_w(%cell, %c0) : (!llvm.ptr, i64) -> i64
+    %wn = trikeshed.at %cellw[%z] : !s64, index -> i64
     %rn = func.call @sbr_row(%rows, %ri, %kp, %kn, %wp, %wn) : (!llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64) -> i64
     scf.yield %rn : i64
   }
@@ -895,53 +933,84 @@ func.func private @sbr_env(%c: !llvm.ptr, %h: !llvm.ptr, %drv: !llvm.ptr, %outpu
 }
 
 // The arguments' rows (a pointer and a length each, as a Text's first words): the builder's base name, then the
-// derivation's arguments with the placeholders rewritten.  The rows are the handle's 4th room, the base name its 9th.
-// Returns how many.
+// derivation's arguments with the placeholders rewritten.  The store keeps each rewritten argument as a Text, one after
+// another (the context's texts, at 112: their rows and how many), so the rows are the base name's and theirs: one combine
+// drained once into the handle's 4th room (the base name is its 9th).  The loop asks the store for each argument in
+// turn, which allocates: it stays a loop.  Returns how many rows.
 func.func private @sbr_args(%c: !llvm.ptr, %h: !llvm.ptr, %drv: !llvm.ptr) -> i64 {
-  %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
   %c2 = arith.constant 2 : i64
   %c4 = arith.constant 4 : i64
   %c9 = arith.constant 9 : i64
   %c16 = arith.constant 16 : i64
   %c80 = arith.constant 80 : i64
-  %c96 = arith.constant 96 : i64
+  %c112 = arith.constant 112 : i64
+  %low32 = arith.constant 4294967295 : i64
   %z = arith.constant 0 : index
   %i1 = arith.constant 1 : index
+  %i2 = arith.constant 2 : index
+  %i3 = arith.constant 3 : index
   %cell = llvm.alloca %c1 x i64 : (i64) -> !llvm.ptr
-  %bt = llvm.getelementptr %drv[%c80] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %bp, %bn = func.call @sbr_text(%bt) : (!llvm.ptr) -> (!llvm.ptr, i64)
-  %at = llvm.getelementptr %drv[%c96] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %arows, %na = func.call @sbr_text(%at) : (!llvm.ptr) -> (!llvm.ptr, i64)
-  %na1 = arith.addi %na, %c1 : i64
-  %rb = arith.muli %na1, %c16 : i64
-  %rows = func.call @sbr_room(%rb) : (i64) -> !llvm.ptr
-  func.call @sbr_keep(%h, %c4, %rows) : (!llvm.ptr, i64, !llvm.ptr) -> ()
+  %brow = llvm.alloca %c2 x i64 : (i64) -> !llvm.ptr
+  // the derivation's builder and its arguments (two Texts' worth of words at 80): one view
+  %dt = llvm.getelementptr %drv[%c80] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+  %dd = func.call @sbr_d(%dt, %c4) : (!llvm.ptr, i64) -> !d
+  %dm = builtin.unrealized_conversion_cast %dd : !d to !m64
+  %dw = builtin.unrealized_conversion_cast %dm : !m64 to !s64
+  %bpb = trikeshed.at %dw[%z] : !s64, index -> i64
+  %bnw = trikeshed.at %dw[%i1] : !s64, index -> i64
+  %arb = trikeshed.at %dw[%i2] : !s64, index -> i64
+  %anw = trikeshed.at %dw[%i3] : !s64, index -> i64
+  %bn = arith.andi %bnw, %low32 : i64
+  %na = arith.andi %anw, %low32 : i64
+  %bp = llvm.inttoptr %bpb : i64 to !llvm.ptr
+  %arows = llvm.inttoptr %arb : i64 to !llvm.ptr
+  // the base name, and its row
   %bn1 = arith.addi %bn, %c1 : i64
   %base = func.call @sbr_room(%bn1) : (i64) -> !llvm.ptr
   func.call @sbr_keep(%h, %c9, %base) : (!llvm.ptr, i64, !llvm.ptr) -> ()
   %bl = func.call @nixstore_ts_basename(%bp, %bn, %base) : (!llvm.ptr, i64, !llvm.ptr) -> i64
   %bb = llvm.ptrtoint %base : !llvm.ptr to i64
-  func.call @sbr_ws(%rows, %c0, %bb) : (!llvm.ptr, i64, i64) -> ()
-  func.call @sbr_ws(%rows, %c1, %bl) : (!llvm.ptr, i64, i64) -> ()
+  %bd = func.call @sbr_d(%brow, %c2) : (!llvm.ptr, i64) -> !d
+  %bm = builtin.unrealized_conversion_cast %bd : !d to !m64
+  %bs = builtin.unrealized_conversion_cast %bm : !m64 to !s64
+  memref.store %bb, %bm[%z] : !m64
+  memref.store %bl, %bm[%i1] : !m64
+  // each argument rewritten: one more Text of the store's
+  %tt = llvm.getelementptr %c[%c112] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+  %t0, %before = func.call @sbr_text(%tt) : (!llvm.ptr) -> (!llvm.ptr, i64)
+  %na2 = arith.muli %na, %c2 : i64
+  %ad = func.call @sbr_d(%arows, %na2) : (!llvm.ptr, i64) -> !d
+  %am = builtin.unrealized_conversion_cast %ad : !d to !m64
+  %aw = builtin.unrealized_conversion_cast %am : !m64 to !s64
   %nai = arith.index_cast %na : i64 to index
   scf.for %j = %z to %nai step %i1 {
-    %j64 = arith.index_cast %j : index to i64
-    %ro = arith.muli %j64, %c16 : i64
-    %t = llvm.getelementptr %arows[%ro] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-    %ap, %an = func.call @sbr_text(%t) : (!llvm.ptr) -> (!llvm.ptr, i64)
+    %w0 = arith.muli %j, %i2 : index
+    %w1 = arith.addi %w0, %i1 : index
+    %apb = trikeshed.at %aw[%w0] : !s64, index -> i64
+    %anw2 = trikeshed.at %aw[%w1] : !s64, index -> i64
+    %an = arith.andi %anw2, %low32 : i64
+    %ap = llvm.inttoptr %apb : i64 to !llvm.ptr
     %wp = func.call @nixsb_rewrite(%c, %ap, %an, %cell) : (!llvm.ptr, !llvm.ptr, i64, !llvm.ptr) -> !llvm.ptr
-    %wn = func.call @sbr_w(%cell, %c0) : (!llvm.ptr, i64) -> i64
-    %wb = llvm.ptrtoint %wp : !llvm.ptr to i64
-    %j1 = arith.addi %j64, %c1 : i64
-    %w0 = arith.muli %j1, %c2 : i64
-    %w1 = arith.addi %w0, %c1 : i64
-    func.call @sbr_ws(%rows, %w0, %wb) : (!llvm.ptr, i64, i64) -> ()
-    func.call @sbr_ws(%rows, %w1, %wn) : (!llvm.ptr, i64, i64) -> ()
   }
+  // the rows: the base name's, then the rewritten Texts' (where the store's texts are now)
+  %t1, %after = func.call @sbr_text(%tt) : (!llvm.ptr) -> (!llvm.ptr, i64)
+  %skip = arith.muli %before, %c16 : i64
+  %first = llvm.getelementptr %t1[%skip] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+  %td = func.call @sbr_d(%first, %na2) : (!llvm.ptr, i64) -> !d
+  %tm = builtin.unrealized_conversion_cast %td : !d to !m64
+  %ts = builtin.unrealized_conversion_cast %tm : !m64 to !s64
+  %all = trikeshed.combine %bs, %ts : !s64, !s64 -> !s64
+  %na1 = arith.addi %na, %c1 : i64
+  %rb = arith.muli %na1, %c16 : i64
+  %rows = func.call @sbr_room(%rb) : (i64) -> !llvm.ptr
+  func.call @sbr_keep(%h, %c4, %rows) : (!llvm.ptr, i64, !llvm.ptr) -> ()
+  %rw = arith.muli %na1, %c2 : i64
+  %rd = func.call @sbr_d(%rows, %rw) : (!llvm.ptr, i64) -> !d
+  %rm = builtin.unrealized_conversion_cast %rd : !d to !m64
+  %end = trikeshed.drain %all, %rm : !s64, !m64 -> index
   return %na1 : i64
 }
-
 // What follows a builder that did not end well: its outputs removed (each at the store's physical root), then its
 // directory removed, or kept and said so where the store keeps failed builds, then the failure said: 1 in any case
 // (an entry that could not be removed is the error instead).  w: what nixsb_os_wait made of the builder's status.
@@ -964,6 +1033,13 @@ func.func private @sbr_failed(%c: !llvm.ptr, %settings: !llvm.ptr, %drvp: !llvm.
   %rt = llvm.getelementptr %settings[%c16] : (!llvm.ptr, i64) -> !llvm.ptr, i8
   %rp, %rn = func.call @sbr_text(%rt) : (!llvm.ptr) -> (!llvm.ptr, i64)
   %prows, %pcount = func.call @sbr_text(%outputs) : (!llvm.ptr) -> (!llvm.ptr, i64)
+  // the outputs' rows (four words each: a name, a path), read through one view
+  %c4 = arith.constant 4 : i64
+  %low32 = arith.constant 4294967295 : i64
+  %pw4 = arith.muli %pcount, %c4 : i64
+  %pd = func.call @sbr_d(%prows, %pw4) : (!llvm.ptr, i64) -> !d
+  %pm = builtin.unrealized_conversion_cast %pd : !d to !m64
+  %pws = builtin.unrealized_conversion_cast %pm : !m64 to !s64
   %je, %s1 = scf.while (%j = %c0, %s = %c0) : (i64, i64) -> (i64, i64) {
     %in = arith.cmpi slt, %j, %pcount : i64
     %fine = arith.cmpi eq, %s, %c0 : i64
@@ -971,10 +1047,15 @@ func.func private @sbr_failed(%c: !llvm.ptr, %settings: !llvm.ptr, %drvp: !llvm.
     scf.condition(%go) %j, %s : i64, i64
   } do {
   ^bb0(%ja: i64, %sa: i64):
-    %ro = arith.muli %ja, %c32 : i64
-    %vo = arith.addi %ro, %c16 : i64
-    %vt = llvm.getelementptr %prows[%vo] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-    %pp, %pn = func.call @sbr_text(%vt) : (!llvm.ptr) -> (!llvm.ptr, i64)
+    %jw = arith.muli %ja, %c4 : i64
+    %jp = arith.addi %jw, %c2 : i64
+    %jn = arith.addi %jp, %c1 : i64
+    %jpi = arith.index_cast %jp : i64 to index
+    %jni = arith.index_cast %jn : i64 to index
+    %ppb = trikeshed.at %pws[%jpi] : !s64, index -> i64
+    %pnw = trikeshed.at %pws[%jni] : !s64, index -> i64
+    %pn = arith.andi %pnw, %low32 : i64
+    %pp = llvm.inttoptr %ppb : i64 to !llvm.ptr
     %real, %realn = func.call @sbr_cat(%rp, %rn, %pp, %pn, %null, %c0, %null, %c0) : (!llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64) -> (!llvm.ptr, i64)
     %there = func.call @nixsb_exists(%real, %realn) : (!llvm.ptr, i64) -> i64
     %is = arith.cmpi ne, %there, %c0 : i64
@@ -1015,32 +1096,70 @@ func.func private @sbr_failed(%c: !llvm.ptr, %settings: !llvm.ptr, %drvp: !llvm.
   return %res : i64
 }
 
+// A child's end awaited: waitpid again when a signal breaks the wait (EINTR).  What nixsb_os_wait makes of its status:
+// its exit code, or 256 and more when a signal ended it.  The loop is the wait itself: it stays a loop.
+func.func private @sbr_wait(%pid: i32) -> i64 {
+  %c1 = arith.constant 1 : i64
+  %z32 = arith.constant 0 : i32
+  %eintr = arith.constant 4 : i64
+  %status = llvm.alloca %c1 x i32 : (i64) -> !llvm.ptr
+  llvm.store %z32, %status : i32, !llvm.ptr
+  %we = scf.while (%go = %c1) : (i64) -> (i64) {
+    %on = arith.cmpi eq, %go, %c1 : i64
+    scf.condition(%on) %go : i64
+  } do {
+  ^bb0(%goa: i64):
+    %wp = func.call @waitpid(%pid, %status, %z32) : (i32, !llvm.ptr, i32) -> i32
+    %neg = arith.cmpi slt, %wp, %z32 : i32
+    %er = func.call @nixsb_os_errno() : () -> i64
+    %broken = arith.cmpi eq, %er, %eintr : i64
+    %again = arith.andi %neg, %broken : i1
+    %g2 = arith.extui %again : i1 to i64
+    scf.yield %g2 : i64
+  }
+  %st32 = llvm.load %status : !llvm.ptr -> i32
+  %stw = arith.extui %st32 : i32 to i64
+  %w = func.call @nixsb_os_wait(%stw) : (i64) -> i64
+  return %w : i64
+}
+
 // c: the store's context (its first word the store; the Texts at its 16 and 32 the rooms of the environment's and the
 // arguments' strings); drv: the derivation; outputs: its outputs' paths by name.  0, or 1 with the error said or kept.
+// The handle's rooms (16 words on this frame, read through one view): 0 the build's directory, 1 the environment's rows
+// as set, 2 in name order, 3 its pointers, 4 the arguments' rows, 5 their pointers.
 func.func @nixsb_build(%c: !llvm.ptr, %drvp: !llvm.ptr, %drvn: i64, %drv: !llvm.ptr, %outputs: !llvm.ptr) -> i64 {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
   %c2 = arith.constant 2 : i64
   %c3 = arith.constant 3 : i64
-  %c4 = arith.constant 4 : i64
-  %c5 = arith.constant 5 : i64
   %c8 = arith.constant 8 : i64
   %c16 = arith.constant 16 : i64
   %c17 = arith.constant 17 : i64
   %c21 = arith.constant 21 : i64
   %c32 = arith.constant 32 : i64
   %c80 = arith.constant 80 : i64
+  %low32 = arith.constant 4294967295 : i64
   %m1 = arith.constant -1 : i64
   %z32 = arith.constant 0 : i32
   %one32 = arith.constant 1 : i32
   %two32 = arith.constant 2 : i32
   %x127 = arith.constant 127 : i32
-  %eintr = arith.constant 4 : i64
+  %z = arith.constant 0 : index
+  %i1 = arith.constant 1 : index
+  %i2 = arith.constant 2 : index
+  %i3 = arith.constant 3 : index
+  %i4 = arith.constant 4 : index
+  %i5 = arith.constant 5 : index
   %o_empty = arith.constant 293 : i64 // lit ""
   %h = llvm.alloca %c16 x i64 : (i64) -> !llvm.ptr
-  %status = llvm.alloca %c1 x i32 : (i64) -> !llvm.ptr
   func.call @sbr_open(%h) : (!llvm.ptr) -> ()
-  %st = func.call @sbr_w(%c, %c0) : (!llvm.ptr, i64) -> i64
+  %hd = func.call @sbr_d(%h, %c16) : (!llvm.ptr, i64) -> !d
+  %hm = builtin.unrealized_conversion_cast %hd : !d to !m64
+  %hw = builtin.unrealized_conversion_cast %hm : !m64 to !s64
+  %cd = func.call @sbr_d(%c, %c1) : (!llvm.ptr, i64) -> !d
+  %cm = builtin.unrealized_conversion_cast %cd : !d to !m64
+  %cw = builtin.unrealized_conversion_cast %cm : !m64 to !s64
+  %st = trikeshed.at %cw[%z] : !s64, index -> i64
   %stp = llvm.inttoptr %st : i64 to !llvm.ptr
   %settings = llvm.getelementptr %stp[%c16] : (!llvm.ptr, i64) -> !llvm.ptr, i8
   %tn = func.call @sbr_top(%c, %h, %drv) : (!llvm.ptr, !llvm.ptr, !llvm.ptr) -> i64
@@ -1048,7 +1167,7 @@ func.func @nixsb_build(%c: !llvm.ptr, %drvp: !llvm.ptr, %drvn: i64, %drv: !llvm.
   %res = scf.if %notop -> (i64) {
     scf.yield %c1 : i64
   } else {
-    %top = func.call @sbr_w(%h, %c0) : (!llvm.ptr, i64) -> i64
+    %top = trikeshed.at %hw[%z] : !s64, index -> i64
     %topp = llvm.inttoptr %top : i64 to !llvm.ptr
     %n = func.call @sbr_env(%c, %h, %drv, %outputs, %topp, %tn) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> i64
     %noenv = arith.cmpi slt, %n, %c0 : i64
@@ -1056,30 +1175,39 @@ func.func @nixsb_build(%c: !llvm.ptr, %drvp: !llvm.ptr, %drvn: i64, %drv: !llvm.
       scf.yield %c1 : i64
     } else {
       // the environment in name order, and its strings; the arguments and theirs
-      %rowsb = func.call @sbr_w(%h, %c1) : (!llvm.ptr, i64) -> i64
+      %rowsb = trikeshed.at %hw[%i1] : !s64, index -> i64
       %rows = llvm.inttoptr %rowsb : i64 to !llvm.ptr
       %fb = arith.muli %n, %c32 : i64
       %final = func.call @sbr_room(%fb) : (i64) -> !llvm.ptr
-      func.call @sbr_keep(%h, %c2, %final) : (!llvm.ptr, i64, !llvm.ptr) -> ()
+      %finalb = llvm.ptrtoint %final : !llvm.ptr to i64
+      memref.store %finalb, %hm[%i2] : !m64
       %m = func.call @sbr_drain_env(%rows, %n, %final) : (!llvm.ptr, i64, !llvm.ptr) -> i64
       %m1x = arith.addi %m, %c1 : i64
       %eb = arith.muli %m1x, %c8 : i64
       %envp = func.call @sbr_room(%eb) : (i64) -> !llvm.ptr
-      func.call @sbr_keep(%h, %c3, %envp) : (!llvm.ptr, i64, !llvm.ptr) -> ()
+      %envpb = llvm.ptrtoint %envp : !llvm.ptr to i64
+      memref.store %envpb, %hm[%i3] : !m64
       %na = func.call @sbr_args(%c, %h, %drv) : (!llvm.ptr, !llvm.ptr, !llvm.ptr) -> i64
-      %argrowsb = func.call @sbr_w(%h, %c4) : (!llvm.ptr, i64) -> i64
+      %argrowsb = trikeshed.at %hw[%i4] : !s64, index -> i64
       %argrows = llvm.inttoptr %argrowsb : i64 to !llvm.ptr
       %na1 = arith.addi %na, %c1 : i64
       %ab = arith.muli %na1, %c8 : i64
       %argv = func.call @sbr_room(%ab) : (i64) -> !llvm.ptr
-      func.call @sbr_keep(%h, %c5, %argv) : (!llvm.ptr, i64, !llvm.ptr) -> ()
+      %argvb = llvm.ptrtoint %argv : !llvm.ptr to i64
+      memref.store %argvb, %hm[%i5] : !m64
       %envroom = llvm.getelementptr %c[%c16] : (!llvm.ptr, i64) -> !llvm.ptr, i8
       %argroom = llvm.getelementptr %c[%c32] : (!llvm.ptr, i64) -> !llvm.ptr, i8
       %es = func.call @nixstore_ts_cstrs(%envroom, %final, %m, %c1, %envp) : (!llvm.ptr, !llvm.ptr, i64, i64, !llvm.ptr) -> i64
       %as = func.call @nixstore_ts_cstrs(%argroom, %argrows, %na, %c0, %argv) : (!llvm.ptr, !llvm.ptr, i64, i64, !llvm.ptr) -> i64
       // the builder: its path as a C string (a Text that never held a byte has none of its own)
       %bt = llvm.getelementptr %drv[%c80] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-      %bp0, %bn = func.call @sbr_text(%bt) : (!llvm.ptr) -> (!llvm.ptr, i64)
+      %bd = func.call @sbr_d(%bt, %c2) : (!llvm.ptr, i64) -> !d
+      %bm = builtin.unrealized_conversion_cast %bd : !d to !m64
+      %bw = builtin.unrealized_conversion_cast %bm : !m64 to !s64
+      %bpb = trikeshed.at %bw[%z] : !s64, index -> i64
+      %bnw = trikeshed.at %bw[%i1] : !s64, index -> i64
+      %bn = arith.andi %bnw, %low32 : i64
+      %bp0 = llvm.inttoptr %bpb : i64 to !llvm.ptr
       %ep, %en = func.call @sbr_lit(%o_empty) : (i64) -> (!llvm.ptr, i64)
       %some = arith.cmpi ne, %bn, %c0 : i64
       %bp = scf.if %some -> (!llvm.ptr) {
@@ -1097,8 +1225,8 @@ func.func @nixsb_build(%c: !llvm.ptr, %drvp: !llvm.ptr, %drvn: i64, %drv: !llvm.
         %res3 = scf.if %child -> (i64) {
           // the child: in the build's directory, reading nothing, its output where the store's errors go, a session
           // of its own; a builder that cannot be run says so itself
-          %cd = func.call @chdir(%topp) : (!llvm.ptr) -> i32
-          %nocd = arith.cmpi ne, %cd, %z32 : i32
+          %cdr = func.call @chdir(%topp) : (!llvm.ptr) -> i32
+          %nocd = arith.cmpi ne, %cdr, %z32 : i32
           scf.if %nocd {
             func.call @_exit(%x127) : (i32) -> ()
           }
@@ -1112,24 +1240,8 @@ func.func @nixsb_build(%c: !llvm.ptr, %drvp: !llvm.ptr, %drvn: i64, %drv: !llvm.
           func.call @_exit(%x127) : (i32) -> ()
           scf.yield %c1 : i64
         } else {
-          // the parent: the builder's end awaited (again when a signal breaks the wait)
-          llvm.store %z32, %status : i32, !llvm.ptr
-          %we = scf.while (%go = %c1) : (i64) -> (i64) {
-            %on = arith.cmpi eq, %go, %c1 : i64
-            scf.condition(%on) %go : i64
-          } do {
-          ^bb0(%goa: i64):
-            %wp = func.call @waitpid(%pid, %status, %z32) : (i32, !llvm.ptr, i32) -> i32
-            %neg = arith.cmpi slt, %wp, %z32 : i32
-            %er = func.call @nixsb_os_errno() : () -> i64
-            %broken = arith.cmpi eq, %er, %eintr : i64
-            %again = arith.andi %neg, %broken : i1
-            %g2 = arith.extui %again : i1 to i64
-            scf.yield %g2 : i64
-          }
-          %st32 = llvm.load %status : !llvm.ptr -> i32
-          %stw = arith.extui %st32 : i32 to i64
-          %w = func.call @nixsb_os_wait(%stw) : (i64) -> i64
+          // the parent: the builder's end awaited
+          %w = func.call @sbr_wait(%pid) : (i32) -> i64
           %well = arith.cmpi eq, %w, %c0 : i64
           %res4 = scf.if %well -> (i64) {
             %ds = func.call @nixsb_delete(%c, %topp, %tn) : (!llvm.ptr, !llvm.ptr, i64) -> i64
@@ -1149,7 +1261,6 @@ func.func @nixsb_build(%c: !llvm.ptr, %drvp: !llvm.ptr, %drvn: i64, %drv: !llvm.
   func.call @sbr_close(%h) : (!llvm.ptr) -> ()
   return %res : i64
 }
-
 //===----------------------------------------------------------------------===//
 // builtin:fetchurl
 //===----------------------------------------------------------------------===//

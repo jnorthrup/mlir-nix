@@ -397,7 +397,7 @@ void restorePath(std::string_view path, std::string_view nar) {
 // Store paths
 //===----------------------------------------------------------------------===//
 
-// nixstore::checkName / outputPathName / isStorePath / storePathName / storePathHashPart are hollowed out to MLIR:
+// nixstore::checkName / outputPathName / isStorePath / storePathName are hollowed out to MLIR:
 // lowered/nixstore/StoreName.mlir (trikeshed.at / slice / text / compare / combine / drain over the byte series), built
 // into NixStore by lib/CMakeLists.txt.  checkName's scan answers a code and the first illegal index; the error wording
 // stays here.  The other bridges size the Text and adopt the drained bytes; the naming algebra is gone from here.
@@ -405,7 +405,6 @@ extern "C" int nixstore_ts_checkname(const char *p, size_t n, size_t *bad);
 extern "C" size_t nixstore_ts_outputname(const char *d, size_t dn, const char *o, size_t on, char *out);
 extern "C" bool nixstore_ts_isstorepath(const char *sd, size_t ss, const char *pd, size_t ps);
 extern "C" size_t nixstore_ts_storename(const char *p, size_t n, char *out);
-extern "C" size_t nixstore_ts_storehash(const char *p, size_t n, char *out);
 
 void checkName(std::string_view name) {
   size_t bad = 0;
@@ -522,13 +521,6 @@ composite::Text storePathName(std::string_view storePath) {
   return t;
 }
 
-composite::Text storePathHashPart(std::string_view storePath) {
-  composite::Text t;
-  t.resize(32);
-  t.truncate(nixstore_ts_storehash(storePath.data(), storePath.size(), t.begin()));
-  return t;
-}
-
 //===----------------------------------------------------------------------===//
 // Derivations
 //===----------------------------------------------------------------------===//
@@ -543,11 +535,6 @@ composite::Text DerivationOutput::methodAlgo() const {
 composite::Text DerivationOutput::fixedPath(std::string_view storeDir, std::string_view drvName,
                                             std::string_view output) const {
   return makeFixedOutputPath(storeDir, outputPathName(drvName, output), method, hash);
-}
-
-bool Derivation::isFixed() const {
-  return outputs.size() == 1 && outputs.begin()->first == "out" &&
-         outputs.begin()->second.kind == DerivationOutput::CAFixed;
 }
 
 // The derivation ATerm text is composed in lowered/nixstore/DrvUnparse.mlir (trikeshed.combineAll + combine + drain over

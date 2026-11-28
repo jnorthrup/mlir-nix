@@ -167,7 +167,7 @@ struct Sb {
   }
 };
 } // namespace
-static_assert(offsetof(Sb, block) == 16 && offsetof(Sb, set) == 48 && sizeof(SortedSet) == 16 && offsetof(Store, settings) == 16 && offsetof(StoreSettings, realRoot) == 16 &&
+static_assert(offsetof(Sb, block) == 16 && offsetof(Sb, set) == 48 && offsetof(Sb, texts) == 112 && sizeof(SortedSet) == 16 && offsetof(Store, settings) == 16 && offsetof(StoreSettings, realRoot) == 16 &&
                   offsetof(StoreSettings, stateDir) == 32 && offsetof(StoreSettings, readOnly) == 48 && offsetof(StoreSettings, cores) == 52 &&
                   offsetof(StoreSettings, keepFailed) == 56 && sizeof(composite::MutableSeries<composite::Text>) == 16 && sizeof(SortedMap<composite::Text>::Row) == 32 &&
                   offsetof(Derivation, outputs) == 16 && offsetof(Derivation, inputDrvs) == 32 && offsetof(Derivation, inputSrcs) == 48 && sizeof(DrvInputs::Row) == 32 &&

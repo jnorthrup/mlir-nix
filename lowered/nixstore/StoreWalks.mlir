@@ -201,21 +201,9 @@ func.func private @sbw_put(%h: !llvm.ptr, %k: i64, %from: i64, %pre: i64, %p: !l
   return %base : !llvm.ptr
 }
 
-// room k's path cut back to its first len bytes: the NUL after them again
-func.func private @sbw_cut(%h: !llvm.ptr, %k: i64, %len: i64) {
-  %c1 = arith.constant 1 : i64
-  %c2 = arith.constant 2 : i64
-  %nul = arith.constant 0 : i8
-  %k2 = arith.muli %k, %c2 : i64
-  %pi = arith.addi %k2, %c1 : i64
-  %base = func.call @sbw_p(%h, %pi) : (!llvm.ptr, i64) -> !llvm.ptr
-  %at = llvm.getelementptr %base[%len] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  llvm.store %nul, %at : i8, !llvm.ptr
-  return
-}
 
 // The entries of the directory at `path` but "." and "..", pushed on the names in the order the system gives them: a
-// fill, read back by sbw_name from where the top was.  0, or -1 when the directory cannot be opened (errno says why).
+// fill, read back by sbw_each from where the top was.  0, or -1 when the directory cannot be opened (errno says why).
 func.func private @sbw_list(%h: !llvm.ptr, %path: !llvm.ptr) -> i64 {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
@@ -291,76 +279,185 @@ func.func private @sbw_list(%h: !llvm.ptr, %path: !llvm.ptr) -> i64 {
   return %r : i64
 }
 
-// the name at the names' byte off: its bytes, its length, and where the next one lies
-func.func private @sbw_name(%h: !llvm.ptr, %off: i64) -> (!llvm.ptr, i64, i64) {
+
+//===----------------------------------------------------------------------===//
+// A directory's entries, walked
+//===----------------------------------------------------------------------===//
+
+// The entries of a directory, walked in the order they were listed (the names from `mark` to the names' top).  Each
+// one's path is room 0's first flen bytes, "/" and its name: one combine drained once (and into room 1 after its first
+// tlen bytes, for a copy that keeps the entry).  The walk `which` then takes the entry: 0 canonicalises it, 1 copies it
+// when the filter keeps it (asked where the handle's word 8 says so), 2 scans it, 3 takes it as an entry of the roots.
+// This is the walks' one loop: its effects (the C library's calls, the store's callbacks) come in the order the entries
+// were read, and it ends at the first entry that fails.  Then the names are forgotten and the paths cut back (a NUL
+// after their first bytes again).  0, or 1 with the error said or kept.
+func.func private @sbw_each(%h: !llvm.ptr, %which: i64, %mark: i64, %flen: i64, %tlen: i64) -> i64 {
+  %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
-  %c5 = arith.constant 5 : i64
+  %c2 = arith.constant 2 : i64
   %c8 = arith.constant 8 : i64
+  %c16 = arith.constant 16 : i64
   %cm8 = arith.constant -8 : i64
   %z = arith.constant 0 : index
-  %base = func.call @sbw_p(%h, %c5) : (!llvm.ptr, i64) -> !llvm.ptr
-  %lp = llvm.getelementptr %base[%off] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %ld = func.call @sbw_d(%lp, %c1) : (!llvm.ptr, i64) -> !d
-  %lm = builtin.unrealized_conversion_cast %ld : !d to !m64
-  %ls = builtin.unrealized_conversion_cast %lm : !m64 to !s64
-  %n = trikeshed.at %ls[%z] : !s64, index -> i64
-  %bo = arith.addi %off, %c8 : i64
-  %np = llvm.getelementptr %base[%bo] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %a0 = arith.addi %n, %c8 : i64
-  %adv = arith.andi %a0, %cm8 : i64
-  %next = arith.addi %bo, %adv : i64
-  return %np, %n, %next : !llvm.ptr, i64, i64
+  %i1 = arith.constant 1 : index
+  %i3 = arith.constant 3 : index
+  %i5 = arith.constant 5 : index
+  %i7 = arith.constant 7 : index
+  %i8 = arith.constant 8 : index
+  // the handle's words: 0 the context, 1 and 3 the two paths, 5 the names, 7 their top, 8 whether the filter is asked
+  %hd = func.call @sbw_d(%h, %c16) : (!llvm.ptr, i64) -> !d
+  %hm = builtin.unrealized_conversion_cast %hd : !d to !m64
+  %hw = builtin.unrealized_conversion_cast %hm : !m64 to !s64
+  %bg = memref.get_global @sbw_bytes : memref<12xi8>
+  %bytes = trikeshed.text %bg : memref<12xi8> -> !s
+  %slash = trikeshed.slice %bytes[%z, %i1] : !s -> !s
+  %nul = trikeshed.slice %bytes[%i1, %i1] : !s -> !s
+  %end = trikeshed.at %hw[%i7] : !s64, index -> i64
+  %copies = arith.cmpi eq, %which, %c1 : i64
+  %f1 = arith.addi %flen, %c1 : i64
+  %t1 = arith.addi %tlen, %c1 : i64
+  %oe, %se = scf.while (%off = %mark, %s = %c0) : (i64, i64) -> (i64, i64) {
+    %in = arith.cmpi slt, %off, %end : i64
+    %fine = arith.cmpi eq, %s, %c0 : i64
+    %go = arith.andi %in, %fine : i1
+    scf.condition(%go) %off, %s : i64, i64
+  } do {
+  ^bb0(%oa: i64, %sa: i64):
+    // the name at the names' byte oa: its length (a word), then its bytes; the next lies a whole word on.  The names
+    // may have moved since the entry before: their room is read from the handle
+    %nb = trikeshed.at %hw[%i5] : !s64, index -> i64
+    %names = llvm.inttoptr %nb : i64 to !llvm.ptr
+    %rec = llvm.getelementptr %names[%oa] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+    %ld = func.call @sbw_d(%rec, %c1) : (!llvm.ptr, i64) -> !d
+    %lm = builtin.unrealized_conversion_cast %ld : !d to !m64
+    %ls = builtin.unrealized_conversion_cast %lm : !m64 to !s64
+    %nn = trikeshed.at %ls[%z] : !s64, index -> i64
+    %bo = arith.addi %oa, %c8 : i64
+    %np = llvm.getelementptr %names[%bo] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+    %a0 = arith.addi %nn, %c8 : i64
+    %adv = arith.andi %a0, %cm8 : i64
+    %next = arith.addi %bo, %adv : i64
+    %nd = func.call @sbw_d(%np, %nn) : (!llvm.ptr, i64) -> !d
+    %nm = builtin.unrealized_conversion_cast %nd : !d to !m
+    %name = builtin.unrealized_conversion_cast %nm : !m to !s
+    // the entry's path: "/", the name and a NUL after the directory's
+    %child = trikeshed.combine %slash, %name, %nul : !s, !s, !s -> !s
+    %w = arith.addi %nn, %c2 : i64
+    %cf = arith.addi %f1, %nn : i64
+    %need = arith.addi %cf, %c1 : i64
+    %fb = func.call @sbw_room(%h, %c0, %need) : (!llvm.ptr, i64, i64) -> !llvm.ptr
+    %fat = llvm.getelementptr %fb[%flen] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+    %fd = func.call @sbw_d(%fat, %w) : (!llvm.ptr, i64) -> !d
+    %fm = builtin.unrealized_conversion_cast %fd : !d to !m
+    %fe = trikeshed.drain %child, %fm : !s, !m -> index
+    %sn = scf.if %copies -> (i64) {
+      %filtered = trikeshed.at %hw[%i8] : !s64, index -> i64
+      %asks = arith.cmpi ne, %filtered, %c0 : i64
+      %keep = scf.if %asks -> (i64) {
+        %cb = trikeshed.at %hw[%z] : !s64, index -> i64
+        %ctx = llvm.inttoptr %cb : i64 to !llvm.ptr
+        %kk = func.call @nixsb_keep(%ctx, %fb, %cf) : (!llvm.ptr, !llvm.ptr, i64) -> i64
+        scf.yield %kk : i64
+      } else {
+        scf.yield %c1 : i64
+      }
+      %kept = arith.cmpi eq, %keep, %c1 : i64
+      %sc = scf.if %kept -> (i64) {
+        %ct = arith.addi %t1, %nn : i64
+        %need1 = arith.addi %ct, %c1 : i64
+        %tb = func.call @sbw_room(%h, %c1, %need1) : (!llvm.ptr, i64, i64) -> !llvm.ptr
+        %tat = llvm.getelementptr %tb[%tlen] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+        %td = func.call @sbw_d(%tat, %w) : (!llvm.ptr, i64) -> !d
+        %tm = builtin.unrealized_conversion_cast %td : !d to !m
+        %te = trikeshed.drain %child, %tm : !s, !m -> index
+        %r = func.call @sbw_copy(%h, %cf, %ct) : (!llvm.ptr, i64, i64) -> i64
+        scf.yield %r : i64
+      } else {
+        %failed = arith.cmpi slt, %keep, %c0 : i64
+        %sf = arith.extui %failed : i1 to i64
+        scf.yield %sf : i64
+      }
+      scf.yield %sc : i64
+    } else {
+      %iscanon = arith.cmpi eq, %which, %c0 : i64
+      %r0 = scf.if %iscanon -> (i64) {
+        %r = func.call @sbw_canon(%h, %cf) : (!llvm.ptr, i64) -> i64
+        scf.yield %r : i64
+      } else {
+        %isscan = arith.cmpi eq, %which, %c2 : i64
+        %r1 = scf.if %isscan -> (i64) {
+          %r = func.call @sbw_scan(%h, %cf) : (!llvm.ptr, i64) -> i64
+          scf.yield %r : i64
+        } else {
+          func.call @sbw_root(%h, %cf) : (!llvm.ptr, i64) -> ()
+          scf.yield %c0 : i64
+        }
+        scf.yield %r1 : i64
+      }
+      scf.yield %r0 : i64
+    }
+    scf.yield %next, %sn : i64, i64
+  }
+  memref.store %mark, %hm[%i7] : !m64
+  %pb = trikeshed.at %hw[%i1] : !s64, index -> i64
+  %path = llvm.inttoptr %pb : i64 to !llvm.ptr
+  %pat = llvm.getelementptr %path[%flen] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+  %pd = func.call @sbw_d(%pat, %c1) : (!llvm.ptr, i64) -> !d
+  %pm = builtin.unrealized_conversion_cast %pd : !d to !m
+  %pe = trikeshed.drain %nul, %pm : !s, !m -> index
+  scf.if %copies {
+    %qb = trikeshed.at %hw[%i3] : !s64, index -> i64
+    %to = llvm.inttoptr %qb : i64 to !llvm.ptr
+    %qat = llvm.getelementptr %to[%tlen] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+    %qd = func.call @sbw_d(%qat, %c1) : (!llvm.ptr, i64) -> !d
+    %qm = builtin.unrealized_conversion_cast %qd : !d to !m
+    %qe = trikeshed.drain %nul, %qm : !s, !m -> index
+  }
+  return %se : i64
 }
 
 //===----------------------------------------------------------------------===//
 // canonicalisePathMetaData
 //===----------------------------------------------------------------------===//
 
-// The tree whose path is room 0's first len bytes.  0, or 1 with the error said: an entry lstat refuses.
+// The tree whose path is room 0's first len bytes: its entries first (sbw_each), then itself: its permission bits (a
+// directory's or a file's its owner may run: r-x for all; another file's: r-- for all; a link's are left) and its times.
+// 0, or 1 with the error said: an entry lstat refuses.
 func.func private @sbw_canon(%h: !llvm.ptr, %len: i64) -> i64 {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
   %c2 = arith.constant 2 : i64
   %c3 = arith.constant 3 : i64
-  %c7 = arith.constant 7 : i64
   %c16 = arith.constant 16 : i64
   %c64 = arith.constant 64 : i64
   %m1 = arith.constant -1 : i64
   %rx = arith.constant 365 : i32
   %ro = arith.constant 292 : i32
+  %z = arith.constant 0 : index
+  %i1 = arith.constant 1 : index
+  %i7 = arith.constant 7 : index
   %cell = llvm.alloca %c1 x i64 : (i64) -> !llvm.ptr
-  %path0 = func.call @sbw_p(%h, %c1) : (!llvm.ptr, i64) -> !llvm.ptr
+  %hd = func.call @sbw_d(%h, %c16) : (!llvm.ptr, i64) -> !d
+  %hm = builtin.unrealized_conversion_cast %hd : !d to !m64
+  %hw = builtin.unrealized_conversion_cast %hm : !m64 to !s64
+  %pb0 = trikeshed.at %hw[%i1] : !s64, index -> i64
+  %path0 = llvm.inttoptr %pb0 : i64 to !llvm.ptr
   %mode = func.call @nixsb_os_lstat(%path0, %cell) : (!llvm.ptr, !llvm.ptr) -> i64
   %bad = arith.cmpi slt, %mode, %c0 : i64
   %st = scf.if %bad -> (i64) {
-    %ctx = func.call @sbw_p(%h, %c0) : (!llvm.ptr, i64) -> !llvm.ptr
+    %cb = trikeshed.at %hw[%z] : !s64, index -> i64
+    %ctx = llvm.inttoptr %cb : i64 to !llvm.ptr
     %said = func.call @nixsb_say(%ctx, %c0, %c0, %path0, %len, %path0, %c0, %path0, %c0, %m1, %c0) : (!llvm.ptr, i64, i64, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64) -> i64
     scf.yield %said : i64
   } else {
     %kind = arith.shrui %mode, %c16 : i64
     %isdir = arith.cmpi eq, %kind, %c2 : i64
     %s1 = scf.if %isdir -> (i64) {
-      %mark = func.call @sbw_g(%h, %c7) : (!llvm.ptr, i64) -> i64
+      %mark = trikeshed.at %hw[%i7] : !s64, index -> i64
       %l = func.call @sbw_list(%h, %path0) : (!llvm.ptr, !llvm.ptr) -> i64
       %listed = arith.cmpi eq, %l, %c0 : i64
       %s2 = scf.if %listed -> (i64) {
-        %end = func.call @sbw_g(%h, %c7) : (!llvm.ptr, i64) -> i64
-        %oe, %se = scf.while (%off = %mark, %s = %c0) : (i64, i64) -> (i64, i64) {
-          %in = arith.cmpi slt, %off, %end : i64
-          %fine = arith.cmpi eq, %s, %c0 : i64
-          %go = arith.andi %in, %fine : i1
-          scf.condition(%go) %off, %s : i64, i64
-        } do {
-        ^bb0(%oa: i64, %sa: i64):
-          %np, %nn, %next = func.call @sbw_name(%h, %oa) : (!llvm.ptr, i64) -> (!llvm.ptr, i64, i64)
-          %pb = func.call @sbw_put(%h, %c0, %len, %c1, %np, %nn) : (!llvm.ptr, i64, i64, i64, !llvm.ptr, i64) -> !llvm.ptr
-          %l1 = arith.addi %len, %c1 : i64
-          %clen = arith.addi %l1, %nn : i64
-          %sn = func.call @sbw_canon(%h, %clen) : (!llvm.ptr, i64) -> i64
-          scf.yield %next, %sn : i64, i64
-        }
-        func.call @sbw_s(%h, %c7, %mark) : (!llvm.ptr, i64, i64) -> ()
-        func.call @sbw_cut(%h, %c0, %len) : (!llvm.ptr, i64, i64) -> ()
+        %se = func.call @sbw_each(%h, %c0, %mark, %len, %c0) : (!llvm.ptr, i64, i64, i64, i64) -> i64
         scf.yield %se : i64
       } else {
         scf.yield %c0 : i64
@@ -371,7 +468,9 @@ func.func private @sbw_canon(%h: !llvm.ptr, %len: i64) -> i64 {
     }
     %ok = arith.cmpi eq, %s1, %c0 : i64
     scf.if %ok {
-      %path1 = func.call @sbw_p(%h, %c1) : (!llvm.ptr, i64) -> !llvm.ptr
+      // the path's room may have moved in the walk
+      %pb1 = trikeshed.at %hw[%i1] : !s64, index -> i64
+      %path1 = llvm.inttoptr %pb1 : i64 to !llvm.ptr
       %islnk = arith.cmpi eq, %kind, %c3 : i64
       scf.if %islnk {
       } else {
@@ -387,7 +486,6 @@ func.func private @sbw_canon(%h: !llvm.ptr, %len: i64) -> i64 {
   }
   return %st : i64
 }
-
 func.func @nixsb_canon(%ctx: !llvm.ptr, %p: !llvm.ptr, %n: i64) -> i64 {
   %c0 = arith.constant 0 : i64
   %c16 = arith.constant 16 : i64
@@ -441,16 +539,15 @@ func.func private @sbw_copy_link(%h: !llvm.ptr, %flen: i64, %tlen: i64) -> i64 {
   return %st : i64
 }
 
-// The tree at room 0's first flen bytes copied to room 1's first tlen bytes.  0, or 1 with the error said (or kept by
-// the store's callback).
+// The tree at room 0's first flen bytes copied to room 1's first tlen bytes: a file by the store (its owner's run bit
+// kept), a directory made and its entries copied (sbw_each), a link made again; anything else is refused.  0, or 1 with
+// the error said (or kept by the store's callback).
 func.func private @sbw_copy(%h: !llvm.ptr, %flen: i64, %tlen: i64) -> i64 {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
   %c2 = arith.constant 2 : i64
   %c3 = arith.constant 3 : i64
   %c6 = arith.constant 6 : i64
-  %c7 = arith.constant 7 : i64
-  %c8 = arith.constant 8 : i64
   %c16 = arith.constant 16 : i64
   %c64 = arith.constant 64 : i64
   %m1 = arith.constant -1 : i64
@@ -458,10 +555,20 @@ func.func private @sbw_copy(%h: !llvm.ptr, %flen: i64, %tlen: i64) -> i64 {
   %rwx = arith.constant 493 : i64
   %rw = arith.constant 420 : i64
   %dmode = arith.constant 493 : i32
+  %z = arith.constant 0 : index
+  %i1 = arith.constant 1 : index
+  %i3 = arith.constant 3 : index
+  %i7 = arith.constant 7 : index
   %cell = llvm.alloca %c1 x i64 : (i64) -> !llvm.ptr
-  %ctx = func.call @sbw_p(%h, %c0) : (!llvm.ptr, i64) -> !llvm.ptr
-  %from = func.call @sbw_p(%h, %c1) : (!llvm.ptr, i64) -> !llvm.ptr
-  %to = func.call @sbw_p(%h, %c3) : (!llvm.ptr, i64) -> !llvm.ptr
+  %hd = func.call @sbw_d(%h, %c16) : (!llvm.ptr, i64) -> !d
+  %hm = builtin.unrealized_conversion_cast %hd : !d to !m64
+  %hw = builtin.unrealized_conversion_cast %hm : !m64 to !s64
+  %cb = trikeshed.at %hw[%z] : !s64, index -> i64
+  %fb = trikeshed.at %hw[%i1] : !s64, index -> i64
+  %tb = trikeshed.at %hw[%i3] : !s64, index -> i64
+  %ctx = llvm.inttoptr %cb : i64 to !llvm.ptr
+  %from = llvm.inttoptr %fb : i64 to !llvm.ptr
+  %to = llvm.inttoptr %tb : i64 to !llvm.ptr
   %mode = func.call @nixsb_os_lstat(%from, %cell) : (!llvm.ptr, !llvm.ptr) -> i64
   %bad = arith.cmpi slt, %mode, %c0 : i64
   %st = scf.if %bad -> (i64) {
@@ -487,50 +594,14 @@ func.func private @sbw_copy(%h: !llvm.ptr, %flen: i64, %tlen: i64) -> i64 {
           %said2 = func.call @nixsb_say(%ctx, %c0, %c2, %to, %tlen, %to, %c0, %to, %c0, %e2, %c0) : (!llvm.ptr, i64, i64, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64) -> i64
           scf.yield %said2 : i64
         } else {
-          %mark = func.call @sbw_g(%h, %c7) : (!llvm.ptr, i64) -> i64
+          %mark = trikeshed.at %hw[%i7] : !s64, index -> i64
           %l = func.call @sbw_list(%h, %from) : (!llvm.ptr, !llvm.ptr) -> i64
           %closed = arith.cmpi ne, %l, %c0 : i64
           %s4 = scf.if %closed -> (i64) {
             %said3 = func.call @nixsb_say(%ctx, %c0, %c3, %from, %flen, %from, %c0, %from, %c0, %m1, %c0) : (!llvm.ptr, i64, i64, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64) -> i64
             scf.yield %said3 : i64
           } else {
-            %filtered = func.call @sbw_g(%h, %c8) : (!llvm.ptr, i64) -> i64
-            %asks = arith.cmpi ne, %filtered, %c0 : i64
-            %end = func.call @sbw_g(%h, %c7) : (!llvm.ptr, i64) -> i64
-            %oe, %se = scf.while (%off = %mark, %s = %c0) : (i64, i64) -> (i64, i64) {
-              %in = arith.cmpi slt, %off, %end : i64
-              %fine = arith.cmpi eq, %s, %c0 : i64
-              %go = arith.andi %in, %fine : i1
-              scf.condition(%go) %off, %s : i64, i64
-            } do {
-            ^bb0(%oa: i64, %sa: i64):
-              %np, %nn, %next = func.call @sbw_name(%h, %oa) : (!llvm.ptr, i64) -> (!llvm.ptr, i64, i64)
-              %fb = func.call @sbw_put(%h, %c0, %flen, %c1, %np, %nn) : (!llvm.ptr, i64, i64, i64, !llvm.ptr, i64) -> !llvm.ptr
-              %f1 = arith.addi %flen, %c1 : i64
-              %cf = arith.addi %f1, %nn : i64
-              %keep = scf.if %asks -> (i64) {
-                %kk = func.call @nixsb_keep(%ctx, %fb, %cf) : (!llvm.ptr, !llvm.ptr, i64) -> i64
-                scf.yield %kk : i64
-              } else {
-                scf.yield %c1 : i64
-              }
-              %kept = arith.cmpi eq, %keep, %c1 : i64
-              %sn = scf.if %kept -> (i64) {
-                %tb = func.call @sbw_put(%h, %c1, %tlen, %c1, %np, %nn) : (!llvm.ptr, i64, i64, i64, !llvm.ptr, i64) -> !llvm.ptr
-                %t1 = arith.addi %tlen, %c1 : i64
-                %ct = arith.addi %t1, %nn : i64
-                %sc = func.call @sbw_copy(%h, %cf, %ct) : (!llvm.ptr, i64, i64) -> i64
-                scf.yield %sc : i64
-              } else {
-                %failed = arith.cmpi slt, %keep, %c0 : i64
-                %sf = arith.extui %failed : i1 to i64
-                scf.yield %sf : i64
-              }
-              scf.yield %next, %sn : i64, i64
-            }
-            func.call @sbw_s(%h, %c7, %mark) : (!llvm.ptr, i64, i64) -> ()
-            func.call @sbw_cut(%h, %c0, %flen) : (!llvm.ptr, i64, i64) -> ()
-            func.call @sbw_cut(%h, %c1, %tlen) : (!llvm.ptr, i64, i64) -> ()
+            %se = func.call @sbw_each(%h, %c1, %mark, %flen, %tlen) : (!llvm.ptr, i64, i64, i64, i64) -> i64
             scf.yield %se : i64
           }
           scf.yield %s4 : i64
@@ -553,7 +624,6 @@ func.func private @sbw_copy(%h: !llvm.ptr, %flen: i64, %tlen: i64) -> i64 {
   }
   return %st : i64
 }
-
 // filtered: whether the store's filter is asked about each entry (nixsb_keep)
 func.func @nixsb_copy(%ctx: !llvm.ptr, %fp: !llvm.ptr, %fn: i64, %tp: !llvm.ptr, %tn: i64, %filtered: i64) -> i64 {
   %c0 = arith.constant 0 : i64
@@ -597,21 +667,27 @@ func.func private @sbw_scan_link(%h: !llvm.ptr) {
 }
 
 // The tree at room 0's first len bytes scanned: a file's bytes (read by the store), a link's target, a directory's
-// entries.  What lstat refuses or a directory that cannot be opened has nothing.  0, or 1 when a file could not be read.
+// entries (sbw_each).  What lstat refuses or a directory that cannot be opened has nothing.  0, or 1 when a file could
+// not be read.  Handle words: 8 the hash parts' windows, 9 the table's order, 10 how many it holds, 11 the marks.
 func.func private @sbw_scan(%h: !llvm.ptr, %len: i64) -> i64 {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
   %c2 = arith.constant 2 : i64
   %c3 = arith.constant 3 : i64
-  %c7 = arith.constant 7 : i64
-  %c8 = arith.constant 8 : i64
-  %c9 = arith.constant 9 : i64
-  %c10 = arith.constant 10 : i64
-  %c11 = arith.constant 11 : i64
   %c16 = arith.constant 16 : i64
   %z = arith.constant 0 : index
+  %i1 = arith.constant 1 : index
+  %i7 = arith.constant 7 : index
+  %i8 = arith.constant 8 : index
+  %i9 = arith.constant 9 : index
+  %i10 = arith.constant 10 : index
+  %i11 = arith.constant 11 : index
   %cell = llvm.alloca %c1 x i64 : (i64) -> !llvm.ptr
-  %path = func.call @sbw_p(%h, %c1) : (!llvm.ptr, i64) -> !llvm.ptr
+  %hd = func.call @sbw_d(%h, %c16) : (!llvm.ptr, i64) -> !d
+  %hm = builtin.unrealized_conversion_cast %hd : !d to !m64
+  %hw = builtin.unrealized_conversion_cast %hm : !m64 to !s64
+  %pb = trikeshed.at %hw[%i1] : !s64, index -> i64
+  %path = llvm.inttoptr %pb : i64 to !llvm.ptr
   %mode = func.call @nixsb_os_lstat(%path, %cell) : (!llvm.ptr, !llvm.ptr) -> i64
   %bad = arith.cmpi slt, %mode, %c0 : i64
   %st = scf.if %bad -> (i64) {
@@ -620,7 +696,8 @@ func.func private @sbw_scan(%h: !llvm.ptr, %len: i64) -> i64 {
     %kind = arith.shrui %mode, %c16 : i64
     %isreg = arith.cmpi eq, %kind, %c1 : i64
     %s1 = scf.if %isreg -> (i64) {
-      %ctx = func.call @sbw_p(%h, %c0) : (!llvm.ptr, i64) -> !llvm.ptr
+      %cb = trikeshed.at %hw[%z] : !s64, index -> i64
+      %ctx = llvm.inttoptr %cb : i64 to !llvm.ptr
       %data = func.call @nixsb_read(%ctx, %path, %len, %cell) : (!llvm.ptr, !llvm.ptr, i64, !llvm.ptr) -> !llvm.ptr
       %cd = func.call @sbw_d(%cell, %c1) : (!llvm.ptr, i64) -> !d
       %cm = builtin.unrealized_conversion_cast %cd : !d to !m64
@@ -630,10 +707,13 @@ func.func private @sbw_scan(%h: !llvm.ptr, %len: i64) -> i64 {
       %s2 = scf.if %unread -> (i64) {
         scf.yield %c1 : i64
       } else {
-        %w = func.call @sbw_p(%h, %c8) : (!llvm.ptr, i64) -> !llvm.ptr
-        %order = func.call @sbw_p(%h, %c9) : (!llvm.ptr, i64) -> !llvm.ptr
-        %nu = func.call @sbw_g(%h, %c10) : (!llvm.ptr, i64) -> i64
-        %found = func.call @sbw_p(%h, %c11) : (!llvm.ptr, i64) -> !llvm.ptr
+        %wb = trikeshed.at %hw[%i8] : !s64, index -> i64
+        %ob = trikeshed.at %hw[%i9] : !s64, index -> i64
+        %nu = trikeshed.at %hw[%i10] : !s64, index -> i64
+        %fb = trikeshed.at %hw[%i11] : !s64, index -> i64
+        %w = llvm.inttoptr %wb : i64 to !llvm.ptr
+        %order = llvm.inttoptr %ob : i64 to !llvm.ptr
+        %found = llvm.inttoptr %fb : i64 to !llvm.ptr
         %hits = func.call @nixstore_ts_refscan(%data, %n, %w, %order, %nu, %found) : (!llvm.ptr, i64, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr) -> i64
         scf.yield %c0 : i64
       }
@@ -645,27 +725,11 @@ func.func private @sbw_scan(%h: !llvm.ptr, %len: i64) -> i64 {
         func.call @sbw_scan_link(%h) : (!llvm.ptr) -> ()
       }
       %s3 = scf.if %isdir -> (i64) {
-        %mark = func.call @sbw_g(%h, %c7) : (!llvm.ptr, i64) -> i64
+        %mark = trikeshed.at %hw[%i7] : !s64, index -> i64
         %l = func.call @sbw_list(%h, %path) : (!llvm.ptr, !llvm.ptr) -> i64
         %listed = arith.cmpi eq, %l, %c0 : i64
         %s4 = scf.if %listed -> (i64) {
-          %end = func.call @sbw_g(%h, %c7) : (!llvm.ptr, i64) -> i64
-          %oe, %se = scf.while (%off = %mark, %s = %c0) : (i64, i64) -> (i64, i64) {
-            %in = arith.cmpi slt, %off, %end : i64
-            %fine = arith.cmpi eq, %s, %c0 : i64
-            %go = arith.andi %in, %fine : i1
-            scf.condition(%go) %off, %s : i64, i64
-          } do {
-          ^bb0(%oa: i64, %sa: i64):
-            %np, %nn, %next = func.call @sbw_name(%h, %oa) : (!llvm.ptr, i64) -> (!llvm.ptr, i64, i64)
-            %pb = func.call @sbw_put(%h, %c0, %len, %c1, %np, %nn) : (!llvm.ptr, i64, i64, i64, !llvm.ptr, i64) -> !llvm.ptr
-            %l1 = arith.addi %len, %c1 : i64
-            %clen = arith.addi %l1, %nn : i64
-            %sn = func.call @sbw_scan(%h, %clen) : (!llvm.ptr, i64) -> i64
-            scf.yield %next, %sn : i64, i64
-          }
-          func.call @sbw_s(%h, %c7, %mark) : (!llvm.ptr, i64, i64) -> ()
-          func.call @sbw_cut(%h, %c0, %len) : (!llvm.ptr, i64, i64) -> ()
+          %se = func.call @sbw_each(%h, %c2, %mark, %len, %c0) : (!llvm.ptr, i64, i64, i64, i64) -> i64
           scf.yield %se : i64
         } else {
           scf.yield %c0 : i64
@@ -680,7 +744,6 @@ func.func private @sbw_scan(%h: !llvm.ptr, %len: i64) -> i64 {
   }
   return %st : i64
 }
-
 // cands: the nc candidates (Text rows, sorted).  Room 1 holds, for the walk: each candidate's hash part (32 bytes of
 // room each), the hash parts' windows, the table's order and the marks.  refs gets each candidate found (nixsb_set), in
 // the candidates' order.  0, or 1 when a file could not be read (the store keeps why).
@@ -881,49 +944,54 @@ func.func private @sbw_root_link(%h: !llvm.ptr) {
   return
 }
 
-// The directory of roots at room 0's first len bytes: its entries in the order read, a directory among them walked in
-// its turn, a link taken (sbw_root_link); one that cannot be opened has none.
-func.func private @sbw_roots(%h: !llvm.ptr, %len: i64) {
-  %c0 = arith.constant 0 : i64
+// An entry of the roots, at room 0's first len bytes: a directory is walked in its turn, a link taken (sbw_root_link);
+// anything else, or what lstat refuses, is nothing.
+func.func private @sbw_root(%h: !llvm.ptr, %len: i64) {
   %c1 = arith.constant 1 : i64
   %c2 = arith.constant 2 : i64
   %c3 = arith.constant 3 : i64
-  %c7 = arith.constant 7 : i64
   %c16 = arith.constant 16 : i64
+  %i1 = arith.constant 1 : index
   %cell = llvm.alloca %c1 x i64 : (i64) -> !llvm.ptr
-  %dirp = func.call @sbw_p(%h, %c1) : (!llvm.ptr, i64) -> !llvm.ptr
-  %mark = func.call @sbw_g(%h, %c7) : (!llvm.ptr, i64) -> i64
-  %l = func.call @sbw_list(%h, %dirp) : (!llvm.ptr, !llvm.ptr) -> i64
-  %listed = arith.cmpi eq, %l, %c0 : i64
-  scf.if %listed {
-    %end = func.call @sbw_g(%h, %c7) : (!llvm.ptr, i64) -> i64
-    %oe = scf.while (%off = %mark) : (i64) -> (i64) {
-      %in = arith.cmpi slt, %off, %end : i64
-      scf.condition(%in) %off : i64
-    } do {
-    ^bb0(%oa: i64):
-      %np, %nn, %next = func.call @sbw_name(%h, %oa) : (!llvm.ptr, i64) -> (!llvm.ptr, i64, i64)
-      %pb = func.call @sbw_put(%h, %c0, %len, %c1, %np, %nn) : (!llvm.ptr, i64, i64, i64, !llvm.ptr, i64) -> !llvm.ptr
-      %l1 = arith.addi %len, %c1 : i64
-      %clen = arith.addi %l1, %nn : i64
-      %mode = func.call @nixsb_os_lstat(%pb, %cell) : (!llvm.ptr, !llvm.ptr) -> i64
-      %kind = arith.shrsi %mode, %c16 : i64
-      %isdir = arith.cmpi eq, %kind, %c2 : i64
-      %islnk = arith.cmpi eq, %kind, %c3 : i64
-      scf.if %isdir {
-        func.call @sbw_roots(%h, %clen) : (!llvm.ptr, i64) -> ()
-      }
-      scf.if %islnk {
-        func.call @sbw_root_link(%h) : (!llvm.ptr) -> ()
-      }
-      scf.yield %next : i64
-    }
-    func.call @sbw_s(%h, %c7, %mark) : (!llvm.ptr, i64, i64) -> ()
-    func.call @sbw_cut(%h, %c0, %len) : (!llvm.ptr, i64, i64) -> ()
+  %hd = func.call @sbw_d(%h, %c16) : (!llvm.ptr, i64) -> !d
+  %hm = builtin.unrealized_conversion_cast %hd : !d to !m64
+  %hw = builtin.unrealized_conversion_cast %hm : !m64 to !s64
+  %pb = trikeshed.at %hw[%i1] : !s64, index -> i64
+  %path = llvm.inttoptr %pb : i64 to !llvm.ptr
+  %mode = func.call @nixsb_os_lstat(%path, %cell) : (!llvm.ptr, !llvm.ptr) -> i64
+  %kind = arith.shrsi %mode, %c16 : i64
+  %isdir = arith.cmpi eq, %kind, %c2 : i64
+  %islnk = arith.cmpi eq, %kind, %c3 : i64
+  scf.if %isdir {
+    func.call @sbw_roots(%h, %len) : (!llvm.ptr, i64) -> ()
+  }
+  scf.if %islnk {
+    func.call @sbw_root_link(%h) : (!llvm.ptr) -> ()
   }
   return
 }
 
+// The directory of roots at room 0's first len bytes: its entries in the order read (sbw_each, each one sbw_root's); one
+// that cannot be opened has none.
+func.func private @sbw_roots(%h: !llvm.ptr, %len: i64) {
+  %c0 = arith.constant 0 : i64
+  %c3 = arith.constant 3 : i64
+  %c16 = arith.constant 16 : i64
+  %i1 = arith.constant 1 : index
+  %i7 = arith.constant 7 : index
+  %hd = func.call @sbw_d(%h, %c16) : (!llvm.ptr, i64) -> !d
+  %hm = builtin.unrealized_conversion_cast %hd : !d to !m64
+  %hw = builtin.unrealized_conversion_cast %hm : !m64 to !s64
+  %pb = trikeshed.at %hw[%i1] : !s64, index -> i64
+  %dirp = llvm.inttoptr %pb : i64 to !llvm.ptr
+  %mark = trikeshed.at %hw[%i7] : !s64, index -> i64
+  %l = func.call @sbw_list(%h, %dirp) : (!llvm.ptr, !llvm.ptr) -> i64
+  %listed = arith.cmpi eq, %l, %c0 : i64
+  scf.if %listed {
+    %se = func.call @sbw_each(%h, %c3, %mark, %len, %c0) : (!llvm.ptr, i64, i64, i64, i64) -> i64
+  }
+  return
+}
 // settings: the store's (StoreSettings begins with three Texts, a pointer and 32 bits of length each: the store
 // directory, the store's physical root, the state directory); set: where the roots go (nixsb_set).  The roots'
 // directory is the state directory's "gcroots": one combine drained once into room 0.

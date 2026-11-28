@@ -241,7 +241,6 @@ bool isInStore(std::string_view storeDir, std::string_view path);
 composite::Text toStorePath(std::string_view storeDir, std::string_view path);
 bool isStorePath(std::string_view storeDir, std::string_view path);
 composite::Text storePathName(std::string_view storePath);
-composite::Text storePathHashPart(std::string_view storePath);
 
 //===----------------------------------------------------------------------===//
 // Derivations
@@ -292,7 +291,6 @@ struct Derivation {
     return *this;
   }
 
-  bool isFixed() const;
   composite::Text unparse(bool maskOutputs, const DrvInputs *actualInputs = nullptr) const;
   /// SHA-256 of unparse(...): the ATerm text composed once in DrvUnparse.mlir and drained into a Text, then hashed.
   Hash hashUnparsed(bool maskOutputs, const DrvInputs *actualInputs = nullptr) const;
