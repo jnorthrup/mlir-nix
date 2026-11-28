@@ -29,6 +29,8 @@ at mkForce priority 50, and the page reports what it changes.
 - `src/index.mlir` is a JSON text's index in TrikeShed's forms, lowered the same way: `confix.index` (this repository's
   confix dialect) scans the text with TrikeShed's Confix scanner (`../../lib/Confix/confix.ll`) into ConfixIndexK's
   rows (Spans, Tags, DirectChildren) and kids, and every read of it (a tag, a span, a child, KeyToChild) is a trikeshed op.
+  The op lowers into a call of its body, `../../lowered/confix/ConfixIndex.mlir`, which the Makefile lowers too and
+  links, as LLVM IR, into the module that calls it.
 - `src/columns.mlir` codes the corpus's columns and orders its rows, in TrikeShed's ops lowered the same way: the rows by
   the bytes of their pieces (`trikeshed.sorted`, its order an unsigned `compare` of two slices: Cursor.ordered), each
   name's run (`where`: groupClusters over the ordered rows), and each row's code (`bisect` among the names: DictColumn).

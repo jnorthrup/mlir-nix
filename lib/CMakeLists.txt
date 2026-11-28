@@ -135,7 +135,7 @@ function(mlnix_lower_trikeshed target mlir stem)
   set(ll ${MLNIX_LOWERED_DIR}/${stem}.ll)
   set(o ${MLNIX_LOWERED_DIR}/${stem}.o)
   add_custom_command(OUTPUT ${cur}
-    COMMAND ${lower_opt} ${src} --trikeshed-lower-cursors -o ${cur}
+    COMMAND ${lower_opt} ${src} --trikeshed-lower-cursors ${MLNIX_LOWER_OPT_ARGS} -o ${cur}
     DEPENDS ${src} mlnix-opt COMMENT "trikeshed-lower-cursors ${mlir}")
   add_custom_command(OUTPUT ${low}
     COMMAND ${MLNIX_MLIR_OPT} ${cur} ${ARGN} ${MLNIX_TRIKESHED_PIPELINE} -o ${low}
@@ -305,6 +305,17 @@ add_custom_command(OUTPUT ${MLNIX_LOWERED_DIR}/ClusterOps.pic.o
 set_source_files_properties(${MLNIX_LOWERED_DIR}/ClusterOps.pic.o PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
 add_dependencies(TrikeShedRuntime mlnix_lowered_ClusterOps)
 target_sources(TrikeShedRuntime PRIVATE ${MLNIX_LOWERED_DIR}/ClusterOps.pic.o)
+# The body of confix.index (lib/Dialect/ConfixDialect.cpp's lowering of the op is a call of it): the index a series a
+# column over the scan's record (confix.scan, confix.row and confix.kid, which --confix-to-llvm lowers: the one module
+# whose lowering takes MLNIX_LOWER_OPT_ARGS).  TrikeShedRuntime carries it, position independent, with the scanner it
+# calls (confix.ll's), for whatever runs a module that lowered the op (test/mlir); mini-luci's Makefile lowers the same
+# file for its server.
+set(MLNIX_LOWER_OPT_ARGS --confix-to-llvm)
+set(MLNIX_LOWER_CLANG_ARGS -fPIC)
+mlnix_lower_trikeshed(TrikeShedRuntime lowered/confix/ConfixIndex.mlir ConfixIndex)
+unset(MLNIX_LOWER_OPT_ARGS)
+unset(MLNIX_LOWER_CLANG_ARGS)
+target_sources(TrikeShedRuntime PRIVATE ${CONFIX_OBJ})
 
 add_library(NixFrontend STATIC Frontend/Parser.cpp Frontend/Source.cpp Frontend/Confix.cpp)
 add_dependencies(NixFrontend MLIRNixOpsIncGen TrikeShedIncGen)

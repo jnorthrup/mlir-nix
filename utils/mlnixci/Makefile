@@ -117,3 +117,20 @@ $(BUILD)/kursive-walk.ll: $(MLIR_NIX)/lowered/nixeval/KursiveOps.mlir
 	$(LLVM_BIN)/mlir-opt $< $(LOWER_BUFFERS) | $(LLVM_BIN)/mlir-translate --mlir-to-llvmir -o $@
 
 $(BUILD)/mlnixci: $(BUILD)/request.o $(BUILD)/kursive-walk.o
+
+# confix.index (src/index.mlir) lowers into a call of its body: mlir-nix's lowered/confix/ConfixIndex.mlir, in the confix
+# dialect's reads of the scan's record and TrikeShed's ops, lowered as the TrikeShed modules are and then by
+# --confix-to-llvm (its confix.scan, confix.row and confix.kid).
+$(BUILD)/confix-index.ll: $(MLIR_NIX)/lowered/confix/ConfixIndex.mlir
+	mkdir -p $(BUILD)
+	$(MLNIX_OPT) $< --trikeshed-lower-cursors --confix-to-llvm > $(BUILD)/confix-index.lowered.mlir
+	! grep -q -E '(trikeshed|confix)\.' $(BUILD)/confix-index.lowered.mlir
+	$(LLVM_BIN)/mlir-opt $(BUILD)/confix-index.lowered.mlir $(LOWER_BUFFERS) | $(LLVM_BIN)/mlir-translate --mlir-to-llvmir -o $@
+
+# The module that lowers the op carries the body: the body's LLVM IR is linked into the module's and made internal to
+# it, so clang compiles the module's call with what it calls and no object of the body is linked apart.
+CONFIX_CALLERS = index
+$(CONFIX_CALLERS:%=$(BUILD)/%.o): $(BUILD)/%.o: $(BUILD)/%.ll $(BUILD)/confix-index.ll
+	$(LLVM_BIN)/llvm-link --internalize $^ -o $(BUILD)/$*.linked.bc
+	$(LLVM_BIN)/clang -c -O2 -Wno-override-module $(BUILD)/$*.linked.bc -o $@
+	$(LLVM_BIN)/llvm-objcopy --localize-symbol=dealloc_helper $@

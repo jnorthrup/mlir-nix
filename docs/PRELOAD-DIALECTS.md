@@ -175,8 +175,10 @@ Steps:
      `!trikeshed.cursor<"ConfixIndex", [!trikeshed.twin<i32>, i8, !trikeshed.twinpacked<i32>]>` (Spans as (open, close), Tags,
      DirectChildren as (first, count) into the kid series it also makes), and `confix.columns` is the Columns facet: over a
      series of object rows, a cursor of one i32 column per member name, the value's row or -1.  Both lower in
-     trikeshed-lower-cursors' conversion, through CursorLoweringInterface (include/Composite/CursorLowering.h): the scanner's
-     arrays are series buffers and every read after the scan is a trikeshed op.  The scan itself is still confix.ll.
+     trikeshed-lower-cursors' conversion, through CursorLoweringInterface (include/Composite/CursorLowering.h).  The
+     index's lowering is a call of its body, lowered/confix/ConfixIndex.mlir's confix_index, written once in MLIR
+     and not built op by op in C++: confix.scan into a record sized for the text, then each column a series over
+     confix.row and the kids a series over confix.kid.  The scan itself is still confix.ll.
    - trikeshed-lower-cursors also lowers what the facets are read with: slice (a view: a series is now
      `memref<?xT, strided<[1], offset: ?>>`, the same descriptor, so a caller passing offset 0 sees no change), compare,
      sorted (stable) and bisect with a comparator region, and j/first/second on a pair of two equal halves, laid out by

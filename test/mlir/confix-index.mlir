@@ -1,6 +1,7 @@
 // confix.index and confix.columns: a JSON text's index as TrikeShed's cursor and series, its Columns facet, and the
-// series ops that read it (slice, compare, sorted, bisect, first, second, j), lowered by trikeshed-lower-cursors, taken to
-// LLVM by the stock pipeline and run with confix.ll's scanner.  The text is
+// series ops that read it (slice, compare, sorted, bisect, first, second, j), lowered by trikeshed-lower-cursors
+// (confix.index into a call of its body, lowered/confix/ConfixIndex.mlir's confix_index), taken to LLVM by the stock
+// pipeline and run with that body and confix.ll's scanner (build/lib's TrikeShedRuntime carries both).  The text is
 //   {"options":[{"path":["a","b"],"kind":"bool x","state":"set"},{"state":"none","path":["c"]},7,{"kind":"str","kind":"int"}],"etc":{"p":1}}
 // The expected values come from a separate reader of the text (rows in the order they open, a span's close inclusive,
 // an object's children its keys and values alternating), not from the scanner:
@@ -12,9 +13,9 @@
 //
 // RUN: mlnix-opt %s | mlnix-opt | FileCheck %s --check-prefix=ROUND
 // RUN: mlnix-opt %s --trikeshed-lower-cursors | FileCheck %s --check-prefix=LOWERED
-// RUN: d=$(mktemp -d) && clang -shared -fPIC -O1 -Wno-override-module lib/Confix/confix.ll -o $d/confix.so && mlnix-opt %s --trikeshed-lower-cursors | mlir-opt --ownership-based-buffer-deallocation --canonicalize --buffer-deallocation-simplification --bufferization-lower-deallocations --convert-scf-to-cf --expand-strided-metadata --lower-affine --finalize-memref-to-llvm --convert-arith-to-llvm --convert-index-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts | mlir-runner -e main -entry-point-result=void -shared-libs=$(ls $(dirname $(which mlir-runner))/../lib/libmlir_runner_utils.* | head -1),$d/confix.so | FileCheck %s
+// RUN: ext=so; if [ "$(uname -s)" = Darwin ]; then ext=dylib; fi; mlnix-opt %s --trikeshed-lower-cursors | mlir-opt --ownership-based-buffer-deallocation --canonicalize --buffer-deallocation-simplification --bufferization-lower-deallocations --convert-scf-to-cf --expand-strided-metadata --lower-affine --finalize-memref-to-llvm --convert-arith-to-llvm --convert-index-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts | mlir-runner -e main -entry-point-result=void -shared-libs=$(ls $(dirname $(which mlir-runner))/../lib/libmlir_runner_utils.* | head -1),%S/../../build/lib/libTrikeShedRuntime.${ext} | FileCheck %s
 // the same answers with the pairs routed first (trikeshed-route-twins): the index's columns keep the scanner's layout
-// RUN: d=$(mktemp -d) && clang -shared -fPIC -O1 -Wno-override-module lib/Confix/confix.ll -o $d/confix.so && mlnix-opt %s --trikeshed-route-twins --trikeshed-lower-cursors | mlir-opt --ownership-based-buffer-deallocation --canonicalize --buffer-deallocation-simplification --bufferization-lower-deallocations --convert-scf-to-cf --expand-strided-metadata --lower-affine --finalize-memref-to-llvm --convert-arith-to-llvm --convert-index-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts | mlir-runner -e main -entry-point-result=void -shared-libs=$(ls $(dirname $(which mlir-runner))/../lib/libmlir_runner_utils.* | head -1),$d/confix.so | FileCheck %s
+// RUN: ext=so; if [ "$(uname -s)" = Darwin ]; then ext=dylib; fi; mlnix-opt %s --trikeshed-route-twins --trikeshed-lower-cursors | mlir-opt --ownership-based-buffer-deallocation --canonicalize --buffer-deallocation-simplification --bufferization-lower-deallocations --convert-scf-to-cf --expand-strided-metadata --lower-affine --finalize-memref-to-llvm --convert-arith-to-llvm --convert-index-to-llvm --convert-cf-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts | mlir-runner -e main -entry-point-result=void -shared-libs=$(ls $(dirname $(which mlir-runner))/../lib/libmlir_runner_utils.* | head -1),%S/../../build/lib/libTrikeShedRuntime.${ext} | FileCheck %s
 
 // ROUND: confix.index json %{{.*}} : !trikeshed.series<i8> -> !trikeshed.cursor<"ConfixIndex", [!trikeshed.twin<i32>, i8, !trikeshed.twinpacked<i32>]>, !trikeshed.series<i32>
 // ROUND: confix.columns json %{{.*}} ["path", "kind", "state", "missing"]
@@ -72,7 +73,8 @@
 
 // LOWERED-NOT: trikeshed.
 // LOWERED-NOT: confix.
-// LOWERED: llvm.func @confix_scan_json(!llvm.ptr, !llvm.ptr) -> i32
+// LOWERED: func.func private @confix_index(memref<?xi8, strided<[1], offset: ?>>, i32) -> (memref<?xi64, strided<[1], offset: ?>>, memref<?xi8, strided<[1], offset: ?>>, memref<?xi64, strided<[1], offset: ?>>, memref<?xi32, strided<[1], offset: ?>>, i32, i32)
+// LOWERED: call @confix_index(
 
 !text = !trikeshed.series<i8>
 !s32 = !trikeshed.series<i32>
