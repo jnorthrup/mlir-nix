@@ -412,239 +412,57 @@ bool isStorePath(std::string_view storeDir, std::string_view path) { return nixs
 composite::Text storePathName(std::string_view storePath) { composite::Text t; nixstore_tx_storename(storePath.data(), storePath.size(), &t); return t; }
 composite::Text storePathHashPart(std::string_view storePath) { composite::Text t; nixstore_tx_storehash(storePath.data(), storePath.size(), &t); return t; }
 
-namespace {
-// A Text drained by an entry that answers the bytes written, or -needed when the room (bound) is short.
-template <class F> composite::Text drained(size_t bound, F call) {
-  composite::Text s;
-  s.resize(bound);
-  int64_t w = call(s.begin(), int64_t(bound));
-  if (w < 0) { s.resize(size_t(-w)); w = call(s.begin(), -w); }
-  s.truncate(size_t(w));
-  return s;
-}
-} // namespace
-
 //===----------------------------------------------------------------------===//
 // Derivations
 //===----------------------------------------------------------------------===//
 
-composite::Text DerivationOutput::methodAlgo() const {
-  std::string_view prefix = method == FileIngestionMethod::NixArchive ? "r:"
-                            : method == FileIngestionMethod::Text      ? "text:"
-                                                                       : "";
-  return composite::cat(prefix, algoName(kind == CAFixed ? hash.algo : hashAlgo));
+// What stands between a Derivation and its texts is lowered/nixstore/DrvMarshal.mlir: it reads the Derivation's rows
+// where they lie, gives them to the ATerm writer (DrvUnparse.mlir) and the JSON writer (DrvJson.mlir), and takes the
+// ATerm reader's strings (DrvParse.mlir).  Here: a forward each, the layouts DrvMarshal.mlir reads held by a
+// static_assert, and the callbacks that make a row in the Derivation the reader fills (a row allocates).
+static_assert(sizeof(Derivation) == 152 && offsetof(Derivation, outputs) == 16 && offsetof(Derivation, inputDrvs) == 32 && offsetof(Derivation, inputSrcs) == 48 &&
+                  offsetof(Derivation, platform) == 64 && offsetof(Derivation, builder) == 80 && offsetof(Derivation, args) == 96 && offsetof(Derivation, env) == 112 &&
+                  offsetof(Derivation, structuredAttrs) == 128 && offsetof(composite::Maybe<composite::Text>, v) == 8 &&
+                  sizeof(SortedMap<DerivationOutput>::Row) == 120 && offsetof(SortedMap<DerivationOutput>::Row, second) == 16 && offsetof(DerivationOutput, kind) == 0 &&
+                  offsetof(DerivationOutput, path) == 8 && offsetof(DerivationOutput, method) == 24 && offsetof(DerivationOutput, hashAlgo) == 28 &&
+                  offsetof(DerivationOutput, hash) == 32 && sizeof(SortedMap<SortedSet>::Row) == 32 && sizeof(SortedMap<composite::Text>::Row) == 32 &&
+                  sizeof(SortedSet) == 16 && sizeof(composite::MutableSeries<composite::Text>) == 16 && sizeof(Hash) == 68,
+              "DrvMarshal.mlir reads a Derivation where it lies");
+extern "C" {
+void nixstore_ts_methodalgo(const DerivationOutput *o, composite::Text *out);
+int64_t nixstore_ts_drvfixedpath(const DerivationOutput *o, const char *sd, int64_t sdn, const char *drvName, int64_t dn, const char *output, int64_t on, composite::Text *out);
+int64_t nixstore_ts_isfixed(const Derivation *d);
+void nixstore_ts_drvtext(const Derivation *d, int64_t mask, const DrvInputs *inputs, composite::Text *out);
+void nixstore_ts_drvhash(const Derivation *d, int64_t mask, const DrvInputs *inputs, Hash *h);
+void nixstore_ts_drvjsontext(const char *path, int64_t pn, const Derivation *d, composite::Text *out);
+int64_t nixstore_ts_drvread(const char *text, int64_t n, Derivation *d, composite::Text *err);
+void nixstore_drv_out(Derivation *d, const char *id, int64_t idn, int64_t kind, int64_t method, int64_t algo, const Hash *h, const char *path, int64_t pn) {
+  DerivationOutput o;
+  o.kind = DerivationOutput::Kind(kind), o.method = FileIngestionMethod(method), o.hashAlgo = HashAlgo(algo);
+  if (h) o.hash = *h;
+  if (pn) o.path = composite::Text(std::string_view(path, size_t(pn)));
+  d->outputs[std::string_view(id, size_t(idn))] = composite::mv(o);
+}
+SortedSet *nixstore_drv_in(Derivation *d, const char *p, int64_t n) { SortedSet &s = d->inputDrvs[std::string_view(p, size_t(n))]; s = SortedSet(); return &s; }
+void nixstore_set_insert(SortedSet *s, const char *p, int64_t n) { s->insert(std::string_view(p, size_t(n))); }
+void nixstore_texts_append(composite::MutableSeries<composite::Text> *a, const char *p, int64_t n) { a->append(composite::Text(std::string_view(p, size_t(n)))); }
+void nixstore_drv_env(Derivation *d, const char *k, int64_t kn, const char *v, int64_t vn) { d->env[std::string_view(k, size_t(kn))] = composite::Text(std::string_view(v, size_t(vn))); }
 }
 
-composite::Text DerivationOutput::fixedPath(std::string_view storeDir, std::string_view drvName,
-                                            std::string_view output) const {
-  return makeFixedOutputPath(storeDir, outputPathName(drvName, output), method, hash);
+composite::Text DerivationOutput::methodAlgo() const { composite::Text t; nixstore_ts_methodalgo(this, &t); return t; }
+composite::Text DerivationOutput::fixedPath(std::string_view storeDir, std::string_view drvName, std::string_view output) const {
+  composite::Text t; if (nixstore_ts_drvfixedpath(this, storeDir.data(), storeDir.size(), drvName.data(), drvName.size(), output.data(), output.size(), &t)) throw Error(t); return t;
 }
-
-bool Derivation::isFixed() const {
-  return outputs.size() == 1 && outputs.begin()->first == "out" &&
-         outputs.begin()->second.kind == DerivationOutput::CAFixed;
-}
-
-// The derivation ATerm text is composed in lowered/nixstore/DrvUnparse.mlir (trikeshed.combineAll + combine + drain over
-// series<i8>, built into NixStore by lib/CMakeLists.txt): one lazy composition of the whole ATerm drained once into a
-// pre-sized buffer.  The bridge here only marshals the Derivation into flat record arrays -- normalizing each output's
-// kind to its (name,path,algo,hash) fields, applying maskOutputs and slotting __json into the env order -- sizes the Text
-// and adopts the drained bytes.  The composition loop, the two Out sinks and the ATerm escape helpers are gone from here.
-namespace {
-struct DrvWin { const char *p; size_t n; };
-struct DrvOut { DrvWin name, path, algo, hash; };
-struct DrvIn { DrvWin path; const DrvWin *outs; size_t nouts; };
-struct DrvEnv { DrvWin key, val; };
-struct DrvBuf {
-  composite::MutableSeries<DrvOut> outs;
-  composite::MutableSeries<composite::Text> owned; // the methodAlgo / hash strings the records point into
-  composite::MutableSeries<DrvIn> ins;
-  composite::MutableSeries<DrvWin> inouts, srcs, args;
-  composite::MutableSeries<DrvEnv> env;
-  composite::MutableSeries<int64_t> kinds; // each output's DerivationOutput::Kind (the JSON writer's fields)
-  DrvWin platform, builder;
-  size_t bound = 0;
-};
-} // namespace
-extern "C" int64_t nixstore_ts_unparse(const DrvOut *, int64_t, const DrvIn *, int64_t, const DrvWin *, int64_t,
-                                       const char *, int64_t, const char *, int64_t, const DrvWin *, int64_t,
-                                       const DrvEnv *, int64_t, char *, int64_t);
-
-namespace {
-void marshalDrv(const Derivation &d, bool maskOutputs, const DrvInputs *actualInputs, DrvBuf &b) {
-  auto win = [](const composite::Text &t) { return DrvWin{t.data(), t.size()}; };
-  auto winv = [](std::string_view v) { return DrvWin{v.data(), v.size()}; };
-  const DrvWin empty{"", 0};
-  const auto &inputs = actualInputs ? *actualInputs : d.inputDrvs;
-  b.outs.reserve(d.outputs.size());
-  b.owned.reserve(2 * d.outputs.size());
-  b.ins.reserve(inputs.size());
-  size_t totalOuts = 0;
-  for (const auto &[path, outs] : inputs) totalOuts += outs.size();
-  b.inouts.reserve(totalOuts);
-  b.srcs.reserve(d.inputSrcs.size());
-  b.args.reserve(d.args.size());
-  b.env.reserve(d.env.size() + 1);
-  for (const auto &[name, o] : d.outputs) {
-    DrvWin pw = empty, aw = empty, hw = empty;
-    switch (o.kind) {
-    case DerivationOutput::InputAddressed:
-      pw = maskOutputs ? empty : win(o.path);
-      break;
-    case DerivationOutput::CAFixed: {
-      pw = maskOutputs ? empty : win(o.path);
-      composite::Text a = o.methodAlgo(), h = o.hash.to_string(HashFormat::Base16, false);
-      aw = win(a); hw = win(h); b.owned.append(composite::mv(a)); b.owned.append(composite::mv(h));
-      break;
-    }
-    case DerivationOutput::CAFloating: {
-      composite::Text a = o.methodAlgo(); aw = win(a); b.owned.append(composite::mv(a));
-      break;
-    }
-    case DerivationOutput::Deferred:
-      break;
-    case DerivationOutput::Impure: {
-      composite::Text a = o.methodAlgo(); aw = win(a); b.owned.append(composite::mv(a)); hw = winv("impure");
-      break;
-    }
-    }
-    b.outs.append(DrvOut{win(name), pw, aw, hw}); b.kinds.append(int64_t(o.kind));
-  }
-  for (const auto &[path, outs] : inputs) {
-    const DrvWin *base = b.inouts.data() + b.inouts.size();
-    for (const composite::Text &o : outs) b.inouts.append(win(o));
-    b.ins.append(DrvIn{win(path), base, outs.size()});
-  }
-  for (const composite::Text &p : d.inputSrcs) b.srcs.append(win(p));
-  b.platform = win(d.platform);
-  b.builder = win(d.builder);
-  for (const composite::Text &a : d.args) b.args.append(win(a));
-  // The environment in key order, with __json (the structured attributes, which win over an env entry of that name) at
-  // its place in that order; an output's value is masked when maskOutputs.  Nothing is copied and no map is built.
-  auto isOutput = [&](std::string_view k) {
-    for (const auto &[name, o] : d.outputs)
-      if (name == k) return true;
-    return false;
-  };
-  auto addEnv = [&](std::string_view k, std::string_view v) {
-    b.env.append(DrvEnv{winv(k), maskOutputs && isOutput(k) ? empty : winv(v)});
-  };
-  constexpr std::string_view kJson = "__json";
-  bool json = d.structuredAttrs.has_value();
-  for (const auto &[k, v] : d.env) {
-    if (json && std::string_view(k) >= kJson) { addEnv(kJson, *d.structuredAttrs); json = false; }
-    if (d.structuredAttrs && k == kJson) continue;
-    addEnv(k, v);
-  }
-  if (json) addEnv(kJson, *d.structuredAttrs);
-  // A worst-case bound: every field quoted (2 + n) or escaped (2 + 2n), plus structural slack per element.  The entry
-  // also answers -needed when cap is short, so the bridge retries; the bound only keeps that to one call.
-  size_t bytes = b.platform.n + b.builder.n, fields = 2;
-  for (const DrvOut &o : b.outs) { bytes += o.name.n + o.path.n + o.algo.n + o.hash.n; fields += 4; }
-  for (const DrvIn &i : b.ins) { bytes += i.path.n; fields += 1; for (size_t j = 0; j < i.nouts; j++) { bytes += i.outs[j].n; fields += 1; } }
-  for (const DrvWin &s : b.srcs) { bytes += s.n; fields += 1; }
-  for (const DrvWin &a : b.args) { bytes += a.n; fields += 1; }
-  for (const DrvEnv &e : b.env) { bytes += e.key.n + e.val.n; fields += 2; }
-  b.bound = 2 * bytes + 2 * fields + 16 * (b.outs.size() + b.ins.size() + b.srcs.size() + b.args.size() + b.env.size() + 1) + 64;
-}
-} // namespace
-
-composite::Text Derivation::unparse(bool maskOutputs, const DrvInputs *actualInputs) const {
-  DrvBuf b;
-  marshalDrv(*this, maskOutputs, actualInputs, b);
-  return drained(b.bound, [&](char *into, int64_t cap) {
-    return nixstore_ts_unparse(b.outs.data(), b.outs.size(), b.ins.data(), b.ins.size(), b.srcs.data(), b.srcs.size(),
-                               b.platform.p, b.platform.n, b.builder.p, b.builder.n, b.args.data(), b.args.size(),
-                               b.env.data(), b.env.size(), into, cap);
-  });
-}
-
-Hash Derivation::hashUnparsed(bool maskOutputs, const DrvInputs *actualInputs) const {
-  composite::Text t = unparse(maskOutputs, actualInputs);
-  HashSink h(HashAlgo::SHA256);
-  h.update(std::string_view(t.data(), t.size()));
-  return h.finish();
-}
-
-// parseDerivation's walk over the ATerm text is lowered/nixstore/DrvParse.mlir: it decodes every string into the room,
-// records it in `wins` in text order, counts the lists ([outputs, inputs, srcs, args, env, each input's outputs]) and
-// answers -1 or the old parser's failure offset.  Building the Derivation stays here: the outputs' kinds and methods,
-// parseHashAlgo/parseHash and their errors (first, for the outputs the walk read before an ATerm error: the old parser
-// classified each output as it went), __json, and the sorted maps and sets.
-extern "C" int64_t nixstore_ts_drvparse(const char *, int64_t, char *, DrvWin *, int64_t *);
-
+bool Derivation::isFixed() const { return nixstore_ts_isfixed(this); }
+composite::Text Derivation::unparse(bool maskOutputs, const DrvInputs *actualInputs) const { composite::Text t; nixstore_ts_drvtext(this, maskOutputs, actualInputs, &t); return t; }
+Hash Derivation::hashUnparsed(bool maskOutputs, const DrvInputs *actualInputs) const { Hash h; nixstore_ts_drvhash(this, maskOutputs, actualInputs, &h); return h; }
 Derivation parseDerivation(std::string_view text, composite::Text name) {
   Derivation d;
+  composite::Text e;
   d.name = composite::mv(name);
-  size_t half = text.size() / 2 + 2;
-  composite::Text room;
-  room.resize(text.size());
-  composite::MutableSeries<DrvWin> wins(half);
-  composite::MutableSeries<int64_t> counts(half + 5);
-  int64_t fail = nixstore_ts_drvparse(text.data(), int64_t(text.size()), room.begin(), wins.data(), counts.data());
-  const DrvWin *w = wins.data();
-  const int64_t *c = counts.data();
-  auto next = [&] { const DrvWin &x = *w++; return std::string_view(x.p, x.n); };
-  for (int64_t i = 0; i < c[0]; i++) {
-    std::string_view id = next(), path = next(), a = next(), hash = next();
-    DerivationOutput o;
-    if (!a.empty()) {
-      o.method = FileIngestionMethod::Flat;
-      if (a.rfind("r:", 0) == 0) { o.method = FileIngestionMethod::NixArchive; a = a.substr(2); }
-      else if (a.rfind("text:", 0) == 0) { o.method = FileIngestionMethod::Text; a = a.substr(5); }
-      auto ha = parseHashAlgo(a);
-      if (!ha) throw Error(composite::cat("unknown hash algorithm '", a, "' in derivation"));
-      o.hashAlgo = *ha;
-      if (hash == "impure") o.kind = DerivationOutput::Impure;
-      else if (!hash.empty()) {
-        o.kind = DerivationOutput::CAFixed;
-        o.hash = parseHash(hash, *ha);
-        o.path = composite::Text(path);
-      } else o.kind = DerivationOutput::CAFloating;
-    } else if (path.empty()) {
-      o.kind = DerivationOutput::Deferred;
-    } else {
-      o.kind = DerivationOutput::InputAddressed;
-      o.path = composite::Text(path);
-    }
-    d.outputs[id] = composite::mv(o);
-  }
-  if (fail >= 0) throw Error(composite::cat("invalid derivation (ATerm parse error at offset ", size_t(fail), ")"));
-  for (int64_t i = 0; i < c[1]; i++) {
-    std::string_view path = next();
-    SortedSet outs;
-    for (int64_t j = 0; j < c[5 + i]; j++) outs.insert(next());
-    d.inputDrvs[path] = composite::mv(outs);
-  }
-  for (int64_t i = 0; i < c[2]; i++) d.inputSrcs.insert(next());
-  d.platform = composite::Text(next());
-  d.builder = composite::Text(next());
-  for (int64_t i = 0; i < c[3]; i++) d.args.append(composite::Text(next()));
-  for (int64_t i = 0; i < c[4]; i++) {
-    std::string_view k = next(), v = next();
-    if (k == "__json") d.structuredAttrs = composite::Text(v);
-    else d.env[k] = composite::Text(v);
-  }
+  if (nixstore_ts_drvread(text.data(), text.size(), &d, &e)) throw Error(e);
   return d;
 }
-
-// derivationToJSON's whole composition is lowered/nixstore/DrvJson.mlir (fill-drain over the record arrays marshalDrv
-// makes with maskOutputs off, where __json sits in the env at its place in key order, plus each output's kind).
-extern "C" int64_t nixstore_ts_drvjson(const char *, int64_t, const DrvOut *, int64_t, const int64_t *, const DrvIn *,
-                                       int64_t, const DrvWin *, int64_t, const char *, int64_t, const char *, int64_t,
-                                       const char *, int64_t, const DrvWin *, int64_t, const DrvEnv *, int64_t, char *,
-                                       int64_t);
-
-composite::Text derivationToJSON(std::string_view storeDir, std::string_view drvPath, const Derivation &drv) {
-  DrvBuf b;
-  marshalDrv(drv, false, nullptr, b);
-  (void)storeDir;
-  return drained(3 * b.bound + 6 * (drvPath.size() + drv.name.size()) + 128, [&](char *into, int64_t cap) {
-    return nixstore_ts_drvjson(drvPath.data(), drvPath.size(), b.outs.data(), b.outs.size(), b.kinds.data(),
-                               b.ins.data(), b.ins.size(), b.srcs.data(), b.srcs.size(), drv.name.data(),
-                               drv.name.size(), b.platform.p, b.platform.n, b.builder.p, b.builder.n, b.args.data(),
-                               b.args.size(), b.env.data(), b.env.size(), into, cap);
-  });
-}
+composite::Text derivationToJSON(std::string_view storeDir, std::string_view drvPath, const Derivation &drv) { composite::Text t; nixstore_ts_drvjsontext(drvPath.data(), drvPath.size(), &drv, &t); return t; }
 
 } // namespace nixstore

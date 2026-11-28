@@ -271,21 +271,25 @@ mlnix_lower_trikeshed(NixStore lowered/nixstore/StorePathOps.mlir StorePathOps)
 # hashPlaceholder; toStorePath (the slash after the store name found by one fold); and the Texts of baseNameOf, dirOf,
 # outputPathName, storePathName, storePathHashPart and jsonFloat, sized to the entry's bound and cut to what it wrote.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/StorePathMake.mlir StorePathMake)
-# The derivation ATerm writer nixstore::unparseTo (StorePaths.cpp's composition loop, TextOut/HashOut and the
-# escapeInto/appendEscaped helpers are gone; the bridges marshal the Derivation into record arrays, apply maskOutputs
-# and slot __json, size the Text and call this entry).  The whole ATerm composition is trikeshed.combineAll / combine /
-# slice / text / at / drain over series<i8>: one variadic combine of section views, each list a combineAll, each escaped
-# string a combineAll over a constant ATerm escape table, drained once into a pre-sized buffer (fill-drain).
+# The derivation ATerm writer (Derivation::unparse and hashUnparsed).  The whole ATerm composition is
+# trikeshed.combineAll / combine / slice / text / at / drain over series<i8>: one variadic combine of section views, each
+# list a combineAll, each escaped string a combineAll over a constant ATerm escape table, drained once (fill-drain) into
+# the Text sized to it, or into a room whose SHA-256 is the answer.  It reads the records DrvMarshal.mlir gives it.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/DrvUnparse.mlir DrvUnparse)
-# The derivation ATerm reader nixstore::parseDerivation (StorePaths.cpp's ATermParser and its walk are gone; the bridge
-# builds the Derivation from the decoded strings, keeping the outputs' kinds, parseHashAlgo/parseHash and their errors,
-# __json and the sorted maps).  The walk of the fixed Derive(...) structure is trikeshed.at / slice / compare / drain
-# over series<i8> (each run between escapes a slice drained into the room), a failure offset passed through every step.
+# The derivation ATerm reader's walk (parseDerivation).  The walk of the fixed Derive(...) structure is trikeshed.at /
+# slice / compare / drain over series<i8> (each run between escapes a slice drained into the room), a failure offset
+# passed through every step; DrvMarshal.mlir gives the decoded strings to the Derivation.
 mlnix_lower_trikeshed(NixStore lowered/nixstore/DrvParse.mlir DrvParse)
-# The derivation JSON writer nixstore::derivationToJSON (StorePaths.cpp's composition is gone; the bridge reuses
-# marshalDrv's record arrays plus each output's kind).  One variadic trikeshed.combine of literal slices, escaped strings
-# (combineAll over Nix's JSON escape table) and list combineAlls, drained once into a pre-sized buffer (fill-drain).
+# The derivation JSON writer (derivationToJSON).  One variadic trikeshed.combine of literal slices, escaped strings
+# (combineAll over Nix's JSON escape table) and list combineAlls, drained once into the Text sized to it (fill-drain).
 mlnix_lower_trikeshed(NixStore lowered/nixstore/DrvJson.mlir DrvJson)
+# What stands between a Derivation and those three (StorePaths.cpp's marshalDrv, unparse, hashUnparsed, parseDerivation,
+# derivationToJSON, methodAlgo, fixedPath and isFixed are forwards; it keeps the callbacks that make a row).  A
+# Derivation's rows are read where they lie (the input derivations, the sources, the arguments and the environment are
+# given to the writers as they are); the outputs' windows by kind are one series, drained once with their kinds; the
+# environment with __json at its place is one combine of the rows around the place a bisect finds; a masked value is a
+# bisect of the rows for each output's name; the reader's windows are walked by folds over their words.
+mlnix_lower_trikeshed(NixStore lowered/nixstore/DrvMarshal.mlir DrvMarshal)
 # structuredAttrsFiles whole (.attrs.json and .attrs.sh; StructuredAttrs.cpp's DOM, parser and shell writer are gone, the
 # bridge keeps the record's arrays and the rooms).  __json is read by confix.checked (JsonRead.mlir's
 # scan, linked into NixEval), each object's members put in key order by trikeshed.sorted, the placeholders rewritten by a

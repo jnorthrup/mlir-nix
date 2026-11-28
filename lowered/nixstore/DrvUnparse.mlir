@@ -1,10 +1,10 @@
-// The derivation ATerm writer (nixstore::unparseTo, lib/Store/StorePaths.cpp) hollowed into the
-// TrikeShed dialect.  The C++ bridge marshals the Derivation into flat record arrays (outputs, inputs,
-// srcs, args, env), normalizes each output's kind to its (name,path,algo,hash) fields, applies maskOutputs
-// and slots __json into the env order; this module iterates those arrays and composes the WHOLE ATerm text
-// as one variadic combine of section views, each list a combineAll, each escaped string a combineAll over a
-// constant ATerm escape table -- drained ONCE into a pre-sized buffer (fill-drain).  The entry returns the
-// bytes written, or -needed when cap is too small (the bridge pre-sizes a worst-case bound and truncates).
+// The derivation ATerm writer (nixstore::Derivation::unparse and hashUnparsed, through lowered/nixstore/DrvMarshal.mlir).
+// The caller gives the records as they lie: the outputs as (name, path, method-and-algorithm, hash) windows, and the
+// input derivations, the sources, the arguments and the environment as rows of Texts (a window is a pointer and a
+// count; a count is its word's low 32 bits, a Text's size beside its capacity).  This module iterates them and composes
+// the WHOLE ATerm text as one variadic combine of section views, each list a combineAll, each escaped string a
+// combineAll over a constant ATerm escape table, drained ONCE (fill-drain): into the Text at `into`, sized once to the
+// text (mode 0), or into a room of its own whose SHA-256 is put in the Hash at `into` (mode 1).  Answers the text's bytes.
 // ATerm escaping: " -> \", \ -> \\, \n \r \t -> \n \r \t; every other byte raw (escapeInto's table).
 !s = !trikeshed.series<i8>
 !m = memref<?xi8, strided<[1], offset: ?>>
@@ -34,10 +34,14 @@ func.func private @nx_desc(%p: !llvm.ptr, %n: i64) -> !d {
   return %f : !d
 }
 
+func.func private @nixstore_text_sized(!llvm.ptr, i64) -> !llvm.ptr
+func.func private @nixstore_ts_hashstring(i64, !llvm.ptr, i64, !llvm.ptr)
+
 func.func @nixstore_ts_unparse(%outs: !llvm.ptr, %nouts: i64, %inputs: !llvm.ptr, %ninputs: i64,
     %srcs: !llvm.ptr, %nsrcs: i64, %platform: !llvm.ptr, %platformLen: i64,
     %builder: !llvm.ptr, %builderLen: i64, %args: !llvm.ptr, %nargs: i64,
-    %env: !llvm.ptr, %nenv: i64, %into: !llvm.ptr, %cap: i64) -> i64 {
+    %env: !llvm.ptr, %nenv: i64, %into: !llvm.ptr, %mode: i64) -> i64 {
+  %m32 = arith.constant 4294967295 : i64
   %c10 = arith.constant 64 : i64
   %c13 = arith.constant 0 : i64
   %c16 = arith.constant 8 : i64
@@ -63,19 +67,23 @@ func.func @nixstore_ts_unparse(%outs: !llvm.ptr, %nouts: i64, %inputs: !llvm.ptr
   %ap14 = llvm.getelementptr %ap12[%c13] : (!llvm.ptr, i64) -> !llvm.ptr, i8
   %p15 = llvm.load %ap14 : !llvm.ptr -> !llvm.ptr
   %ap17 = llvm.getelementptr %ap12[%c16] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %l18 = llvm.load %ap17 : !llvm.ptr -> i64
+  %l18w = llvm.load %ap17 : !llvm.ptr -> i64
+  %l18 = arith.andi %l18w, %m32 : i64
   %ap20 = llvm.getelementptr %ap12[%c19] : (!llvm.ptr, i64) -> !llvm.ptr, i8
   %p21 = llvm.load %ap20 : !llvm.ptr -> !llvm.ptr
   %ap23 = llvm.getelementptr %ap12[%c22] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %l24 = llvm.load %ap23 : !llvm.ptr -> i64
+  %l24w = llvm.load %ap23 : !llvm.ptr -> i64
+  %l24 = arith.andi %l24w, %m32 : i64
   %ap26 = llvm.getelementptr %ap12[%c25] : (!llvm.ptr, i64) -> !llvm.ptr, i8
   %p27 = llvm.load %ap26 : !llvm.ptr -> !llvm.ptr
   %ap29 = llvm.getelementptr %ap12[%c28] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %l30 = llvm.load %ap29 : !llvm.ptr -> i64
+  %l30w = llvm.load %ap29 : !llvm.ptr -> i64
+  %l30 = arith.andi %l30w, %m32 : i64
   %ap32 = llvm.getelementptr %ap12[%c31] : (!llvm.ptr, i64) -> !llvm.ptr, i8
   %p33 = llvm.load %ap32 : !llvm.ptr -> !llvm.ptr
   %ap35 = llvm.getelementptr %ap12[%c34] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %l36 = llvm.load %ap35 : !llvm.ptr -> i64
+  %l36w = llvm.load %ap35 : !llvm.ptr -> i64
+  %l36 = arith.andi %l36w, %m32 : i64
   %f38 = arith.cmpi eq, %k8, %c37 : index
   %g39 = memref.get_global @l_comma : memref<1xi8>
   %s40 = trikeshed.text %g39 : memref<1xi8> -> !s
@@ -150,11 +158,13 @@ func.func @nixstore_ts_unparse(%outs: !llvm.ptr, %nouts: i64, %inputs: !llvm.ptr
   %ap109 = llvm.getelementptr %ap108[%c13] : (!llvm.ptr, i64) -> !llvm.ptr, i8
   %p110 = llvm.load %ap109 : !llvm.ptr -> !llvm.ptr
   %ap111 = llvm.getelementptr %ap108[%c16] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %l112 = llvm.load %ap111 : !llvm.ptr -> i64
+  %l112w = llvm.load %ap111 : !llvm.ptr -> i64
+  %l112 = arith.andi %l112w, %m32 : i64
   %ap113 = llvm.getelementptr %ap108[%c19] : (!llvm.ptr, i64) -> !llvm.ptr, i8
   %p114 = llvm.load %ap113 : !llvm.ptr -> !llvm.ptr
   %ap115 = llvm.getelementptr %ap108[%c22] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %l116 = llvm.load %ap115 : !llvm.ptr -> i64
+  %l116w = llvm.load %ap115 : !llvm.ptr -> i64
+  %l116 = arith.andi %l116w, %m32 : i64
   %ni117 = arith.index_cast %l116 : i64 to index
   %f118 = arith.cmpi eq, %k105, %c37 : index
   %g119 = memref.get_global @l_comma : memref<1xi8>
@@ -187,7 +197,8 @@ func.func @nixstore_ts_unparse(%outs: !llvm.ptr, %nouts: i64, %inputs: !llvm.ptr
   %ap147 = llvm.getelementptr %ap146[%c13] : (!llvm.ptr, i64) -> !llvm.ptr, i8
   %p148 = llvm.load %ap147 : !llvm.ptr -> !llvm.ptr
   %ap149 = llvm.getelementptr %ap146[%c16] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %l150 = llvm.load %ap149 : !llvm.ptr -> i64
+  %l150w = llvm.load %ap149 : !llvm.ptr -> i64
+  %l150 = arith.andi %l150w, %m32 : i64
   %f151 = arith.cmpi eq, %j143, %c37 : index
   %g152 = memref.get_global @l_comma : memref<1xi8>
   %s153 = trikeshed.text %g152 : memref<1xi8> -> !s
@@ -222,7 +233,8 @@ func.func @nixstore_ts_unparse(%outs: !llvm.ptr, %nouts: i64, %inputs: !llvm.ptr
   %ap179 = llvm.getelementptr %ap178[%c13] : (!llvm.ptr, i64) -> !llvm.ptr, i8
   %p180 = llvm.load %ap179 : !llvm.ptr -> !llvm.ptr
   %ap181 = llvm.getelementptr %ap178[%c16] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %l182 = llvm.load %ap181 : !llvm.ptr -> i64
+  %l182w = llvm.load %ap181 : !llvm.ptr -> i64
+  %l182 = arith.andi %l182w, %m32 : i64
   %f183 = arith.cmpi eq, %k175, %c37 : index
   %g184 = memref.get_global @l_comma : memref<1xi8>
   %s185 = trikeshed.text %g184 : memref<1xi8> -> !s
@@ -252,7 +264,8 @@ func.func @nixstore_ts_unparse(%outs: !llvm.ptr, %nouts: i64, %inputs: !llvm.ptr
   %ap208 = llvm.getelementptr %ap207[%c13] : (!llvm.ptr, i64) -> !llvm.ptr, i8
   %p209 = llvm.load %ap208 : !llvm.ptr -> !llvm.ptr
   %ap210 = llvm.getelementptr %ap207[%c16] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %l211 = llvm.load %ap210 : !llvm.ptr -> i64
+  %l211w = llvm.load %ap210 : !llvm.ptr -> i64
+  %l211 = arith.andi %l211w, %m32 : i64
   %f212 = arith.cmpi eq, %k204, %c37 : index
   %g213 = memref.get_global @l_comma : memref<1xi8>
   %s214 = trikeshed.text %g213 : memref<1xi8> -> !s
@@ -297,11 +310,13 @@ func.func @nixstore_ts_unparse(%outs: !llvm.ptr, %nouts: i64, %inputs: !llvm.ptr
   %ap252 = llvm.getelementptr %ap251[%c13] : (!llvm.ptr, i64) -> !llvm.ptr, i8
   %p253 = llvm.load %ap252 : !llvm.ptr -> !llvm.ptr
   %ap254 = llvm.getelementptr %ap251[%c16] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %l255 = llvm.load %ap254 : !llvm.ptr -> i64
+  %l255w = llvm.load %ap254 : !llvm.ptr -> i64
+  %l255 = arith.andi %l255w, %m32 : i64
   %ap256 = llvm.getelementptr %ap251[%c19] : (!llvm.ptr, i64) -> !llvm.ptr, i8
   %p257 = llvm.load %ap256 : !llvm.ptr -> !llvm.ptr
   %ap258 = llvm.getelementptr %ap251[%c22] : (!llvm.ptr, i64) -> !llvm.ptr, i8
-  %l259 = llvm.load %ap258 : !llvm.ptr -> i64
+  %l259w = llvm.load %ap258 : !llvm.ptr -> i64
+  %l259 = arith.andi %l259w, %m32 : i64
   %f260 = arith.cmpi eq, %k248, %c37 : index
   %g261 = memref.get_global @l_comma : memref<1xi8>
   %s262 = trikeshed.text %g261 : memref<1xi8> -> !s
@@ -427,16 +442,28 @@ func.func @nixstore_ts_unparse(%outs: !llvm.ptr, %nouts: i64, %inputs: !llvm.ptr
   %cb377 = trikeshed.combine %s327, %ol6, %s329, %il103, %s331, %sl173, %s335, %q345, %sl348, %e372, %s374, %al202, %s333, %el246, %s376 : !s, !s, !s, !s, !s, !s, !s, !s, !s, !s, !s, !s, !s, !s, !s -> !s
   %sz378 = trikeshed.size %cb377 : !s
   %sz379 = arith.index_cast %sz378 : index to i64
-  %neg380 = arith.subi %c13, %sz379 : i64
-  %tb381 = arith.cmpi ult, %cap, %sz379 : i64
-  %r382 = scf.if %tb381 -> i64 {
-    scf.yield %neg380 : i64
+  // Where the text goes: the Text at `into`, sized once to the text (mode 0); or a room of its own, whose SHA-256 is
+  // then put in the Hash at `into` (mode 1).  One drain either way.
+  %zero64 = arith.constant 0 : i64
+  %zeroi = arith.constant 0 : index
+  %hashed = arith.cmpi ne, %mode, %zero64 : i64
+  %hn = arith.select %hashed, %sz378, %zeroi : index
+  %hroom = memref.alloc(%hn) : memref<?xi8>
+  %hb = memref.extract_aligned_pointer_as_index %hroom : memref<?xi8> -> index
+  %hb64 = arith.index_cast %hb : index to i64
+  %hp = llvm.inttoptr %hb64 : i64 to !llvm.ptr
+  %tp = scf.if %hashed -> (!llvm.ptr) {
+    scf.yield %hp : !llvm.ptr
   } else {
-  %d383 = func.call @nx_desc(%into, %cap) : (!llvm.ptr, i64) -> !d
-    %m384 = builtin.unrealized_conversion_cast %d383 : !d to !m
-    %end385 = trikeshed.drain %cb377, %m384 : !s, !m -> index
-    %w386 = arith.index_cast %end385 : index to i64
-    scf.yield %w386 : i64
+    %t = func.call @nixstore_text_sized(%into, %sz379) : (!llvm.ptr, i64) -> !llvm.ptr
+    scf.yield %t : !llvm.ptr
   }
-  return %r382 : i64
+  %td = func.call @nx_desc(%tp, %sz379) : (!llvm.ptr, i64) -> !d
+  %tm = builtin.unrealized_conversion_cast %td : !d to !m
+  %tend = trikeshed.drain %cb377, %tm : !s, !m -> index
+  scf.if %hashed {
+    %sha256 = arith.constant 2 : i64
+    func.call @nixstore_ts_hashstring(%sha256, %hp, %sz379, %into) : (i64, !llvm.ptr, i64, !llvm.ptr) -> ()
   }
+  return %sz379 : i64
+}
