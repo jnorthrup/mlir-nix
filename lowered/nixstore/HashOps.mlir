@@ -9,7 +9,8 @@
 //                                       algorithm's module is called on the context (Md5, Sha1, Sha512, and SHA-256
 //                                       through nixstore_s256_*: Sha256.mlir, or libcrypto where the build links it)
 //   nixstore_ts_hashstring(a, p, n, h)  the digest of n bytes
-//   nixstore_ts_hashfile(a, path, n, h, err)   the digest of a file's bytes, read 64 KiB at a time
+//   nixstore_ts_hashfile(a, path, n, h, err)   the digest of a file's bytes: read after read into one page of 64 KiB,
+//                                       each chunk a slice of the page's view, taken by the sink
 //   nixstore_ts_hashtext(h, format, includeAlgo, out)   Hash::to_string: the Text sized once to the name, the separator and
 //                                       the digits; the prefix one combine drained once, the digits Encoders.mlir's
 //   nixstore_ts_hashinto(h, format, includeAlgo, into)  the same text written at `into`: its bytes
@@ -370,11 +371,42 @@ func.func private @hs_file_notopened(%err: !llvm.ptr, %cp: !llvm.ptr, %n: i64, %
   return %f : i64
 }
 
-// hashFile: the file's bytes through a sink, 64 KiB at a time.  A file that cannot be opened is said with what the
-// system says; a read that fails is said without it, the file closed first, as the C++ said it.
-func.func @nixstore_ts_hashfile(%a: i64, %cp: !llvm.ptr, %n: i64, %h: !llvm.ptr, %err: !llvm.ptr) -> i64 {
+// The file's bytes through the sink: read after read into the page (their order is the effect, so an scf.while), each
+// chunk read a slice of the one view of the page, which the sink takes.  1 when the file ended, 2 when a read failed.
+func.func private @hs_feed(%s: !llvm.ptr, %fd: i32, %buf: !llvm.ptr, %cap: i64) -> i64 {
   %c0 = arith.constant 0 : i64
   %c1 = arith.constant 1 : i64
+  %c2 = arith.constant 2 : i64
+  %z = arith.constant 0 : index
+  %page_d = func.call @hs_desc(%buf, %cap) : (!llvm.ptr, i64) -> !d
+  %page_m = builtin.unrealized_conversion_cast %page_d : !d to !m
+  %page = builtin.unrealized_conversion_cast %page_m : !m to !s
+  %se = scf.while (%state = %c0) : (i64) -> (i64) {
+    %go = arith.cmpi eq, %state, %c0 : i64
+    scf.condition(%go) %state : i64
+  } do {
+  ^bb0(%sa: i64):
+    %k = func.call @read(%fd, %buf, %cap) : (i32, !llvm.ptr, i64) -> i64
+    %some = arith.cmpi sgt, %k, %c0 : i64
+    scf.if %some {
+      %ki = arith.index_cast %k : i64 to index
+      %chunk = trikeshed.slice %page[%z, %ki] : !s -> !s
+      %cn = trikeshed.size %chunk : !s
+      %cn64 = arith.index_cast %cn : index to i64
+      func.call @nixstore_hs_update(%s, %buf, %cn64) : (!llvm.ptr, !llvm.ptr, i64) -> ()
+    }
+    %neg = arith.cmpi slt, %k, %c0 : i64
+    %s1 = arith.select %some, %c0, %c1 : i64
+    %s2 = arith.select %neg, %c2, %s1 : i64
+    scf.yield %s2 : i64
+  }
+  return %se : i64
+}
+
+// hashFile: the file's bytes through a sink, a page of 64 KiB at a time (hs_feed).  A file that cannot be opened is said
+// with what the system says; a read that fails is said without it, the file closed first, as the C++ said it.
+func.func @nixstore_ts_hashfile(%a: i64, %cp: !llvm.ptr, %n: i64, %h: !llvm.ptr, %err: !llvm.ptr) -> i64 {
+  %c0 = arith.constant 0 : i64
   %c2 = arith.constant 2 : i64
   %c44 = arith.constant 44 : i64
   %c65536 = arith.constant 65536 : i64
@@ -394,22 +426,7 @@ func.func @nixstore_ts_hashfile(%a: i64, %cp: !llvm.ptr, %n: i64, %h: !llvm.ptr,
   %fd = func.call @nixsi_os_open(%cp, %c0) : (!llvm.ptr, i64) -> i32
   %opened = arith.cmpi sge, %fd, %z32 : i32
   %r = scf.if %opened -> (i64) {
-    // state 0 reading, 1 the file's end, 2 a read failed
-    %se = scf.while (%state = %c0) : (i64) -> (i64) {
-      %go = arith.cmpi eq, %state, %c0 : i64
-      scf.condition(%go) %state : i64
-    } do {
-    ^bb0(%sa: i64):
-      %k = func.call @read(%fd, %buf, %c65536) : (i32, !llvm.ptr, i64) -> i64
-      %some = arith.cmpi sgt, %k, %c0 : i64
-      scf.if %some {
-        func.call @nixstore_hs_update(%s, %buf, %k) : (!llvm.ptr, !llvm.ptr, i64) -> ()
-      }
-      %neg = arith.cmpi slt, %k, %c0 : i64
-      %s1 = arith.select %some, %c0, %c1 : i64
-      %s2 = arith.select %neg, %c2, %s1 : i64
-      scf.yield %s2 : i64
-    }
+    %se = func.call @hs_feed(%s, %fd, %buf, %c65536) : (!llvm.ptr, i32, !llvm.ptr, i64) -> i64
     %rcc = func.call @close(%fd) : (i32) -> i32
     %failed = arith.cmpi eq, %se, %c2 : i64
     %res = scf.if %failed -> (i64) {
