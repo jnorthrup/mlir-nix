@@ -127,4 +127,14 @@ $(BUILD)/confix-index.ll: $(MLIR_NIX)/lowered/confix/ConfixIndex.mlir
 	! grep -q -E '(trikeshed|confix)\.' $(BUILD)/confix-index.lowered.mlir
 	$(LLVM_BIN)/mlir-opt $(BUILD)/confix-index.lowered.mlir --inline --symbol-dce $(LOWER_BUFFERS) | $(LLVM_BIN)/mlir-translate --mlir-to-llvmir -o $@
 
-$(BUILD)/mlnixci: $(BUILD)/confix-index.o
+# The two modules that lower those ops carry the bodies: the bodies' LLVM IR is linked into the module's and made
+# internal to it, so clang compiles a module's calls with what they call and no object of the bodies is linked apart.
+# confix_unescape is inlined wherever it is called: opt_text reads each row's two values in each of its combineAll's two
+# passes, and inlined (as when the op was expanded in place) the pass that only measures makes no cells.  As a call
+# into an object of its own it cost the columns of a corpus 19% more instructions (NixOS's 22,008 options: 437 M
+# against the expansion's 367 M; linked and inlined here, 365 M).
+CONFIX_CALLERS = index columns
+$(CONFIX_CALLERS:%=$(BUILD)/%.o): $(BUILD)/%.o: $(BUILD)/%.ll $(BUILD)/confix-index.ll
+	$(LLVM_BIN)/llvm-link --internalize $^ -o $(BUILD)/$*.linked.bc
+	$(LLVM_BIN)/clang -c -O2 -Wno-override-module -mllvm -force-attribute=confix_unescape:alwaysinline $(BUILD)/$*.linked.bc -o $@
+	$(LLVM_BIN)/llvm-objcopy --localize-symbol=dealloc_helper $@
