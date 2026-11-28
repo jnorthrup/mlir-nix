@@ -130,10 +130,10 @@ func.func private @jw_cells(%wp: !llvm.ptr) -> !d attributes { llvm.linkage = #l
 }
 
 // ---- the fill.  The open cells become the lane's next rows (one drain: a page's run at a time, a page opened where a
-// run begins one), and are empty.
+// run begins one).  The fill is not set here: whoever seals writes next at 0 and says where that ends (jw_room's
+// callers), or writes no more (the entry's last seal).
 func.func private @jw_seal(%wp: !llvm.ptr, %out: !bytes) attributes { llvm.linkage = #llvm.linkage<internal> } {
   %c0 = arith.constant 0 : index
-  %z = arith.constant 0 : i64
   %fill = func.call @jw_w(%wp, %c0) : (!llvm.ptr, index) -> i64
   %cd = func.call @jw_cells(%wp) : (!llvm.ptr) -> !d
   %cm = builtin.unrealized_conversion_cast %cd : !d to !m8
@@ -141,7 +141,6 @@ func.func private @jw_seal(%wp: !llvm.ptr, %out: !bytes) attributes { llvm.linka
   %filli = arith.index_cast %fill : i64 to index
   %full = trikeshed.slice %cs[%c0, %filli] : !text -> !text
   %rows = trikeshed.drain %full, %out : !text, !bytes -> index
-  func.call @jw_filled(%wp, %z) : (!llvm.ptr, i64) -> ()
   return
 }
 
